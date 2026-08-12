@@ -77,7 +77,7 @@ sudo -u remote-agent -H env DISPLAY=:0 XAUTHORITY=/home/remote-agent/.Xauthority
 
 ## 4. 使用同一服务用户登录 Provider
 
-所有登录和检查都必须在 `remote-agent` 身份下进行，这样 systemd 进程能看到同一份 CLI 原生状态和 PATH。先确认 Node、pnpm、`acpx` 所需的 `npx`、以及各 CLI 都可执行。
+所有登录和检查都必须在 `remote-agent` 身份下进行，这样 systemd 进程能看到同一份 CLI 原生状态和 PATH。先确认 Node、pnpm、`acpx` 所需的 `npx`、以及各 CLI 都可执行；下一节会把这些命令所在目录显式写入 systemd 的 `PATH`。
 
 ```bash
 sudo -u remote-agent -H bash -lc 'node --version && pnpm --version && claude --version && codex --version && hermes --version'
@@ -96,7 +96,30 @@ sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && pnpm build'
 sudo -u remote-agent btrfs subvolume show /srv/remote-agent/template/workspace
 ```
 
-创建 `/etc/systemd/system/remote-agent.service`：
+不要假设 systemd 能加载 login shell 的 PATH。先在**同一个服务用户**下找出实际绝对路径；任何一个命令找不到都先修复安装，不要写 unit：
+
+```bash
+sudo -u remote-agent -H bash -lc '
+  for command in node pnpm npx claude codex hermes; do
+    command -v "$command" || exit 1
+  done
+'
+
+REMOTE_AGENT_NODE="$(sudo -u remote-agent -H bash -lc 'command -v node')"
+REMOTE_AGENT_PNPM="$(sudo -u remote-agent -H bash -lc 'command -v pnpm')"
+REMOTE_AGENT_PATH="$(sudo -u remote-agent -H bash -lc '
+  for command in node pnpm npx claude codex hermes; do dirname "$(command -v "$command")"; done | sort -u | paste -sd: -
+'):/usr/bin:/bin"
+
+sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
+  "$REMOTE_AGENT_NODE" --version
+sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
+  "$REMOTE_AGENT_PNPM" --version
+sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
+  npx --version && claude --version && codex --version && hermes --version
+```
+
+以刚验证的变量写入 `/etc/systemd/system/remote-agent.service`；不要使用 `/usr/bin/env pnpm`、不受控 wrapper 或 root：
 
 ```ini
 [Unit]
@@ -111,7 +134,8 @@ Group=remote-agent
 WorkingDirectory=/opt/remote-agent-server
 EnvironmentFile=/opt/remote-agent-server/.env
 Environment=HOME=/home/remote-agent
-ExecStart=/usr/bin/env pnpm start
+Environment="PATH=<replace-with-REMOTE_AGENT_PATH>"
+ExecStart=<replace-with-REMOTE_AGENT_PNPM> start
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=45
@@ -122,7 +146,7 @@ PrivateTmp=true
 WantedBy=multi-user.target
 ```
 
-`pnpm start` 在此项目固定执行 `node dist/server/main.js`，因此 `WorkingDirectory` 必须是已执行 `pnpm build` 的发布目录。不要使用 `DynamicUser=yes`：Provider CLI 原生登录状态、Btrfs 权限和 Hermes home 都需要稳定的 `remote-agent` UID/HOME。若 systemd 下的 `pnpm` 不在 `/usr/bin/env` 可解析的 PATH，改为服务器上由 `remote-agent` 实际使用的 pnpm 绝对路径。
+将尖括号替换为上一步输出的实际值，例如 `Environment="PATH=/home/remote-agent/.local/bin:/usr/local/bin:/usr/bin:/bin"` 与 `ExecStart=/home/remote-agent/.local/share/pnpm/pnpm start`。`pnpm start` 在此项目固定执行 `node dist/server/main.js`，因此 `WorkingDirectory` 必须是已执行 `pnpm build` 的发布目录。不要使用 `DynamicUser=yes`：Provider CLI 原生登录状态、Btrfs 权限和 Hermes home 都需要稳定的 `remote-agent` UID/HOME。
 
 启用服务并确认健康接口：
 
@@ -133,37 +157,31 @@ curl --fail http://127.0.0.1:3000/api/health
 sudo journalctl -u remote-agent -n 100 --no-pager
 ```
 
-服务能启动只证明 Btrfs doctor 通过，不代表三个 Provider 都已登录。接着创建或复用三个 smoke Agent，并逐一调用 `GET /api/agents/<id>/doctor`；任一个失败都先修复其 CLI/登录状态，而不是跳过。
+服务能启动只证明 Btrfs doctor 通过，不代表 systemd 的 PATH 或三个 Provider 都可用。第 6 节的完整 smoke 会经**应用 HTTP doctor**验证三种 Provider；任一个失败都先修复 unit 的 PATH、CLI 或登录状态，而不是跳过。
 
 ## 6. 真实三 Provider smoke 验收
 
-先创建三个固定名称的 Agent。这样可以在实际运行 smoke 前配置 Hermes 的专用 home；重复执行脚本会复用这些同名 Agent，不会无限创建记录。
+先用 `--prepare` 创建或复用三个固定名称的 Agent。该模式只确保并打印 Agent ID，**不会**创建 Session/Run，也不会调用 doctor，因此可以先获得 Hermes 的专用 home。匹配 0 条时创建、1 条时复用或重新启用；同名同 Provider 多于 1 条时会以非零退出并打印所有冲突 ID，必须人工清理后再继续，不能任选一条。
 
 ```bash
-cd /opt/remote-agent-server
-set -a; . ./.env; set +a
-
-curl --fail-with-body -X POST http://127.0.0.1:3000/api/agents \
-  -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
-  --data '{"name":"remote-agent-smoke-claude_code","provider":"claude_code"}'
-curl --fail-with-body -X POST http://127.0.0.1:3000/api/agents \
-  -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
-  --data '{"name":"remote-agent-smoke-codex","provider":"codex"}'
-curl --fail-with-body -X POST http://127.0.0.1:3000/api/agents \
-  -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
-  --data '{"name":"remote-agent-smoke-hermes","provider":"hermes"}'
+HERMES_AGENT_ID="$(sudo -u remote-agent -H bash -lc '
+  cd /opt/remote-agent-server
+  set -a; . ./.env; set +a
+  pnpm --silent smoke:providers --prepare
+' | jq -er 'select(.provider == "hermes" and .outcome == "prepared") | .agentId')" || exit 1
+test -n "$HERMES_AGENT_ID" || exit 1
 ```
 
-若这三个 Agent 已存在，`POST` 会额外创建记录；这不会破坏服务，但应改为从 UI 或 `GET /api/agents` 找到既有的同名记录。保存 Hermes Agent 的 `id`，用于下面的 `HERMES_HOME` 命令。
+该命令需要 `jq`；不安装它时直接运行其中的 `pnpm smoke:providers --prepare` 并从 JSON 输出中手动记录 Hermes `agentId`。不要继续使用无条件 `POST /api/agents`，因为当前 API 没有 Agent 名称唯一约束。
 
 Hermes 必须使用刚才 `remote-agent-smoke-hermes` 返回的 `id` 配置模型并通过 ACP 检查：
 
 ```bash
 sudo -u remote-agent -H env \
-  HERMES_HOME=/srv/remote-agent/data/agents/<hermes-agent-id>/provider-home/hermes \
+  HERMES_HOME=/srv/remote-agent/data/agents/$HERMES_AGENT_ID/provider-home/hermes \
   hermes model
 sudo -u remote-agent -H env \
-  HERMES_HOME=/srv/remote-agent/data/agents/<hermes-agent-id>/provider-home/hermes \
+  HERMES_HOME=/srv/remote-agent/data/agents/$HERMES_AGENT_ID/provider-home/hermes \
   hermes acp --check
 ```
 
@@ -172,11 +190,13 @@ sudo -u remote-agent -H env \
 随后运行：
 
 ```bash
-cd /opt/remote-agent-server
-set -a; . ./.env; set +a
-pnpm smoke:providers
+sudo -u remote-agent -H bash -lc '
+  cd /opt/remote-agent-server
+  set -a; . ./.env; set +a
+  pnpm smoke:providers
+'
 ```
 
-该脚本通过 HTTP API 按 Claude Code、Codex、Hermes 顺序执行：确保固定 smoke Agent 存在并通过 doctor、创建新 Session、发送“只回复当前工作目录的目录名”、等待成功、在同一 Session 发送“只回复你上一轮看到的目录名”、等待成功，并读取第二轮 Run 的事件历史。每一步都会打印 Provider、Agent ID、Session ID 和 Run ID。任一 Provider 未安装/未登录、Session 续接失败、Run 失败、超时或没有事件历史，命令都会以非零退出。它不 mock Provider，也不会在 `pnpm test` 中联网。
+该脚本通过 HTTP API 按 Claude Code、Codex、Hermes 顺序执行：确保固定 smoke Agent 存在并通过应用 doctor、创建新 Session、发送“只回复当前工作目录的目录名”、等待成功、在同一 Session 发送“只回复你上一轮看到的目录名”、等待成功，并读取第二轮 Run 的事件历史。每一步都会打印 Provider、Agent ID、Session ID 和 Run ID。每次 HTTP 请求（包括 response body）都有 Abort deadline；Run 轮询的每次读取受该 Run 的剩余 `SMOKE_RUN_TIMEOUT_MS` 限制。任一 Provider 未安装/未登录、Session 续接失败、Run 失败、未知 Run 状态、超时或事件 `seq` 未从 1 严格连续递增，命令都会以非零退出。它不 mock Provider，也不会在 `pnpm test` 中联网。
 
 Smoke 只覆盖三个 Provider 的顺序双轮真实连通性。仍须在目标服务器手动验收：两个不同 Session 并发、断开并重新连接 SSE 后 `seq` 不缺失/不重复、Session 快照修改不污染模板或另一个 Session、浏览器任务只在该 Session 的 `browser/` 产生 Profile、服务重启把在途 Run 标为 `failed/server_restarted` 且不重放输入。

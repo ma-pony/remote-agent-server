@@ -1,6 +1,17 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { readSmokeConfig } from "../scripts/smoke-providers.js";
+import {
+  assertEventHistory,
+  createSmokeApi,
+  ensureAgent,
+  main,
+  readSmokeConfig,
+  waitForTerminalRun
+} from "../scripts/smoke-providers.js";
+
+const config = readSmokeConfig({ API_TOKEN: "test-token", SMOKE_RUN_TIMEOUT_MS: "20" });
+
+afterEach(() => vi.useRealTimers());
 
 describe("provider smoke configuration", () => {
   it("requires an API token before it can contact the server", () => {
@@ -13,5 +24,69 @@ describe("provider smoke configuration", () => {
       pollIntervalMs: 1_000,
       runTimeoutMs: 300_000
     });
+  });
+
+  it("aborts a half-open response body at the request deadline and clears its timer", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => ({
+      ok: true,
+      status: 200,
+      text: () => new Promise<string>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      })
+    }));
+    const api = createSmokeApi(config, fetchMock);
+
+    const pending = api.request("/agents", "GET", undefined, 20);
+    const assertion = expect(pending).rejects.toThrow("timed out after 20ms");
+    await vi.advanceTimersByTimeAsync(20);
+
+    await assertion;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    [[{ id: "one", seq: 2, type: "status" }]],
+    [[{ id: "one", seq: 1, type: "status" }, { id: "two", seq: 3, type: "message" }]],
+    [[{ id: "two", seq: 2, type: "status" }, { id: "one", seq: 1, type: "message" }]],
+    [[{ id: "one", seq: 1.5, type: "status" }]]
+  ])("rejects invalid event history: %j", async (events) => {
+    const api = { request: vi.fn(async () => events) };
+
+    await expect(assertEventHistory(api, "run-1")).rejects.toThrow("strictly contiguous");
+  });
+
+  it("refuses duplicate smoke Agent records and reports every ID", async () => {
+    const api = {
+      request: vi.fn(async () => [
+        { id: "agent-1", name: "remote-agent-smoke-codex", provider: "codex", enabled: true },
+        { id: "agent-2", name: "remote-agent-smoke-codex", provider: "codex", enabled: true }
+      ])
+    };
+
+    await expect(ensureAgent(api, "codex")).rejects.toThrow("agent-1, agent-2");
+  });
+
+  it("prepare only ensures Agents and does not create Sessions or Runs", async () => {
+    const agents = ["claude_code", "codex", "hermes"].map((provider) => ({
+      id: `agent-${provider}`,
+      name: `remote-agent-smoke-${provider}`,
+      provider,
+      enabled: true
+    }));
+    const api = { request: vi.fn(async () => agents) };
+
+    await main({ API_TOKEN: "test-token" }, { args: ["--prepare"], api });
+
+    expect(api.request).toHaveBeenCalledTimes(3);
+    expect(api.request.mock.calls.every(([path]) => path === "/agents")).toBe(true);
+  });
+
+  it("fails immediately when a Run endpoint returns an unknown status", async () => {
+    const api = { request: vi.fn(async () => ({ id: "run-1", status: "lost", result: null, error: null })) };
+
+    await expect(waitForTerminalRun(api, config, "run-1")).rejects.toThrow("unknown status");
+    expect(api.request.mock.calls[0]?.[3]).toBeGreaterThan(0);
+    expect(api.request.mock.calls[0]?.[3]).toBeLessThanOrEqual(config.runTimeoutMs);
   });
 });

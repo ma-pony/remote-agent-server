@@ -1,34 +1,17 @@
 type Provider = "claude_code" | "codex" | "hermes";
+type HttpMethod = "GET" | "POST" | "PATCH";
 
-type Agent = {
+export type Agent = {
   id: string;
   name: string;
   provider: Provider;
   enabled: boolean;
 };
 
-type Doctor = {
-  ok: boolean;
-  message: string;
-  details: string[];
-};
-
-type Session = {
-  id: string;
-};
-
-type Run = {
-  id: string;
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
-  result: string | null;
-  error: string | null;
-};
-
-type RunEvent = {
-  id: string;
-  seq: number;
-  type: "message" | "tool" | "status" | "error";
-};
+type Doctor = { ok: boolean; message: string; details: string[] };
+type Session = { id: string };
+type Run = { id: string; status: string; result: string | null; error: string | null };
+type RunEvent = { id: string; seq: number; type: "message" | "tool" | "status" | "error" };
 
 export type SmokeConfig = {
   apiToken: string;
@@ -37,26 +20,33 @@ export type SmokeConfig = {
   runTimeoutMs: number;
 };
 
-type SmokeTrace = {
-  provider: Provider;
-  agentId?: string;
-  sessionId?: string;
-  runIds: string[];
+export type SmokeApi = {
+  request<T>(path: string, method?: HttpMethod, body?: unknown, timeoutMs?: number): Promise<T>;
 };
 
+type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
+type FetchImplementation = (url: string, init: RequestInit) => Promise<FetchResponse>;
+type SmokeTrace = { provider: Provider; agentId?: string; sessionId?: string; runIds: string[] };
+export type MainDependencies = { args?: string[]; api?: SmokeApi };
+
 const PROVIDERS = ["claude_code", "codex", "hermes"] as const;
+const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
+const NON_TERMINAL_RUN_STATUSES = new Set(["queued", "running"]);
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_RUN_TIMEOUT_MS = 300_000;
+const MAX_REQUEST_TIMEOUT_MS = 30_000;
 
 class ApiError extends Error {
-  constructor(
-    readonly method: string,
-    readonly path: string,
-    readonly status: number,
-    readonly body: string
-  ) {
+  constructor(readonly method: string, readonly path: string, readonly status: number, readonly body: string) {
     super(`${method} ${path} failed with HTTP ${status}: ${body || "empty response"}`);
     this.name = "ApiError";
+  }
+}
+
+class RequestTimeoutError extends Error {
+  constructor(method: string, path: string, timeoutMs: number) {
+    super(`${method} ${path} timed out after ${timeoutMs}ms`);
+    this.name = "RequestTimeoutError";
   }
 }
 
@@ -67,15 +57,12 @@ const positiveInteger = (name: string, value: string | undefined, fallback: numb
   return parsed;
 };
 
-/**
- * Reads only the environment needed by the explicit real-provider smoke command.
- */
+/** Reads only the environment needed by the explicit real-provider smoke command. */
 export const readSmokeConfig = (env: Record<string, string | undefined>): SmokeConfig => {
   const apiToken = env.API_TOKEN?.trim();
   if (apiToken === undefined || apiToken === "") {
     throw new Error("API_TOKEN is required; load the deployment .env before running smoke:providers");
   }
-
   const rawBaseUrl = env.SMOKE_BASE_URL?.trim() || "http://127.0.0.1:3000";
   let parsedBaseUrl: URL;
   try {
@@ -86,7 +73,6 @@ export const readSmokeConfig = (env: Record<string, string | undefined>): SmokeC
   if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:") {
     throw new Error("SMOKE_BASE_URL must use HTTP or HTTPS");
   }
-
   return {
     apiToken,
     baseUrl: `${parsedBaseUrl.toString().replace(/\/$/, "").replace(/\/api$/, "")}/api`,
@@ -107,30 +93,46 @@ const toErrorText = (body: string): string => {
   return body;
 };
 
-const request = async <T>(
-  config: SmokeConfig,
-  path: string,
-  method: "GET" | "POST" | "PATCH" = "GET",
-  body?: unknown
-): Promise<T> => {
-  const response = await fetch(`${config.baseUrl}${path}`, {
-    method,
-    headers: {
-      authorization: `Bearer ${config.apiToken}`,
-      ...(body === undefined ? {} : { "content-type": "application/json" })
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) })
-  });
-  const text = await response.text();
-  if (!response.ok) throw new ApiError(method, path, response.status, toErrorText(text));
-  try {
-    return JSON.parse(text) as T;
-  } catch (_error) {
-    throw new Error(`${method} ${path} returned invalid JSON`);
-  }
-};
+const requestTimeout = (config: SmokeConfig): number => Math.min(config.runTimeoutMs, MAX_REQUEST_TIMEOUT_MS);
 
-const logTrace = (trace: SmokeTrace, outcome: "running" | "succeeded" | "failed"): void => {
+/** Creates an authenticated API client whose fetch and body-read share one abort deadline. */
+export const createSmokeApi = (
+  config: SmokeConfig,
+  fetchImplementation: FetchImplementation = fetch as unknown as FetchImplementation
+): SmokeApi => ({
+  async request<T>(path: string, method: HttpMethod = "GET", body?: unknown, timeoutMs: number = requestTimeout(config)): Promise<T> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer.unref?.();
+    try {
+      const response = await fetchImplementation(`${config.baseUrl}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${config.apiToken}`,
+          ...(body === undefined ? {} : { "content-type": "application/json" })
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        signal: controller.signal
+      });
+      const text = await response.text();
+      if (!response.ok) throw new ApiError(method, path, response.status, toErrorText(text));
+      try {
+        return JSON.parse(text) as T;
+      } catch (_error) {
+        throw new Error(`${method} ${path} returned invalid JSON`);
+      }
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+        throw new RequestTimeoutError(method, path, timeoutMs);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+});
+
+const logTrace = (trace: SmokeTrace, outcome: "prepared" | "succeeded" | "failed"): void => {
   console.log(JSON.stringify({
     outcome,
     provider: trace.provider,
@@ -142,27 +144,29 @@ const logTrace = (trace: SmokeTrace, outcome: "running" | "succeeded" | "failed"
 
 const smokeAgentName = (provider: Provider): string => `remote-agent-smoke-${provider}`;
 
-const ensureAgent = async (config: SmokeConfig, trace: SmokeTrace): Promise<Agent> => {
-  const agents = await request<Agent[]>(config, "/agents");
-  const existing = agents.find((agent) => agent.name === smokeAgentName(trace.provider) && agent.provider === trace.provider);
-  const agent = existing === undefined
-    ? await request<Agent>(config, "/agents", "POST", { name: smokeAgentName(trace.provider), provider: trace.provider })
-    : existing.enabled
-      ? existing
-      : await request<Agent>(config, `/agents/${existing.id}`, "PATCH", { enabled: true });
-  trace.agentId = agent.id;
-  return agent;
+/** Finds exactly one durable smoke Agent, creating it only when none exists. */
+export const ensureAgent = async (api: SmokeApi, provider: Provider): Promise<Agent> => {
+  const agents = await api.request<Agent[]>("/agents");
+  const matches = agents.filter((agent) => agent.name === smokeAgentName(provider) && agent.provider === provider);
+  if (matches.length > 1) {
+    throw new Error(`Found duplicate smoke Agents for ${provider}: ${matches.map((agent) => agent.id).join(", ")}; remove duplicates before continuing`);
+  }
+  const existing = matches[0];
+  if (existing === undefined) {
+    return api.request<Agent>("/agents", "POST", { name: smokeAgentName(provider), provider });
+  }
+  return existing.enabled ? existing : api.request<Agent>(`/agents/${existing.id}`, "PATCH", { enabled: true });
 };
 
-const assertDoctor = async (config: SmokeConfig, agent: Agent): Promise<void> => {
-  const doctor = await request<Doctor>(config, `/agents/${agent.id}/doctor`);
+const assertDoctor = async (api: SmokeApi, agent: Agent): Promise<void> => {
+  const doctor = await api.request<Doctor>(`/agents/${agent.id}/doctor`);
   if (!doctor.ok) {
     throw new Error(`Provider doctor failed for ${agent.provider}: ${doctor.message}${doctor.details.length === 0 ? "" : ` (${doctor.details.join("; ")})`}`);
   }
 };
 
-const createSession = async (config: SmokeConfig, agent: Agent, trace: SmokeTrace): Promise<Session> => {
-  const session = await request<Session>(config, "/sessions", "POST", {
+const createSession = async (api: SmokeApi, agent: Agent, trace: SmokeTrace): Promise<Session> => {
+  const session = await api.request<Session>("/sessions", "POST", {
     agentId: agent.id,
     title: `smoke-${agent.provider}-${new Date().toISOString()}`
   });
@@ -170,45 +174,52 @@ const createSession = async (config: SmokeConfig, agent: Agent, trace: SmokeTrac
   return session;
 };
 
-const waitForTerminalRun = async (config: SmokeConfig, runId: string): Promise<Run> => {
+/** Polls a Run without ever allowing one request or body read to exceed the Run deadline. */
+export const waitForTerminalRun = async (api: SmokeApi, config: SmokeConfig, runId: string): Promise<Run> => {
   const deadline = Date.now() + config.runTimeoutMs;
   while (true) {
-    const run = await request<Run>(config, `/runs/${runId}`);
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) throw new Error(`Run ${runId} did not reach a terminal status within ${config.runTimeoutMs}ms`);
+    const run = await api.request<Run>(`/runs/${runId}`, "GET", undefined, remainingMs);
     if (run.status === "succeeded") return run;
     if (run.status === "failed" || run.status === "cancelled") {
       throw new Error(`Run ${run.id} ended ${run.status}: ${run.error ?? "no error detail"}`);
     }
-    if (Date.now() >= deadline) {
-      throw new Error(`Run ${run.id} did not reach a terminal status within ${config.runTimeoutMs}ms (last status: ${run.status})`);
+    if (!NON_TERMINAL_RUN_STATUSES.has(run.status) && !TERMINAL_RUN_STATUSES.has(run.status)) {
+      throw new Error(`Run ${run.id} returned unknown status: ${run.status}`);
     }
-    await sleep(config.pollIntervalMs);
+    const pauseMs = Math.min(config.pollIntervalMs, deadline - Date.now());
+    if (pauseMs <= 0) throw new Error(`Run ${run.id} did not reach a terminal status within ${config.runTimeoutMs}ms (last status: ${run.status})`);
+    await sleep(pauseMs);
   }
 };
 
-const run = async (config: SmokeConfig, session: Session, input: string, trace: SmokeTrace): Promise<Run> => {
-  const created = await request<Run>(config, `/sessions/${session.id}/runs`, "POST", { input });
+const run = async (api: SmokeApi, config: SmokeConfig, session: Session, input: string, trace: SmokeTrace): Promise<Run> => {
+  const created = await api.request<Run>(`/sessions/${session.id}/runs`, "POST", { input });
   trace.runIds.push(created.id);
   console.log(`provider=${trace.provider} agent=${trace.agentId} session=${session.id} run=${created.id}`);
-  return waitForTerminalRun(config, created.id);
+  return waitForTerminalRun(api, config, created.id);
 };
 
-const assertEventHistory = async (config: SmokeConfig, runId: string): Promise<void> => {
-  const events = await request<RunEvent[]>(config, `/runs/${runId}/events?afterSeq=0`);
+/** Ensures second-turn history starts at one and contains no order, duplicate, or gap errors. */
+export const assertEventHistory = async (api: SmokeApi, runId: string): Promise<void> => {
+  const events = await api.request<RunEvent[]>(`/runs/${runId}/events?afterSeq=0`);
   if (events.length === 0) throw new Error(`Run ${runId} succeeded without persisted event history`);
-  if (events.some((event) => !Number.isInteger(event.seq) || event.seq < 1)) {
-    throw new Error(`Run ${runId} returned invalid event sequence history`);
+  if (events.some((event, index) => !Number.isInteger(event.seq) || event.seq !== index + 1)) {
+    throw new Error(`Run ${runId} event seq must start at 1 and be strictly contiguous`);
   }
 };
 
-const verifyProvider = async (config: SmokeConfig, provider: Provider): Promise<void> => {
+const verifyProvider = async (api: SmokeApi, config: SmokeConfig, provider: Provider): Promise<void> => {
   const trace: SmokeTrace = { provider, runIds: [] };
   try {
-    const agent = await ensureAgent(config, trace);
-    await assertDoctor(config, agent);
-    const session = await createSession(config, agent, trace);
-    await run(config, session, "只回复当前工作目录的目录名", trace);
-    const secondRun = await run(config, session, "只回复你上一轮看到的目录名", trace);
-    await assertEventHistory(config, secondRun.id);
+    const agent = await ensureAgent(api, provider);
+    trace.agentId = agent.id;
+    await assertDoctor(api, agent);
+    const session = await createSession(api, agent, trace);
+    await run(api, config, session, "只回复当前工作目录的目录名", trace);
+    const secondRun = await run(api, config, session, "只回复你上一轮看到的目录名", trace);
+    await assertEventHistory(api, secondRun.id);
     logTrace(trace, "succeeded");
   } catch (error) {
     logTrace(trace, "failed");
@@ -216,31 +227,52 @@ const verifyProvider = async (config: SmokeConfig, provider: Provider): Promise<
   }
 };
 
+export const prepareProviders = async (api: SmokeApi): Promise<void> => {
+  for (const provider of PROVIDERS) {
+    const trace: SmokeTrace = { provider, runIds: [] };
+    try {
+      trace.agentId = (await ensureAgent(api, provider)).id;
+      logTrace(trace, "prepared");
+    } catch (error) {
+      logTrace(trace, "failed");
+      throw error;
+    }
+  }
+};
+
 const usage = (): void => {
-  console.log(`Usage: API_TOKEN=... pnpm smoke:providers
+  console.log(`Usage: API_TOKEN=... pnpm smoke:providers [--prepare]
+
+  --prepare ensures and prints exactly one smoke Agent ID per Provider. It creates no Session/Run and does not call doctor.
 
 Optional environment:
   SMOKE_BASE_URL=http://127.0.0.1:3000
   SMOKE_POLL_INTERVAL_MS=1000
   SMOKE_RUN_TIMEOUT_MS=300000
 
-This command performs real HTTP requests and real Provider runs. It does not mock Providers.`);
+This command performs real HTTP requests. Without --prepare it also performs real Provider runs; it does not mock Providers.`);
 };
 
-export const main = async (env: Record<string, string | undefined> = process.env): Promise<void> => {
-  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+export const main = async (
+  env: Record<string, string | undefined> = process.env,
+  dependencies: MainDependencies = {}
+): Promise<void> => {
+  const args = dependencies.args ?? process.argv.slice(2);
+  if (args.includes("--help") || args.includes("-h")) {
     usage();
     return;
   }
+  if (args.some((arg) => arg !== "--prepare")) throw new Error(`Unknown argument: ${args.find((arg) => arg !== "--prepare")}`);
   const config = readSmokeConfig(env);
+  const api = dependencies.api ?? createSmokeApi(config);
+  if (args.includes("--prepare")) return prepareProviders(api);
   for (const provider of PROVIDERS) {
     console.log(`Starting real smoke for ${provider}`);
-    await verifyProvider(config, provider);
+    await verifyProvider(api, config, provider);
   }
 };
 
 const isEntrypoint = process.argv[1]?.endsWith("smoke-providers.ts") ?? false;
-
 if (isEntrypoint) {
   void main().catch((error: unknown) => {
     console.error(error);
