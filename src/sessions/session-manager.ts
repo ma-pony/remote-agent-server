@@ -35,8 +35,11 @@ export type CreateSessionInput = { agentId: string; title: string };
 export type SessionRuntimeContext = { agent: Agent; session: Session };
 
 export class SessionManagerError extends Error {
-  constructor(readonly code: "agent_not_found" | "agent_disabled" | "session_not_found" | "session_busy" | "session_create_failed" | "runtime_reset_failed") {
-    super(code);
+  constructor(
+    readonly code: "agent_not_found" | "agent_disabled" | "session_not_found" | "session_busy" | "session_create_failed" | "runtime_reset_failed",
+    options?: ErrorOptions
+  ) {
+    super(code, options);
   }
 }
 
@@ -158,10 +161,10 @@ export class SessionManager {
   async resetProviderSession(id: string): Promise<Session> {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
-    if (session.status === "running") throw new SessionManagerError("session_busy");
 
     const agent = this.agentManager.get(session.agentId);
     if (agent === undefined) throw new SessionManagerError("agent_not_found");
+    this.claimForReset(session.id);
 
     try {
       await this.runtime.reset({
@@ -173,15 +176,65 @@ export class SessionManager {
         providerSessionId: session.providerSessionId,
         memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8")
       });
-    } catch (_error) {
-      throw new SessionManagerError("runtime_reset_failed");
+    } catch (error) {
+      try {
+        this.releaseResetClaim(session.id, false);
+      } catch (releaseError) {
+        throw new SessionManagerError("runtime_reset_failed", {
+          cause: new AggregateError([error, releaseError], "Runtime reset and Session claim release failed")
+        });
+      }
+      throw new SessionManagerError("runtime_reset_failed", { cause: error });
     }
 
-    const updatedAt = new Date().toISOString();
-    this.db
-      .prepare("UPDATE sessions SET provider_session_id = NULL, updated_at = ? WHERE id = ?")
-      .run(updatedAt, session.id);
+    try {
+      return this.releaseResetClaim(session.id, true);
+    } catch (error) {
+      throw new SessionManagerError("runtime_reset_failed", { cause: error });
+    }
+  }
 
-    return { ...session, providerSessionId: null, updatedAt };
+  private claimForReset(id: string): void {
+    this.inImmediateTransaction(() => {
+      const updatedAt = new Date().toISOString();
+      const result = this.db
+        .prepare("UPDATE sessions SET status = 'running', updated_at = ? WHERE id = ? AND status = 'idle'")
+        .run(updatedAt, id);
+      if (result.changes !== 1) throw new SessionManagerError("session_busy");
+    });
+  }
+
+  private releaseResetClaim(id: string, clearProviderSessionId: boolean): Session {
+    return this.inImmediateTransaction(() => {
+      const updatedAt = new Date().toISOString();
+      const providerAssignment = clearProviderSessionId ? "provider_session_id = NULL," : "";
+      const result = this.db.prepare(`
+        UPDATE sessions
+        SET ${providerAssignment} status = 'idle', updated_at = ?
+        WHERE id = ?
+          AND status = 'running'
+          AND NOT EXISTS (
+            SELECT 1 FROM runs
+            WHERE session_id = sessions.id AND status IN ('queued', 'running')
+          )
+      `).run(updatedAt, id);
+      if (result.changes !== 1) throw new Error("session_reset_claim_release_failed");
+
+      const released = this.get(id);
+      if (released === undefined) throw new SessionManagerError("session_not_found");
+      return released;
+    });
+  }
+
+  private inImmediateTransaction<T>(operation: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = operation();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 }

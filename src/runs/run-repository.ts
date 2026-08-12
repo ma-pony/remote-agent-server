@@ -82,10 +82,13 @@ export class RunRepository {
 
     try {
       return this.inImmediateTransaction(() => {
+        const claimed = this.db
+          .prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+          .run("running", createdAt, run.sessionId, "idle");
+        if (claimed.changes !== 1) throw new RunRepositoryError("session_busy");
         this.db
           .prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
           .run(run.id, run.sessionId, run.status, run.input, run.createdAt);
-        this.db.prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?").run("running", createdAt, run.sessionId);
         return run;
       });
     } catch (error) {

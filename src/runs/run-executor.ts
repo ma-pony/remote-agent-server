@@ -2,7 +2,7 @@ import { dirname, join } from "node:path";
 
 import type { EventType, Run } from "../domain.js";
 import type { EventStore } from "../events/event-store.js";
-import type { AgentRuntime, RuntimeEvent, RuntimeTurnResult } from "../runtime/agent-runtime.js";
+import type { AgentRuntime, RuntimeEvent, RuntimeTurn, RuntimeTurnResult } from "../runtime/agent-runtime.js";
 import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { SkillProjector } from "../runtime/skill-projector.js";
 import type { SessionManager } from "../sessions/session-manager.js";
@@ -49,6 +49,7 @@ export class RunExecutor {
   private readonly runRepository: RunRepository;
   private readonly eventStore: EventStore;
   private readonly sessionManager: SessionManager;
+  private readonly cancellationIntents = new Set<string>();
 
   constructor({ runtime, skillProjector, runRepository, eventStore, sessionManager }: RunExecutorDependencies) {
     this.runtime = runtime;
@@ -63,6 +64,8 @@ export class RunExecutor {
    */
   async execute(runId: string): Promise<Run> {
     const run = this.runRepository.markRunning(runId);
+    let liveTurn: RuntimeTurn | undefined;
+    let liveIterator: AsyncIterator<RuntimeEvent> | undefined;
 
     try {
       const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
@@ -78,9 +81,14 @@ export class RunExecutor {
       });
       this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
 
+      if (this.cancellationIntents.has(run.id)) {
+        return this.finishRun(run.id, { status: "cancelled" });
+      }
       const turn = this.runtime.startTurn({ sessionId: session.id, requestId: run.id, text: run.input });
+      liveTurn = turn;
       let output = "";
       const iterator = turn.events[Symbol.asyncIterator]();
+      liveIterator = iterator;
       const resultOutcome = turn.result.then<TurnRace, TurnRace>(
         (result) => ({ source: "result", result }),
         (error: unknown) => ({ source: "result_error", error })
@@ -94,18 +102,14 @@ export class RunExecutor {
           result = outcome.result;
           await settleBestEffort(() => turn.closeEvents());
           await settleBestEffort(async () => iterator.return?.());
+          liveTurn = undefined;
+          liveIterator = undefined;
           break;
         }
         if (outcome.source === "result_error") {
-          await settleBestEffort(() => turn.closeEvents());
-          await settleBestEffort(async () => iterator.return?.());
           throw outcome.error;
         }
         if (outcome.source === "event_error") {
-          await Promise.all([
-            settleBestEffort(() => turn.cancel()),
-            settleBestEffort(() => turn.closeEvents())
-          ]);
           throw outcome.error;
         }
         if (outcome.iteration.done) {
@@ -113,6 +117,8 @@ export class RunExecutor {
           if (canonical.source === "result") result = canonical.result;
           else if (canonical.source === "result_error") throw canonical.error;
           else throw new Error("Unexpected turn outcome");
+          liveTurn = undefined;
+          liveIterator = undefined;
           break;
         }
 
@@ -125,9 +131,12 @@ export class RunExecutor {
 
       return this.finishFromCanonicalResult(run.id, output, result);
     } catch (error) {
+      await this.cleanupFailedTurn(liveTurn, liveIterator);
       const message = errorMessage(error);
       this.appendBestEffort(run.id, "error", { message });
       return this.finishRun(run.id, { status: "failed", error: message });
+    } finally {
+      this.cancellationIntents.delete(run.id);
     }
   }
 
@@ -144,7 +153,10 @@ export class RunExecutor {
         run = this.requireRun(runId);
       }
     }
-    if (run.status === "running") await this.runtime.cancel(run.sessionId);
+    if (run.status === "running") {
+      this.cancellationIntents.add(run.id);
+      await this.runtime.cancel(run.sessionId);
+    }
     return this.requireRun(runId);
   }
 
@@ -184,6 +196,18 @@ export class RunExecutor {
       (iteration) => ({ source: "event", iteration }),
       (error: unknown) => ({ source: "event_error", error })
     );
+  }
+
+  private async cleanupFailedTurn(
+    turn: RuntimeTurn | undefined,
+    iterator: AsyncIterator<RuntimeEvent> | undefined
+  ): Promise<void> {
+    if (turn === undefined) return;
+    await Promise.all([
+      settleBestEffort(() => turn.cancel()),
+      settleBestEffort(() => turn.closeEvents())
+    ]);
+    if (iterator !== undefined) await settleBestEffort(async () => iterator.return?.());
   }
 
   private requireRun(id: string): Run {

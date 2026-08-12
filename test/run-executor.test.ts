@@ -9,6 +9,7 @@ import { EventStore } from "../src/events/event-store.js";
 import type {
   AgentRuntime,
   RuntimeEvent,
+  RuntimeSession,
   RuntimeTurn,
   RuntimeTurnResult
 } from "../src/runtime/agent-runtime.js";
@@ -60,6 +61,99 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("preparation 期间按 runId 记录取消且不影响同 Session 后续 Run", async () => {
+    const ensured = deferred<RuntimeSession>();
+    const runtime = createFakeRuntime();
+    const originalEnsureSession = runtime.ensureSession.bind(runtime);
+    const originalStartTurn = runtime.startTurn.bind(runtime);
+    let ensureCalls = 0;
+    runtime.ensureSession = vi.fn((input) => {
+      ensureCalls += 1;
+      return ensureCalls === 1 ? ensured.promise : originalEnsureSession(input);
+    });
+    runtime.startTurn = vi.fn(originalStartTurn);
+    runtime.cancel = vi.fn(async () => undefined);
+    const setupResult = setup(runtime);
+
+    const firstExecution = setupResult.executor.execute(setupResult.run.id);
+    await vi.waitFor(() => expect(runtime.ensureSession).toHaveBeenCalledTimes(1));
+    await setupResult.executor.cancel(setupResult.run.id);
+    ensured.resolve({ providerSessionId: "provider-session-1" });
+    await firstExecution;
+
+    expect(runtime.cancel).toHaveBeenCalledWith("session-1");
+    expect(runtime.startTurn).not.toHaveBeenCalled();
+    expect(setupResult.runRepository.get(setupResult.run.id)?.status).toBe("cancelled");
+
+    const nextRun = setupResult.runRepository.create({ sessionId: "session-1", input: "继续执行" });
+    await setupResult.executor.execute(nextRun.id);
+
+    expect(runtime.startTurn).toHaveBeenCalledTimes(1);
+    expect(runtime.startTurn).toHaveBeenCalledWith({
+      sessionId: "session-1",
+      requestId: nextRun.id,
+      text: "继续执行"
+    });
+    expect(setupResult.runRepository.get(nextRun.id)?.status).toBe("succeeded");
+    setupResult.db.close();
+  });
+
+  it("Event append 失败时有界清理仍在运行的 Turn 和 iterator", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(() => new Promise<void>(() => undefined));
+      const closeEvents = vi.fn(() => new Promise<void>(() => undefined));
+      const returnIterator = vi.fn(() => new Promise<IteratorResult<RuntimeEvent>>(() => undefined));
+      let nextCalls = 0;
+      const runtime = createFakeRuntime();
+      runtime.startTurn = (): RuntimeTurn => ({
+        events: {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => {
+                nextCalls += 1;
+                if (nextCalls === 1) {
+                  return Promise.resolve({
+                    done: false,
+                    value: { type: "message", stream: "output", text: "partial" } satisfies RuntimeEvent
+                  });
+                }
+                return new Promise<IteratorResult<RuntimeEvent>>(() => undefined);
+              },
+              return: returnIterator
+            };
+          }
+        },
+        result: new Promise<RuntimeTurnResult>(() => undefined),
+        cancel,
+        closeEvents
+      });
+      const setupResult = setup(runtime);
+      const append = setupResult.eventStore.append.bind(setupResult.eventStore);
+      vi.spyOn(setupResult.eventStore, "append").mockImplementation((runId, type, content) => {
+        if (type === "message") throw new Error("event append failed");
+        return append(runId, type, content);
+      });
+
+      const execution = setupResult.executor.execute(setupResult.run.id);
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS * 3);
+      await execution;
+
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(closeEvents).toHaveBeenCalledTimes(1);
+      expect(returnIterator).toHaveBeenCalledTimes(1);
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+        status: "failed",
+        error: "event append failed"
+      });
+      expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+      expect(vi.getTimerCount()).toBe(0);
+      setupResult.db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("canonical result 先结束时停止无限事件迭代并完成 Run", async () => {
     vi.useFakeTimers();
     try {

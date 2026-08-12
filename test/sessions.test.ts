@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +20,12 @@ const authHeaders = (): Record<string, string> => ({ authorization: `Bearer ${ap
 const tempDirs: string[] = [];
 const apps: Array<{ app: FastifyInstance; close: () => Promise<void> }> = [];
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
 const createFakeRuntime = (reset = async (_input: RuntimeSessionInput): Promise<void> => undefined): AgentRuntime => ({
   ensureSession: async (_input: RuntimeSessionInput): Promise<RuntimeSession> => ({ providerSessionId: null }),
   startTurn: (_input: RuntimeTurnInput): RuntimeTurn => {
@@ -38,7 +44,7 @@ const createFakeRuntime = (reset = async (_input: RuntimeSessionInput): Promise<
 const createTestApp = async (options: {
   runtime?: AgentRuntime;
   commandRunner?: CommandRunner;
-} = {}): Promise<{ app: FastifyInstance; db: ReturnType<typeof createTestDatabase>["db"] }> => {
+} = {}): Promise<{ app: FastifyInstance; db: ReturnType<typeof createTestDatabase>["db"]; dataDir: string }> => {
   const { db } = createTestDatabase();
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-sessions-"));
   tempDirs.push(dataDir);
@@ -59,7 +65,7 @@ const createTestApp = async (options: {
   });
   apps.push({ app, close: async () => { await app.close(); db.close(); } });
   await app.ready();
-  return { app, db };
+  return { app, db, dataDir };
 };
 
 const createAgent = async (app: FastifyInstance): Promise<{ id: string }> => {
@@ -230,48 +236,112 @@ describe("Session API", () => {
     db.close();
   });
 
-  it("重置成功后保留 Workspace 并只清空 Provider Session ID", async () => {
+  it("reset 原子 claim Session，成功后释放并允许创建 Run", async () => {
     let app!: FastifyInstance;
     let db!: ReturnType<typeof createTestDatabase>["db"];
+    let dataDir!: string;
     let providerSessionIdDuringRuntime: string | null = null;
-    const reset = vi.fn(async (_input: RuntimeSessionInput): Promise<void> => {
-      providerSessionIdDuringRuntime = (db.prepare("SELECT provider_session_id FROM sessions WHERE id = ?").get(_input.sessionId) as {
+    const resetRelease = deferred<void>();
+    const reset = vi.fn(async (input: RuntimeSessionInput): Promise<void> => {
+      providerSessionIdDuringRuntime = (db.prepare("SELECT provider_session_id FROM sessions WHERE id = ?").get(input.sessionId) as {
         provider_session_id: string | null;
       }).provider_session_id;
+      await resetRelease.promise;
     });
-    ({ app, db } = await createTestApp({ runtime: createFakeRuntime(reset) }));
+    ({ app, db, dataDir } = await createTestApp({ runtime: createFakeRuntime(reset) }));
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
+    writeFileSync(join(dataDir, "agents", agent.id, "MEMORY.md"), "remember reset");
     db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
 
-    const response = await app.inject({ method: "POST", url: `/api/sessions/${session.id}/reset`, headers: authHeaders() });
+    const resetting = app.inject({ method: "POST", url: `/api/sessions/${session.id}/reset`, headers: authHeaders() });
+    await vi.waitFor(() => expect(reset).toHaveBeenCalledTimes(1));
 
+    const statusDuringReset = db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id);
+    const busy = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/runs`,
+      headers: authHeaders(),
+      payload: { input: "不能并发" }
+    });
+
+    resetRelease.resolve();
+    const response = await resetting;
+
+    expect(statusDuringReset).toEqual({ status: "running" });
+    expect(busy.statusCode).toBe(409);
+    expect(busy.json()).toEqual({
+      error: { code: "session_busy", message: "Session already has an active Run" }
+    });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ id: session.id, providerSessionId: null, workspacePath: session.workspacePath });
-    expect(reset).toHaveBeenCalledWith(expect.objectContaining({
+    expect(response.json()).toMatchObject({
+      id: session.id,
+      status: "idle",
+      providerSessionId: null,
+      workspacePath: session.workspacePath
+    });
+    expect(reset).toHaveBeenCalledWith({
       sessionId: session.id,
       agentId: agent.id,
       provider: "codex",
       providerSessionId: "provider-session-1",
-      workspacePath: session.workspacePath
-    }));
+      workspacePath: session.workspacePath,
+      browserProfilePath: join(dirname(session.workspacePath), "browser"),
+      memory: "remember reset"
+    });
     expect(providerSessionIdDuringRuntime).toBe("provider-session-1");
-    expect(db.prepare("SELECT provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({ provider_session_id: null });
+    expect(db.prepare("SELECT status, provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
+      status: "idle",
+      provider_session_id: null
+    });
+
+    const accepted = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/runs`,
+      headers: authHeaders(),
+      payload: { input: "reset 后继续" }
+    });
+    expect(accepted.statusCode).toBe(201);
   });
 
-  it("Runtime reset 失败时保留 Provider Session ID", async () => {
-    const { app, db } = await createTestApp({
-      runtime: createFakeRuntime(async () => Promise.reject(new Error("provider failed")))
+  it("Runtime reset 失败时释放 claim、保留 Provider Session ID 并允许创建 Run", async () => {
+    const resetRelease = deferred<void>();
+    const reset = vi.fn(async () => {
+      await resetRelease.promise;
+      throw new Error("provider failed");
     });
+    const { app, db } = await createTestApp({ runtime: createFakeRuntime(reset) });
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
     db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
 
-    const response = await app.inject({ method: "POST", url: `/api/sessions/${session.id}/reset`, headers: authHeaders() });
+    const resetting = app.inject({ method: "POST", url: `/api/sessions/${session.id}/reset`, headers: authHeaders() });
+    await vi.waitFor(() => expect(reset).toHaveBeenCalledTimes(1));
+    const busy = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/runs`,
+      headers: authHeaders(),
+      payload: { input: "不能并发" }
+    });
 
+    resetRelease.resolve();
+    const response = await resetting;
+
+    expect(busy.statusCode).toBe(409);
     expect(response.statusCode).toBe(500);
     expect(response.json()).toEqual({ error: { code: "runtime_reset_failed", message: "Failed to reset runtime session" } });
-    expect(db.prepare("SELECT provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({ provider_session_id: "provider-session-1" });
+    expect(db.prepare("SELECT status, provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
+      status: "idle",
+      provider_session_id: "provider-session-1"
+    });
+
+    const accepted = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/runs`,
+      headers: authHeaders(),
+      payload: { input: "失败后继续" }
+    });
+    expect(accepted.statusCode).toBe(201);
   });
 
   it("运行中的 Session 拒绝 reset", async () => {

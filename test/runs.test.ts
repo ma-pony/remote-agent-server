@@ -106,6 +106,20 @@ describe("RunRepository", () => {
     db.close();
   });
 
+  it("Session 已被 reset claim 时即使没有活动 Run 也返回 session_busy", () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    const repository = new RunRepository({ db });
+    db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(session.id);
+
+    expect(() => repository.create({ sessionId: session.id, input: "work" })).toThrow(
+      expect.objectContaining({ code: "session_busy" })
+    );
+    expect(repository.listBySession(session.id)).toEqual([]);
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id)).toEqual({ status: "running" });
+    db.close();
+  });
+
   it("结束 running Run 时原子恢复 Session 为 idle", () => {
     const { db, seed } = createTestDatabase();
     const session = seed.session();

@@ -13,6 +13,7 @@ const statusNames: Record<RunStatus, string> = {
   cancelled: "已取消"
 };
 const streamRetryDelays = [500, 1_000, 2_000, 4_000, 5_000] as const;
+const canonicalPollIntervalMs = 5_000;
 
 const eventContent = (item: RunEvent): Record<string, unknown> => {
   try {
@@ -111,29 +112,55 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     if (activeRunId === null) return;
     const controller = new AbortController();
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let canonicalPollTimer: ReturnType<typeof setTimeout> | undefined;
+    let canonicalRefresh: Promise<boolean> | undefined;
     let cursor = views.find((view) => view.run.id === activeRunId)?.events.at(-1)?.seq ?? 0;
     let consecutiveFailures = 0;
     setStreamError("");
 
-    const refreshCanonicalRun = async (): Promise<boolean> => {
-      try {
-        const canonical = await api<Run>(`/runs/${activeRunId}`, { signal: controller.signal });
-        if (controller.signal.aborted) return true;
-        setViews((current) => current.map((view) =>
-          view.run.id === canonical.id ? { ...view, run: canonical } : view
-        ));
-        if (terminalStatuses.has(canonical.status)) {
-          setStreamError("");
-          controller.abort();
-          return true;
+    const clearCanonicalPoll = (): void => {
+      if (canonicalPollTimer !== undefined) clearTimeout(canonicalPollTimer);
+      canonicalPollTimer = undefined;
+    };
+    const finishTerminal = (): void => {
+      clearCanonicalPoll();
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      retryTimer = undefined;
+      setStreamError("");
+      controller.abort();
+    };
+    const refreshCanonicalRun = (): Promise<boolean> => {
+      if (canonicalRefresh !== undefined) return canonicalRefresh;
+      canonicalRefresh = (async () => {
+        try {
+          const canonical = await api<Run>(`/runs/${activeRunId}`, { signal: controller.signal });
+          if (controller.signal.aborted) return true;
+          setViews((current) => current.map((view) =>
+            view.run.id === canonical.id ? { ...view, run: canonical } : view
+          ));
+          if (terminalStatuses.has(canonical.status)) {
+            finishTerminal();
+            return true;
+          }
+        } catch (_error) {
+          if (controller.signal.aborted) return true;
         }
-      } catch (_error) {
-        if (controller.signal.aborted) return true;
-      }
-      return false;
+        return false;
+      })().finally(() => { canonicalRefresh = undefined; });
+      return canonicalRefresh;
+    };
+    const scheduleCanonicalPoll = (): void => {
+      if (controller.signal.aborted || canonicalPollTimer !== undefined) return;
+      canonicalPollTimer = setTimeout(() => {
+        canonicalPollTimer = undefined;
+        void refreshCanonicalRun().then((terminal) => {
+          if (!terminal) scheduleCanonicalPoll();
+        });
+      }, canonicalPollIntervalMs);
     };
 
     const connect = async (): Promise<void> => {
+      scheduleCanonicalPoll();
       try {
         await streamRunEvents(activeRunId, cursor, (item) => {
           cursor = Math.max(cursor, item.seq);
@@ -141,9 +168,10 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
           setStreamError("");
           setViews((current) => mergeEvent(current, activeRunId, item));
           const status = eventStatus(item);
-          if (status !== undefined && terminalStatuses.has(status)) controller.abort();
+          if (status !== undefined && terminalStatuses.has(status)) finishTerminal();
         }, controller.signal);
       } catch (reason) {
+        clearCanonicalPoll();
         if (controller.signal.aborted || await refreshCanonicalRun()) return;
         if (isRunStreamPermanentError(reason)) {
           setStreamError(`实时连接失败：${errorMessage(reason)}`);
@@ -156,13 +184,17 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
         }
         consecutiveFailures += 1;
         setStreamError(`实时连接中断：${errorMessage(reason)}，将在 ${delay / 1_000} 秒后重连`);
-        retryTimer = setTimeout(() => void connect(), delay);
+        retryTimer = setTimeout(() => {
+          retryTimer = undefined;
+          void connect();
+        }, delay);
       }
     };
     void connect();
     return () => {
       controller.abort();
       if (retryTimer !== undefined) clearTimeout(retryTimer);
+      clearCanonicalPoll();
     };
   }, [activeRunId, streamReconnectGeneration]);
 

@@ -513,6 +513,63 @@ describe("最小管理界面", () => {
     expect(screen.getByLabelText("发送给 Agent")).toBeEnabled();
   });
 
+  it("SSE 保持 open 但没有 terminal Event 时低频轮询 canonical Run 并收尾", async () => {
+    vi.useFakeTimers();
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", `/sessions/${session.id}`);
+    const runningRun = {
+      id: "run-open",
+      sessionId: session.id,
+      status: "running",
+      input: "等待 canonical 收尾",
+      result: null,
+      error: null,
+      createdAt: now,
+      startedAt: now,
+      finishedAt: null
+    };
+    let canonicalRequests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, status: "running", runs: [runningRun] });
+      if (url === "/api/agents") return jsonResponse([agent]);
+      if (url === "/api/runs/run-open/events?afterSeq=0") return jsonResponse([]);
+      if (url === "/api/runs/run-open") {
+        canonicalRequests += 1;
+        if (canonicalRequests === 1) {
+          return jsonResponse({ error: { code: "temporarily_unavailable", message: "暂时不可用" } }, 503);
+        }
+        return jsonResponse({ ...runningRun, status: "succeeded", result: "canonical result", finishedAt: now });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    let streamSignal!: AbortSignal;
+    fetchEventSourceMock.mockImplementation((_url: string, options: { signal: AbortSignal }) => {
+      streamSignal = options.signal;
+      return new Promise<void>((resolve) => options.signal.addEventListener("abort", () => resolve(), { once: true }));
+    });
+
+    render(<App />);
+    await vi.waitFor(() => expect(fetchEventSourceMock).toHaveBeenCalledTimes(1));
+    expect(canonicalRequests).toBe(0);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+    expect(canonicalRequests).toBe(1);
+    expect(streamSignal.aborted).toBe(false);
+    expect(screen.getByRole("button", { name: "取消运行" })).toBeInTheDocument();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+
+    expect(canonicalRequests).toBe(2);
+    expect(streamSignal.aborted).toBe(true);
+    expect(screen.getByText("已完成")).toBeInTheDocument();
+    expect(screen.getByText("canonical result")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "取消运行" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("发送给 Agent")).toBeEnabled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([
     ["401", () => jsonResponse({ error: { message: "Invalid API token" } }, 401)],
     ["非 SSE", () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } })]
