@@ -10,6 +10,7 @@ import type { RunScheduler } from "./run-scheduler.js";
 
 export const SSE_HISTORY_BATCH_SIZE = 100;
 export const SSE_LIVE_BUFFER_LIMIT = 256;
+export const SSE_DRAIN_TIMEOUT_MS = 1_000;
 
 export interface SseWriter {
   readonly destroyed?: boolean;
@@ -93,13 +94,23 @@ export const streamRunEvents = async (
     if (accepted || closed) return;
 
     await new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const onDrain = (): void => {
+        if (settled) return;
+        settled = true;
         writer.off("drain", onDrain);
-        wakeDrain = undefined;
+        if (wakeDrain === onDrain) wakeDrain = undefined;
+        if (timer !== undefined) clearTimeout(timer);
         resolve();
       };
       wakeDrain = onDrain;
       writer.once("drain", onDrain);
+      timer = setTimeout(() => {
+        finish(true);
+        onDrain();
+      }, SSE_DRAIN_TIMEOUT_MS);
+      timer.unref?.();
       if (closed) onDrain();
     });
   };

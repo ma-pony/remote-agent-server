@@ -509,6 +509,9 @@ describe("AcpxAgentRuntime", () => {
       { type: "status", text: "working" }
     ]);
     await expect(turn.result).resolves.toEqual({ status: "failed", code: "provider_failed", message: "boom" });
+    await turn.closeEvents();
+    const acpTurn = acp.startTurn.mock.results[0]?.value as AcpRuntimeTurn;
+    expect(acpTurn.closeStream).toHaveBeenCalledTimes(1);
   });
 
   it("支持 turn cancel、session cancel 和 reset discard", async () => {
@@ -521,11 +524,13 @@ describe("AcpxAgentRuntime", () => {
 
     const turn = runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
     await turn.cancel();
+    await turn.closeEvents();
     await runtime.cancel(SESSION_ID);
     await runtime.reset(input);
 
     const acpTurn = acp.startTurn.mock.results[0]?.value as AcpRuntimeTurn;
     expect(acpTurn.cancel).toHaveBeenCalled();
+    expect(acpTurn.closeStream).toHaveBeenCalled();
     expect(acp.cancel).toHaveBeenCalledWith(expect.objectContaining({ reason: "cancelled_by_request" }));
     expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({
       reason: "provider_session_reset",
@@ -573,6 +578,7 @@ describe("AcpxAgentRuntime", () => {
 
   it("shutdown cancel 永不结束时仍有界关闭 cached handle", async () => {
     vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       const root = makeRoot();
       const acp = runtimeStub();
@@ -583,18 +589,20 @@ describe("AcpxAgentRuntime", () => {
       const acpTurn = acp.startTurn.mock.results[0]?.value as AcpRuntimeTurn;
       acpTurn.cancel = vi.fn(() => new Promise<void>(() => undefined));
 
-      const shutdown = runtime.shutdown();
+      const shutdown = expect(runtime.shutdown()).rejects.toBeInstanceOf(AggregateError);
       await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
       await shutdown;
 
       expect(acpTurn.cancel).toHaveBeenCalledWith({ reason: "service_shutdown" });
       expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({ reason: "service_shutdown" }));
+      expect(consoleError).toHaveBeenCalledWith(expect.any(AggregateError));
     } finally {
+      consoleError.mockRestore();
       vi.useRealTimers();
     }
   });
 
-  it("shutdown handle close 永不结束时记录 timeout 并有界返回", async () => {
+  it("shutdown handle close 永不结束时保留 Handle 并 reject AggregateError", async () => {
     vi.useFakeTimers();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
@@ -605,17 +613,80 @@ describe("AcpxAgentRuntime", () => {
       const runtime = new AcpxAgentRuntime(makeConfig(root));
       await runtime.ensureSession(sessionInput(root));
 
-      const shutdown = runtime.shutdown();
+      const shutdown = expect(runtime.shutdown()).rejects.toBeInstanceOf(AggregateError);
       await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
       await shutdown;
 
       expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({ reason: "service_shutdown" }));
       expect(consoleError).toHaveBeenCalledWith(expect.any(AggregateError));
+      const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+      expect(options.agentRegistry.list()).toEqual([`remote:codex:${AGENT_ID}:${SESSION_ID}`]);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       consoleError.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it("shutdown idle handle close reject 时完成其他清理后 reject AggregateError", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acp.close.mockRejectedValueOnce(new Error("close rejected"));
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+
+    await expect(runtime.shutdown()).rejects.toEqual(expect.objectContaining({
+      name: "AggregateError",
+      errors: [expect.objectContaining({
+        stage: "handle_close",
+        sessionId: SESSION_ID,
+        cause: expect.objectContaining({ message: "close rejected" })
+      })]
+    }));
+
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    expect(options.agentRegistry.list()).toEqual([`remote:codex:${AGENT_ID}:${SESSION_ID}`]);
+    consoleError.mockRestore();
+  });
+
+  it("shutdown 期间晚返回 Handle 的 close reject 被聚合且不注销 target", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const root = makeRoot();
+    const acp = runtimeStub();
+    let releaseHandle!: (handle: AcpRuntimeHandle) => void;
+    acp.ensureSession.mockImplementationOnce(() => new Promise<AcpRuntimeHandle>((resolve) => {
+      releaseHandle = resolve;
+    }));
+    acp.close.mockRejectedValue(new Error("late close rejected"));
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    const ensuring = runtime.ensureSession(sessionInput(root));
+    await vi.waitFor(() => expect(acp.ensureSession).toHaveBeenCalledTimes(1));
+
+    const shutdown = expect(runtime.shutdown()).rejects.toEqual(expect.objectContaining({
+      name: "AggregateError",
+      errors: expect.arrayContaining([
+        expect.objectContaining({ stage: "late_handle_close", sessionId: SESSION_ID }),
+        expect.objectContaining({ stage: "session_operation", sessionId: SESSION_ID }),
+        expect.objectContaining({ stage: "handle_close", sessionId: SESSION_ID })
+      ])
+    }));
+    releaseHandle({
+      sessionKey: `remote-agent:${SESSION_ID}`,
+      backend: "acpx",
+      runtimeSessionName: "late",
+      agentSessionId: "provider-session-1"
+    });
+
+    await expect(ensuring).rejects.toMatchObject({ code: "runtime_shutdown" });
+    await shutdown;
+
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    expect(options.agentRegistry.list()).toEqual([`remote:codex:${AGENT_ID}:${SESSION_ID}`]);
+    expect(acp.close).toHaveBeenCalledTimes(2);
+    consoleError.mockRestore();
   });
 
   it.each(["claude_code", "codex", "hermes"] as const)("doctor probe 指向指定的 %s Provider", async (provider) => {

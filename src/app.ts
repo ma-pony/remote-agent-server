@@ -69,11 +69,26 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });
   let stopped = false;
+  let shutdownError: unknown;
   app.addHook("preClose", async () => {
     if (stopped) return;
     stopped = true;
-    await scheduler.stop();
-    await runtime.shutdown();
+    const failures: unknown[] = [];
+    try {
+      await scheduler.stop();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
+      await runtime.shutdown();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length === 1) shutdownError = failures[0];
+    if (failures.length > 1) shutdownError = new AggregateError(failures, "Application shutdown failed");
+  });
+  app.addHook("onClose", async () => {
+    if (shutdownError !== undefined) throw shutdownError;
   });
   scheduler.start();
 

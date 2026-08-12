@@ -92,15 +92,20 @@ export class RunExecutor {
         const outcome = await Promise.race([nextEvent, resultOutcome]);
         if (outcome.source === "result") {
           result = outcome.result;
+          await settleBestEffort(() => turn.closeEvents());
           await settleBestEffort(async () => iterator.return?.());
           break;
         }
         if (outcome.source === "result_error") {
+          await settleBestEffort(() => turn.closeEvents());
           await settleBestEffort(async () => iterator.return?.());
           throw outcome.error;
         }
         if (outcome.source === "event_error") {
-          await settleBestEffort(() => turn.cancel());
+          await Promise.all([
+            settleBestEffort(() => turn.cancel()),
+            settleBestEffort(() => turn.closeEvents())
+          ]);
           throw outcome.error;
         }
         if (outcome.iteration.done) {
@@ -166,7 +171,7 @@ export class RunExecutor {
   }
 
   private nextEvent(iterator: AsyncIterator<RuntimeEvent>): Promise<TurnRace> {
-    return Promise.resolve(iterator.next()).then<TurnRace, TurnRace>(
+    return Promise.resolve().then(() => iterator.next()).then<TurnRace, TurnRace>(
       (iteration) => ({ source: "event", iteration }),
       (error: unknown) => ({ source: "event_error", error })
     );

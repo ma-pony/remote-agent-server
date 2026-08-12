@@ -65,6 +65,7 @@ describe("RunExecutor", () => {
     try {
       const result = deferred<RuntimeTurnResult>();
       const returnIterator = vi.fn(() => new Promise<IteratorResult<RuntimeEvent>>(() => undefined));
+      const closeEvents = vi.fn(() => new Promise<void>(() => undefined));
       let nextCalls = 0;
       const runtime = createFakeRuntime();
       runtime.startTurn = (): RuntimeTurn => ({
@@ -87,7 +88,47 @@ describe("RunExecutor", () => {
           }
         },
         result: result.promise,
-        cancel: async () => undefined
+        cancel: async () => undefined,
+        closeEvents
+      });
+      const setupResult = setup(runtime);
+
+      const execution = setupResult.executor.execute(setupResult.run.id);
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS * 2);
+      await execution;
+
+      expect(closeEvents).toHaveBeenCalledTimes(1);
+      expect(returnIterator).toHaveBeenCalledTimes(1);
+      expect(closeEvents.mock.invocationCallOrder[0]).toBeLessThan(returnIterator.mock.invocationCallOrder[0]!);
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+        status: "succeeded",
+        result: "final answer"
+      });
+      expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+      expect(vi.getTimerCount()).toBe(0);
+      setupResult.db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("iterator.next 同步抛错时 bounded cancel 和 closeEvents 后失败 Run", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(() => new Promise<void>(() => undefined));
+      const closeEvents = vi.fn(() => new Promise<void>(() => undefined));
+      const runtime = createFakeRuntime();
+      runtime.startTurn = (): RuntimeTurn => ({
+        events: {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => { throw new Error("sync next exploded"); }
+            };
+          }
+        },
+        result: new Promise<RuntimeTurnResult>(() => undefined),
+        cancel,
+        closeEvents
       });
       const setupResult = setup(runtime);
 
@@ -95,12 +136,13 @@ describe("RunExecutor", () => {
       await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
       await execution;
 
-      expect(returnIterator).toHaveBeenCalledTimes(1);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(closeEvents).toHaveBeenCalledTimes(1);
       expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
-        status: "succeeded",
-        result: "final answer"
+        status: "failed",
+        error: "sync next exploded"
       });
-      expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+      expect(vi.getTimerCount()).toBe(0);
       setupResult.db.close();
     } finally {
       vi.useRealTimers();
@@ -178,7 +220,8 @@ describe("RunExecutor", () => {
     runtime.startTurn = (): RuntimeTurn => ({
       events: { async *[Symbol.asyncIterator]() {} },
       result: Promise.reject(new Error("result exploded")),
-      cancel: async () => undefined
+      cancel: async () => undefined,
+      closeEvents: async () => undefined
     });
     const setupResult = setup(runtime);
 
@@ -215,7 +258,8 @@ describe("RunExecutor", () => {
         }
       },
       result: new Promise<RuntimeTurnResult>(() => undefined),
-      cancel: async () => undefined
+      cancel: async () => undefined,
+      closeEvents: async () => undefined
     });
     const setupResult = setup(runtime);
 
@@ -242,7 +286,8 @@ describe("RunExecutor", () => {
           }
         },
         result: new Promise<RuntimeTurnResult>(() => undefined),
-        cancel
+        cancel,
+        closeEvents: async () => undefined
       });
       const setupResult = setup(runtime);
 
@@ -289,7 +334,8 @@ describe("RunExecutor", () => {
         async *[Symbol.asyncIterator]() {}
       },
       result: result.promise,
-      cancel: async () => undefined
+      cancel: async () => undefined,
+      closeEvents: async () => undefined
     });
     runtime.cancel = cancel;
     const setupResult = setup(runtime);

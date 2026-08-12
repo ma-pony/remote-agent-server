@@ -123,6 +123,22 @@ type ActiveTurn = {
   turn: AcpRuntimeTurn;
 };
 
+type SessionOperation = {
+  barrier: Promise<void>;
+  completion: Promise<void>;
+};
+
+class RuntimeShutdownFailure extends Error {
+  constructor(
+    readonly stage: "active_cancel" | "session_operation" | "handle_close" | "late_handle_close",
+    readonly sessionId: string,
+    reason: unknown
+  ) {
+    super(`Runtime shutdown ${stage} failed for Session ${sessionId}`, { cause: reason });
+    this.name = "RuntimeShutdownFailure";
+  }
+}
+
 const toolContent = (event: Extract<AcpRuntimeEvent, { type: "tool_call" }>): Record<string, unknown> => {
   const content: Record<string, unknown> = {};
   for (const key of [
@@ -176,7 +192,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private readonly runtime: AcpRuntime;
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
-  private readonly sessionOperations = new Map<string, Promise<void>>();
+  private readonly sessionOperations = new Map<string, SessionOperation>();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
   private readonly shutdownFailures: unknown[] = [];
@@ -221,8 +237,21 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const providerSessionId = handle.agentSessionId ?? handle.backendSessionId ?? null;
 
     if (this.shuttingDown) {
-      await settleBestEffort(() => this.runtime.close({ handle, reason: "service_shutdown" }));
-      this.registry.unregister(agent);
+      const outcome = await settleBestEffort(() => this.runtime.close({ handle, reason: "service_shutdown" }));
+      if (outcome.status === "fulfilled") {
+        this.registry.unregister(agent);
+      } else {
+        this.sessions.set(input.sessionId, {
+          handle,
+          providerSessionId,
+          provider: input.provider,
+          agentId: input.agentId,
+          workspacePath: input.workspacePath,
+          browserProfilePath: input.browserProfilePath,
+          target: agent
+        });
+        this.recordShutdownFailure("late_handle_close", input.sessionId, outcome.reason);
+      }
       throw new AgentRuntimeError("runtime_shutdown", "Runtime is shutting down");
     }
 
@@ -267,6 +296,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
     if (session === undefined) {
       throw new AgentRuntimeError("session_not_ready", "Runtime session has not been ensured");
     }
+    if (this.activeTurns.has(input.sessionId)) {
+      throw new AgentRuntimeError("session_not_ready", "Runtime session still has an active Turn");
+    }
     const turn = this.runtime.startTurn({
       handle: session.handle,
       text: input.text,
@@ -276,22 +308,29 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const activeTurn = { handle: session.handle, turn };
     this.activeTurns.set(input.sessionId, activeTurn);
     const result = turn.result.then(mapResult);
-    void turn.result.then(
-      () => this.clearActiveTurn(input.sessionId, activeTurn),
-      () => this.clearActiveTurn(input.sessionId, activeTurn)
-    );
+    const clearActiveTurn = (): void => this.clearActiveTurn(input.sessionId, activeTurn);
 
     return {
       events: {
         async *[Symbol.asyncIterator]() {
-          for await (const event of turn.events) {
-            const mapped = mapEvent(event);
-            if (mapped !== undefined) yield mapped;
+          let completed = false;
+          try {
+            for await (const event of turn.events) {
+              const mapped = mapEvent(event);
+              if (mapped !== undefined) yield mapped;
+            }
+            completed = true;
+          } finally {
+            if (completed) clearActiveTurn();
           }
         }
       },
       result,
-      cancel: async (): Promise<void> => turn.cancel({ reason: "cancelled_by_request" })
+      cancel: async (): Promise<void> => turn.cancel({ reason: "cancelled_by_request" }),
+      closeEvents: async (): Promise<void> => {
+        await turn.closeStream();
+        clearActiveTurn();
+      }
     };
   }
 
@@ -359,35 +398,52 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private async performShutdown(): Promise<void> {
     this.shuttingDown = true;
 
-    const activeTurns = [...this.activeTurns.values()];
-    const cancelOutcomes = await Promise.all(activeTurns.map(({ turn }) =>
-      settleBestEffort(() => turn.cancel({ reason: "service_shutdown" }))
-    ));
+    const activeTurns = [...this.activeTurns.entries()];
+    await Promise.all(activeTurns.map(async ([sessionId, { turn }]) => {
+      const outcome = await settleBestEffort(() => turn.cancel({ reason: "service_shutdown" }));
+      if (outcome.status !== "fulfilled") {
+        this.recordShutdownFailure("active_cancel", sessionId, outcome.reason);
+      }
+    }));
 
-    const operationsOutcome = await settleBestEffort(() =>
-      Promise.allSettled([...this.sessionOperations.values()])
-    );
+    const operations = [...this.sessionOperations.entries()];
+    await Promise.all(operations.map(async ([sessionId, operation]) => {
+      const outcome = await settleBestEffort(() => operation.completion);
+      if (outcome.status !== "fulfilled") {
+        this.recordShutdownFailure("session_operation", sessionId, outcome.reason);
+      }
+    }));
     const sessions = [...this.sessions.entries()];
-    const closeOutcomes = await Promise.all(sessions.map(([sessionId, session]) =>
-      settleBestEffort(() => this.serializeSession(sessionId, async () => {
+    await Promise.all(sessions.map(async ([sessionId, session]) => {
+      const outcome = await settleBestEffort(() => this.serializeSession(sessionId, async () => {
         await this.runtime.close({ handle: session.handle, reason: "service_shutdown" });
-      }))
-    ));
+      }));
+      if (outcome.status === "fulfilled") {
+        if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId);
+        this.registry.unregister(session.target);
+        this.activeTurns.delete(sessionId);
+      } else {
+        this.recordShutdownFailure("handle_close", sessionId, outcome.reason);
+      }
+    }));
 
-    this.activeTurns.clear();
-    this.sessions.clear();
-    this.registry.clear();
-
-    const cleanupErrors = [...cancelOutcomes, operationsOutcome, ...closeOutcomes]
-      .filter((outcome) => outcome.status !== "fulfilled")
-      .map((outcome) => outcome.reason);
-    if (cleanupErrors.length > 0) {
-      this.shutdownFailures.push(...cleanupErrors);
-      console.error(new AggregateError(
+    if (this.sessions.size === 0) this.registry.clear();
+    if (this.shutdownFailures.length > 0) {
+      const error = new AggregateError(
         this.shutdownFailures,
         "Runtime shutdown timed out or failed; process exit is required to release any remaining provider resources"
-      ));
+      );
+      console.error(error);
+      throw error;
     }
+  }
+
+  private recordShutdownFailure(
+    stage: RuntimeShutdownFailure["stage"],
+    sessionId: string,
+    reason: unknown
+  ): void {
+    this.shutdownFailures.push(new RuntimeShutdownFailure(stage, sessionId, reason));
   }
 
   private canReuse(session: ManagedSession, input: RuntimeSessionInput): boolean {
@@ -409,12 +465,16 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   private serializeSession<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.sessionOperations.get(sessionId) ?? Promise.resolve();
+    const previous = this.sessionOperations.get(sessionId)?.barrier ?? Promise.resolve();
     const run = previous.then(operation);
-    const settled = run.then(() => undefined, () => undefined);
-    this.sessionOperations.set(sessionId, settled);
+    const completion = run.then(() => undefined);
+    const state: SessionOperation = {
+      completion,
+      barrier: completion.catch(() => undefined)
+    };
+    this.sessionOperations.set(sessionId, state);
     return run.finally(() => {
-      if (this.sessionOperations.get(sessionId) === settled) this.sessionOperations.delete(sessionId);
+      if (this.sessionOperations.get(sessionId) === state) this.sessionOperations.delete(sessionId);
     });
   }
 

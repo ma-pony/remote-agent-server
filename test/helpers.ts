@@ -80,7 +80,8 @@ export const createFakeRuntime = (options: FakeRuntimeOptions = {}): AgentRuntim
         }
       },
       result: eventsFinished.then(() => options.result ?? { status: "completed" }),
-      cancel: async (): Promise<void> => undefined
+      cancel: async (): Promise<void> => undefined,
+      closeEvents: async (): Promise<void> => undefined
     };
   },
   cancel: async (_sessionId: string): Promise<void> => undefined,

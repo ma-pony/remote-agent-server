@@ -11,6 +11,7 @@ import type { Event } from "../src/domain.js";
 import { openDatabase, migrate } from "../src/db.js";
 import { EventStore } from "../src/events/event-store.js";
 import {
+  SSE_DRAIN_TIMEOUT_MS,
   SSE_HISTORY_BATCH_SIZE,
   SSE_LIVE_BUFFER_LIMIT,
   streamRunEvents,
@@ -210,6 +211,37 @@ describe("Event API", () => {
     expect(writer.chunks[1]).toContain("id: 2");
     writer.emit("close");
     await streaming;
+  });
+
+  it("SSE write false 且永不 drain 时有界结束、退订并清理 timer", async () => {
+    vi.useFakeTimers();
+    try {
+      const { eventStore, runId } = await createEventApp();
+      const writer = new FakeSseWriter();
+      writer.write.mockReturnValue(false);
+      const originalSubscribe = eventStore.subscribe.bind(eventStore);
+      const unsubscribed = vi.fn();
+      vi.spyOn(eventStore, "subscribe").mockImplementation((id, listener) => {
+        const unsubscribe = originalSubscribe(id, listener);
+        return () => {
+          unsubscribed();
+          unsubscribe();
+        };
+      });
+      const streaming = streamRunEvents(eventStore, runId, 0, writer);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(eventStore.subscribe).toHaveBeenCalledTimes(1);
+      eventStore.append(runId, "message", { text: "blocked" });
+      await vi.advanceTimersByTimeAsync(SSE_DRAIN_TIMEOUT_MS);
+
+      await streaming;
+
+      expect(unsubscribed).toHaveBeenCalledTimes(1);
+      expect(writer.end).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("SSE live write 抛错时安全断开并退订，不影响 Run 或后续 append", async () => {

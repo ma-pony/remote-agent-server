@@ -27,6 +27,7 @@ export type RuntimeTurn = {
   events: AsyncIterable<RuntimeEvent>;
   result: Promise<RuntimeTurnResult>;
   cancel(): Promise<void>;
+  closeEvents(): Promise<void>;
 };
 
 export interface AgentRuntime {

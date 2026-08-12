@@ -260,7 +260,8 @@ describe("Run API", () => {
     runtime.startTurn = () => ({
       events: { async *[Symbol.asyncIterator]() {} },
       result: result.promise,
-      cancel: async () => undefined
+      cancel: async () => undefined,
+      closeEvents: async () => undefined
     });
     runtime.cancel = async () => result.resolve({ status: "cancelled" });
     const { app, db, root } = await createApiTestApp({ runtime, maxConcurrentRuns: 1 });
@@ -287,7 +288,8 @@ describe("Run API", () => {
     runtime.startTurn = () => ({
       events: { async *[Symbol.asyncIterator]() {} },
       result: firstResult.promise,
-      cancel: async () => undefined
+      cancel: async () => undefined,
+      closeEvents: async () => undefined
     });
     runtime.cancel = cancel;
     const { app, db, root } = await createApiTestApp({ runtime, maxConcurrentRuns: 1 });
@@ -452,7 +454,8 @@ describe("Server startup and shutdown", () => {
     runtime.startTurn = () => ({
       events: { async *[Symbol.asyncIterator]() {} },
       result: result.promise,
-      cancel: async () => undefined
+      cancel: async () => undefined,
+      closeEvents: async () => undefined
     });
     runtime.cancel = vi.fn(async () => {
       const duringClose = await server.app.inject({ method: "GET", url: "/api/health" });
@@ -473,6 +476,25 @@ describe("Server startup and shutdown", () => {
     expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
   });
 
+  it("programmatic close 在 Runtime shutdown 失败时完成 server/DB 关闭后 reject", async () => {
+    const root = mkdtempSync(join(tmpdir(), "remote-agent-close-failed-"));
+    tempDirectories.push(root);
+    seedRestartDatabase(join(root, "server.sqlite3"), root, false);
+    const runtime = createFakeRuntime({ result: { status: "completed" } });
+    const shutdownError = new AggregateError([new Error("handle close failed")], "runtime shutdown failed");
+    runtime.shutdown = vi.fn(async () => Promise.reject(shutdownError));
+    const options = startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) });
+    options.listen = async (app) => app.listen({ host: "127.0.0.1", port: 0 });
+    const server = await startServer(options);
+    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+    expect(server.app.server.listening).toBe(true);
+
+    await expect(server.close()).rejects.toBe(shutdownError);
+
+    expect(server.app.server.listening).toBe(false);
+    expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
+  });
+
   it("SIGTERM 在有界 graceful close 后显式退出进程以兜底残留 Provider 资源", async () => {
     const root = mkdtempSync(join(tmpdir(), "remote-agent-signal-"));
     tempDirectories.push(root);
@@ -481,12 +503,35 @@ describe("Server startup and shutdown", () => {
     const exitProcess = vi.fn();
     const options = startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) });
     options.installSignalHandlers = true;
+    options.listen = async (app) => app.listen({ host: "127.0.0.1", port: 0 });
     const server = await startServer({ ...options, exitProcess });
     await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+    expect(server.app.server.listening).toBe(true);
 
     process.emit("SIGTERM", "SIGTERM");
 
     await vi.waitFor(() => expect(exitProcess).toHaveBeenCalledWith(0));
+    expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
+  });
+
+  it("SIGTERM shutdown 失败时完成关闭并以 exit code 1 退出", async () => {
+    const root = mkdtempSync(join(tmpdir(), "remote-agent-signal-failed-"));
+    tempDirectories.push(root);
+    seedRestartDatabase(join(root, "server.sqlite3"), root, false);
+    const runtime = createFakeRuntime({ result: { status: "completed" } });
+    runtime.shutdown = vi.fn(async () => Promise.reject(new AggregateError([new Error("close failed")] )));
+    const exitProcess = vi.fn();
+    const options = startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) });
+    options.installSignalHandlers = true;
+    options.listen = async (app) => app.listen({ host: "127.0.0.1", port: 0 });
+    const server = await startServer({ ...options, exitProcess });
+    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+    expect(server.app.server.listening).toBe(true);
+
+    process.emit("SIGTERM", "SIGTERM");
+
+    await vi.waitFor(() => expect(exitProcess).toHaveBeenCalledWith(1));
+    expect(server.app.server.listening).toBe(false);
     expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
   });
 });
