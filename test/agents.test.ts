@@ -25,7 +25,8 @@ const createFakeRuntime = (): AgentRuntime => ({
     ok: true,
     message: `${provider} ready`,
     details: ["Fake Runtime"]
-  })
+  }),
+  shutdown: async (): Promise<void> => undefined
 });
 
 const apps: Array<{ app: FastifyInstance; close: () => Promise<void> }> = [];

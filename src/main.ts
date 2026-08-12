@@ -19,6 +19,7 @@ export type StartServerOptions = {
   commandRunner?: CommandRunner;
   listen?: (app: FastifyInstance, config: AppConfig) => Promise<unknown>;
   installSignalHandlers?: boolean;
+  exitProcess?: (code: number) => void;
 };
 
 export type RunningServer = {
@@ -74,11 +75,16 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
 
     await (options.listen ?? defaultListen)(app, config);
     if (options.installSignalHandlers ?? true) {
+      const exitProcess = options.exitProcess ?? ((code: number): never => process.exit(code));
       onSignal = () => {
-        void close().catch((error: unknown) => {
-          console.error(error);
-          process.exitCode = 1;
-        });
+        void close()
+          .then(
+            () => exitProcess(0),
+            (error: unknown) => {
+              console.error(error);
+              exitProcess(1);
+            }
+          );
       };
       process.once("SIGINT", onSignal);
       process.once("SIGTERM", onSignal);

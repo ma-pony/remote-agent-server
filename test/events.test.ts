@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -9,12 +10,32 @@ import { buildApp } from "../src/app.js";
 import type { Event } from "../src/domain.js";
 import { openDatabase, migrate } from "../src/db.js";
 import { EventStore } from "../src/events/event-store.js";
+import {
+  SSE_HISTORY_BATCH_SIZE,
+  SSE_LIVE_BUFFER_LIMIT,
+  streamRunEvents,
+  type SseWriter
+} from "../src/runs/run-routes.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const tempDirs: string[] = [];
 const applications: Array<{ app: FastifyInstance; db: ReturnType<typeof createTestDatabase>["db"] }> = [];
 const apiToken = "test-token";
 const authHeaders = (): Record<string, string> => ({ authorization: `Bearer ${apiToken}` });
+
+class FakeSseWriter extends EventEmitter implements SseWriter {
+  readonly chunks: string[] = [];
+  destroyed = false;
+  writableEnded = false;
+  readonly write = vi.fn((chunk: string): boolean => {
+    this.chunks.push(chunk);
+    return true;
+  });
+  readonly end = vi.fn((): void => {
+    this.writableEnded = true;
+    this.emit("close");
+  });
+}
 
 const createEventApp = async () => {
   const { db, seed } = createTestDatabase();
@@ -89,6 +110,25 @@ describe("EventStore", () => {
     db.close();
   });
 
+  it("订阅者同步或异步异常不会反抛 append，也不影响其他订阅者", async () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    seed.run(session.id, "queued");
+    const run = db.prepare("SELECT id FROM runs").get() as { id: string };
+    const store = new EventStore({ db });
+    const observed: number[] = [];
+    store.subscribe(run.id, () => { throw new Error("broken sync listener"); });
+    store.subscribe(run.id, async () => { throw new Error("broken async listener"); });
+    store.subscribe(run.id, (event) => { observed.push(event.seq); });
+
+    expect(() => store.append(run.id, "status", { text: "persisted" })).not.toThrow();
+    await Promise.resolve();
+
+    expect(observed).toEqual([1]);
+    expect(store.list(run.id, 0)).toHaveLength(1);
+    db.close();
+  });
+
   it("只在事务提交后通知订阅者", () => {
     const directory = mkdtempSync(join(tmpdir(), "remote-agent-events-"));
     tempDirs.push(directory);
@@ -132,6 +172,108 @@ describe("Event API", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject([{ seq: 3, type: "tool" }]);
+  });
+
+  it("SSE history 按固定批次读取而不是一次加载全部", async () => {
+    const { eventStore, runId } = await createEventApp();
+    for (let index = 0; index < SSE_HISTORY_BATCH_SIZE + 1; index += 1) {
+      eventStore.append(runId, "message", { index });
+    }
+    const listBatch = vi.spyOn(eventStore, "listBatch");
+    const writer = new FakeSseWriter();
+
+    const streaming = streamRunEvents(eventStore, runId, 0, writer);
+    await vi.waitFor(() => expect(writer.write).toHaveBeenCalledTimes(SSE_HISTORY_BATCH_SIZE + 1));
+    writer.emit("close");
+    await streaming;
+
+    expect(listBatch).toHaveBeenCalledTimes(2);
+    expect(listBatch.mock.calls.every((call) => call[3] === SSE_HISTORY_BATCH_SIZE)).toBe(true);
+  });
+
+  it("SSE write false 时等待 drain 后才继续写下一条", async () => {
+    const { eventStore, runId } = await createEventApp();
+    eventStore.append(runId, "status", { text: "one" });
+    eventStore.append(runId, "status", { text: "two" });
+    const writer = new FakeSseWriter();
+    writer.write.mockImplementation((chunk: string) => {
+      writer.chunks.push(chunk);
+      return writer.write.mock.calls.length > 1;
+    });
+
+    const streaming = streamRunEvents(eventStore, runId, 0, writer);
+    await vi.waitFor(() => expect(writer.write).toHaveBeenCalledTimes(1));
+    expect(writer.chunks[0]).toContain("id: 1");
+
+    writer.emit("drain");
+    await vi.waitFor(() => expect(writer.write).toHaveBeenCalledTimes(2));
+    expect(writer.chunks[1]).toContain("id: 2");
+    writer.emit("close");
+    await streaming;
+  });
+
+  it("SSE live write 抛错时安全断开并退订，不影响 Run 或后续 append", async () => {
+    const { eventStore, runId } = await createEventApp();
+    const writer = new FakeSseWriter();
+    writer.write.mockImplementation(() => { throw new Error("socket write failed"); });
+    const originalSubscribe = eventStore.subscribe.bind(eventStore);
+    const unsubscribed = vi.fn();
+    vi.spyOn(eventStore, "subscribe").mockImplementation((id, listener) => {
+      const unsubscribe = originalSubscribe(id, listener);
+      return () => {
+        unsubscribed();
+        unsubscribe();
+      };
+    });
+
+    const streaming = streamRunEvents(eventStore, runId, 0, writer);
+    await vi.waitFor(() => expect(eventStore.subscribe).toHaveBeenCalledTimes(1));
+    eventStore.append(runId, "message", { text: "break writer" });
+    await streaming;
+
+    expect(unsubscribed).toHaveBeenCalledTimes(1);
+    expect(() => eventStore.append(runId, "status", { text: "run continues" })).not.toThrow();
+    expect(eventStore.list(runId, 0)).toHaveLength(2);
+  });
+
+  it.each(["close", "error"] as const)("SSE writer %s 时立即退订且不影响 EventStore", async (signal) => {
+    const { eventStore, runId } = await createEventApp();
+    const writer = new FakeSseWriter();
+    const originalSubscribe = eventStore.subscribe.bind(eventStore);
+    const unsubscribed = vi.fn();
+    vi.spyOn(eventStore, "subscribe").mockImplementation((id, listener) => {
+      const unsubscribe = originalSubscribe(id, listener);
+      return () => {
+        unsubscribed();
+        unsubscribe();
+      };
+    });
+    const streaming = streamRunEvents(eventStore, runId, 0, writer);
+    await vi.waitFor(() => expect(eventStore.subscribe).toHaveBeenCalledTimes(1));
+
+    if (signal === "error") writer.emit(signal, new Error("socket failed"));
+    else writer.emit(signal);
+    await streaming;
+
+    expect(unsubscribed).toHaveBeenCalledTimes(1);
+    expect(() => eventStore.append(runId, "message", { text: "still running" })).not.toThrow();
+  });
+
+  it("SSE live buffer 超限时断开，由客户端按最后 seq 重连", async () => {
+    const { eventStore, runId } = await createEventApp();
+    const writer = new FakeSseWriter();
+    writer.write.mockReturnValue(false);
+    vi.spyOn(eventStore, "subscribe");
+    const streaming = streamRunEvents(eventStore, runId, 0, writer);
+    await vi.waitFor(() => expect(eventStore.subscribe).toHaveBeenCalledTimes(1));
+
+    for (let index = 0; index <= SSE_LIVE_BUFFER_LIMIT + 1; index += 1) {
+      eventStore.append(runId, "message", { index });
+    }
+    await streaming;
+
+    expect(writer.end).toHaveBeenCalledTimes(1);
+    expect(eventStore.list(runId, 0)).toHaveLength(SSE_LIVE_BUFFER_LIMIT + 2);
   });
 
   it("SSE reconnect 按游标回放、订阅后二次补洞、推送 live，并在关闭时退订", async () => {

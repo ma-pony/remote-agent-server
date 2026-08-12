@@ -25,6 +25,7 @@ import type {
   RuntimeTurnInput,
   RuntimeTurnResult
 } from "./agent-runtime.js";
+import { settleBestEffort } from "./bounded-operation.js";
 
 export const ACP_AGENT = {
   claude_code: "claude",
@@ -49,7 +50,7 @@ type RuntimeTarget = {
 };
 
 export class AgentRuntimeError extends Error {
-  constructor(readonly code: "invalid_runtime_target" | "session_not_ready" | "session_resume_failed", message: string) {
+  constructor(readonly code: "invalid_runtime_target" | "session_not_ready" | "session_resume_failed" | "runtime_shutdown", message: string) {
     super(message);
     this.name = "AgentRuntimeError";
   }
@@ -176,6 +177,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly sessionOperations = new Map<string, Promise<void>>();
+  private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
+  private readonly shutdownFailures: unknown[] = [];
 
   constructor(private readonly config: AppConfig) {
     this.registry = new RemoteAgentRegistry(config.dataDir);
@@ -183,6 +187,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   async ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession> {
+    this.assertRunning();
     return this.serializeSession(input.sessionId, () => this.ensureSessionLocked(input));
   }
 
@@ -214,6 +219,12 @@ export class AcpxAgentRuntime implements AgentRuntime {
         : { resumeSessionId: input.providerSessionId })
     });
     const providerSessionId = handle.agentSessionId ?? handle.backendSessionId ?? null;
+
+    if (this.shuttingDown) {
+      await settleBestEffort(() => this.runtime.close({ handle, reason: "service_shutdown" }));
+      this.registry.unregister(agent);
+      throw new AgentRuntimeError("runtime_shutdown", "Runtime is shutting down");
+    }
 
     if (
       input.providerSessionId !== null
@@ -248,6 +259,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   startTurn(input: RuntimeTurnInput): RuntimeTurn {
+    this.assertRunning();
     if (this.sessionOperations.has(input.sessionId)) {
       throw new AgentRuntimeError("session_not_ready", "Runtime session is being changed");
     }
@@ -296,6 +308,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   async reset(input: RuntimeSessionInput): Promise<void> {
+    this.assertRunning();
     await this.serializeSession(input.sessionId, async () => {
       await this.ensureSessionLocked(input);
       const session = this.sessions.get(input.sessionId);
@@ -314,6 +327,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   async doctor(provider: Provider, agentId: string): Promise<RuntimeDoctor> {
+    this.assertRunning();
     const sessionId = randomUUID();
     assertTarget(provider, agentId, sessionId);
     const registry = new RemoteAgentRegistry(this.config.dataDir);
@@ -334,12 +348,60 @@ export class AcpxAgentRuntime implements AgentRuntime {
     }
   }
 
+  /**
+   * Stops accepting work, cancels active Turns, and closes cached Handles without discarding persistent state.
+   */
+  shutdown(): Promise<void> {
+    this.shutdownPromise ??= this.performShutdown();
+    return this.shutdownPromise;
+  }
+
+  private async performShutdown(): Promise<void> {
+    this.shuttingDown = true;
+
+    const activeTurns = [...this.activeTurns.values()];
+    const cancelOutcomes = await Promise.all(activeTurns.map(({ turn }) =>
+      settleBestEffort(() => turn.cancel({ reason: "service_shutdown" }))
+    ));
+
+    const operationsOutcome = await settleBestEffort(() =>
+      Promise.allSettled([...this.sessionOperations.values()])
+    );
+    const sessions = [...this.sessions.entries()];
+    const closeOutcomes = await Promise.all(sessions.map(([sessionId, session]) =>
+      settleBestEffort(() => this.serializeSession(sessionId, async () => {
+        await this.runtime.close({ handle: session.handle, reason: "service_shutdown" });
+      }))
+    ));
+
+    this.activeTurns.clear();
+    this.sessions.clear();
+    this.registry.clear();
+
+    const cleanupErrors = [...cancelOutcomes, operationsOutcome, ...closeOutcomes]
+      .filter((outcome) => outcome.status !== "fulfilled")
+      .map((outcome) => outcome.reason);
+    if (cleanupErrors.length > 0) {
+      this.shutdownFailures.push(...cleanupErrors);
+      console.error(new AggregateError(
+        this.shutdownFailures,
+        "Runtime shutdown timed out or failed; process exit is required to release any remaining provider resources"
+      ));
+    }
+  }
+
   private canReuse(session: ManagedSession, input: RuntimeSessionInput): boolean {
     return session.provider === input.provider
       && session.agentId === input.agentId
       && session.workspacePath === input.workspacePath
       && session.browserProfilePath === input.browserProfilePath
       && (input.providerSessionId === null || session.providerSessionId === input.providerSessionId);
+  }
+
+  private assertRunning(): void {
+    if (this.shuttingDown) {
+      throw new AgentRuntimeError("runtime_shutdown", "Runtime is shutting down");
+    }
   }
 
   private clearActiveTurn(sessionId: string, activeTurn: ActiveTurn): void {

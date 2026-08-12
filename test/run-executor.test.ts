@@ -12,6 +12,7 @@ import type {
   RuntimeTurn,
   RuntimeTurnResult
 } from "../src/runtime/agent-runtime.js";
+import { BEST_EFFORT_TIMEOUT_MS } from "../src/runtime/bounded-operation.js";
 import { RunExecutor } from "../src/runs/run-executor.js";
 import { RunRepository } from "../src/runs/run-repository.js";
 import { SessionManager } from "../src/sessions/session-manager.js";
@@ -59,6 +60,53 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("canonical result 先结束时停止无限事件迭代并完成 Run", async () => {
+    vi.useFakeTimers();
+    try {
+      const result = deferred<RuntimeTurnResult>();
+      const returnIterator = vi.fn(() => new Promise<IteratorResult<RuntimeEvent>>(() => undefined));
+      let nextCalls = 0;
+      const runtime = createFakeRuntime();
+      runtime.startTurn = (): RuntimeTurn => ({
+        events: {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => {
+                nextCalls += 1;
+                if (nextCalls === 1) {
+                  return Promise.resolve({
+                    done: false,
+                    value: { type: "message", stream: "output", text: "final answer" } satisfies RuntimeEvent
+                  });
+                }
+                result.resolve({ status: "completed" });
+                return new Promise<IteratorResult<RuntimeEvent>>(() => undefined);
+              },
+              return: returnIterator
+            };
+          }
+        },
+        result: result.promise,
+        cancel: async () => undefined
+      });
+      const setupResult = setup(runtime);
+
+      const execution = setupResult.executor.execute(setupResult.run.id);
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
+      await execution;
+
+      expect(returnIterator).toHaveBeenCalledTimes(1);
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+        status: "succeeded",
+        result: "final answer"
+      });
+      expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+      setupResult.db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("先标记 running，再投影环境并按 canonical completed 保存输出", async () => {
     let setupResult!: ReturnType<typeof setup>;
     const runtime = createFakeRuntime({
@@ -166,7 +214,7 @@ describe("RunExecutor", () => {
           throw new Error("stream exploded");
         }
       },
-      result: Promise.resolve({ status: "completed" }),
+      result: new Promise<RuntimeTurnResult>(() => undefined),
       cancel: async () => undefined
     });
     const setupResult = setup(runtime);
@@ -179,6 +227,56 @@ describe("RunExecutor", () => {
     });
     expect(setupResult.eventStore.list(setupResult.run.id, 0).at(-1)).toMatchObject({ type: "error" });
     expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    setupResult.db.close();
+  });
+
+  it("事件迭代异常时 cancel 永不结束也会有界失败 Run", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(() => new Promise<void>(() => undefined));
+      const runtime = createFakeRuntime();
+      runtime.startTurn = (): RuntimeTurn => ({
+        events: {
+          async *[Symbol.asyncIterator]() {
+            throw new Error("stream exploded");
+          }
+        },
+        result: new Promise<RuntimeTurnResult>(() => undefined),
+        cancel
+      });
+      const setupResult = setup(runtime);
+
+      const execution = setupResult.executor.execute(setupResult.run.id);
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
+      await execution;
+
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+        status: "failed",
+        error: "stream exploded"
+      });
+      expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+      setupResult.db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("queued 取消与 markRunning 竞态时改为取消 Runtime Turn", async () => {
+    const runtime = createFakeRuntime();
+    runtime.cancel = vi.fn(async () => undefined);
+    const setupResult = setup(runtime);
+    const cancelQueued = setupResult.runRepository.cancelQueued.bind(setupResult.runRepository);
+    vi.spyOn(setupResult.runRepository, "cancelQueued").mockImplementationOnce((runId) => {
+      setupResult.runRepository.markRunning(runId);
+      return cancelQueued(runId);
+    });
+
+    const run = await setupResult.executor.cancel(setupResult.run.id);
+
+    expect(run.status).toBe("running");
+    expect(runtime.cancel).toHaveBeenCalledWith("session-1");
+    setupResult.runRepository.finish(run.id, { status: "cancelled" });
     setupResult.db.close();
   });
 

@@ -1,4 +1,5 @@
 import type { Run } from "../domain.js";
+import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { RunExecutor } from "./run-executor.js";
 import type { RunRepository } from "./run-repository.js";
 
@@ -54,11 +55,7 @@ export class RunScheduler {
     this.started = false;
     this.pending.splice(0);
     await Promise.all([...this.active].map(async (runId) => {
-      try {
-        await this.executor.cancel(runId);
-      } catch (_error) {
-        // Shutdown cancellation is best effort; restart recovery is authoritative.
-      }
+      await settleBestEffort(() => this.executor.cancel(runId));
     }));
   }
 

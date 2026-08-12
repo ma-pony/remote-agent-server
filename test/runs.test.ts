@@ -10,6 +10,7 @@ import { migrate, openDatabase } from "../src/db.js";
 import type { Run } from "../src/domain.js";
 import { startServer, type RunningServer } from "../src/main.js";
 import type { AgentRuntime, RuntimeTurnResult } from "../src/runtime/agent-runtime.js";
+import { BEST_EFFORT_TIMEOUT_MS } from "../src/runtime/bounded-operation.js";
 import { RunScheduler } from "../src/runs/run-scheduler.js";
 import { RunRepository, RunRepositoryError } from "../src/runs/run-repository.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
@@ -226,6 +227,30 @@ describe("RunScheduler", () => {
     expect(execute.mock.calls.map(([runId]) => runId)).toEqual(["run-1", "run-2"]);
     await scheduler.stop();
   });
+
+  it("stop 的 active cancel 永不结束时仍在固定 timeout 后返回", async () => {
+    vi.useFakeTimers();
+    try {
+      const execute = vi.fn(() => new Promise<Run>(() => undefined));
+      const cancel = vi.fn(() => new Promise<Run>(() => undefined));
+      const scheduler = new RunScheduler({
+        runRepository: { listQueued: () => [{ id: "run-1" }] as Run[] },
+        executor: { execute, cancel },
+        maxConcurrentRuns: 1
+      });
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      const stopping = scheduler.stop();
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
+      await stopping;
+
+      expect(cancel).toHaveBeenCalledWith("run-1");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("Run API", () => {
@@ -393,6 +418,30 @@ describe("Server startup and shutdown", () => {
     await server.close();
   });
 
+  it("Btrfs check 失败时不执行 recovery、Runtime 或 queued 调度", async () => {
+    const root = mkdtempSync(join(tmpdir(), "remote-agent-check-failed-"));
+    tempDirectories.push(root);
+    const databasePath = join(root, "server.sqlite3");
+    seedRestartDatabase(databasePath, root, true);
+    const runtime = createFakeRuntime();
+    runtime.ensureSession = vi.fn(runtime.ensureSession);
+    runtime.startTurn = vi.fn(runtime.startTurn);
+
+    await expect(startServer(startOptions(root, runtime, {
+      run: async () => Promise.reject(new Error("not a btrfs subvolume"))
+    }))).rejects.toThrow("not a btrfs subvolume");
+
+    const observer = openDatabase(databasePath);
+    expect(observer.prepare("SELECT status, error FROM runs WHERE id = 'old-run'").get()).toEqual({
+      status: "running",
+      error: null
+    });
+    expect(observer.prepare("SELECT status FROM runs WHERE id = 'queued-run'").get()).toEqual({ status: "queued" });
+    expect(runtime.ensureSession).not.toHaveBeenCalled();
+    expect(runtime.startTurn).not.toHaveBeenCalled();
+    observer.close();
+  });
+
   it("关闭时先拒绝新请求，再取消 active Turn，最后关闭 SQLite", async () => {
     const root = mkdtempSync(join(tmpdir(), "remote-agent-shutdown-"));
     tempDirectories.push(root);
@@ -411,12 +460,33 @@ describe("Server startup and shutdown", () => {
       expect(server.runRepository.get("queued-run")?.status).toBe("running");
       result.resolve({ status: "cancelled" });
     });
+    runtime.shutdown = vi.fn(async () => {
+      expect(server.runRepository.get("queued-run")?.status).toBe("running");
+    });
     server = await startServer(startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) }));
     await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("running"));
 
     await server.close();
 
     expect(runtime.cancel).toHaveBeenCalledWith("queued-session");
+    expect(runtime.shutdown).toHaveBeenCalledTimes(1);
+    expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
+  });
+
+  it("SIGTERM 在有界 graceful close 后显式退出进程以兜底残留 Provider 资源", async () => {
+    const root = mkdtempSync(join(tmpdir(), "remote-agent-signal-"));
+    tempDirectories.push(root);
+    seedRestartDatabase(join(root, "server.sqlite3"), root, false);
+    const runtime = createFakeRuntime({ result: { status: "completed" } });
+    const exitProcess = vi.fn();
+    const options = startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) });
+    options.installSignalHandlers = true;
+    const server = await startServer({ ...options, exitProcess });
+    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+
+    process.emit("SIGTERM", "SIGTERM");
+
+    await vi.waitFor(() => expect(exitProcess).toHaveBeenCalledWith(0));
     expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
   });
 });

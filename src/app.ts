@@ -68,7 +68,13 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });
-  app.addHook("preClose", async () => scheduler.stop());
+  let stopped = false;
+  app.addHook("preClose", async () => {
+    if (stopped) return;
+    stopped = true;
+    await scheduler.stop();
+    await runtime.shutdown();
+  });
   scheduler.start();
 
   return app;

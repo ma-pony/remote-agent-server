@@ -31,7 +31,8 @@ const createFakeRuntime = (reset = async (_input: RuntimeSessionInput): Promise<
     ok: true,
     message: "ready",
     details: []
-  })
+  }),
+  shutdown: async (): Promise<void> => undefined
 });
 
 const createTestApp = async (options: {

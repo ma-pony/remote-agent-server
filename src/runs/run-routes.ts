@@ -8,6 +8,22 @@ import type { RunExecutor } from "./run-executor.js";
 import { RunRepositoryError, type RunRepository } from "./run-repository.js";
 import type { RunScheduler } from "./run-scheduler.js";
 
+export const SSE_HISTORY_BATCH_SIZE = 100;
+export const SSE_LIVE_BUFFER_LIMIT = 256;
+
+export interface SseWriter {
+  readonly destroyed?: boolean;
+  readonly writableEnded?: boolean;
+  write(chunk: string): boolean;
+  end(): void;
+  on(event: "close", listener: () => void): this;
+  on(event: "error", listener: (error: Error) => void): this;
+  once(event: "drain", listener: () => void): this;
+  off(event: "close", listener: () => void): this;
+  off(event: "error", listener: (error: Error) => void): this;
+  off(event: "drain", listener: () => void): this;
+}
+
 const createRunSchema = z.object({ input: z.string().trim().min(1) }).strict();
 const eventQuerySchema = z.object({
   afterSeq: z.coerce.number().int().nonnegative().default(0)
@@ -25,8 +41,123 @@ const handleRunError = (reply: FastifyReply, error: unknown) => {
   return sendError(reply, 409, error.code, "Run state changed");
 };
 
-const writeSseEvent = (reply: FastifyReply, event: Event): void => {
-  reply.raw.write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+const sseFrame = (event: Event): string =>
+  `id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+
+/**
+ * Streams bounded history followed by live Events with backpressure and reconnect-safe cursors.
+ */
+export const streamRunEvents = async (
+  eventStore: EventStore,
+  runId: string,
+  afterSeq: number,
+  writer: SseWriter
+): Promise<void> => {
+  let cursor = afterSeq;
+  let closed = false;
+  let unsubscribe: (() => void) | undefined;
+  let wakeLive: (() => void) | undefined;
+  let wakeDrain: (() => void) | undefined;
+  const liveBuffer: Event[] = [];
+
+  const finish = (endWriter: boolean): void => {
+    if (closed) return;
+    closed = true;
+    unsubscribe?.();
+    unsubscribe = undefined;
+    wakeLive?.();
+    wakeDrain?.();
+    if (endWriter && !writer.destroyed && !writer.writableEnded) {
+      try {
+        writer.end();
+      } catch (_error) {
+        // A broken SSE writer is isolated from the Agent Run.
+      }
+    }
+  };
+  const onClose = (): void => finish(false);
+  const onError = (_error: Error): void => finish(false);
+  writer.on("close", onClose);
+  writer.on("error", onError);
+
+  const write = async (event: Event): Promise<void> => {
+    if (closed || event.seq <= cursor) return;
+    let accepted: boolean;
+    try {
+      accepted = writer.write(sseFrame(event));
+    } catch (_error) {
+      finish(true);
+      return;
+    }
+    cursor = event.seq;
+    if (accepted || closed) return;
+
+    await new Promise<void>((resolve) => {
+      const onDrain = (): void => {
+        writer.off("drain", onDrain);
+        wakeDrain = undefined;
+        resolve();
+      };
+      wakeDrain = onDrain;
+      writer.once("drain", onDrain);
+      if (closed) onDrain();
+    });
+  };
+
+  const replayThrough = async (throughSeq: number): Promise<void> => {
+    while (!closed && cursor < throughSeq) {
+      const batch = eventStore.listBatch(runId, cursor, throughSeq, SSE_HISTORY_BATCH_SIZE);
+      if (batch.length === 0) return;
+      for (const event of batch) {
+        await write(event);
+        if (closed) return;
+      }
+    }
+  };
+
+  try {
+    await replayThrough(eventStore.latestSeq(runId));
+    if (closed) return;
+
+    unsubscribe = eventStore.subscribe(runId, (event) => {
+      if (closed || event.seq <= cursor) return;
+      if (liveBuffer.length >= SSE_LIVE_BUFFER_LIMIT) {
+        finish(true);
+        return;
+      }
+      liveBuffer.push(event);
+      wakeLive?.();
+    });
+    if (closed) {
+      unsubscribe();
+      unsubscribe = undefined;
+      return;
+    }
+
+    await replayThrough(eventStore.latestSeq(runId));
+    while (!closed) {
+      liveBuffer.sort((left, right) => left.seq - right.seq);
+      const event = liveBuffer.shift();
+      if (event !== undefined) {
+        await write(event);
+        continue;
+      }
+      await new Promise<void>((resolve) => {
+        wakeLive = () => {
+          wakeLive = undefined;
+          resolve();
+        };
+        if (closed || liveBuffer.length > 0) wakeLive();
+      });
+    }
+  } catch (_error) {
+    finish(true);
+  } finally {
+    unsubscribe?.();
+    unsubscribe = undefined;
+    writer.off("close", onClose);
+    writer.off("error", onError);
+  }
 };
 
 export type RunRouteDependencies = {
@@ -94,36 +225,7 @@ export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependenci
     });
     reply.raw.flushHeaders();
 
-    let cursor = parsed.data.afterSeq;
-    let closed = false;
-    let catchingUp = true;
-    const buffered: Event[] = [];
-    let unsubscribe = (): void => undefined;
-    const send = (event: Event): void => {
-      if (closed || event.seq <= cursor) return;
-      writeSseEvent(reply, event);
-      cursor = event.seq;
-    };
-    const cleanup = (): void => {
-      if (closed) return;
-      closed = true;
-      unsubscribe();
-    };
-    reply.raw.once("close", cleanup);
-
-    for (const event of deps.eventStore.list(request.params.id, cursor)) send(event);
-    unsubscribe = deps.eventStore.subscribe(request.params.id, (event) => {
-      if (catchingUp) buffered.push(event);
-      else send(event);
-    });
-    if (closed) {
-      unsubscribe();
-      return reply;
-    }
-
-    for (const event of deps.eventStore.list(request.params.id, cursor)) send(event);
-    buffered.sort((left, right) => left.seq - right.seq).forEach(send);
-    catchingUp = false;
+    void streamRunEvents(deps.eventStore, request.params.id, parsed.data.afterSeq, reply.raw);
     return reply;
   });
 };

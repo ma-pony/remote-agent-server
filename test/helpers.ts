@@ -67,17 +67,24 @@ export const createFakeRuntime = (options: FakeRuntimeOptions = {}): AgentRuntim
   }),
   startTurn: (_input: RuntimeTurnInput): RuntimeTurn => {
     const events = options.events ?? [];
+    let finishEvents!: () => void;
+    const eventsFinished = new Promise<void>((resolve) => { finishEvents = resolve; });
     return {
       events: {
         async *[Symbol.asyncIterator]() {
-          yield* events;
+          try {
+            yield* events;
+          } finally {
+            finishEvents();
+          }
         }
       },
-      result: Promise.resolve(options.result ?? { status: "completed" }),
+      result: eventsFinished.then(() => options.result ?? { status: "completed" }),
       cancel: async (): Promise<void> => undefined
     };
   },
   cancel: async (_sessionId: string): Promise<void> => undefined,
   reset: async (_input: RuntimeSessionInput): Promise<void> => undefined,
-  doctor: async (): Promise<RuntimeDoctor> => options.doctor ?? ({ ok: true, message: "ready", details: [] })
+  doctor: async (): Promise<RuntimeDoctor> => options.doctor ?? ({ ok: true, message: "ready", details: [] }),
+  shutdown: async (): Promise<void> => undefined
 });

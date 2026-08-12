@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { EventEmitter } from "node:events";
 
 import type Database from "better-sqlite3";
 
@@ -32,7 +31,7 @@ export type EventStoreDependencies = {
  */
 export class EventStore {
   private readonly db: Database.Database;
-  private readonly emitter = new EventEmitter();
+  private readonly listeners = new Map<string, Set<(event: Event) => unknown>>();
 
   constructor({ db }: EventStoreDependencies) {
     this.db = db;
@@ -65,7 +64,13 @@ export class EventStore {
       throw error;
     }
 
-    this.emitter.emit(runId, event!);
+    for (const listener of [...(this.listeners.get(runId) ?? [])]) {
+      try {
+        void Promise.resolve(listener(event!)).catch(() => undefined);
+      } catch (_error) {
+        // A subscriber cannot roll back an already-committed Event or affect other subscribers.
+      }
+    }
     return event!;
   }
 
@@ -80,10 +85,35 @@ export class EventStore {
   }
 
   /**
+   * Reads a bounded Event page for streaming history without unbounded memory use.
+   */
+  listBatch(runId: string, afterSeq: number, throughSeq: number, limit: number): Event[] {
+    const rows = this.db
+      .prepare("SELECT * FROM events WHERE run_id = ? AND seq > ? AND seq <= ? ORDER BY seq ASC LIMIT ?")
+      .all(runId, afterSeq, throughSeq, limit) as EventRow[];
+    return rows.map(toEvent);
+  }
+
+  /**
+   * Returns the latest committed sequence number for a Run.
+   */
+  latestSeq(runId: string): number {
+    return (this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE run_id = ?").get(runId) as { seq: number }).seq;
+  }
+
+  /**
    * Subscribes to Events appended to a Run in this process.
    */
-  subscribe(runId: string, listener: (event: Event) => void): () => void {
-    this.emitter.on(runId, listener);
-    return () => this.emitter.off(runId, listener);
+  subscribe(runId: string, listener: (event: Event) => unknown): () => void {
+    let listeners = this.listeners.get(runId);
+    if (listeners === undefined) {
+      listeners = new Set();
+      this.listeners.set(runId, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners!.delete(listener);
+      if (listeners!.size === 0) this.listeners.delete(runId);
+    };
   }
 }

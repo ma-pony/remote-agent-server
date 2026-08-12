@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { EventType, Run } from "../domain.js";
 import type { EventStore } from "../events/event-store.js";
 import type { AgentRuntime, RuntimeEvent, RuntimeTurnResult } from "../runtime/agent-runtime.js";
+import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { SkillProjector } from "../runtime/skill-projector.js";
 import type { SessionManager } from "../sessions/session-manager.js";
 import { RunRepositoryError, type RunRepository } from "./run-repository.js";
@@ -32,6 +33,12 @@ const persistedEvent = (event: RuntimeEvent): { type: EventType; content: unknow
       };
   }
 };
+
+type TurnRace =
+  | { source: "event"; iteration: IteratorResult<RuntimeEvent> }
+  | { source: "event_error"; error: unknown }
+  | { source: "result"; result: RuntimeTurnResult }
+  | { source: "result_error"; error: unknown };
 
 /**
  * Executes one persisted Run against the provider-neutral Runtime boundary.
@@ -72,24 +79,45 @@ export class RunExecutor {
       this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
 
       const turn = this.runtime.startTurn({ sessionId: session.id, requestId: run.id, text: run.input });
-      void turn.result.catch(() => undefined);
       let output = "";
-      try {
-        for await (const runtimeEvent of turn.events) {
-          if (runtimeEvent.type === "message" && runtimeEvent.stream === "output") output += runtimeEvent.text;
-          const event = persistedEvent(runtimeEvent);
-          this.eventStore.append(run.id, event.type, event.content);
+      const iterator = turn.events[Symbol.asyncIterator]();
+      const resultOutcome = turn.result.then<TurnRace, TurnRace>(
+        (result) => ({ source: "result", result }),
+        (error: unknown) => ({ source: "result_error", error })
+      );
+      let nextEvent = this.nextEvent(iterator);
+      let result: RuntimeTurnResult | undefined;
+
+      while (result === undefined) {
+        const outcome = await Promise.race([nextEvent, resultOutcome]);
+        if (outcome.source === "result") {
+          result = outcome.result;
+          await settleBestEffort(async () => iterator.return?.());
+          break;
         }
-      } catch (error) {
-        try {
-          await turn.cancel();
-        } catch (_cancelError) {
-          // The stream failure remains authoritative; cancellation is best effort.
+        if (outcome.source === "result_error") {
+          await settleBestEffort(async () => iterator.return?.());
+          throw outcome.error;
         }
-        throw error;
+        if (outcome.source === "event_error") {
+          await settleBestEffort(() => turn.cancel());
+          throw outcome.error;
+        }
+        if (outcome.iteration.done) {
+          const canonical = await resultOutcome;
+          if (canonical.source === "result") result = canonical.result;
+          else if (canonical.source === "result_error") throw canonical.error;
+          else throw new Error("Unexpected turn outcome");
+          break;
+        }
+
+        const runtimeEvent = outcome.iteration.value;
+        if (runtimeEvent.type === "message" && runtimeEvent.stream === "output") output += runtimeEvent.text;
+        const event = persistedEvent(runtimeEvent);
+        this.eventStore.append(run.id, event.type, event.content);
+        nextEvent = this.nextEvent(iterator);
       }
 
-      const result = await turn.result;
       return this.finishFromCanonicalResult(run.id, output, result);
     } catch (error) {
       const message = errorMessage(error);
@@ -135,6 +163,13 @@ export class RunExecutor {
     });
     this.eventStore.append(runId, "status", { status: "failed" });
     return this.runRepository.finish(runId, { status: "failed", error: result.message });
+  }
+
+  private nextEvent(iterator: AsyncIterator<RuntimeEvent>): Promise<TurnRace> {
+    return Promise.resolve(iterator.next()).then<TurnRace, TurnRace>(
+      (iteration) => ({ source: "event", iteration }),
+      (error: unknown) => ({ source: "event_error", error })
+    );
   }
 
   private requireRun(id: string): Run {

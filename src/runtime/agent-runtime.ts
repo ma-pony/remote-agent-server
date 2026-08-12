@@ -35,4 +35,5 @@ export interface AgentRuntime {
   cancel(sessionId: string): Promise<void>;
   reset(input: RuntimeSessionInput): Promise<void>;
   doctor(provider: Provider, agentId: string): Promise<RuntimeDoctor>;
+  shutdown(): Promise<void>;
 }

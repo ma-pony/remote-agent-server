@@ -26,6 +26,7 @@ const acpxMocks = vi.hoisted(() => ({
 vi.mock("acpx/runtime", () => acpxMocks);
 
 import { AcpxAgentRuntime, AgentRuntimeError } from "../src/runtime/acpx-runtime.js";
+import { BEST_EFFORT_TIMEOUT_MS, settleBestEffort } from "../src/runtime/bounded-operation.js";
 import { SkillProjector } from "../src/runtime/skill-projector.js";
 
 const AGENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -128,6 +129,20 @@ describe("Fake AgentRuntime", () => {
     for await (const event of turn.events) events.push(event);
     expect(events).toEqual([{ type: "message", stream: "output", text: "hello" }]);
     await expect(turn.result).resolves.toEqual({ status: "failed", code: "provider_failed", message: "failed" });
+  });
+
+  it("有界 best-effort 超时后清理 timer 且不等待未结束操作", async () => {
+    vi.useFakeTimers();
+    try {
+      const outcome = settleBestEffort(() => new Promise<void>(() => undefined));
+
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
+
+      await expect(outcome).resolves.toMatchObject({ status: "timed_out" });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -532,6 +547,75 @@ describe("AcpxAgentRuntime", () => {
     expect(acpTurn.cancel).toHaveBeenCalledWith({ reason: "cancelled_by_request" });
     expect(acp.cancel).not.toHaveBeenCalled();
     await expect(turn.result).resolves.toEqual({ status: "completed" });
+  });
+
+  it("shutdown 关闭 idle cached handle 且不 discard 持久状态，并拒绝新工作", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+    const handle = (acp.ensureSession.mock.results[0]?.value) as Promise<AcpRuntimeHandle>;
+
+    await runtime.shutdown();
+
+    expect(acp.close).toHaveBeenCalledWith({
+      handle: await handle,
+      reason: "service_shutdown"
+    });
+    expect(acp.close.mock.calls[0]?.[0]).not.toHaveProperty("discardPersistentState");
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    expect(options.agentRegistry.list()).toEqual([]);
+    await expect(runtime.ensureSession(sessionInput(root))).rejects.toMatchObject({ code: "runtime_shutdown" });
+    expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" }))
+      .toThrowError(expect.objectContaining({ code: "runtime_shutdown" }));
+  });
+
+  it("shutdown cancel 永不结束时仍有界关闭 cached handle", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = makeRoot();
+      const acp = runtimeStub();
+      acpxMocks.createAcpRuntime.mockReturnValue(acp);
+      const runtime = new AcpxAgentRuntime(makeConfig(root));
+      await runtime.ensureSession(sessionInput(root));
+      runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
+      const acpTurn = acp.startTurn.mock.results[0]?.value as AcpRuntimeTurn;
+      acpTurn.cancel = vi.fn(() => new Promise<void>(() => undefined));
+
+      const shutdown = runtime.shutdown();
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
+      await shutdown;
+
+      expect(acpTurn.cancel).toHaveBeenCalledWith({ reason: "service_shutdown" });
+      expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({ reason: "service_shutdown" }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shutdown handle close 永不结束时记录 timeout 并有界返回", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const root = makeRoot();
+      const acp = runtimeStub();
+      acp.close.mockImplementation(() => new Promise<void>(() => undefined));
+      acpxMocks.createAcpRuntime.mockReturnValue(acp);
+      const runtime = new AcpxAgentRuntime(makeConfig(root));
+      await runtime.ensureSession(sessionInput(root));
+
+      const shutdown = runtime.shutdown();
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
+      await shutdown;
+
+      expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({ reason: "service_shutdown" }));
+      expect(consoleError).toHaveBeenCalledWith(expect.any(AggregateError));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      consoleError.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it.each(["claude_code", "codex", "hermes"] as const)("doctor probe 指向指定的 %s Provider", async (provider) => {
