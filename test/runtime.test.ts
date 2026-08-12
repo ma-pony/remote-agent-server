@@ -29,6 +29,7 @@ import { AcpxAgentRuntime, AgentRuntimeError } from "../src/runtime/acpx-runtime
 import { SkillProjector } from "../src/runtime/skill-projector.js";
 
 const AGENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const SECOND_AGENT_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const SESSION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const REQUEST_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 
@@ -315,6 +316,27 @@ describe("AcpxAgentRuntime", () => {
     expect(options.agentRegistry.list()).toEqual([]);
   });
 
+  it("mismatch Handle 关闭失败时仍清理 cache 和 Registry 并保留 close 原错误", async () => {
+    const root = makeRoot();
+    const closeError = new Error("close failed");
+    const acp = runtimeStub({ handle: { agentSessionId: "wrong-provider-session" } });
+    acp.close.mockRejectedValueOnce(closeError);
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+
+    await expect(runtime.ensureSession(sessionInput(root, { providerSessionId: "expected-provider-session" })))
+      .rejects.toBe(closeError);
+
+    expect(acp.close).toHaveBeenCalledWith({
+      handle: expect.any(Object),
+      reason: "provider_session_id_mismatch"
+    });
+    expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" }))
+      .toThrowError(expect.objectContaining({ code: "session_not_ready" }));
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    expect(options.agentRegistry.list()).toEqual([]);
+  });
+
   it("重复 ensure 幂等且首次 prompt 只注入一次", async () => {
     const root = makeRoot();
     const acp = runtimeStub();
@@ -376,6 +398,51 @@ describe("AcpxAgentRuntime", () => {
 
     expect(acp.close.mock.invocationCallOrder[0]).toBeLessThan(acp.ensureSession.mock.invocationCallOrder[1]!);
     expect(acp.ensureSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("成功替换不同 target 后注销旧 Registry target", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    const oldHandle = await acp.ensureSession();
+    const newHandle = { ...oldHandle, agentSessionId: "provider-session-2", runtimeSessionName: "encoded-2" };
+    acp.ensureSession.mockReset();
+    acp.ensureSession.mockResolvedValueOnce(oldHandle).mockResolvedValueOnce(newHandle);
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+
+    await runtime.ensureSession(sessionInput(root, {
+      agentId: SECOND_AGENT_ID,
+      provider: "claude_code",
+      providerSessionId: "provider-session-2"
+    }));
+
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    expect(options.agentRegistry.list()).toEqual([
+      `remote:claude_code:${SECOND_AGENT_ID}:${SESSION_ID}`
+    ]);
+  });
+
+  it("替换旧 Handle 关闭失败时保留旧 cache/target 且不创建新 Handle", async () => {
+    const root = makeRoot();
+    const closeError = new Error("old handle close failed");
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+    acp.close.mockRejectedValueOnce(closeError);
+
+    await expect(runtime.ensureSession(sessionInput(root, {
+      agentId: SECOND_AGENT_ID,
+      provider: "claude_code"
+    }))).rejects.toBe(closeError);
+
+    expect(acp.ensureSession).toHaveBeenCalledTimes(1);
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    expect(options.agentRegistry.list()).toEqual([
+      `remote:codex:${AGENT_ID}:${SESSION_ID}`
+    ]);
+    expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" })).not.toThrow();
   });
 
   it("Handle 正在替换时拒绝 startTurn 使用旧 Handle", async () => {

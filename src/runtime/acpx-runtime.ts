@@ -195,6 +195,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     if (existing !== undefined) {
       await this.runtime.close({ handle: existing.handle, reason: "session_handle_replaced" });
       this.sessions.delete(input.sessionId);
+      this.registry.unregister(existing.target);
     }
 
     const agent = this.registry.register({
@@ -219,12 +220,15 @@ export class AcpxAgentRuntime implements AgentRuntime {
       && providerSessionId !== null
       && providerSessionId !== input.providerSessionId
     ) {
-      await this.runtime.close({
-        handle,
-        reason: "provider_session_id_mismatch"
-      });
-      this.sessions.delete(input.sessionId);
-      this.registry.unregister(agent);
+      try {
+        await this.runtime.close({
+          handle,
+          reason: "provider_session_id_mismatch"
+        });
+      } finally {
+        this.sessions.delete(input.sessionId);
+        this.registry.unregister(agent);
+      }
       throw new AgentRuntimeError(
         "session_resume_failed",
         "Provider session resume returned a different session ID"
