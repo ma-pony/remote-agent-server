@@ -31,13 +31,17 @@ const deferred = <T>() => {
 const setup = (runtime: AgentRuntime, prepare = vi.fn(() => "remember this")) => {
   const root = mkdtempSync(join(tmpdir(), "remote-agent-executor-"));
   tempDirectories.push(root);
-  const { db } = createTestDatabase();
+  const { db, seed } = createTestDatabase();
   const dataDir = join(root, "data");
   const workspacePath = join(root, "sessions", "session-1", "workspace");
   mkdirSync(workspacePath, { recursive: true });
   mkdirSync(join(dirname(workspacePath), "browser"), { recursive: true });
   const agentManager = new AgentManager({ db, dataDir, runtime });
-  const agent = agentManager.create({ name: "Codex", provider: "codex" });
+  const agent = agentManager.create({
+    name: "Codex",
+    provider: "codex",
+    projectEnvironmentId: seed.projectEnvironment.id
+  });
   const createdAt = "2026-08-12T00:00:00.000Z";
   db.prepare(
     "INSERT INTO sessions (id, agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"

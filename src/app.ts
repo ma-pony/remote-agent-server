@@ -50,10 +50,12 @@ export type AppDependencies = {
 export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const app = Fastify({ forceCloseConnections: true });
   const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config);
+  const projectEnvironmentStore = deps.projectEnvironmentStore ?? new ProjectEnvironmentStore({ db: deps.db });
   const agentManager = new AgentManager({
     db: deps.db,
     dataDir: deps.config.dataDir,
-    runtime
+    runtime,
+    projectEnvironmentStore
   });
   const workspaceManager = deps.workspaceManager ?? createWorkspaceManager({
     workspaceTemplate: deps.config.workspaceTemplate,
@@ -65,12 +67,12 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     dataDir: deps.config.dataDir,
     agentManager,
     runtime,
-    workspaceManager
+    workspaceManager,
+    projectEnvironmentStore
   });
   const runRepository = deps.runRepository ?? new RunRepository({ db: deps.db });
   const eventStore = deps.eventStore ?? new EventStore({ db: deps.db });
   const skillProjector = deps.skillProjector ?? new SkillProjector(deps.config.dataDir);
-  const projectEnvironmentStore = deps.projectEnvironmentStore ?? new ProjectEnvironmentStore({ db: deps.db });
   const projectEnvironmentScheduler = deps.projectEnvironmentScheduler ?? new ProjectEnvironmentScheduler({
     store: projectEnvironmentStore,
     builder: new ProjectEnvironmentBuilder({

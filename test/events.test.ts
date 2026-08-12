@@ -60,6 +60,11 @@ const createEventApp = async () => {
     db,
     runtime: createFakeRuntime(),
     eventStore,
+    projectEnvironmentScheduler: {
+      start: () => undefined,
+      requestCheck: async () => undefined,
+      stop: async () => undefined
+    },
     commandRunner: { run: async () => ({ stdout: "", stderr: "" }) }
   });
   applications.push({ app, db });

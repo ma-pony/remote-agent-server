@@ -75,11 +75,13 @@ const createTestApp = async (options: {
 };
 
 const createAgent = async (app: FastifyInstance): Promise<{ id: string }> => {
+  const environments = await app.inject({ method: "GET", url: "/api/project-environments", headers: authHeaders() });
+  const projectEnvironmentId = (environments.json() as Array<{ id: string }>)[0]!.id;
   const response = await app.inject({
     method: "POST",
     url: "/api/agents",
     headers: authHeaders(),
-    payload: { name: "Codex", provider: "codex" }
+    payload: { name: "Codex", provider: "codex", projectEnvironmentId }
   });
   expect(response.statusCode).toBe(201);
   return response.json() as { id: string };
@@ -154,11 +156,15 @@ describe("Session API", () => {
       agentId: agent.id,
       title: "修复工单 1332",
       status: "idle",
-      providerSessionId: null
+      providerSessionId: null,
+      projectEnvironmentRevisionId: expect.any(String)
     });
     const session = created.json() as { id: string; workspacePath: string };
     expect(existsSync(session.workspacePath)).toBe(true);
-    expect(db.prepare("SELECT id FROM sessions WHERE id = ?").get(session.id)).toEqual({ id: session.id });
+    expect(db.prepare("SELECT id, project_environment_revision_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
+      id: session.id,
+      project_environment_revision_id: (created.json() as { projectEnvironmentRevisionId: string }).projectEnvironmentRevisionId
+    });
 
     const detail = await app.inject({ method: "GET", url: `/api/sessions/${session.id}`, headers: authHeaders() });
     expect(detail.statusCode).toBe(200);

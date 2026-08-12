@@ -83,10 +83,6 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
   /**
    * Creates the Session directories and its writable APFS clone.
    */
-  async create(id: string): Promise<Workspace> {
-    return this.createSession(id, this.workspaceTemplate);
-  }
-
   /**
    * Creates a Session from one explicitly selected environment revision.
    */
@@ -112,10 +108,6 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
   /**
    * Removes a newly-created APFS Session after persistence fails.
    */
-  async rollback(id: string): Promise<void> {
-    await this.rollbackSession(id);
-  }
-
   /** Removes a newly-created Session directory. */
   async rollbackSession(id: string): Promise<void> {
     await rm(join(this.sessionsRoot, id), { force: true, recursive: true });

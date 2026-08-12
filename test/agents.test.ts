@@ -31,8 +31,8 @@ const createFakeRuntime = (): AgentRuntime => ({
 
 const apps: Array<{ app: FastifyInstance; close: () => Promise<void> }> = [];
 
-const createTestApp = async (): Promise<{ app: FastifyInstance; dataDir: string }> => {
-  const { db } = createTestDatabase();
+const createTestApp = async (): Promise<{ app: FastifyInstance; dataDir: string; projectEnvironmentId: string }> => {
+  const { db, seed } = createTestDatabase();
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-server-"));
   const app = buildApp({
     config: {
@@ -59,7 +59,7 @@ const createTestApp = async (): Promise<{ app: FastifyInstance; dataDir: string 
   });
 
   await app.ready();
-  return { app, dataDir };
+  return { app, dataDir, projectEnvironmentId: seed.projectEnvironment.id };
 };
 
 afterEach(async () => {
@@ -68,7 +68,7 @@ afterEach(async () => {
 
 describe("Agent API", () => {
   it("只接受经过鉴权的明确 Provider Agent", async () => {
-    const { app, dataDir } = await createTestApp();
+    const { app, dataDir, projectEnvironmentId } = await createTestApp();
 
     const unauthorized = await app.inject({ method: "GET", url: "/api/agents" });
     expect(unauthorized.statusCode).toBe(401);
@@ -86,11 +86,21 @@ describe("Agent API", () => {
       method: "POST",
       url: "/api/agents",
       headers: authHeaders(),
-      payload: { name: "Codex 开发", provider: "codex" }
+      payload: { name: "Codex 开发", provider: "codex", projectEnvironmentId }
     });
 
     expect(response.statusCode).toBe(201);
-    expect(response.json()).toMatchObject({ name: "Codex 开发", provider: "codex", enabled: true });
+    expect(response.json()).toMatchObject({
+      name: "Codex 开发", provider: "codex", enabled: true, projectEnvironmentId
+    });
+
+    const missingEnvironment = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "Missing environment", provider: "codex" }
+    });
+    expect(missingEnvironment.statusCode).toBe(400);
 
     const agent = response.json() as { id: string };
     const agentDir = join(dataDir, "agents", agent.id);
@@ -106,19 +116,19 @@ describe("Agent API", () => {
   });
 
   it("拒绝未知 Provider 和空白名称", async () => {
-    const { app } = await createTestApp();
+    const { app, projectEnvironmentId } = await createTestApp();
 
     const invalidProvider = await app.inject({
       method: "POST",
       url: "/api/agents",
       headers: authHeaders(),
-      payload: { name: "Unknown", provider: "other" }
+      payload: { name: "Unknown", provider: "other", projectEnvironmentId }
     });
     const emptyName = await app.inject({
       method: "POST",
       url: "/api/agents",
       headers: authHeaders(),
-      payload: { name: "   ", provider: "codex" }
+      payload: { name: "   ", provider: "codex", projectEnvironmentId }
     });
 
     expect(invalidProvider.statusCode).toBe(400);
@@ -126,12 +136,12 @@ describe("Agent API", () => {
   });
 
   it("可以启用和停用 Agent", async () => {
-    const { app } = await createTestApp();
+    const { app, projectEnvironmentId } = await createTestApp();
     const created = await app.inject({
       method: "POST",
       url: "/api/agents",
       headers: authHeaders(),
-      payload: { name: "Hermes", provider: "hermes" }
+      payload: { name: "Hermes", provider: "hermes", projectEnvironmentId }
     });
     const { id } = created.json() as { id: string };
 
@@ -155,12 +165,12 @@ describe("Agent API", () => {
   });
 
   it("通过注入 Runtime 返回 Agent doctor 结果", async () => {
-    const { app } = await createTestApp();
+    const { app, projectEnvironmentId } = await createTestApp();
     const created = await app.inject({
       method: "POST",
       url: "/api/agents",
       headers: authHeaders(),
-      payload: { name: "Claude", provider: "claude_code" }
+      payload: { name: "Claude", provider: "claude_code", projectEnvironmentId }
     });
     const { id } = created.json() as { id: string };
 
@@ -171,7 +181,14 @@ describe("Agent API", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ ok: true, message: "claude_code ready", details: ["Fake Runtime"] });
+    expect(response.json()).toEqual({
+      provider: { ok: true, message: "claude_code ready", details: ["Fake Runtime"] },
+      projectEnvironment: {
+        ok: true,
+        message: "Project environment is ready",
+        revisionId: expect.any(String)
+      }
+    });
   });
 
   it("健康检查不需要鉴权", async () => {

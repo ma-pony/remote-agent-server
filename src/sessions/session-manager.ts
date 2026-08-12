@@ -6,6 +6,7 @@ import type Database from "better-sqlite3";
 
 import type { AgentManager } from "../agents/agent-manager.js";
 import type { Agent, Session, SessionStatus } from "../domain.js";
+import { ProjectEnvironmentStore } from "../project-environments/project-environment-store.js";
 import type { AgentRuntime } from "../runtime/agent-runtime.js";
 import { WorkspaceCreateError, type WorkspaceManager } from "../workspaces/workspace-manager.js";
 
@@ -16,6 +17,7 @@ type SessionRow = {
   status: SessionStatus;
   provider_session_id: string | null;
   workspace_path: string;
+  project_environment_revision_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -27,6 +29,7 @@ const toSession = (row: SessionRow): Session => ({
   status: row.status,
   providerSessionId: row.provider_session_id,
   workspacePath: row.workspace_path,
+  projectEnvironmentRevisionId: row.project_environment_revision_id,
   createdAt: row.created_at,
   updatedAt: row.updated_at
 });
@@ -36,7 +39,7 @@ export type SessionRuntimeContext = { agent: Agent; session: Session };
 
 export class SessionManagerError extends Error {
   constructor(
-    readonly code: "agent_not_found" | "agent_disabled" | "session_not_found" | "session_busy" | "session_create_failed" | "runtime_reset_failed",
+    readonly code: "agent_not_found" | "agent_disabled" | "project_environment_unavailable" | "session_not_found" | "session_busy" | "session_create_failed" | "runtime_reset_failed",
     options?: ErrorOptions
   ) {
     super(code, options);
@@ -49,6 +52,7 @@ export type SessionManagerDependencies = {
   agentManager: AgentManager;
   runtime: AgentRuntime;
   workspaceManager: WorkspaceManager;
+  projectEnvironmentStore?: ProjectEnvironmentStore;
 };
 
 /**
@@ -60,13 +64,15 @@ export class SessionManager {
   private readonly agentManager: AgentManager;
   private readonly runtime: AgentRuntime;
   private readonly workspaceManager: WorkspaceManager;
+  private readonly projectEnvironmentStore: ProjectEnvironmentStore;
 
-  constructor({ db, dataDir, agentManager, runtime, workspaceManager }: SessionManagerDependencies) {
+  constructor({ db, dataDir, agentManager, runtime, workspaceManager, projectEnvironmentStore }: SessionManagerDependencies) {
     this.db = db;
     this.dataDir = dataDir;
     this.agentManager = agentManager;
     this.runtime = runtime;
     this.workspaceManager = workspaceManager;
+    this.projectEnvironmentStore = projectEnvironmentStore ?? new ProjectEnvironmentStore({ db });
   }
 
   /**
@@ -76,11 +82,16 @@ export class SessionManager {
     const agent = this.agentManager.get(input.agentId);
     if (agent === undefined) throw new SessionManagerError("agent_not_found");
     if (!agent.enabled) throw new SessionManagerError("agent_disabled");
+    if (agent.projectEnvironmentId === null) throw new SessionManagerError("project_environment_unavailable");
+    const revision = this.projectEnvironmentStore.getCurrentRevision(agent.projectEnvironmentId);
+    if (revision?.status !== "ready" || revision.workspacePath === null) {
+      throw new SessionManagerError("project_environment_unavailable");
+    }
 
     const id = randomUUID();
     let workspace;
     try {
-      workspace = await this.workspaceManager.create(id);
+      workspace = await this.workspaceManager.createSession(id, revision.workspacePath);
     } catch (error) {
       if (error instanceof WorkspaceCreateError) throw error;
       throw new WorkspaceCreateError();
@@ -90,12 +101,12 @@ export class SessionManager {
     try {
       this.db
         .prepare(
-          "INSERT INTO sessions (id, agent_id, title, status, provider_session_id, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+          "INSERT INTO sessions (id, agent_id, title, status, provider_session_id, workspace_path, project_environment_revision_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
-        .run(id, agent.id, input.title, "idle", null, workspace.workspacePath, createdAt, createdAt);
+        .run(id, agent.id, input.title, "idle", null, workspace.workspacePath, revision.id, createdAt, createdAt);
     } catch (_error) {
       try {
-        await this.workspaceManager.rollback(id);
+        await this.workspaceManager.rollbackSession(id);
       } catch (_rollbackError) {
         // The database failure remains the primary error; rollback was still attempted.
       }
@@ -109,6 +120,7 @@ export class SessionManager {
       status: "idle",
       providerSessionId: null,
       workspacePath: workspace.workspacePath,
+      projectEnvironmentRevisionId: revision.id,
       createdAt,
       updatedAt: createdAt
     };

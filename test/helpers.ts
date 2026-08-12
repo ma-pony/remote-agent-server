@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type Database from "better-sqlite3";
 
 import { migrate, openDatabase } from "../src/db.js";
@@ -20,6 +22,7 @@ const now = (): string => "2026-08-12T00:00:00.000Z";
 export const createTestDatabase = (): {
   db: Database.Database;
   seed: {
+    projectEnvironment: { id: string; revisionId: string; workspacePath: string };
     session: () => { id: string };
     run: (sessionId: string, status: "queued" | "running" | "succeeded" | "failed" | "cancelled") => void;
   };
@@ -27,14 +30,37 @@ export const createTestDatabase = (): {
   const db = openDatabase(":memory:");
   migrate(db);
 
+  const projectEnvironmentId = randomUUID();
+  const projectEnvironmentRevisionId = randomUUID();
+  const projectEnvironmentWorkspacePath = `/tmp/${projectEnvironmentRevisionId}/workspace`;
+  db.prepare(
+    "INSERT INTO project_environments (id, name, current_revision_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+  ).run(projectEnvironmentId, "Test environment", projectEnvironmentRevisionId, now(), now());
+  db.prepare(`
+    INSERT INTO project_environment_revisions
+      (id, project_environment_id, status, workspace_path, input_fingerprint, created_at, finished_at)
+    VALUES (?, ?, 'ready', ?, ?, ?, ?)
+  `).run(
+    projectEnvironmentRevisionId,
+    projectEnvironmentId,
+    projectEnvironmentWorkspacePath,
+    "test-input",
+    now(),
+    now()
+  );
   const agentId = id("agent");
   db.prepare(
-    "INSERT INTO agents (id, name, provider, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
-  ).run(agentId, "Test agent", "codex", now(), now());
+    "INSERT INTO agents (id, name, provider, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(agentId, "Test agent", "codex", projectEnvironmentId, now(), now());
 
   return {
     db,
     seed: {
+      projectEnvironment: {
+        id: projectEnvironmentId,
+        revisionId: projectEnvironmentRevisionId,
+        workspacePath: projectEnvironmentWorkspacePath
+      },
       session: () => {
         const sessionId = id("session");
         db.prepare(

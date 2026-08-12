@@ -44,10 +44,6 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
   /**
    * Creates the Session directories and its writable template snapshot.
    */
-  async create(id: string): Promise<Workspace> {
-    return this.createSession(id, this.workspaceTemplate);
-  }
-
   /**
    * Creates a Session from one explicitly selected environment revision.
    */
@@ -73,10 +69,6 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
   /**
    * Removes a newly-created snapshot after Session persistence fails.
    */
-  async rollback(id: string): Promise<void> {
-    await this.rollbackSession(id);
-  }
-
   /** Removes a newly-created Session snapshot and its runtime directories. */
   async rollbackSession(id: string): Promise<void> {
     const sessionPath = join(this.sessionsRoot, id);

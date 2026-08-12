@@ -1,25 +1,39 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
-import { AgentManager } from "./agent-manager.js";
+import { AgentManager, AgentManagerError } from "./agent-manager.js";
 
 const createAgentSchema = z.object({
   name: z.string().trim().min(1),
-  provider: z.enum(["claude_code", "codex", "hermes"])
+  provider: z.enum(["claude_code", "codex", "hermes"]),
+  projectEnvironmentId: z.string().uuid()
 }).strict();
 
 const updateAgentSchema = z.object({
   name: z.string().trim().min(1).optional(),
-  enabled: z.boolean().optional()
-}).strict().refine((input) => input.name !== undefined || input.enabled !== undefined, {
+  enabled: z.boolean().optional(),
+  projectEnvironmentId: z.string().uuid().optional()
+}).strict().refine(
+  (input) => input.name !== undefined || input.enabled !== undefined || input.projectEnvironmentId !== undefined,
+  {
   message: "At least one field must be provided"
-});
+  }
+);
 
 const badRequest = (reply: FastifyReply, message: string) =>
   reply.code(400).send({ error: { code: "invalid_request", message } });
 
 const notFound = (reply: FastifyReply) =>
   reply.code(404).send({ error: { code: "not_found", message: "Agent not found" } });
+
+const handleAgentError = (reply: FastifyReply, error: unknown) => {
+  if (error instanceof AgentManagerError) {
+    return reply.code(400).send({
+      error: { code: error.code, message: "Project environment has no ready revision" }
+    });
+  }
+  throw error;
+};
 
 /**
  * Registers the authenticated Agent management routes.
@@ -31,15 +45,23 @@ export const registerAgentRoutes = (app: FastifyInstance, agentManager: AgentMan
     const parsed = createAgentSchema.safeParse(request.body);
     if (!parsed.success) return badRequest(reply, "Invalid Agent input");
 
-    return reply.code(201).send(agentManager.create(parsed.data));
+    try {
+      return reply.code(201).send(agentManager.create(parsed.data));
+    } catch (error) {
+      return handleAgentError(reply, error);
+    }
   });
 
   app.patch<{ Params: { id: string } }>("/agents/:id", (request, reply) => {
     const parsed = updateAgentSchema.safeParse(request.body);
     if (!parsed.success) return badRequest(reply, "Invalid Agent update");
 
-    const agent = agentManager.update(request.params.id, parsed.data);
-    return agent === undefined ? notFound(reply) : agent;
+    try {
+      const agent = agentManager.update(request.params.id, parsed.data);
+      return agent === undefined ? notFound(reply) : agent;
+    } catch (error) {
+      return handleAgentError(reply, error);
+    }
   });
 
   app.get<{ Params: { id: string } }>("/agents/:id/doctor", async (request, reply) => {

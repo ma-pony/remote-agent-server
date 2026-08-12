@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 
 import type { Agent, Provider } from "../domain.js";
+import { ProjectEnvironmentStore } from "../project-environments/project-environment-store.js";
 import type { AgentRuntime, RuntimeDoctor } from "../runtime/agent-runtime.js";
 
 type AgentRow = {
@@ -12,6 +13,7 @@ type AgentRow = {
   name: string;
   provider: Provider;
   enabled: number;
+  project_environment_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -19,17 +21,20 @@ type AgentRow = {
 export type CreateAgentInput = {
   name: string;
   provider: Provider;
+  projectEnvironmentId: string;
 };
 
 export type UpdateAgentInput = {
   name?: string;
   enabled?: boolean;
+  projectEnvironmentId?: string;
 };
 
 export type AgentManagerDependencies = {
   db: Database.Database;
   dataDir: string;
   runtime: AgentRuntime;
+  projectEnvironmentStore?: ProjectEnvironmentStore;
 };
 
 const toAgent = (row: AgentRow): Agent => ({
@@ -37,6 +42,7 @@ const toAgent = (row: AgentRow): Agent => ({
   name: row.name,
   provider: row.provider,
   enabled: row.enabled === 1,
+  projectEnvironmentId: row.project_environment_id,
   createdAt: row.created_at,
   updatedAt: row.updated_at
 });
@@ -48,14 +54,17 @@ export class AgentManager {
   private readonly db: Database.Database;
   private readonly dataDir: string;
   private readonly runtime: AgentRuntime;
+  private readonly projectEnvironmentStore: ProjectEnvironmentStore;
 
-  constructor({ db, dataDir, runtime }: AgentManagerDependencies) {
+  constructor({ db, dataDir, runtime, projectEnvironmentStore }: AgentManagerDependencies) {
     this.db = db;
     this.dataDir = dataDir;
     this.runtime = runtime;
+    this.projectEnvironmentStore = projectEnvironmentStore ?? new ProjectEnvironmentStore({ db });
   }
 
   create(input: CreateAgentInput): Agent {
+    this.requireReadyEnvironment(input.projectEnvironmentId);
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     const agentDir = join(this.dataDir, "agents", id);
@@ -65,15 +74,16 @@ export class AgentManager {
     writeFileSync(join(agentDir, "MEMORY.md"), "", { flag: "a" });
     this.db
       .prepare(
-        "INSERT INTO agents (id, name, provider, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+        "INSERT INTO agents (id, name, provider, enabled, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
       )
-      .run(id, input.name, input.provider, 1, createdAt, createdAt);
+      .run(id, input.name, input.provider, 1, input.projectEnvironmentId, createdAt, createdAt);
 
     return {
       id,
       name: input.name,
       provider: input.provider,
       enabled: true,
+      projectEnvironmentId: input.projectEnvironmentId,
       createdAt,
       updatedAt: createdAt
     };
@@ -95,16 +105,44 @@ export class AgentManager {
 
     const name = input.name ?? agent.name;
     const enabled = input.enabled ?? agent.enabled;
+    const projectEnvironmentId = input.projectEnvironmentId ?? agent.projectEnvironmentId;
+    if (projectEnvironmentId === null) throw new AgentManagerError("project_environment_unavailable");
+    this.requireReadyEnvironment(projectEnvironmentId);
     const updatedAt = new Date().toISOString();
     this.db
-      .prepare("UPDATE agents SET name = ?, enabled = ?, updated_at = ? WHERE id = ?")
-      .run(name, enabled ? 1 : 0, updatedAt, id);
+      .prepare("UPDATE agents SET name = ?, enabled = ?, project_environment_id = ?, updated_at = ? WHERE id = ?")
+      .run(name, enabled ? 1 : 0, projectEnvironmentId, updatedAt, id);
 
-    return { ...agent, name, enabled, updatedAt };
+    return { ...agent, name, enabled, projectEnvironmentId, updatedAt };
   }
 
-  async doctor(id: string): Promise<RuntimeDoctor | undefined> {
+  async doctor(id: string): Promise<{
+    provider: RuntimeDoctor;
+    projectEnvironment: { ok: boolean; message: string; revisionId: string | null };
+  } | undefined> {
     const agent = this.get(id);
-    return agent === undefined ? undefined : this.runtime.doctor(agent.provider, agent.id);
+    if (agent === undefined) return undefined;
+    const revision = agent.projectEnvironmentId === null
+      ? undefined
+      : this.projectEnvironmentStore.getCurrentRevision(agent.projectEnvironmentId);
+    return {
+      provider: await this.runtime.doctor(agent.provider, agent.id),
+      projectEnvironment: revision?.status === "ready" && revision.workspacePath !== null
+        ? { ok: true, message: "Project environment is ready", revisionId: revision.id }
+        : { ok: false, message: "Project environment has no ready revision", revisionId: null }
+    };
+  }
+
+  private requireReadyEnvironment(id: string): void {
+    const revision = this.projectEnvironmentStore.getCurrentRevision(id);
+    if (revision?.status !== "ready" || revision.workspacePath === null) {
+      throw new AgentManagerError("project_environment_unavailable");
+    }
+  }
+}
+
+export class AgentManagerError extends Error {
+  constructor(readonly code: "project_environment_unavailable") {
+    super(code);
   }
 }

@@ -24,6 +24,8 @@ const handleError = (reply: FastifyReply, error: unknown) => {
       return sendError(reply, 404, "not_found", "Agent not found");
     case "agent_disabled":
       return sendError(reply, 400, error.code, "Agent is disabled");
+    case "project_environment_unavailable":
+      return sendError(reply, 400, error.code, "Project environment has no ready revision");
     case "session_not_found":
       return sendError(reply, 404, "not_found", "Session not found");
     case "session_busy":

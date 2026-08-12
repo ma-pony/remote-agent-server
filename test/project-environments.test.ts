@@ -42,8 +42,6 @@ const createBuilderFixture = () => {
   };
   const workspaceManager: WorkspaceManager = {
     check: async () => undefined,
-    create: async () => { throw new Error("unused"); },
-    rollback: async () => undefined,
     createSession: async () => { throw new Error("unused"); },
     rollbackSession: async () => undefined,
     createRevision: async (target, source) => {
@@ -249,7 +247,7 @@ describe("ProjectEnvironmentScheduler", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(checked).toEqual([]);
     await scheduler.runScheduledCheck();
-    expect(new Set(checked)).toEqual(new Set([first.id, second.id]));
+    expect(new Set(checked)).toEqual(new Set(store.list().map(({ id }) => id)));
 
     await scheduler.stop();
     await expect(scheduler.requestCheck(first.id)).rejects.toThrow("environment_scheduler_stopped");
@@ -324,8 +322,6 @@ describe("Project environment API", () => {
       runtime: createFakeRuntime(),
       workspaceManager: {
         check: async () => undefined,
-        create: async () => { throw new Error("unused"); },
-        rollback: async () => undefined,
         createSession: async () => { throw new Error("unused"); },
         rollbackSession: async () => undefined,
         createRevision: async () => undefined,
