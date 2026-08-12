@@ -1,0 +1,347 @@
+// @vitest-environment jsdom
+
+import "@testing-library/jest-dom/vitest";
+
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { buildApp } from "../src/app.js";
+import { App } from "../src/web/app.js";
+import { createFakeRuntime, createTestDatabase } from "./helpers.js";
+
+const fetchEventSourceMock = vi.hoisted(() => vi.fn());
+
+vi.mock("@microsoft/fetch-event-source", () => ({
+  fetchEventSource: fetchEventSourceMock
+}));
+
+const now = "2026-08-12T08:00:00.000Z";
+const agent = {
+  id: "agent-1",
+  name: "主力 Codex",
+  provider: "codex",
+  enabled: true,
+  createdAt: now,
+  updatedAt: now
+};
+const session = {
+  id: "session-1",
+  agentId: agent.id,
+  title: "修复工单 1332",
+  status: "idle",
+  providerSessionId: "provider-session-1",
+  workspacePath: "/sessions/session-1/workspace",
+  createdAt: now,
+  updatedAt: now
+};
+
+const jsonResponse = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), {
+  status,
+  headers: { "content-type": "application/json" }
+});
+
+const requestUrl = (input: RequestInfo | URL): string => typeof input === "string" ? input : input.toString();
+
+const event = (runId: string, seq: number, type: "message" | "tool" | "status" | "error", content: unknown) => ({
+  id: `${runId}-event-${seq}`,
+  runId,
+  seq,
+  type,
+  contentJson: JSON.stringify(content),
+  createdAt: now
+});
+
+const saveToken = async (): Promise<void> => {
+  fireEvent.change(screen.getByLabelText("API Token"), { target: { value: "secret-token" } });
+  fireEvent.click(screen.getByRole("button", { name: "进入管理台" }));
+  await waitFor(() => expect(sessionStorage.getItem("apiToken")).toBe("secret-token"));
+};
+
+beforeEach(() => {
+  sessionStorage.clear();
+  window.history.replaceState({}, "", "/agents");
+  fetchEventSourceMock.mockReset();
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+describe("最小管理界面", () => {
+  it("Fastify 对前端深层路由回退 index.html，但不把 API 404 伪装成页面", async () => {
+    const webRoot = mkdtempSync(join(tmpdir(), "remote-agent-web-"));
+    mkdirSync(join(webRoot, "assets"));
+    writeFileSync(join(webRoot, "index.html"), "<!doctype html><title>Remote Agent UI</title>");
+    const { db } = createTestDatabase();
+    const app = buildApp({
+      config: {
+        host: "127.0.0.1",
+        port: 3000,
+        apiToken: "secret-token",
+        dataDir: webRoot,
+        databasePath: ":memory:",
+        workspaceTemplate: "/unused/template",
+        sessionsRoot: "/unused/sessions",
+        maxConcurrentRuns: 1
+      },
+      db,
+      runtime: createFakeRuntime(),
+      commandRunner: { run: async () => ({ stdout: "", stderr: "" }) },
+      webRoot
+    });
+
+    try {
+      await app.ready();
+      const page = await app.inject({ method: "GET", url: "/sessions/session-1" });
+      const missingApi = await app.inject({ method: "GET", url: "/api/not-a-route", headers: { authorization: "Bearer secret-token" } });
+      const missingApiRoot = await app.inject({ method: "GET", url: "/api?probe=1", headers: { authorization: "Bearer secret-token" } });
+
+      expect(page.statusCode).toBe(200);
+      expect(page.headers["content-type"]).toContain("text/html");
+      expect(page.body).toContain("Remote Agent UI");
+      expect(missingApi.statusCode).toBe(404);
+      expect(missingApi.headers["content-type"]).toContain("application/json");
+      expect(missingApi.json()).toEqual({ error: { code: "not_found", message: "API route not found" } });
+      expect(missingApiRoot.headers["content-type"]).toContain("application/json");
+    } finally {
+      await app.close();
+      db.close();
+      rmSync(webRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("Token 只进入 sessionStorage，随后可创建三种 Provider Agent、检查环境并启停", async () => {
+    const agents = [agent];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("Bearer secret-token");
+      if (url === "/api/agents" && (init?.method ?? "GET") === "GET") return jsonResponse(agents);
+      if (url === "/api/agents" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { name: string; provider: string };
+        const created = { ...agent, id: `agent-${agents.length + 1}`, ...body };
+        agents.push(created);
+        return jsonResponse(created, 201);
+      }
+      if (url.endsWith("/doctor")) {
+        return url.includes("agent-1")
+          ? jsonResponse({ ok: true, message: "ready", details: [] })
+          : jsonResponse({ ok: false, message: "未登录 Provider", details: ["请先登录"] });
+      }
+      if (url.startsWith("/api/agents/") && init?.method === "PATCH") {
+        const id = url.split("/").at(-1);
+        const target = agents.find((item) => item.id === id)!;
+        Object.assign(target, JSON.parse(String(init.body)) as object);
+        return jsonResponse(target);
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    }));
+
+    render(<App />);
+
+    expect(screen.getByRole("heading", { name: "连接 Remote Agent" })).toBeInTheDocument();
+    expect(sessionStorage.getItem("apiToken")).toBeNull();
+    await saveToken();
+
+    expect(await screen.findByText("主力 Codex")).toBeInTheDocument();
+    expect(window.location.search).toBe("");
+
+    for (const [name, provider] of [
+      ["Claude 开发", "claude_code"],
+      ["Codex 审核", "codex"],
+      ["Hermes 运维", "hermes"]
+    ] as const) {
+      fireEvent.change(screen.getByLabelText("Agent 名称"), { target: { value: name } });
+      fireEvent.change(screen.getByLabelText("Provider"), { target: { value: provider } });
+      fireEvent.click(screen.getByRole("button", { name: "创建 Agent" }));
+      expect(await screen.findByText(name)).toBeInTheDocument();
+    }
+
+    const primaryAgent = screen.getByText("主力 Codex").closest("article")!;
+    fireEvent.click(within(primaryAgent).getByRole("button", { name: "运行检查" }));
+    expect(await within(primaryAgent).findByText("可用")).toBeInTheDocument();
+
+    const claudeAgent = screen.getByText("Claude 开发").closest("article")!;
+    fireEvent.click(within(claudeAgent).getByRole("button", { name: "运行检查" }));
+    expect(await within(claudeAgent).findByText("未登录 Provider")).toBeInTheDocument();
+
+    fireEvent.click(within(primaryAgent).getByRole("button", { name: "停用" }));
+    expect(await within(primaryAgent).findByText("已停用")).toBeInTheDocument();
+    fireEvent.click(within(primaryAgent).getByRole("button", { name: "启用" }));
+    expect(await within(primaryAgent).findByText("已启用")).toBeInTheDocument();
+  });
+
+  it("Session 列表可创建 Session 并进入详情", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", "/sessions");
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/api/agents") return jsonResponse([agent]);
+      if (url === "/api/sessions" && (init?.method ?? "GET") === "GET") return jsonResponse([]);
+      if (url === "/api/sessions" && init?.method === "POST") return jsonResponse(session, 201);
+      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, runs: [] });
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByText("暂无 Session")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Session 标题"), { target: { value: session.title } });
+    fireEvent.change(screen.getByLabelText("选择 Agent"), { target: { value: agent.id } });
+    fireEvent.click(screen.getByRole("button", { name: "创建 Session" }));
+
+    expect(await screen.findByRole("heading", { name: session.title })).toBeInTheDocument();
+    expect(window.location.pathname).toBe(`/sessions/${session.id}`);
+  });
+
+  it("Session 详情保留多轮历史，合并增量并显示工具、错误、终态、取消和继续输入", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", `/sessions/${session.id}`);
+    const oldRun = {
+      id: "run-old",
+      sessionId: session.id,
+      status: "succeeded",
+      input: "先读取日志",
+      result: "日志已读取",
+      error: null,
+      createdAt: now,
+      startedAt: now,
+      finishedAt: now
+    };
+    let nextRun = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, runs: [oldRun] });
+      if (url === "/api/agents") return jsonResponse([agent]);
+      if (url === "/api/runs/run-old/events?afterSeq=0") return jsonResponse([
+        event("run-old", 1, "message", { stream: "output", text: "日志" }),
+        event("run-old", 2, "message", { stream: "output", text: "已读取" })
+      ]);
+      if (url === `/api/sessions/${session.id}/runs` && init?.method === "POST") {
+        nextRun += 1;
+        return jsonResponse({
+          ...oldRun,
+          id: `run-${nextRun}`,
+          status: "queued",
+          input: (JSON.parse(String(init.body)) as { input: string }).input,
+          result: null,
+          startedAt: null,
+          finishedAt: null
+        }, 201);
+      }
+      if (url === "/api/runs/run-1/cancel" && init?.method === "POST") {
+        return jsonResponse({ ...oldRun, id: "run-1", status: "running", input: "修复它", result: null, finishedAt: null });
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    }));
+
+    const streams: Array<{ url: string; options: {
+      headers?: Record<string, string>;
+      signal?: AbortSignal;
+      onmessage(message: { data: string }): void;
+    } }> = [];
+    fetchEventSourceMock.mockImplementation((url: string, options: typeof streams[number]["options"]) => {
+      streams.push({ url, options });
+      return new Promise<void>((resolve) => options.signal?.addEventListener("abort", () => resolve(), { once: true }));
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("先读取日志")).toBeInTheDocument();
+    expect(screen.getByText("日志已读取")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("发送给 Agent"), { target: { value: "修复它" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(await screen.findByText("修复它")).toBeInTheDocument();
+    expect(screen.getByText("排队中")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "取消运行" })).toBeInTheDocument();
+    expect(streams[0]?.url).toBe("/api/runs/run-1/events/stream?afterSeq=0");
+    expect(streams[0]?.options.headers).toEqual({ authorization: "Bearer secret-token" });
+
+    await act(async () => {
+      streams[0]!.options.onmessage({ data: JSON.stringify(event("run-1", 1, "status", { text: "正在分析" })) });
+      streams[0]!.options.onmessage({ data: JSON.stringify(event("run-1", 2, "message", { stream: "output", text: "已定位" })) });
+      streams[0]!.options.onmessage({ data: JSON.stringify(event("run-1", 3, "message", { stream: "output", text: "问题" })) });
+      streams[0]!.options.onmessage({ data: JSON.stringify(event("run-1", 4, "tool", { title: "读取配置", status: "completed", path: "config.yml" })) });
+      streams[0]!.options.onmessage({ data: JSON.stringify(event("run-1", 5, "error", { message: "Provider 暂时不可用" })) });
+    });
+
+    expect(screen.getByText("正在分析")).toBeInTheDocument();
+    expect(screen.getByText("运行中")).toBeInTheDocument();
+    expect(screen.getByText("已定位问题")).toBeInTheDocument();
+    const tool = screen.getByText("读取配置").closest("details")!;
+    expect(within(tool).getByText("已完成")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Provider 暂时不可用");
+
+    fireEvent.click(screen.getByRole("button", { name: "取消运行" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith(
+      "/api/runs/run-1/cancel",
+      expect.objectContaining({ method: "POST" })
+    ));
+
+    await act(async () => {
+      streams[0]!.options.onmessage({ data: JSON.stringify(event("run-1", 6, "status", { status: "succeeded" })) });
+    });
+    expect(screen.queryByRole("button", { name: "取消运行" })).not.toBeInTheDocument();
+    expect(screen.getByLabelText("发送给 Agent")).toBeEnabled();
+
+    fireEvent.change(screen.getByLabelText("发送给 Agent"), { target: { value: "继续验证" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    expect(await screen.findByText("继续验证")).toBeInTheDocument();
+    await waitFor(() => expect(streams).toHaveLength(2));
+  });
+
+  it("SSE 断线后从最新 seq 重连，并在卸载时中止请求", async () => {
+    vi.useFakeTimers();
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", `/sessions/${session.id}`);
+    const runningRun = {
+      id: "run-live",
+      sessionId: session.id,
+      status: "running",
+      input: "继续执行",
+      result: null,
+      error: null,
+      createdAt: now,
+      startedAt: now,
+      finishedAt: null
+    };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, status: "running", runs: [runningRun] });
+      if (url === "/api/agents") return jsonResponse([agent]);
+      if (url === "/api/runs/run-live/events?afterSeq=0") return jsonResponse([]);
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+    const signals: AbortSignal[] = [];
+    fetchEventSourceMock
+      .mockImplementationOnce((_url: string, options: { signal: AbortSignal; onmessage(message: { data: string }): void }) => {
+        signals.push(options.signal);
+        options.onmessage({ data: JSON.stringify(event("run-live", 7, "message", { stream: "output", text: "处理中" })) });
+        return Promise.reject(new Error("connection lost"));
+      })
+      .mockImplementation((_url: string, options: { signal: AbortSignal }) => {
+        signals.push(options.signal);
+        return new Promise<void>((resolve) => options.signal.addEventListener("abort", () => resolve(), { once: true }));
+      });
+
+    const rendered = render(<App />);
+    await vi.waitFor(() => expect(fetchEventSourceMock).toHaveBeenCalledTimes(1));
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+
+    expect(fetchEventSourceMock).toHaveBeenCalledTimes(2);
+    expect(fetchEventSourceMock.mock.calls[1]?.[0]).toBe("/api/runs/run-live/events/stream?afterSeq=7");
+    expect(screen.getByText("处理中")).toBeInTheDocument();
+
+    rendered.unmount();
+    expect(signals.at(-1)?.aborted).toBe(true);
+  });
+});

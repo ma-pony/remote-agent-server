@@ -1,3 +1,7 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+
+import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import type Database from "better-sqlite3";
 
@@ -26,6 +30,7 @@ export type AppDependencies = {
   runRepository?: RunRepository;
   eventStore?: EventStore;
   skillProjector?: SkillProjector;
+  webRoot?: string;
 };
 
 /**
@@ -68,6 +73,18 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });
+
+  const webRoot = deps.webRoot ?? resolve(process.cwd(), "dist/web");
+  if (existsSync(webRoot)) {
+    app.register(fastifyStatic, { root: webRoot, wildcard: false });
+    app.setNotFoundHandler((request, reply) => {
+      const path = request.url.split("?", 1)[0];
+      if (path === "/api" || path?.startsWith("/api/")) {
+        return reply.code(404).send({ error: { code: "not_found", message: "API route not found" } });
+      }
+      return reply.sendFile("index.html");
+    });
+  }
   let stopped = false;
   let shutdownError: unknown;
   app.addHook("preClose", async () => {
