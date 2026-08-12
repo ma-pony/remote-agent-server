@@ -122,6 +122,32 @@ describe("BtrfsWorkspaceManager", () => {
     ]);
   });
 
+  it("从指定版本创建 Session，并创建、复制和删除环境 Subvolume", async () => {
+    const root = createTempDir();
+    const sessionsRoot = join(root, "sessions");
+    const source = join(root, "environment-v1");
+    const emptyRevision = join(root, "environment-v2");
+    const copiedRevision = join(root, "environment-v3");
+    const { runner, calls } = createRunner();
+    const manager = new BtrfsWorkspaceManager({
+      workspaceTemplate: join(root, "legacy-template"),
+      sessionsRoot,
+      commandRunner: runner
+    });
+
+    const session = await manager.createSession("session-456", source);
+    await manager.createRevision(emptyRevision, null);
+    await manager.createRevision(copiedRevision, source);
+    await manager.removeRevision(copiedRevision);
+
+    expect(calls).toEqual([
+      { command: "btrfs", args: ["subvolume", "snapshot", source, session.workspacePath] },
+      { command: "btrfs", args: ["subvolume", "create", emptyRevision] },
+      { command: "btrfs", args: ["subvolume", "snapshot", source, copiedRevision] },
+      { command: "btrfs", args: ["subvolume", "delete", copiedRevision] }
+    ]);
+  });
+
   it("快照失败时清理尚未持久化的 Session 目录", async () => {
     const root = createTempDir();
     const sessionsRoot = join(root, "sessions");
@@ -215,6 +241,33 @@ describe("ApfsWorkspaceManager", () => {
     expect(existsSync(workspace.workspacePath)).toBe(true);
   });
 
+  it("从指定版本创建 Session，并创建、复制和删除环境目录", async () => {
+    const root = createTempDir();
+    const sessionsRoot = join(root, "sessions");
+    const source = join(root, "environment-v1");
+    const emptyRevision = join(root, "environment-v2");
+    const copiedRevision = join(root, "environment-v3");
+    mkdirSync(source);
+    const { runner, calls } = createRunner();
+    const manager = new ApfsWorkspaceManager({
+      workspaceTemplate: join(root, "legacy-template"),
+      sessionsRoot,
+      commandRunner: runner
+    });
+
+    const session = await manager.createSession("session-456", source);
+    await manager.createRevision(emptyRevision, null);
+    await manager.createRevision(copiedRevision, source);
+    await manager.removeRevision(copiedRevision);
+
+    expect(calls).toEqual([
+      { command: "cp", args: ["-cR", source, session.workspacePath] },
+      { command: "cp", args: ["-cR", source, copiedRevision] }
+    ]);
+    expect(existsSync(emptyRevision)).toBe(true);
+    expect(existsSync(copiedRevision)).toBe(false);
+  });
+
   it("Clone 失败时清理 Session 目录", async () => {
     const root = createTempDir();
     const sessionsRoot = join(root, "sessions");
@@ -239,7 +292,7 @@ describe("ApfsWorkspaceManager", () => {
       commandRunner: createRunner().runner
     });
 
-    await manager.rollback("session-123");
+    await manager.rollbackSession("session-123");
 
     expect(existsSync(sessionPath)).toBe(false);
   });

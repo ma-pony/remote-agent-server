@@ -1,4 +1,5 @@
 import { mkdir, rm } from "node:fs/promises";
+import { dirname } from "node:path";
 import { join } from "node:path";
 
 import {
@@ -44,6 +45,13 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
    * Creates the Session directories and its writable template snapshot.
    */
   async create(id: string): Promise<Workspace> {
+    return this.createSession(id, this.workspaceTemplate);
+  }
+
+  /**
+   * Creates a Session from one explicitly selected environment revision.
+   */
+  async createSession(id: string, sourcePath: string): Promise<Workspace> {
     const sessionPath = join(this.sessionsRoot, id);
     const workspacePath = join(sessionPath, "workspace");
     const runtimePath = join(sessionPath, "runtime");
@@ -53,7 +61,7 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
       await mkdir(sessionPath, { recursive: true });
       await mkdir(runtimePath);
       await mkdir(browserProfilePath);
-      await this.commandRunner.run("btrfs", ["subvolume", "snapshot", this.workspaceTemplate, workspacePath]);
+      await this.commandRunner.run("btrfs", ["subvolume", "snapshot", sourcePath, workspacePath]);
     } catch (_error) {
       await rm(sessionPath, { force: true, recursive: true });
       throw new WorkspaceCreateError();
@@ -66,10 +74,40 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
    * Removes a newly-created snapshot after Session persistence fails.
    */
   async rollback(id: string): Promise<void> {
+    await this.rollbackSession(id);
+  }
+
+  /** Removes a newly-created Session snapshot and its runtime directories. */
+  async rollbackSession(id: string): Promise<void> {
     const sessionPath = join(this.sessionsRoot, id);
     const workspacePath = join(sessionPath, "workspace");
 
     await this.commandRunner.run("btrfs", ["subvolume", "delete", workspacePath]);
     await rm(sessionPath, { force: true, recursive: true });
+  }
+
+  /** Creates either an empty Btrfs subvolume or a writable revision snapshot. */
+  async createRevision(targetPath: string, sourcePath: string | null): Promise<void> {
+    try {
+      await mkdir(dirname(targetPath), { recursive: true });
+      const args = sourcePath === null
+        ? ["subvolume", "create", targetPath]
+        : ["subvolume", "snapshot", sourcePath, targetPath];
+      await this.commandRunner.run("btrfs", args);
+    } catch (error) {
+      try {
+        await this.commandRunner.run("btrfs", ["subvolume", "delete", targetPath]);
+      } catch (_cleanupError) {
+        // Preserve the original create failure.
+      }
+      await rm(targetPath, { force: true, recursive: true });
+      throw error;
+    }
+  }
+
+  /** Deletes one exact environment revision subvolume. */
+  async removeRevision(path: string): Promise<void> {
+    await this.commandRunner.run("btrfs", ["subvolume", "delete", path]);
+    await rm(path, { force: true, recursive: true });
   }
 }

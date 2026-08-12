@@ -1,4 +1,5 @@
 import { mkdir, rm, stat as nodeStat, statfs as nodeStatfs } from "node:fs/promises";
+import { dirname } from "node:path";
 import { join } from "node:path";
 
 import {
@@ -83,6 +84,13 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
    * Creates the Session directories and its writable APFS clone.
    */
   async create(id: string): Promise<Workspace> {
+    return this.createSession(id, this.workspaceTemplate);
+  }
+
+  /**
+   * Creates a Session from one explicitly selected environment revision.
+   */
+  async createSession(id: string, sourcePath: string): Promise<Workspace> {
     const sessionPath = join(this.sessionsRoot, id);
     const workspacePath = join(sessionPath, "workspace");
     const runtimePath = join(sessionPath, "runtime");
@@ -92,7 +100,7 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
       await mkdir(sessionPath, { recursive: true });
       await mkdir(runtimePath);
       await mkdir(browserProfilePath);
-      await this.commandRunner.run("cp", ["-cR", this.workspaceTemplate, workspacePath]);
+      await this.commandRunner.run("cp", ["-cR", sourcePath, workspacePath]);
     } catch (_error) {
       await rm(sessionPath, { force: true, recursive: true });
       throw new WorkspaceCreateError();
@@ -105,7 +113,32 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
    * Removes a newly-created APFS Session after persistence fails.
    */
   async rollback(id: string): Promise<void> {
+    await this.rollbackSession(id);
+  }
+
+  /** Removes a newly-created Session directory. */
+  async rollbackSession(id: string): Promise<void> {
     await rm(join(this.sessionsRoot, id), { force: true, recursive: true });
+  }
+
+  /** Creates either an empty environment revision or an APFS clone. */
+  async createRevision(targetPath: string, sourcePath: string | null): Promise<void> {
+    try {
+      await mkdir(dirname(targetPath), { recursive: true });
+      if (sourcePath === null) {
+        await mkdir(targetPath);
+      } else {
+        await this.commandRunner.run("cp", ["-cR", sourcePath, targetPath]);
+      }
+    } catch (error) {
+      await rm(targetPath, { force: true, recursive: true });
+      throw error;
+    }
+  }
+
+  /** Deletes one exact environment revision directory. */
+  async removeRevision(path: string): Promise<void> {
+    await rm(path, { force: true, recursive: true });
   }
 
 }
