@@ -112,6 +112,10 @@ describe("最小管理界面", () => {
       const jsonClient = await app.inject({ method: "GET", url: "/sessions/session-1", headers: { accept: "application/json" } });
       const asset = await app.inject({ method: "GET", url: "/assets/app.js" });
       const missingAsset = await app.inject({ method: "GET", url: "/assets/missing.js", headers: { accept: "text/html" } });
+      const extensionlessAsset = await app.inject({ method: "GET", url: "/assets/missing", headers: { accept: "text/html" } });
+      const trailingAsset = await app.inject({ method: "GET", url: "/assets/missing.js/", headers: { accept: "text/html" } });
+      const assetRoot = await app.inject({ method: "GET", url: "/assets/", headers: { accept: "text/html" } });
+      const queriedAsset = await app.inject({ method: "GET", url: "/assets/missing?version=1", headers: { accept: "text/html" } });
       const missingFavicon = await app.inject({ method: "GET", url: "/favicon.ico", headers: { accept: "text/html" } });
       const unknownPost = await app.inject({ method: "POST", url: "/sessions/session-1", headers: { accept: "text/html" } });
       const missingApi = await app.inject({ method: "GET", url: "/api/not-a-route", headers: { authorization: "Bearer secret-token" } });
@@ -126,6 +130,10 @@ describe("最小管理界面", () => {
       expect(asset.body).toContain("appLoaded");
       expect(missingAsset.statusCode).toBe(404);
       expect(missingAsset.body).not.toContain("Remote Agent UI");
+      expect(extensionlessAsset.statusCode).toBe(404);
+      expect(trailingAsset.statusCode).toBe(404);
+      expect(assetRoot.statusCode).toBe(404);
+      expect(queriedAsset.statusCode).toBe(404);
       expect(missingFavicon.statusCode).toBe(404);
       expect(unknownPost.statusCode).toBe(404);
       expect(missingApi.statusCode).toBe(404);

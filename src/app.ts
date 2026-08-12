@@ -85,7 +85,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
       const acceptsHtml = request.headers.accept?.includes("text/html") ?? false;
       const lastSegment = path.split("/").at(-1) ?? "";
       const assetLike = /\.[^./]+$/.test(lastSegment);
-      if ((request.method === "GET" || request.method === "HEAD") && acceptsHtml && !assetLike) {
+      const assetPath = path === "/assets" || path.startsWith("/assets/");
+      if ((request.method === "GET" || request.method === "HEAD") && acceptsHtml && !assetPath && !assetLike) {
         return reply.sendFile("index.html");
       }
       return reply.code(404).send({ error: { code: "not_found", message: "Route not found" } });
