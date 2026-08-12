@@ -22,8 +22,12 @@ const applications: Array<{ app: FastifyInstance; db: ReturnType<typeof createTe
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, reject, resolve };
 };
 
 const createApiTestApp = async (options: { runtime?: AgentRuntime; maxConcurrentRuns?: number } = {}) => {
@@ -500,6 +504,8 @@ describe("Server startup and shutdown", () => {
     tempDirectories.push(root);
     seedRestartDatabase(join(root, "server.sqlite3"), root, false);
     const runtime = createFakeRuntime({ result: { status: "completed" } });
+    const shutdown = deferred<void>();
+    runtime.shutdown = vi.fn(() => shutdown.promise);
     const exitProcess = vi.fn();
     const options = startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) });
     options.installSignalHandlers = true;
@@ -509,8 +515,13 @@ describe("Server startup and shutdown", () => {
     expect(server.app.server.listening).toBe(true);
 
     process.emit("SIGTERM", "SIGTERM");
+    await vi.waitFor(() => expect(runtime.shutdown).toHaveBeenCalledTimes(1));
+    process.emit("SIGINT", "SIGINT");
+    expect(exitProcess).not.toHaveBeenCalled();
+    shutdown.resolve();
 
     await vi.waitFor(() => expect(exitProcess).toHaveBeenCalledWith(0));
+    expect(exitProcess).toHaveBeenCalledTimes(1);
     expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
   });
 
@@ -519,7 +530,8 @@ describe("Server startup and shutdown", () => {
     tempDirectories.push(root);
     seedRestartDatabase(join(root, "server.sqlite3"), root, false);
     const runtime = createFakeRuntime({ result: { status: "completed" } });
-    runtime.shutdown = vi.fn(async () => Promise.reject(new AggregateError([new Error("close failed")] )));
+    const shutdown = deferred<void>();
+    runtime.shutdown = vi.fn(() => shutdown.promise);
     const exitProcess = vi.fn();
     const options = startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) });
     options.installSignalHandlers = true;
@@ -529,8 +541,13 @@ describe("Server startup and shutdown", () => {
     expect(server.app.server.listening).toBe(true);
 
     process.emit("SIGTERM", "SIGTERM");
+    await vi.waitFor(() => expect(runtime.shutdown).toHaveBeenCalledTimes(1));
+    process.emit("SIGINT", "SIGINT");
+    expect(exitProcess).not.toHaveBeenCalled();
+    shutdown.reject(new AggregateError([new Error("close failed")]));
 
     await vi.waitFor(() => expect(exitProcess).toHaveBeenCalledWith(1));
+    expect(exitProcess).toHaveBeenCalledTimes(1);
     expect(server.app.server.listening).toBe(false);
     expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
   });

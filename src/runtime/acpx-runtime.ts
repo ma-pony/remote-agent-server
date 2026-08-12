@@ -195,7 +195,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private readonly sessionOperations = new Map<string, SessionOperation>();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
-  private readonly shutdownFailures: unknown[] = [];
+  private readonly shutdownFailures: RuntimeShutdownFailure[] = [];
 
   constructor(private readonly config: AppConfig) {
     this.registry = new RemoteAgentRegistry(config.dataDir);
@@ -391,8 +391,24 @@ export class AcpxAgentRuntime implements AgentRuntime {
    * Stops accepting work, cancels active Turns, and closes cached Handles without discarding persistent state.
    */
   shutdown(): Promise<void> {
-    this.shutdownPromise ??= this.performShutdown();
-    return this.shutdownPromise;
+    if (this.shutdownPromise === undefined) {
+      this.shutdownPromise = this.performShutdown();
+      return this.shutdownPromise;
+    }
+    return this.shutdownPromise.then(
+      () => this.throwCurrentShutdownFailures(),
+      (error: unknown) => {
+        this.throwCurrentShutdownFailures();
+        throw error;
+      }
+    );
+  }
+
+  /**
+   * Exposes an immutable snapshot, including failures recorded after the first bounded shutdown attempt.
+   */
+  get shutdownFailureState(): readonly RuntimeShutdownFailure[] {
+    return Object.freeze([...this.shutdownFailures]);
   }
 
   private async performShutdown(): Promise<void> {
@@ -427,15 +443,23 @@ export class AcpxAgentRuntime implements AgentRuntime {
       }
     }));
 
-    if (this.sessions.size === 0) this.registry.clear();
+    if (this.sessions.size === 0 && this.sessionOperations.size === 0) this.registry.clear();
     if (this.shutdownFailures.length > 0) {
-      const error = new AggregateError(
-        this.shutdownFailures,
-        "Runtime shutdown timed out or failed; process exit is required to release any remaining provider resources"
-      );
+      const error = this.createShutdownError();
       console.error(error);
       throw error;
     }
+  }
+
+  private createShutdownError(): AggregateError {
+    return new AggregateError(
+      [...this.shutdownFailures],
+      "Runtime shutdown timed out or failed; process exit is required to release any remaining provider resources"
+    );
+  }
+
+  private throwCurrentShutdownFailures(): void {
+    if (this.shutdownFailures.length > 0) throw this.createShutdownError();
   }
 
   private recordShutdownFailure(

@@ -651,42 +651,108 @@ describe("AcpxAgentRuntime", () => {
     consoleError.mockRestore();
   });
 
-  it("shutdown 期间晚返回 Handle 的 close reject 被聚合且不注销 target", async () => {
+  it("operation timeout 后保留 target，晚返回 Handle close reject 对重复 shutdown 可见", async () => {
+    vi.useFakeTimers();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    const root = makeRoot();
-    const acp = runtimeStub();
-    let releaseHandle!: (handle: AcpRuntimeHandle) => void;
-    acp.ensureSession.mockImplementationOnce(() => new Promise<AcpRuntimeHandle>((resolve) => {
-      releaseHandle = resolve;
-    }));
-    acp.close.mockRejectedValue(new Error("late close rejected"));
-    acpxMocks.createAcpRuntime.mockReturnValue(acp);
-    const runtime = new AcpxAgentRuntime(makeConfig(root));
-    const ensuring = runtime.ensureSession(sessionInput(root));
-    await vi.waitFor(() => expect(acp.ensureSession).toHaveBeenCalledTimes(1));
+    try {
+      const root = makeRoot();
+      const acp = runtimeStub();
+      let releaseHandle!: (handle: AcpRuntimeHandle) => void;
+      acp.ensureSession.mockImplementationOnce(() => new Promise<AcpRuntimeHandle>((resolve) => {
+        releaseHandle = resolve;
+      }));
+      acp.close.mockRejectedValue(new Error("late close rejected"));
+      acpxMocks.createAcpRuntime.mockReturnValue(acp);
+      const runtime = new AcpxAgentRuntime(makeConfig(root));
+      const ensuring = runtime.ensureSession(sessionInput(root));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(acp.ensureSession).toHaveBeenCalledTimes(1);
+      const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
 
-    const shutdown = expect(runtime.shutdown()).rejects.toEqual(expect.objectContaining({
-      name: "AggregateError",
-      errors: expect.arrayContaining([
-        expect.objectContaining({ stage: "late_handle_close", sessionId: SESSION_ID }),
-        expect.objectContaining({ stage: "session_operation", sessionId: SESSION_ID }),
-        expect.objectContaining({ stage: "handle_close", sessionId: SESSION_ID })
-      ])
-    }));
-    releaseHandle({
-      sessionKey: `remote-agent:${SESSION_ID}`,
-      backend: "acpx",
-      runtimeSessionName: "late",
-      agentSessionId: "provider-session-1"
-    });
+      const firstShutdown = expect(runtime.shutdown()).rejects.toBeInstanceOf(AggregateError);
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
+      await firstShutdown;
 
-    await expect(ensuring).rejects.toMatchObject({ code: "runtime_shutdown" });
-    await shutdown;
+      expect(options.agentRegistry.list()).toEqual([`remote:codex:${AGENT_ID}:${SESSION_ID}`]);
+      expect(runtime.shutdownFailureState).toEqual(expect.arrayContaining([
+        expect.objectContaining({ stage: "session_operation", sessionId: SESSION_ID })
+      ]));
+      const lateHandle: AcpRuntimeHandle = {
+        sessionKey: `remote-agent:${SESSION_ID}`,
+        backend: "acpx",
+        runtimeSessionName: "late",
+        agentSessionId: "provider-session-1"
+      };
+      releaseHandle(lateHandle);
+      await expect(ensuring).rejects.toMatchObject({ code: "runtime_shutdown" });
 
-    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
-    expect(options.agentRegistry.list()).toEqual([`remote:codex:${AGENT_ID}:${SESSION_ID}`]);
-    expect(acp.close).toHaveBeenCalledTimes(2);
-    consoleError.mockRestore();
+      expect(options.agentRegistry.list()).toEqual([`remote:codex:${AGENT_ID}:${SESSION_ID}`]);
+      expect(runtime.shutdownFailureState).toEqual(expect.arrayContaining([
+        expect.objectContaining({ stage: "late_handle_close", sessionId: SESSION_ID })
+      ]));
+      await expect(runtime.shutdown()).rejects.toEqual(expect.objectContaining({
+        errors: expect.arrayContaining([
+          expect.objectContaining({ stage: "session_operation", sessionId: SESSION_ID }),
+          expect.objectContaining({ stage: "late_handle_close", sessionId: SESSION_ID })
+        ])
+      }));
+      await expect(runtime.ensureSession(sessionInput(root))).rejects.toMatchObject({ code: "runtime_shutdown" });
+      expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "new work" }))
+        .toThrowError(expect.objectContaining({ code: "runtime_shutdown" }));
+      await runtime.cancel(SESSION_ID);
+      expect(acp.cancel).toHaveBeenCalledWith({ handle: lateHandle, reason: "cancelled_by_request" });
+      expect(acp.close).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      consoleError.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("operation timeout 后晚返回 Handle close 成功才 unregister target", async () => {
+    vi.useFakeTimers();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const root = makeRoot();
+      const acp = runtimeStub();
+      let releaseHandle!: (handle: AcpRuntimeHandle) => void;
+      acp.ensureSession.mockImplementationOnce(() => new Promise<AcpRuntimeHandle>((resolve) => {
+        releaseHandle = resolve;
+      }));
+      acpxMocks.createAcpRuntime.mockReturnValue(acp);
+      const runtime = new AcpxAgentRuntime(makeConfig(root));
+      const ensuring = runtime.ensureSession(sessionInput(root));
+      await vi.advanceTimersByTimeAsync(0);
+      const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+
+      const firstShutdown = expect(runtime.shutdown()).rejects.toBeInstanceOf(AggregateError);
+      await vi.advanceTimersByTimeAsync(BEST_EFFORT_TIMEOUT_MS);
+      await firstShutdown;
+      expect(options.agentRegistry.list()).toEqual([`remote:codex:${AGENT_ID}:${SESSION_ID}`]);
+
+      releaseHandle({
+        sessionKey: `remote-agent:${SESSION_ID}`,
+        backend: "acpx",
+        runtimeSessionName: "late",
+        agentSessionId: "provider-session-1"
+      });
+      await expect(ensuring).rejects.toMatchObject({ code: "runtime_shutdown" });
+
+      expect(acp.close).toHaveBeenCalledTimes(1);
+      expect(options.agentRegistry.list()).toEqual([]);
+      expect(runtime.shutdownFailureState).not.toEqual(expect.arrayContaining([
+        expect.objectContaining({ stage: "late_handle_close" })
+      ]));
+      await expect(runtime.shutdown()).rejects.toEqual(expect.objectContaining({
+        errors: expect.arrayContaining([
+          expect.objectContaining({ stage: "session_operation", sessionId: SESSION_ID })
+        ])
+      }));
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      consoleError.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it.each(["claude_code", "codex", "hermes"] as const)("doctor probe 指向指定的 %s Provider", async (provider) => {

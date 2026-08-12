@@ -76,7 +76,12 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     await (options.listen ?? defaultListen)(app, config);
     if (options.installSignalHandlers ?? true) {
       const exitProcess = options.exitProcess ?? ((code: number): never => process.exit(code));
+      let signalHandled = false;
       onSignal = () => {
+        if (signalHandled) return;
+        signalHandled = true;
+        process.off("SIGINT", onSignal!);
+        process.off("SIGTERM", onSignal!);
         void close()
           .then(
             () => exitProcess(0),
