@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -106,7 +107,25 @@ describe("Session API", () => {
   });
 
   it("快照成功后保存并返回 Session 详情", async () => {
-    const { app, db } = await createTestApp();
+    let db!: ReturnType<typeof createTestDatabase>["db"];
+    let snapshotCompleted = false;
+    const commandRunner: CommandRunner = {
+      run: async (command, args) => {
+        expect(command).toBe("btrfs");
+        expect(args.slice(0, 2)).toEqual(["subvolume", "snapshot"]);
+        const workspacePath = args[3];
+        const sessionPath = dirname(workspacePath);
+        expect(existsSync(sessionPath)).toBe(true);
+        expect(existsSync(join(sessionPath, "runtime"))).toBe(true);
+        expect(existsSync(join(sessionPath, "browser"))).toBe(true);
+        expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+        mkdirSync(workspacePath);
+        snapshotCompleted = true;
+        return { stdout: "", stderr: "" };
+      }
+    };
+    let app!: FastifyInstance;
+    ({ app, db } = await createTestApp({ commandRunner }));
     const agent = await createAgent(app);
 
     const created = await app.inject({
@@ -117,6 +136,7 @@ describe("Session API", () => {
     });
 
     expect(created.statusCode).toBe(201);
+    expect(snapshotCompleted).toBe(true);
     expect(created.json()).toMatchObject({
       agentId: agent.id,
       title: "修复工单 1332",
@@ -124,7 +144,7 @@ describe("Session API", () => {
       providerSessionId: null
     });
     const session = created.json() as { id: string; workspacePath: string };
-    expect(existsSync(session.workspacePath)).toBe(false);
+    expect(existsSync(session.workspacePath)).toBe(true);
     expect(db.prepare("SELECT id FROM sessions WHERE id = ?").get(session.id)).toEqual({ id: session.id });
 
     const detail = await app.inject({ method: "GET", url: `/api/sessions/${session.id}`, headers: authHeaders() });
@@ -159,9 +179,23 @@ describe("Session API", () => {
     const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-session-compensation-"));
     tempDirs.push(dataDir);
     const calls: Array<{ command: string; args: string[] }> = [];
+    let snapshotCompleted = false;
     const commandRunner: CommandRunner = {
       run: async (command, args) => {
         calls.push({ command, args });
+        if (args[1] === "snapshot") {
+          expect(command).toBe("btrfs");
+          expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+          expect(existsSync(join(dirname(args[3]), "runtime"))).toBe(true);
+          expect(existsSync(join(dirname(args[3]), "browser"))).toBe(true);
+          mkdirSync(args[3]);
+          snapshotCompleted = true;
+        }
+        if (args[1] === "delete") {
+          expect(snapshotCompleted).toBe(true);
+          expect(existsSync(args[2])).toBe(true);
+          expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+        }
         return { stdout: "", stderr: "" };
       }
     };
@@ -187,8 +221,11 @@ describe("Session API", () => {
     });
 
     expect(calls).toHaveLength(2);
+    expect(snapshotCompleted).toBe(true);
     expect(calls[0]).toEqual({ command: "btrfs", args: ["subvolume", "snapshot", expect.any(String), expect.any(String)] });
     expect(calls[1]).toEqual({ command: "btrfs", args: ["subvolume", "delete", expect.any(String)] });
+    expect(calls[1]?.args[2]).toBe(calls[0]?.args[3]);
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
     db.close();
   });
 

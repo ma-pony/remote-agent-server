@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -50,7 +50,19 @@ describe("BtrfsWorkspaceManager", () => {
     const root = createTempDir();
     const template = join(root, "template");
     const sessionsRoot = join(root, "sessions");
-    const { runner, calls } = createRunner();
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runner: CommandRunner = {
+      run: async (command, args) => {
+        calls.push({ command, args });
+        expect(command).toBe("btrfs");
+        expect(args).toEqual(["subvolume", "snapshot", template, join(sessionsRoot, "session-123", "workspace")]);
+        expect(existsSync(join(sessionsRoot, "session-123"))).toBe(true);
+        expect(existsSync(join(sessionsRoot, "session-123", "runtime"))).toBe(true);
+        expect(existsSync(join(sessionsRoot, "session-123", "browser"))).toBe(true);
+        mkdirSync(args[3]);
+        return { stdout: "", stderr: "" };
+      }
+    };
     const manager = new BtrfsWorkspaceManager({ workspaceTemplate: template, sessionsRoot, commandRunner: runner });
 
     const workspace = await manager.create("session-123");
@@ -63,6 +75,7 @@ describe("BtrfsWorkspaceManager", () => {
     });
     expect(existsSync(workspace.runtimePath)).toBe(true);
     expect(existsSync(workspace.browserProfilePath)).toBe(true);
+    expect(existsSync(workspace.workspacePath)).toBe(true);
     expect(calls).toEqual([
       { command: "btrfs", args: ["subvolume", "snapshot", template, workspace.workspacePath] }
     ]);
