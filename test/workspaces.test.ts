@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ApfsWorkspaceManager } from "../src/workspaces/apfs-workspace.js";
+import { ApfsWorkspaceManager, type FileSystemInspector } from "../src/workspaces/apfs-workspace.js";
 import { BtrfsWorkspaceManager } from "../src/workspaces/btrfs-workspace.js";
 import { createWorkspaceManager } from "../src/workspaces/create-workspace-manager.js";
 import {
@@ -34,17 +34,22 @@ const createRunner = (): { runner: CommandRunner; calls: Array<{ command: string
   };
 };
 
-const createRunnerWithResults = (outputs: string[]): {
-  runner: CommandRunner;
-  calls: Array<{ command: string; args: string[] }>;
+const createFileSystemInspector = (types: number[], devices: number[]): {
+  fileSystemInspector: FileSystemInspector;
+  calls: Array<{ operation: "statfs" | "stat"; path: string }>;
 } => {
-  const calls: Array<{ command: string; args: string[] }> = [];
-  const remaining = [...outputs];
+  const calls: Array<{ operation: "statfs" | "stat"; path: string }> = [];
+  const remainingTypes = [...types];
+  const remainingDevices = [...devices];
   return {
-    runner: {
-      run: async (command, args) => {
-        calls.push({ command, args });
-        return { stdout: remaining.shift() ?? "", stderr: "" };
+    fileSystemInspector: {
+      statfs: async (path) => {
+        calls.push({ operation: "statfs", path });
+        return { type: remainingTypes.shift() ?? 0 };
+      },
+      stat: async (path) => {
+        calls.push({ operation: "stat", path });
+        return { dev: remainingDevices.shift() ?? 0 };
       }
     },
     calls
@@ -136,29 +141,35 @@ describe("ApfsWorkspaceManager", () => {
     const root = createTempDir();
     const template = join(root, "template");
     const sessionsRoot = join(root, "sessions");
-    const { runner, calls } = createRunnerWithResults(["apfs\n", "apfs\n", "42\n", "42\n"]);
-    const manager = new ApfsWorkspaceManager({ workspaceTemplate: template, sessionsRoot, commandRunner: runner });
+    const { fileSystemInspector, calls } = createFileSystemInspector([26, 26], [42, 42]);
+    const manager = new ApfsWorkspaceManager({
+      workspaceTemplate: template,
+      sessionsRoot,
+      commandRunner: createRunner().runner,
+      fileSystemInspector
+    });
 
     await manager.check();
 
     expect(calls).toEqual([
-      { command: "stat", args: ["-f", "%T", template] },
-      { command: "stat", args: ["-f", "%T", sessionsRoot] },
-      { command: "stat", args: ["-f", "%d", template] },
-      { command: "stat", args: ["-f", "%d", sessionsRoot] }
+      { operation: "statfs", path: template },
+      { operation: "statfs", path: sessionsRoot },
+      { operation: "stat", path: template },
+      { operation: "stat", path: sessionsRoot }
     ]);
   });
 
   it.each([
-    { results: ["hfs\n", "apfs\n", "42\n", "42\n"], name: "非 APFS 路径" },
-    { results: ["apfs\n", "apfs\n", "42\n", "43\n"], name: "不同 Volume" }
-  ])("拒绝$name", async ({ results }) => {
+    { types: [17, 26], devices: [42, 42], name: "非 APFS 路径" },
+    { types: [26, 26], devices: [42, 43], name: "不同 Volume" }
+  ])("拒绝$name", async ({ types, devices }) => {
     const root = createTempDir();
-    const { runner } = createRunnerWithResults(results);
+    const { fileSystemInspector } = createFileSystemInspector(types, devices);
     const manager = new ApfsWorkspaceManager({
       workspaceTemplate: join(root, "template"),
       sessionsRoot: join(root, "sessions"),
-      commandRunner: runner
+      commandRunner: createRunner().runner,
+      fileSystemInspector
     });
 
     await expect(manager.check()).rejects.toThrow(
@@ -170,7 +181,11 @@ describe("ApfsWorkspaceManager", () => {
     const manager = new ApfsWorkspaceManager({
       workspaceTemplate: "/template",
       sessionsRoot: "/sessions",
-      commandRunner: { run: async () => Promise.reject(new Error("stat failed")) }
+      commandRunner: createRunner().runner,
+      fileSystemInspector: {
+        statfs: async () => Promise.reject(new Error("statfs failed")),
+        stat: async () => ({ dev: 42 })
+      }
     });
 
     await expect(manager.check()).rejects.toEqual(

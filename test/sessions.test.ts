@@ -48,20 +48,26 @@ const createTestApp = async (options: {
   const { db } = createTestDatabase();
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-sessions-"));
   tempDirs.push(dataDir);
+  const commandRunner = options.commandRunner ?? { run: async () => ({ stdout: "", stderr: "" }) };
+  const config = {
+    host: "127.0.0.1",
+    port: 3000,
+    apiToken,
+    dataDir,
+    databasePath: ":memory:",
+    workspaceTemplate: join(dataDir, "template"),
+    sessionsRoot: join(dataDir, "sessions"),
+    maxConcurrentRuns: 4
+  };
   const app = buildApp({
-    config: {
-      host: "127.0.0.1",
-      port: 3000,
-      apiToken,
-      dataDir,
-      databasePath: ":memory:",
-      workspaceTemplate: join(dataDir, "template"),
-      sessionsRoot: join(dataDir, "sessions"),
-      maxConcurrentRuns: 4
-    },
+    config,
     db,
     runtime: options.runtime ?? createFakeRuntime(),
-    commandRunner: options.commandRunner ?? { run: async () => ({ stdout: "", stderr: "" }) }
+    workspaceManager: new BtrfsWorkspaceManager({
+      workspaceTemplate: config.workspaceTemplate,
+      sessionsRoot: config.sessionsRoot,
+      commandRunner
+    })
   });
   apps.push({ app, close: async () => { await app.close(); db.close(); } });
   await app.ready();

@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, stat as nodeStat, statfs as nodeStatfs } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -13,9 +13,27 @@ export type ApfsWorkspaceManagerDependencies = {
   workspaceTemplate: string;
   sessionsRoot: string;
   commandRunner: CommandRunner;
+  fileSystemInspector?: FileSystemInspector;
 };
 
 const APFS_CHECK_ERROR = "macOS workspace requires template and sessions on the same APFS volume";
+const APFS_FILE_SYSTEM_TYPE = 26;
+
+export interface FileSystemInspector {
+  statfs(path: string): Promise<{ type: number }>;
+  stat(path: string): Promise<{ dev: number }>;
+}
+
+export const nodeFileSystemInspector: FileSystemInspector = {
+  async statfs(path) {
+    const { type } = await nodeStatfs(path);
+    return { type };
+  },
+  async stat(path) {
+    const { dev } = await nodeStat(path);
+    return { dev };
+  }
+};
 
 /**
  * Creates isolated writable APFS clones for Sessions on macOS.
@@ -24,11 +42,18 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
   private readonly workspaceTemplate: string;
   private readonly sessionsRoot: string;
   private readonly commandRunner: CommandRunner;
+  private readonly fileSystemInspector: FileSystemInspector;
 
-  constructor({ workspaceTemplate, sessionsRoot, commandRunner }: ApfsWorkspaceManagerDependencies) {
+  constructor({
+    workspaceTemplate,
+    sessionsRoot,
+    commandRunner,
+    fileSystemInspector = nodeFileSystemInspector
+  }: ApfsWorkspaceManagerDependencies) {
     this.workspaceTemplate = workspaceTemplate;
     this.sessionsRoot = sessionsRoot;
     this.commandRunner = commandRunner;
+    this.fileSystemInspector = fileSystemInspector;
   }
 
   /**
@@ -36,12 +61,16 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
    */
   async check(): Promise<void> {
     try {
-      const templateType = await this.stat("%T", this.workspaceTemplate);
-      const sessionsType = await this.stat("%T", this.sessionsRoot);
-      const templateDevice = await this.stat("%d", this.workspaceTemplate);
-      const sessionsDevice = await this.stat("%d", this.sessionsRoot);
+      const templateType = (await this.fileSystemInspector.statfs(this.workspaceTemplate)).type;
+      const sessionsType = (await this.fileSystemInspector.statfs(this.sessionsRoot)).type;
+      const templateDevice = (await this.fileSystemInspector.stat(this.workspaceTemplate)).dev;
+      const sessionsDevice = (await this.fileSystemInspector.stat(this.sessionsRoot)).dev;
 
-      if (templateType !== "apfs" || sessionsType !== "apfs" || templateDevice !== sessionsDevice) {
+      if (
+        templateType !== APFS_FILE_SYSTEM_TYPE
+        || sessionsType !== APFS_FILE_SYSTEM_TYPE
+        || templateDevice !== sessionsDevice
+      ) {
         throw new WorkspaceCheckError(APFS_CHECK_ERROR);
       }
     } catch (error) {
@@ -79,8 +108,4 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
     await rm(join(this.sessionsRoot, id), { force: true, recursive: true });
   }
 
-  private async stat(format: "%T" | "%d", path: string): Promise<string> {
-    const result = await this.commandRunner.run("stat", ["-f", format, path]);
-    return result.stdout.trim();
-  }
 }

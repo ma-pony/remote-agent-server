@@ -6,7 +6,7 @@
 
 **Architecture:** 抽取不依赖文件系统的 `WorkspaceManager` 契约，保留现有 Btrfs 实现，新增 APFS 实现，并由一个平台工厂自动选择。Session、Run、API 只依赖统一接口；启动时在监听和恢复 Run 之前完成文件系统检查。
 
-**Tech Stack:** TypeScript、Node.js、Vitest、macOS `stat`/`cp -cR`、Linux `btrfs` CLI。
+**Tech Stack:** TypeScript、Node.js、Vitest、Node `fs.statfs()`/`fs.stat()`、macOS `cp -cR`、Linux `btrfs` CLI。
 
 ## 全局约束
 
@@ -141,7 +141,8 @@ git commit -m "refactor: define workspace manager contract"
 **Interfaces:**
 - Consumes: Task 1 的 `WorkspaceManager`、`Workspace`、`CommandRunner`、`WorkspaceCreateError`、`WorkspaceCheckError`。
 - Produces: `ApfsWorkspaceManager`。
-- Produces: `createWorkspaceManager(input: { platform?: NodeJS.Platform; workspaceTemplate: string; sessionsRoot: string; commandRunner?: CommandRunner }): WorkspaceManager`。
+- Produces: `FileSystemInspector`，包含 `statfs(path)` 的文件系统类型和 `stat(path)` 的设备 ID。
+- Produces: `createWorkspaceManager(input: { platform?: NodeJS.Platform; workspaceTemplate: string; sessionsRoot: string; commandRunner?: CommandRunner; fileSystemInspector?: FileSystemInspector }): WorkspaceManager`。
 
 - [ ] **Step 1: 写 APFS 和平台工厂的失败测试**
 
@@ -162,16 +163,21 @@ it("macOS 选择 APFS，Linux 选择 Btrfs，其他平台失败", () => {
 });
 
 it("APFS 检查模板和 Sessions 根目录位于同一 APFS Volume", async () => {
-  const { runner, calls } = createRunnerWithResults(["apfs\n", "apfs\n", "42\n", "42\n"]);
-  const manager = new ApfsWorkspaceManager({ workspaceTemplate: template, sessionsRoot, commandRunner: runner });
+  const { fileSystemInspector, calls } = createFileSystemInspector([26, 26], [42, 42]);
+  const manager = new ApfsWorkspaceManager({
+    workspaceTemplate: template,
+    sessionsRoot,
+    commandRunner: createRunner().runner,
+    fileSystemInspector
+  });
 
   await manager.check();
 
   expect(calls).toEqual([
-    { command: "stat", args: ["-f", "%T", template] },
-    { command: "stat", args: ["-f", "%T", sessionsRoot] },
-    { command: "stat", args: ["-f", "%d", template] },
-    { command: "stat", args: ["-f", "%d", sessionsRoot] }
+    { operation: "statfs", path: template },
+    { operation: "statfs", path: sessionsRoot },
+    { operation: "stat", path: template },
+    { operation: "stat", path: sessionsRoot }
   ]);
 });
 
@@ -185,11 +191,16 @@ it("APFS 创建 Clone 和 Session 运行目录", async () => {
 });
 
 it.each([
-  { results: ["hfs\n", "apfs\n", "42\n", "42\n"], name: "非 APFS 路径" },
-  { results: ["apfs\n", "apfs\n", "42\n", "43\n"], name: "不同 Volume" }
-])("APFS 拒绝$name", async ({ results }) => {
-  const { runner } = createRunnerWithResults(results);
-  const manager = new ApfsWorkspaceManager({ workspaceTemplate: template, sessionsRoot, commandRunner: runner });
+  { types: [17, 26], devices: [42, 42], name: "非 APFS 路径" },
+  { types: [26, 26], devices: [42, 43], name: "不同 Volume" }
+])("APFS 拒绝$name", async ({ types, devices }) => {
+  const { fileSystemInspector } = createFileSystemInspector(types, devices);
+  const manager = new ApfsWorkspaceManager({
+    workspaceTemplate: template,
+    sessionsRoot,
+    commandRunner: createRunner().runner,
+    fileSystemInspector
+  });
 
   await expect(manager.check()).rejects.toThrow(
     "macOS workspace requires template and sessions on the same APFS volume"
@@ -218,19 +229,22 @@ it("APFS rollback 删除整个 Session 目录", async () => {
 });
 ```
 
-为上述检查增加以下 Runner：
+为上述检查增加以下文件系统检查器：
 
 ```ts
-const createRunnerWithResults = (outputs: string[]) => {
-  const calls: Array<{ command: string; args: string[] }> = [];
-  const remaining = [...outputs];
-  const runner: CommandRunner = {
-    run: async (command, args) => {
-      calls.push({ command, args });
-      return { stdout: remaining.shift() ?? "", stderr: "" };
+const createFileSystemInspector = (types: number[], devices: number[]) => {
+  const calls: Array<{ operation: "statfs" | "stat"; path: string }> = [];
+  const fileSystemInspector: FileSystemInspector = {
+    statfs: async (path) => {
+      calls.push({ operation: "statfs", path });
+      return { type: types.shift() ?? 0 };
+    },
+    stat: async (path) => {
+      calls.push({ operation: "stat", path });
+      return { dev: devices.shift() ?? 0 };
     }
   };
-  return { runner, calls };
+  return { fileSystemInspector, calls };
 };
 ```
 
@@ -242,7 +256,7 @@ Expected: FAIL，因为 APFS Manager 和平台工厂尚不存在。
 
 - [ ] **Step 3: 实现最小 APFS Manager**
 
-`check()` 依次执行四个 `stat` 命令，使用 `stdout.trim()` 比较文件系统类型和设备 ID；任意命令失败、类型不是 `apfs` 或设备 ID 不同，都抛出：
+`check()` 依次通过 Node `fs.statfs()` 读取两个路径的文件系统类型，通过 `fs.stat()` 读取设备 ID。任一读取失败、类型不是 Darwin APFS `f_type=26` 或设备 ID 不同，都抛出：
 
 ```ts
 throw new WorkspaceCheckError("macOS workspace requires template and sessions on the same APFS volume");
@@ -296,7 +310,7 @@ git commit -m "feat: support APFS session workspaces"
 
 - [ ] **Step 1: 写启动自动选择的失败测试**
 
-在 `test/runs.test.ts` 的启动测试中注入 `platform: "darwin"` 和命令 Runner，断言启动检查使用 APFS 的四个 `stat` 命令而非 `btrfs`。为此在 `StartServerOptions` 新增仅用于装配与测试的可选 `platform?: NodeJS.Platform`。
+在 `test/runs.test.ts` 的启动测试中注入 `platform: "darwin"` 和 `FileSystemInspector`，断言启动检查按模板、Sessions 顺序调用 `statfs/stat`，且不调用 `btrfs`。为此在 `StartServerOptions` 新增仅用于装配与测试的可选 `platform?: NodeJS.Platform` 和 `fileSystemInspector?: FileSystemInspector`。
 
 再写一例 `platform: "linux"`，断言仍执行：
 
@@ -332,7 +346,7 @@ await workspaceManager.check();
 
 - 数据目录建议放在 `$HOME/Library/Application Support/remote-agent-server`。
 - 模板与 Sessions 根目录必须位于同一个 APFS Volume。
-- 使用 `diskutil info "$HOME/Library/Application Support/remote-agent-server/template/workspace"` 检查 APFS。
+- 使用 `df` 确认模板和 Sessions 的设备一致，再用 `diskutil info <设备>` 检查 APFS。
 - 使用登录用户的 LaunchAgent 启动，保证 Provider 登录状态和有头浏览器可见。
 - Linux 部署仍要求 Btrfs，不允许完整复制回退。
 

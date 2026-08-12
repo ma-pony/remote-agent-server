@@ -1,6 +1,135 @@
 # Remote Agent Server 部署与真实 Provider 验收
 
-本服务在一台专用 Linux Agent 服务器上以单个低权限用户运行。它会为每个 Session 创建可写 Btrfs 快照，并以 acpx 的 `approve-all` 模式运行 Claude Code、Codex 或 Hermes。`approve-all` 只减少 Provider 的交互确认，**不是安全沙箱**；Workspace 中的代码、网络和该用户能访问的文件都应视为 Agent 可操作范围。
+本服务支持两种原生写时复制 Workspace：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。运行时会根据操作系统自动选择，不提供普通目录复制回退。它以 acpx 的 `approve-all` 模式运行 Claude Code、Codex 或 Hermes。`approve-all` 只减少 Provider 的交互确认，**不是安全沙箱**；Workspace 中的代码、网络和该用户能访问的文件都应视为 Agent 可操作范围。
+
+## macOS：APFS 原生部署
+
+macOS 部署应使用实际登录桌面的普通用户，不使用 root，也不放入无图形会话的系统级 Daemon。这样 Claude Code、Codex、Hermes 的登录状态和有头浏览器都属于同一个用户会话。
+
+以下示例假设项目位于 `~/Projects/remote-agent-server`，运行数据位于 `~/Library/Application Support/remote-agent-server`。
+
+### 1. 准备 APFS 模板和运行目录
+
+```bash
+REMOTE_AGENT_ROOT="$HOME/Library/Application Support/remote-agent-server"
+mkdir -p "$REMOTE_AGENT_ROOT/data"
+mkdir -p "$REMOTE_AGENT_ROOT/template/workspace"
+mkdir -p "$REMOTE_AGENT_ROOT/sessions"
+
+TEMPLATE_DEVICE="$(df "$REMOTE_AGENT_ROOT/template/workspace" | awk 'NR == 2 { print $1 }')"
+SESSIONS_DEVICE="$(df "$REMOTE_AGENT_ROOT/sessions" | awk 'NR == 2 { print $1 }')"
+test "$TEMPLATE_DEVICE" = "$SESSIONS_DEVICE"
+diskutil info "$TEMPLATE_DEVICE" | grep 'File System Personality:.*APFS'
+```
+
+模板和 `sessions/` 必须位于同一个 APFS Volume。服务启动时会再次检查文件系统类型和 Volume；不符合时直接拒绝启动。
+
+把获准使用的仓库、依赖和本地开发配置放入 `template/workspace`。每个新 Session 会通过 `cp -cR` 创建独立的 APFS Clone；已有 Session 不会因模板更新而变化。更新模板时先停止服务，避免 Clone 期间模板内容变化。
+
+### 2. 安装、构建并配置环境
+
+```bash
+cd "$HOME/Projects/remote-agent-server"
+corepack enable
+pnpm install --frozen-lockfile
+pnpm build
+cp .env.example .env
+chmod 0600 .env
+openssl rand -hex 32
+```
+
+将随机值填入 `.env` 的 `API_TOKEN`，并把路径改成当前用户的绝对路径。路径含空格，必须保留双引号：
+
+```dotenv
+HOST=127.0.0.1
+PORT=3000
+API_TOKEN=替换为刚生成的随机值
+DATA_DIR="/Users/当前用户/Library/Application Support/remote-agent-server/data"
+DATABASE_PATH="/Users/当前用户/Library/Application Support/remote-agent-server/data/remote-agent.sqlite3"
+WORKSPACE_TEMPLATE="/Users/当前用户/Library/Application Support/remote-agent-server/template/workspace"
+SESSIONS_ROOT="/Users/当前用户/Library/Application Support/remote-agent-server/sessions"
+MAX_CONCURRENT_RUNS=4
+```
+
+使用同一个 macOS 用户完成 Provider 登录并确认命令可执行：
+
+```bash
+claude login
+codex login
+claude --version && codex --version && hermes --version
+```
+
+### 3. 首次前台启动
+
+```bash
+cd "$HOME/Projects/remote-agent-server"
+set -a
+source ./.env
+set +a
+pnpm start
+```
+
+另一个终端验证：
+
+```bash
+curl --fail http://127.0.0.1:3000/api/health
+```
+
+预期返回 `{"ok":true}`。
+
+### 4. 使用 LaunchAgent 随登录启动
+
+先确保日志目录存在：
+
+```bash
+mkdir -p "$HOME/Library/Logs/remote-agent-server"
+```
+
+创建 `~/Library/LaunchAgents/com.remote-agent-server.plist`，将其中的 `当前用户` 替换为真实用户名：
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.remote-agent-server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>-lc</string>
+    <string>cd "$HOME/Projects/remote-agent-server" &amp;&amp; set -a &amp;&amp; source ./.env &amp;&amp; set +a &amp;&amp; exec pnpm start</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/Users/当前用户/Library/Logs/remote-agent-server/stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/当前用户/Library/Logs/remote-agent-server/stderr.log</string>
+</dict>
+</plist>
+```
+
+加载并检查服务：
+
+```bash
+plutil -lint "$HOME/Library/LaunchAgents/com.remote-agent-server.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.remote-agent-server.plist"
+launchctl print "gui/$(id -u)/com.remote-agent-server"
+curl --fail http://127.0.0.1:3000/api/health
+```
+
+更新代码后先卸载服务，重新构建，再加载：
+
+```bash
+launchctl bootout "gui/$(id -u)/com.remote-agent-server"
+cd "$HOME/Projects/remote-agent-server" && pnpm install --frozen-lockfile && pnpm build
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.remote-agent-server.plist"
+```
+
+## Linux：Btrfs 原生部署
 
 以下示例使用发布目录 `/opt/remote-agent-server` 和 Btrfs 挂载点 `/srv/remote-agent`。请按实际发行版本替换项目路径，但不要让模板和 Session 根目录跨越不同的 Btrfs 文件系统。
 

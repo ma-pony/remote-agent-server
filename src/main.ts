@@ -11,13 +11,16 @@ import { migrate, openDatabase } from "./db.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { RunRepository } from "./runs/run-repository.js";
-import { BtrfsWorkspaceManager } from "./workspaces/btrfs-workspace.js";
-import { systemCommandRunner, type CommandRunner } from "./workspaces/workspace-manager.js";
+import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
+import { type FileSystemInspector } from "./workspaces/apfs-workspace.js";
+import { type CommandRunner } from "./workspaces/workspace-manager.js";
 
 export type StartServerOptions = {
   env?: Record<string, string | undefined>;
+  platform?: NodeJS.Platform;
   runtime?: AgentRuntime;
   commandRunner?: CommandRunner;
+  fileSystemInspector?: FileSystemInspector;
   listen?: (app: FastifyInstance, config: AppConfig) => Promise<unknown>;
   installSignalHandlers?: boolean;
   exitProcess?: (code: number) => void;
@@ -40,15 +43,18 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
   const config = loadConfig(options.env ?? process.env);
   mkdirSync(config.dataDir, { recursive: true });
   mkdirSync(dirname(config.databasePath), { recursive: true });
+  mkdirSync(config.sessionsRoot, { recursive: true });
   const db = openDatabase(config.databasePath);
   let app: FastifyInstance | undefined;
 
   try {
     migrate(db);
-    const workspaceManager = new BtrfsWorkspaceManager({
+    const workspaceManager = createWorkspaceManager({
+      platform: options.platform,
       workspaceTemplate: config.workspaceTemplate,
       sessionsRoot: config.sessionsRoot,
-      commandRunner: options.commandRunner ?? systemCommandRunner
+      commandRunner: options.commandRunner,
+      fileSystemInspector: options.fileSystemInspector
     });
     await workspaceManager.check();
 

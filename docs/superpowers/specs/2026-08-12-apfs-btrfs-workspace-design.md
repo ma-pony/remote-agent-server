@@ -23,9 +23,9 @@ Remote Agent Server 在 macOS 和 Linux 上为每个 Session 快速创建独立�
 两个实现分别为：
 
 - `BtrfsWorkspaceManager`：继续使用 `btrfs subvolume show/snapshot/delete`。
-- `ApfsWorkspaceManager`：使用 macOS 原生 APFS 检查和 `cp -cR` Clone。
+- `ApfsWorkspaceManager`：使用 Node 原生文件系统信息和 `cp -cR` Clone。
 
-应用启动时由工厂根据 `process.platform` 自动选择：`darwin` 选择 APFS，`linux` 选择 Btrfs，其他平台报错。测试可以显式传入平台和命令执行器，不依赖测试机文件系统。
+应用启动时由工厂根据 `process.platform` 自动选择：`darwin` 选择 APFS，`linux` 选择 Btrfs，其他平台报错。测试可以显式传入平台、文件系统检查器和命令执行器，不依赖测试机文件系统。
 
 ## APFS 行为
 
@@ -34,6 +34,8 @@ Remote Agent Server 在 macOS 和 Linux 上为每个 Session 快速创建独立�
 1. 模板目录存在。
 2. 模板目录和 Sessions 根目录都位于 APFS。
 3. 两者位于同一个 APFS Volume，保证 Clone 能使用同一底层存储。
+
+文件系统类型通过 Node `fs.statfs()` 读取；Darwin 的 APFS `f_type` 为 `26`。同卷关系通过 Node `fs.stat()` 返回的 `dev` 比较。不能使用 `stat -f %T`，该格式在 macOS 表示文件类型，不是文件系统类型。
 
 `create()` 先创建 Session、`runtime/` 和 `browser/` 目录，再执行：
 

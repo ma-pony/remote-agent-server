@@ -19,8 +19,8 @@ import { registerRunRoutes } from "./runs/run-routes.js";
 import { RunScheduler } from "./runs/run-scheduler.js";
 import { SessionManager } from "./sessions/session-manager.js";
 import { registerSessionRoutes } from "./sessions/session-routes.js";
-import { BtrfsWorkspaceManager } from "./workspaces/btrfs-workspace.js";
-import { systemCommandRunner, type CommandRunner, type WorkspaceManager } from "./workspaces/workspace-manager.js";
+import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
+import { type CommandRunner, type WorkspaceManager } from "./workspaces/workspace-manager.js";
 
 export type AppDependencies = {
   config: AppConfig;
@@ -45,10 +45,10 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     dataDir: deps.config.dataDir,
     runtime
   });
-  const workspaceManager = deps.workspaceManager ?? new BtrfsWorkspaceManager({
+  const workspaceManager = deps.workspaceManager ?? createWorkspaceManager({
     workspaceTemplate: deps.config.workspaceTemplate,
     sessionsRoot: deps.config.sessionsRoot,
-    commandRunner: deps.commandRunner ?? systemCommandRunner
+    commandRunner: deps.commandRunner
   });
   const sessionManager = new SessionManager({
     db: deps.db,

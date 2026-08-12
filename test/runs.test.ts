@@ -385,6 +385,7 @@ describe("Server startup and shutdown", () => {
     },
     runtime,
     commandRunner,
+    platform: "linux" as const,
     listen: async (app: FastifyInstance) => app.ready(),
     installSignalHandlers: false
   });
@@ -423,7 +424,7 @@ describe("Server startup and shutdown", () => {
       await app.ready();
     };
 
-    const server = await startServer(options);
+    const server = await startServer({ ...options, platform: "linux" });
     await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
 
     expect(order).toEqual(["check", "runtime", "listen"]);
@@ -447,9 +448,12 @@ describe("Server startup and shutdown", () => {
     runtime.ensureSession = vi.fn(runtime.ensureSession);
     runtime.startTurn = vi.fn(runtime.startTurn);
 
-    await expect(startServer(startOptions(root, runtime, {
-      run: async () => Promise.reject(new Error("not a btrfs subvolume"))
-    }))).rejects.toThrow("not a btrfs subvolume");
+    await expect(startServer({
+      ...startOptions(root, runtime, {
+        run: async () => Promise.reject(new Error("not a btrfs subvolume"))
+      }),
+      platform: "linux"
+    })).rejects.toThrow("Linux workspace requires Btrfs");
 
     const observer = openDatabase(databasePath);
     expect(observer.prepare("SELECT status, error FROM runs WHERE id = 'old-run'").get()).toEqual({
@@ -460,6 +464,44 @@ describe("Server startup and shutdown", () => {
     expect(runtime.ensureSession).not.toHaveBeenCalled();
     expect(runtime.startTurn).not.toHaveBeenCalled();
     observer.close();
+  });
+
+  it("macOS 启动时检查 APFS 同卷后才执行 recovery", async () => {
+    const root = mkdtempSync(join(tmpdir(), "remote-agent-apfs-startup-"));
+    tempDirectories.push(root);
+    const databasePath = join(root, "server.sqlite3");
+    seedRestartDatabase(databasePath, root, false);
+    const runtime = createFakeRuntime({ result: { status: "completed" } });
+    const commandRunner = {
+      run: vi.fn(async () => ({ stdout: "", stderr: "" }))
+    };
+    const fileSystemCalls: Array<{ operation: "statfs" | "stat"; path: string }> = [];
+    const fileSystemInspector = {
+      statfs: vi.fn(async (path: string) => {
+        fileSystemCalls.push({ operation: "statfs", path });
+        return { type: 26 };
+      }),
+      stat: vi.fn(async (path: string) => {
+        fileSystemCalls.push({ operation: "stat", path });
+        return { dev: 42 };
+      })
+    };
+
+    const server = await startServer({
+      ...startOptions(root, runtime, commandRunner),
+      platform: "darwin",
+      fileSystemInspector
+    });
+    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+
+    expect(fileSystemCalls).toEqual([
+      { operation: "statfs", path: join(root, "template") },
+      { operation: "statfs", path: join(root, "sessions") },
+      { operation: "stat", path: join(root, "template") },
+      { operation: "stat", path: join(root, "sessions") }
+    ]);
+    expect(commandRunner.run).not.toHaveBeenCalled();
+    await server.close();
   });
 
   it("关闭时先拒绝新请求，再取消 active Turn，最后关闭 SQLite", async () => {
