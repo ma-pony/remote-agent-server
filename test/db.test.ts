@@ -21,17 +21,43 @@ describe("configuration", () => {
   it("默认最大并发为 4", () => {
     expect(loadConfig(validEnv).maxConcurrentRuns).toBe(4);
   });
+
+  it("项目环境默认每三小时检查且准备命令最多运行三十分钟", () => {
+    const config = loadConfig(validEnv);
+
+    expect(config.projectEnvironmentCheckIntervalMs).toBe(3 * 60 * 60 * 1000);
+    expect(config.projectPrepareTimeoutMs).toBe(30 * 60 * 1000);
+    expect(config.projectEnvironmentsRoot).toBe("/srv/remote-agent/environments");
+  });
 });
 
 describe("database migration", () => {
-  it("只创建四张业务表", () => {
+  it("创建执行记录和项目环境七张业务表", () => {
     const { db } = createTestDatabase();
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
       .all()
       .map((row) => (row as { name: string }).name);
 
-    expect(tables).toEqual(["agents", "events", "runs", "sessions"]);
+    expect(tables).toEqual([
+      "agents",
+      "environment_repositories",
+      "events",
+      "project_environment_revisions",
+      "project_environments",
+      "runs",
+      "sessions"
+    ]);
+  });
+
+  it("为 Agent 和 Session 增加项目环境关联", () => {
+    const { db } = createTestDatabase();
+    const agentColumns = db.prepare("PRAGMA table_info(agents)").all().map((row) => (row as { name: string }).name);
+    const sessionColumns = db.prepare("PRAGMA table_info(sessions)").all().map((row) => (row as { name: string }).name);
+
+    expect(agentColumns).toContain("project_environment_id");
+    expect(sessionColumns).toContain("project_environment_revision_id");
+    db.close();
   });
 
   it("拒绝同一 Session 的第二个活动 Run", () => {

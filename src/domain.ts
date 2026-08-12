@@ -3,6 +3,44 @@ export type AgentProvider = Provider;
 export type SessionStatus = "idle" | "running";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type EventType = "message" | "tool" | "status" | "error";
+export type ProjectEnvironmentRevisionStatus = "preparing" | "ready" | "failed";
+
+export type ProjectEnvironment = {
+  id: string;
+  name: string;
+  currentRevisionId: string | null;
+  lastCheckedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EnvironmentRepository = {
+  id: string;
+  projectEnvironmentId: string;
+  name: string;
+  gitUrl: string;
+  prepareCommand: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProjectEnvironmentRevision = {
+  id: string;
+  projectEnvironmentId: string;
+  status: ProjectEnvironmentRevisionStatus;
+  workspacePath: string | null;
+  inputFingerprint: string;
+  failureStage: string | null;
+  error: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+};
+
+export type ProjectEnvironmentDetail = ProjectEnvironment & {
+  repositories: EnvironmentRepository[];
+  currentRevision: ProjectEnvironmentRevision | null;
+  latestRevision: ProjectEnvironmentRevision | null;
+};
 
 export type Agent = {
   id: string;
