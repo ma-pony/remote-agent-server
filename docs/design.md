@@ -60,13 +60,16 @@ Remote Agent Server 是部署在 Agent 服务器上的远程执行服务。调�
 id
 name
 provider          # claude_code / codex / hermes
-config_json
 enabled
 created_at
 updated_at
 ```
 
-敏感凭证放在 `.env`，`config_json` 只保存环境变量名称等非敏感配置。
+Agent 第一版只表示一个可选择的 Provider 档案：名称、Provider 类型和是否启用。Agent 的 Skills 和 Memory 使用第 8 节约定的文件目录。
+
+模型、权限模式和 MCP 等 Provider 参数沿用 Claude Code、Codex、Hermes 各自的原生配置；API Key 等敏感凭证使用 `.env` 或 Agent CLI 自己的登录状态；Provider 执行命令在代码中固定映射。Workspace、仓库和浏览器目录属于 Session，并发数、数据目录和服务鉴权属于服务配置。
+
+出现明确需求后再增加对应字段，不使用通用 JSON 配置承载未知参数。
 
 ### 4.2 sessions
 
