@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -171,6 +171,43 @@ describe("SkillProjector", () => {
 
     expect(memory).toBe("");
   });
+
+  it("Memory 读取失败时保留旧托管 Skills", () => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const managed = join(root, ".agents", "skills", "_remote-agent-managed");
+    mkdirSync(join(managed, "old-skill"), { recursive: true });
+    writeFileSync(join(managed, "old-skill", "SKILL.md"), "old skill");
+    mkdirSync(join(config.dataDir, "agents", AGENT_ID, "MEMORY.md"), { recursive: true });
+
+    expect(() => new SkillProjector(config.dataDir).prepare(
+      { id: AGENT_ID, provider: "codex" },
+      { workspacePath: root }
+    )).toThrow();
+
+    expect(readFileSync(join(managed, "old-skill", "SKILL.md"), "utf8")).toBe("old skill");
+  });
+
+  it("Skills 复制失败时保留旧目录并清理临时目录", () => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const skillsRoot = join(root, ".agents", "skills");
+    const managed = join(skillsRoot, "_remote-agent-managed");
+    mkdirSync(join(config.dataDir, "agents", AGENT_ID, "skills", "new-skill"), { recursive: true });
+    mkdirSync(join(managed, "old-skill"), { recursive: true });
+    writeFileSync(join(managed, "old-skill", "SKILL.md"), "old skill");
+    const projector = new SkillProjector(config.dataDir, {
+      copy: () => { throw new Error("copy failed"); }
+    });
+
+    expect(() => projector.prepare(
+      { id: AGENT_ID, provider: "codex" },
+      { workspacePath: root }
+    )).toThrow("copy failed");
+
+    expect(readFileSync(join(managed, "old-skill", "SKILL.md"), "utf8")).toBe("old skill");
+    expect(readdirSync(skillsRoot)).toEqual(["_remote-agent-managed"]);
+  });
 });
 
 describe("AcpxAgentRuntime", () => {
@@ -268,10 +305,102 @@ describe("AcpxAgentRuntime", () => {
 
     await expect(runtime.ensureSession(sessionInput(root, { providerSessionId: "expected-provider-session" })))
       .rejects.toEqual(new AgentRuntimeError("session_resume_failed", "Provider session resume returned a different session ID"));
-    expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({
-      reason: "provider_session_id_mismatch",
-      discardPersistentState: true
+    expect(acp.close).toHaveBeenCalledWith({
+      handle: expect.any(Object),
+      reason: "provider_session_id_mismatch"
+    });
+    expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" }))
+      .toThrowError(expect.objectContaining({ code: "session_not_ready" }));
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    expect(options.agentRegistry.list()).toEqual([]);
+  });
+
+  it("重复 ensure 幂等且首次 prompt 只注入一次", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    const input = sessionInput(root);
+
+    const first = await runtime.ensureSession(input);
+    const second = await runtime.ensureSession(input);
+
+    expect(first).toEqual(second);
+    expect(acp.ensureSession).toHaveBeenCalledTimes(1);
+    expect(acp.ensureSession.mock.calls[0]?.[0]).toHaveProperty("sessionOptions");
+  });
+
+  it("并发 ensure 按 Session 串行并复用同一 Handle", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    let release!: (handle: AcpRuntimeHandle) => void;
+    acp.ensureSession.mockImplementationOnce(() => new Promise<AcpRuntimeHandle>((resolve) => {
+      release = resolve;
     }));
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    const input = sessionInput(root);
+
+    const first = runtime.ensureSession(input);
+    const second = runtime.ensureSession(input);
+    await vi.waitFor(() => expect(acp.ensureSession).toHaveBeenCalledTimes(1));
+    release({
+      sessionKey: `remote-agent:${SESSION_ID}`,
+      backend: "acpx",
+      runtimeSessionName: "encoded",
+      agentSessionId: "provider-session-1"
+    });
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { providerSessionId: "provider-session-1" },
+      { providerSessionId: "provider-session-1" }
+    ]);
+    expect(acp.ensureSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("替换 Session Handle 前先关闭旧 Handle", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    const oldHandle = await acp.ensureSession();
+    const newHandle = { ...oldHandle, agentSessionId: "provider-session-2", runtimeSessionName: "encoded-2" };
+    acp.ensureSession.mockReset();
+    acp.ensureSession.mockResolvedValueOnce(oldHandle).mockImplementationOnce(async () => {
+      expect(acp.close).toHaveBeenCalledWith({ handle: oldHandle, reason: "session_handle_replaced" });
+      return newHandle;
+    });
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+
+    await runtime.ensureSession(sessionInput(root));
+    await runtime.ensureSession(sessionInput(root, { providerSessionId: "provider-session-2" }));
+
+    expect(acp.close.mock.invocationCallOrder[0]).toBeLessThan(acp.ensureSession.mock.invocationCallOrder[1]!);
+    expect(acp.ensureSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("Handle 正在替换时拒绝 startTurn 使用旧 Handle", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    const oldHandle = await acp.ensureSession();
+    const newHandle = { ...oldHandle, agentSessionId: "provider-session-2", runtimeSessionName: "encoded-2" };
+    let releaseClose!: () => void;
+    acp.ensureSession.mockReset();
+    acp.ensureSession.mockResolvedValueOnce(oldHandle).mockResolvedValueOnce(newHandle);
+    acp.close.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    }));
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+
+    const replacing = runtime.ensureSession(sessionInput(root, { providerSessionId: "provider-session-2" }));
+    await vi.waitFor(() => expect(acp.close).toHaveBeenCalledTimes(1));
+
+    expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" }))
+      .toThrowError(expect.objectContaining({ code: "session_not_ready" }));
+    releaseClose();
+    await expect(replacing).resolves.toEqual({ providerSessionId: "provider-session-2" });
+    expect(acp.startTurn).not.toHaveBeenCalled();
   });
 
   it("映射实时事件并只从 result 读取 canonical 终态", async () => {
@@ -322,6 +451,22 @@ describe("AcpxAgentRuntime", () => {
     }));
   });
 
+  it("session cancel 绑定 active turn 而不是可变 Handle cache", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+
+    const turn = runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
+    await runtime.cancel(SESSION_ID);
+
+    const acpTurn = acp.startTurn.mock.results[0]?.value as AcpRuntimeTurn;
+    expect(acpTurn.cancel).toHaveBeenCalledWith({ reason: "cancelled_by_request" });
+    expect(acp.cancel).not.toHaveBeenCalled();
+    await expect(turn.result).resolves.toEqual({ status: "completed" });
+  });
+
   it.each(["claude_code", "codex", "hermes"] as const)("doctor probe 指向指定的 %s Provider", async (provider) => {
     const root = makeRoot();
     const main = runtimeStub();
@@ -337,12 +482,25 @@ describe("AcpxAgentRuntime", () => {
 
     const options = acpxMocks.createAcpRuntime.mock.calls[1]?.[0] as AcpRuntimeOptions;
     expect(options.probeAgent).toMatch(new RegExp(`^remote:${provider}:${AGENT_ID}:`));
-    expect(options.agentRegistry.resolve(options.probeAgent!)).toContain(
-      provider === "claude_code"
-        ? "claude-agent-acp"
-        : provider === "codex"
-          ? "codex-acp"
-          : "hermes acp"
-    );
+    expect(options.agentRegistry.list()).toEqual([]);
+  });
+
+  it.each(["success", "undefined", "error"] as const)("doctor 在 %s 路径清理临时 Registry", async (outcome) => {
+    const root = makeRoot();
+    const main = runtimeStub();
+    const probe = runtimeStub();
+    if (outcome === "undefined") probe.doctor = undefined as never;
+    if (outcome === "error") probe.doctor.mockRejectedValueOnce(new Error("probe crashed"));
+    acpxMocks.createAcpRuntime.mockReturnValueOnce(main).mockReturnValueOnce(probe);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+
+    if (outcome === "error") {
+      await expect(runtime.doctor("codex", AGENT_ID)).rejects.toThrow("probe crashed");
+    } else {
+      await runtime.doctor("codex", AGENT_ID);
+    }
+
+    const options = acpxMocks.createAcpRuntime.mock.calls[1]?.[0] as AcpRuntimeOptions;
+    expect(options.agentRegistry.list()).toEqual([]);
   });
 });
