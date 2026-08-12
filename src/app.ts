@@ -78,11 +78,17 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   if (existsSync(webRoot)) {
     app.register(fastifyStatic, { root: webRoot, wildcard: false });
     app.setNotFoundHandler((request, reply) => {
-      const path = request.url.split("?", 1)[0];
+      const path = request.url.split("?", 1)[0] ?? request.url;
       if (path === "/api" || path?.startsWith("/api/")) {
         return reply.code(404).send({ error: { code: "not_found", message: "API route not found" } });
       }
-      return reply.sendFile("index.html");
+      const acceptsHtml = request.headers.accept?.includes("text/html") ?? false;
+      const lastSegment = path.split("/").at(-1) ?? "";
+      const assetLike = /\.[^./]+$/.test(lastSegment);
+      if ((request.method === "GET" || request.method === "HEAD") && acceptsHtml && !assetLike) {
+        return reply.sendFile("index.html");
+      }
+      return reply.code(404).send({ error: { code: "not_found", message: "Route not found" } });
     });
   }
   let stopped = false;

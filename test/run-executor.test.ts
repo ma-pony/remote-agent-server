@@ -231,6 +231,13 @@ describe("RunExecutor", () => {
       status: "failed",
       error: "result exploded"
     });
+    expect(setupResult.eventStore.list(setupResult.run.id, 0).map((event) => ({
+      type: event.type,
+      content: JSON.parse(event.contentJson)
+    }))).toEqual([
+      { type: "error", content: { message: "result exploded" } },
+      { type: "status", content: { status: "failed" } }
+    ]);
     expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
     setupResult.db.close();
   });
@@ -244,6 +251,12 @@ describe("RunExecutor", () => {
     await setupResult.executor.execute(setupResult.run.id);
 
     expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({ status, error });
+    const terminalEvents = setupResult.eventStore.list(setupResult.run.id, 0).filter((event) => {
+      const content = JSON.parse(event.contentJson) as { status?: string };
+      return event.type === "status" && content.status !== undefined;
+    });
+    expect(terminalEvents).toHaveLength(1);
+    expect(JSON.parse(terminalEvents[0]!.contentJson)).toEqual({ status });
     expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
     setupResult.db.close();
   });
@@ -269,7 +282,33 @@ describe("RunExecutor", () => {
       status: "failed",
       error: "stream exploded"
     });
-    expect(setupResult.eventStore.list(setupResult.run.id, 0).at(-1)).toMatchObject({ type: "error" });
+    expect(setupResult.eventStore.list(setupResult.run.id, 0).map((item) => ({
+      type: item.type,
+      content: JSON.parse(item.contentJson)
+    })).slice(-2)).toEqual([
+      { type: "error", content: { message: "stream exploded" } },
+      { type: "status", content: { status: "failed" } }
+    ]);
+    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    setupResult.db.close();
+  });
+
+  it("terminal status Event 写入失败时仍按 canonical result 收尾数据库", async () => {
+    const setupResult = setup(createFakeRuntime({ result: { status: "completed" } }));
+    const append = setupResult.eventStore.append.bind(setupResult.eventStore);
+    const appendSpy = vi.spyOn(setupResult.eventStore, "append").mockImplementation((runId, type, content) => {
+      if (type === "status" && (content as { status?: string }).status !== undefined) {
+        throw new Error("terminal event write failed");
+      }
+      return append(runId, type, content);
+    });
+
+    await setupResult.executor.execute(setupResult.run.id);
+
+    expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({ status: "succeeded", error: null });
+    expect(appendSpy.mock.calls.filter(([, type, content]) =>
+      type === "status" && (content as { status?: string }).status !== undefined
+    )).toHaveLength(1);
     expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
     setupResult.db.close();
   });

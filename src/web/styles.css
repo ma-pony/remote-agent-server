@@ -47,6 +47,8 @@ textarea { resize: vertical; line-height: 1.55; }
 .danger-button { color: white; background: var(--danger); border-color: #732219; }
 
 .error-banner { min-height: 24px; margin: 12px 0; color: var(--danger); font-weight: 700; }
+.load-error { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.load-error button { padding: 7px 11px; color: var(--danger); background: transparent; border: 1px solid currentColor; font-weight: 800; }
 .record-list { display: grid; gap: 10px; }
 .record { width: 100%; color: inherit; background: var(--paper); border: 1px solid var(--line); border-left: 5px solid var(--ink); text-align: left; }
 .agent-record { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; gap: 22px; align-items: center; padding: 18px 20px; }
@@ -92,6 +94,7 @@ pre { max-width: 100%; overflow: auto; margin: 10px 0 0; padding: 10px; backgrou
 .event-row { padding: 9px 11px; background: #e8ebe4; border: 1px solid #d3d7cf; font-size: 13px; }
 .event-kind { margin-right: 10px; color: var(--muted); font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 10px; font-weight: 800; letter-spacing: .08em; }
 .error-event { color: #7c291f; background: #f6e4df; border-color: #ddb0a8; }
+.history-error { color: #78530f; background: #f3ead7; border-color: #d5be91; }
 .tool-event summary { display: flex; align-items: center; gap: 8px; }
 .tool-status { margin-left: auto; color: var(--muted); }
 .composer { position: sticky; bottom: 0; padding: 18px; background: #dde1d8; border: 1px solid #abb2a7; box-shadow: 0 -8px 24px rgba(24, 32, 25, .08); }

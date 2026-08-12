@@ -50,6 +50,16 @@ export type RunEvent = {
 
 export type ApiError = { error?: { code?: string; message?: string }; message?: string };
 
+export class RunStreamPermanentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RunStreamPermanentError";
+  }
+}
+
+export const isRunStreamPermanentError = (error: unknown): error is RunStreamPermanentError =>
+  error instanceof RunStreamPermanentError;
+
 /** Sends one authenticated JSON request to the server API. */
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = sessionStorage.getItem("apiToken");
@@ -72,6 +82,18 @@ export function streamRunEvents(
     headers: { authorization: `Bearer ${sessionStorage.getItem("apiToken")}` },
     signal,
     openWhenHidden: true,
+    onopen(response) {
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!response.ok) {
+        const message = `Event stream request failed with HTTP ${response.status}`;
+        if (response.status < 500) throw new RunStreamPermanentError(message);
+        throw new Error(message);
+      }
+      if (!contentType.toLowerCase().startsWith("text/event-stream")) {
+        throw new RunStreamPermanentError(`Event stream returned unsupported content type: ${contentType || "missing"}`);
+      }
+      return Promise.resolve();
+    },
     onmessage(message) {
       onEvent(JSON.parse(message.data) as RunEvent);
     },

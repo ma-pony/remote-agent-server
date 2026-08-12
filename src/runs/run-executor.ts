@@ -126,12 +126,8 @@ export class RunExecutor {
       return this.finishFromCanonicalResult(run.id, output, result);
     } catch (error) {
       const message = errorMessage(error);
-      try {
-        this.eventStore.append(run.id, "error", { message });
-      } catch (_eventError) {
-        // A failed event append must not leave the Run and Session active.
-      }
-      return this.runRepository.finish(run.id, { status: "failed", error: message });
+      this.appendBestEffort(run.id, "error", { message });
+      return this.finishRun(run.id, { status: "failed", error: message });
     }
   }
 
@@ -154,20 +150,33 @@ export class RunExecutor {
 
   private finishFromCanonicalResult(runId: string, output: string, result: RuntimeTurnResult): Run {
     if (result.status === "completed") {
-      this.eventStore.append(runId, "status", { status: "succeeded" });
-      return this.runRepository.finish(runId, { status: "succeeded", result: output });
+      return this.finishRun(runId, { status: "succeeded", result: output });
     }
     if (result.status === "cancelled") {
-      this.eventStore.append(runId, "status", { status: "cancelled" });
-      return this.runRepository.finish(runId, { status: "cancelled" });
+      return this.finishRun(runId, { status: "cancelled" });
     }
 
-    this.eventStore.append(runId, "error", {
+    this.appendBestEffort(runId, "error", {
       ...(result.code === undefined ? {} : { code: result.code }),
       message: result.message
     });
-    this.eventStore.append(runId, "status", { status: "failed" });
-    return this.runRepository.finish(runId, { status: "failed", error: result.message });
+    return this.finishRun(runId, { status: "failed", error: result.message });
+  }
+
+  private finishRun(
+    runId: string,
+    result: { status: "succeeded"; result: string } | { status: "failed"; error: string } | { status: "cancelled" }
+  ): Run {
+    this.appendBestEffort(runId, "status", { status: result.status });
+    return this.runRepository.finish(runId, result);
+  }
+
+  private appendBestEffort(runId: string, type: EventType, content: unknown): void {
+    try {
+      this.eventStore.append(runId, type, content);
+    } catch (_error) {
+      // Event persistence cannot leave the canonical Run and Session active.
+    }
   }
 
   private nextEvent(iterator: AsyncIterator<RuntimeEvent>): Promise<TurnRace> {
