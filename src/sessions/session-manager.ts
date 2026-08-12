@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import type Database from "better-sqlite3";
 
 import type { AgentManager } from "../agents/agent-manager.js";
-import type { Session, SessionStatus } from "../domain.js";
+import type { Agent, Session, SessionStatus } from "../domain.js";
 import type { AgentRuntime } from "../runtime/agent-runtime.js";
 import { BtrfsWorkspaceManager, WorkspaceCreateError } from "../workspaces/btrfs-workspace.js";
 
@@ -32,6 +32,7 @@ const toSession = (row: SessionRow): Session => ({
 });
 
 export type CreateSessionInput = { agentId: string; title: string };
+export type SessionRuntimeContext = { agent: Agent; session: Session };
 
 export class SessionManagerError extends Error {
   constructor(readonly code: "agent_not_found" | "agent_disabled" | "session_not_found" | "session_busy" | "session_create_failed" | "runtime_reset_failed") {
@@ -124,6 +125,31 @@ export class SessionManager {
   get(id: string): Session | undefined {
     const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
     return row === undefined ? undefined : toSession(row);
+  }
+
+  /**
+   * Loads the persisted Session and its Agent for one Runtime turn.
+   */
+  getRuntimeContext(id: string): SessionRuntimeContext {
+    const session = this.get(id);
+    if (session === undefined) throw new SessionManagerError("session_not_found");
+    const agent = this.agentManager.get(session.agentId);
+    if (agent === undefined) throw new SessionManagerError("agent_not_found");
+    return { agent, session };
+  }
+
+  /**
+   * Saves the Provider's durable Session identifier before a Turn starts.
+   */
+  saveProviderSessionId(id: string, providerSessionId: string | null): Session {
+    const session = this.get(id);
+    if (session === undefined) throw new SessionManagerError("session_not_found");
+
+    const updatedAt = new Date().toISOString();
+    this.db
+      .prepare("UPDATE sessions SET provider_session_id = ?, updated_at = ? WHERE id = ?")
+      .run(providerSessionId, updatedAt, id);
+    return { ...session, providerSessionId, updatedAt };
   }
 
   /**

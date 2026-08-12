@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
+import type { RunRepository } from "../runs/run-repository.js";
 import { WorkspaceCreateError } from "../workspaces/btrfs-workspace.js";
 import { SessionManager, SessionManagerError } from "./session-manager.js";
 
@@ -37,7 +38,11 @@ const handleError = (reply: FastifyReply, error: unknown) => {
 /**
  * Registers the authenticated Session lifecycle routes.
  */
-export const registerSessionRoutes = (app: FastifyInstance, sessionManager: SessionManager): void => {
+export const registerSessionRoutes = (
+  app: FastifyInstance,
+  sessionManager: SessionManager,
+  runRepository: RunRepository
+): void => {
   app.get("/sessions", () => sessionManager.list());
 
   app.post("/sessions", async (request, reply) => {
@@ -53,7 +58,9 @@ export const registerSessionRoutes = (app: FastifyInstance, sessionManager: Sess
 
   app.get<{ Params: { id: string } }>("/sessions/:id", (request, reply) => {
     const session = sessionManager.get(request.params.id);
-    return session === undefined ? sendError(reply, 404, "not_found", "Session not found") : session;
+    return session === undefined
+      ? sendError(reply, 404, "not_found", "Session not found")
+      : { ...session, runs: runRepository.listBySession(session.id) };
   });
 
   app.post<{ Params: { id: string } }>("/sessions/:id/reset", async (request, reply) => {
