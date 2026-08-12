@@ -19,14 +19,15 @@ import { registerRunRoutes } from "./runs/run-routes.js";
 import { RunScheduler } from "./runs/run-scheduler.js";
 import { SessionManager } from "./sessions/session-manager.js";
 import { registerSessionRoutes } from "./sessions/session-routes.js";
-import { BtrfsWorkspaceManager, type CommandRunner, systemCommandRunner } from "./workspaces/btrfs-workspace.js";
+import { BtrfsWorkspaceManager } from "./workspaces/btrfs-workspace.js";
+import { systemCommandRunner, type CommandRunner, type WorkspaceManager } from "./workspaces/workspace-manager.js";
 
 export type AppDependencies = {
   config: AppConfig;
   db: Database.Database;
   runtime?: AgentRuntime;
   commandRunner?: CommandRunner;
-  workspaceManager?: BtrfsWorkspaceManager;
+  workspaceManager?: WorkspaceManager;
   runRepository?: RunRepository;
   eventStore?: EventStore;
   skillProjector?: SkillProjector;

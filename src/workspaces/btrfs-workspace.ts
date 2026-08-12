@@ -1,34 +1,13 @@
-import { execFile } from "node:child_process";
 import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFile);
-
-export interface CommandRunner {
-  run(command: string, args: string[]): Promise<{ stdout: string; stderr: string }>;
-}
-
-export type Workspace = {
-  workspacePath: string;
-  runtimePath: string;
-  browserProfilePath: string;
-};
-
-export class WorkspaceCreateError extends Error {
-  readonly code = "workspace_create_failed";
-
-  constructor() {
-    super("Failed to create workspace");
-  }
-}
-
-export const systemCommandRunner: CommandRunner = {
-  async run(command, args) {
-    const { stdout, stderr } = await execFileAsync(command, args);
-    return { stdout, stderr };
-  }
-};
+import {
+  WorkspaceCheckError,
+  WorkspaceCreateError,
+  type CommandRunner,
+  type Workspace,
+  type WorkspaceManager
+} from "./workspace-manager.js";
 
 export type BtrfsWorkspaceManagerDependencies = {
   workspaceTemplate: string;
@@ -39,7 +18,7 @@ export type BtrfsWorkspaceManagerDependencies = {
 /**
  * Creates isolated writable Btrfs workspace snapshots for Sessions.
  */
-export class BtrfsWorkspaceManager {
+export class BtrfsWorkspaceManager implements WorkspaceManager {
   private readonly workspaceTemplate: string;
   private readonly sessionsRoot: string;
   private readonly commandRunner: CommandRunner;
@@ -54,7 +33,11 @@ export class BtrfsWorkspaceManager {
    * Verifies that the configured workspace template is a Btrfs subvolume.
    */
   async check(): Promise<void> {
-    await this.commandRunner.run("btrfs", ["subvolume", "show", this.workspaceTemplate]);
+    try {
+      await this.commandRunner.run("btrfs", ["subvolume", "show", this.workspaceTemplate]);
+    } catch (_error) {
+      throw new WorkspaceCheckError("Linux workspace requires Btrfs");
+    }
   }
 
   /**

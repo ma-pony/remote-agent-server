@@ -4,7 +4,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { BtrfsWorkspaceManager, type CommandRunner } from "../src/workspaces/btrfs-workspace.js";
+import { BtrfsWorkspaceManager } from "../src/workspaces/btrfs-workspace.js";
+import {
+  WorkspaceCheckError,
+  type CommandRunner,
+  type WorkspaceManager
+} from "../src/workspaces/workspace-manager.js";
 
 const tempDirs: string[] = [];
 
@@ -32,6 +37,18 @@ afterEach(() => {
 });
 
 describe("BtrfsWorkspaceManager", () => {
+  it("Btrfs 检查失败时返回明确的文件系统错误", async () => {
+    const manager: WorkspaceManager = new BtrfsWorkspaceManager({
+      workspaceTemplate: "/template",
+      sessionsRoot: "/sessions",
+      commandRunner: { run: async () => Promise.reject(new Error("not btrfs")) }
+    });
+
+    await expect(manager.check()).rejects.toEqual(
+      new WorkspaceCheckError("Linux workspace requires Btrfs")
+    );
+  });
+
   it("通过可注入命令边界检查模板 Subvolume", async () => {
     const root = createTempDir();
     const { runner, calls } = createRunner();

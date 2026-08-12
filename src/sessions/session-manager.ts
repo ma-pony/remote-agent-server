@@ -7,7 +7,7 @@ import type Database from "better-sqlite3";
 import type { AgentManager } from "../agents/agent-manager.js";
 import type { Agent, Session, SessionStatus } from "../domain.js";
 import type { AgentRuntime } from "../runtime/agent-runtime.js";
-import { BtrfsWorkspaceManager, WorkspaceCreateError } from "../workspaces/btrfs-workspace.js";
+import { WorkspaceCreateError, type WorkspaceManager } from "../workspaces/workspace-manager.js";
 
 type SessionRow = {
   id: string;
@@ -48,7 +48,7 @@ export type SessionManagerDependencies = {
   dataDir: string;
   agentManager: AgentManager;
   runtime: AgentRuntime;
-  workspaceManager: BtrfsWorkspaceManager;
+  workspaceManager: WorkspaceManager;
 };
 
 /**
@@ -59,7 +59,7 @@ export class SessionManager {
   private readonly dataDir: string;
   private readonly agentManager: AgentManager;
   private readonly runtime: AgentRuntime;
-  private readonly workspaceManager: BtrfsWorkspaceManager;
+  private readonly workspaceManager: WorkspaceManager;
 
   constructor({ db, dataDir, agentManager, runtime, workspaceManager }: SessionManagerDependencies) {
     this.db = db;

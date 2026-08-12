@@ -10,7 +10,7 @@ import { buildApp } from "../src/app.js";
 import { AgentManager } from "../src/agents/agent-manager.js";
 import { SessionManager } from "../src/sessions/session-manager.js";
 import { BtrfsWorkspaceManager } from "../src/workspaces/btrfs-workspace.js";
-import type { CommandRunner } from "../src/workspaces/btrfs-workspace.js";
+import type { CommandRunner } from "../src/workspaces/workspace-manager.js";
 import type { AgentRuntime, RuntimeDoctor, RuntimeSession, RuntimeSessionInput, RuntimeTurn, RuntimeTurnInput } from "../src/runtime/agent-runtime.js";
 import { createTestDatabase } from "./helpers.js";
 

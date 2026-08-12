@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import type { RunRepository } from "../runs/run-repository.js";
-import { WorkspaceCreateError } from "../workspaces/btrfs-workspace.js";
+import { WorkspaceCreateError } from "../workspaces/workspace-manager.js";
 import { SessionManager, SessionManagerError } from "./session-manager.js";
 
 const createSessionSchema = z.object({

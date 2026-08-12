@@ -11,7 +11,8 @@ import { migrate, openDatabase } from "./db.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { RunRepository } from "./runs/run-repository.js";
-import { BtrfsWorkspaceManager, type CommandRunner, systemCommandRunner } from "./workspaces/btrfs-workspace.js";
+import { BtrfsWorkspaceManager } from "./workspaces/btrfs-workspace.js";
+import { systemCommandRunner, type CommandRunner } from "./workspaces/workspace-manager.js";
 
 export type StartServerOptions = {
   env?: Record<string, string | undefined>;
