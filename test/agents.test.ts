@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
+import { constantTimeTokenEqual } from "../src/auth.js";
 import type { AgentRuntime, RuntimeDoctor, RuntimeSession, RuntimeSessionInput, RuntimeTurn, RuntimeTurnInput } from "../src/runtime/agent-runtime.js";
 import { createTestDatabase } from "./helpers.js";
 
@@ -72,6 +73,14 @@ describe("Agent API", () => {
     expect(unauthorized.statusCode).toBe(401);
     expect(unauthorized.json()).toEqual({ error: { code: "unauthorized", message: "Invalid API token" } });
 
+    const wrongLengthToken = await app.inject({
+      method: "GET",
+      url: "/api/agents",
+      headers: { authorization: "Bearer short" }
+    });
+    expect(wrongLengthToken.statusCode).toBe(401);
+    expect(wrongLengthToken.json()).toEqual({ error: { code: "unauthorized", message: "Invalid API token" } });
+
     const response = await app.inject({
       method: "POST",
       url: "/api/agents",
@@ -87,6 +96,12 @@ describe("Agent API", () => {
     expect(existsSync(join(agentDir, "skills"))).toBe(true);
     expect(readFileSync(join(agentDir, "MEMORY.md"), "utf8")).toBe("");
     expect(existsSync(join(agentDir, "provider-home", "hermes"))).toBe(true);
+  });
+
+  it("对不同长度 Token 使用固定长度的安全比较", () => {
+    expect(constantTimeTokenEqual(apiToken, apiToken)).toBe(true);
+    expect(constantTimeTokenEqual(apiToken, "short")).toBe(false);
+    expect(constantTimeTokenEqual(apiToken, "a token much longer than the configured token")).toBe(false);
   });
 
   it("拒绝未知 Provider 和空白名称", async () => {

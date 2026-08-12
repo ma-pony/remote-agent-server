@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 
 import type { FastifyReply, FastifyRequest } from "fastify";
 
@@ -6,12 +6,18 @@ const unauthorized = (reply: FastifyReply): void => {
   reply.code(401).send({ error: { code: "unauthorized", message: "Invalid API token" } });
 };
 
+const tokenDigest = (token: string): Buffer => createHash("sha256").update(token, "utf8").digest();
+
+/**
+ * Compares API tokens after normalizing them to fixed-size cryptographic digests.
+ */
+export const constantTimeTokenEqual = (expectedToken: string, actualToken: string): boolean =>
+  timingSafeEqual(tokenDigest(expectedToken), tokenDigest(actualToken));
+
 /**
  * Creates the API Bearer token authentication hook.
  */
 export const requireApiToken = (apiToken: string) => {
-  const expected = Buffer.from(apiToken, "utf8");
-
   return async (request: FastifyRequest, reply: FastifyReply): Promise<void> => {
     const authorization = request.headers.authorization;
     const token = typeof authorization === "string" && authorization.startsWith("Bearer ")
@@ -23,8 +29,7 @@ export const requireApiToken = (apiToken: string) => {
       return;
     }
 
-    const actual = Buffer.from(token, "utf8");
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    if (!constantTimeTokenEqual(apiToken, token)) {
       unauthorized(reply);
     }
   };
