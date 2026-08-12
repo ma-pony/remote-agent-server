@@ -139,6 +139,12 @@ class RuntimeShutdownFailure extends Error {
   }
 }
 
+type RuntimeShutdownFailureSnapshot = Readonly<{
+  stage: RuntimeShutdownFailure["stage"];
+  sessionId: string;
+  message: string;
+}>;
+
 const toolContent = (event: Extract<AcpRuntimeEvent, { type: "tool_call" }>): Record<string, unknown> => {
   const content: Record<string, unknown> = {};
   for (const key of [
@@ -407,8 +413,12 @@ export class AcpxAgentRuntime implements AgentRuntime {
   /**
    * Exposes an immutable snapshot, including failures recorded after the first bounded shutdown attempt.
    */
-  get shutdownFailureState(): readonly RuntimeShutdownFailure[] {
-    return Object.freeze([...this.shutdownFailures]);
+  get shutdownFailureState(): readonly RuntimeShutdownFailureSnapshot[] {
+    return Object.freeze(this.shutdownFailures.map(({ stage, sessionId, message }) => Object.freeze({
+      stage,
+      sessionId,
+      message
+    })));
   }
 
   private async performShutdown(): Promise<void> {

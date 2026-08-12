@@ -651,6 +651,56 @@ describe("AcpxAgentRuntime", () => {
     consoleError.mockRestore();
   });
 
+  it("shutdown failure 快照不能被调用方修改并污染内部错误", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const root = makeRoot();
+      const closeError = new Error("close rejected");
+      const acp = runtimeStub();
+      acp.close.mockRejectedValueOnce(closeError);
+      acpxMocks.createAcpRuntime.mockReturnValue(acp);
+      const runtime = new AcpxAgentRuntime(makeConfig(root));
+      await runtime.ensureSession(sessionInput(root));
+
+      await expect(runtime.shutdown()).rejects.toBeInstanceOf(AggregateError);
+      const snapshot = runtime.shutdownFailureState as unknown as Array<Record<string, unknown>>;
+      const exposedCause = snapshot[0]?.cause;
+
+      const entryMutationAccepted = Reflect.set(snapshot[0]!, "message", "tampered failure");
+      const causeMutationAccepted = exposedCause instanceof Object
+        ? Reflect.set(exposedCause, "message", "tampered cause")
+        : false;
+      let arrayMutationError: unknown;
+      try {
+        snapshot.push({ stage: "tampered", sessionId: "tampered", message: "tampered failure" });
+      } catch (error) {
+        arrayMutationError = error;
+      }
+
+      const nextSnapshot = runtime.shutdownFailureState;
+      const repeatedError = await runtime.shutdown().catch((error: unknown) => error as AggregateError);
+      const repeatedFailure = repeatedError.errors[0] as Error & { cause?: unknown };
+      const expectedMessage = `Runtime shutdown handle_close failed for Session ${SESSION_ID}`;
+
+      expect(nextSnapshot).toEqual([{ stage: "handle_close", sessionId: SESSION_ID, message: expectedMessage }]);
+      expect(nextSnapshot[0]).not.toBe(snapshot[0]);
+      expect(Object.isFrozen(snapshot)).toBe(true);
+      expect(Object.isFrozen(snapshot[0])).toBe(true);
+      expect(snapshot[0]).not.toHaveProperty("cause");
+      expect(entryMutationAccepted).toBe(false);
+      expect(causeMutationAccepted).toBe(false);
+      expect(arrayMutationError).toBeInstanceOf(TypeError);
+      expect(repeatedError.message).toBe(
+        "Runtime shutdown timed out or failed; process exit is required to release any remaining provider resources"
+      );
+      expect(repeatedFailure.message).toBe(expectedMessage);
+      expect(repeatedFailure.cause).toBe(closeError);
+      expect(closeError.message).toBe("close rejected");
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   it("operation timeout 后保留 target，晚返回 Handle close reject 对重复 shutdown 可见", async () => {
     vi.useFakeTimers();
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
