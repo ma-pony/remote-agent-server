@@ -8,11 +8,50 @@ export type Agent = {
   name: string;
   provider: Provider;
   enabled: boolean;
+  projectEnvironmentId: string | null;
   createdAt: string;
   updatedAt: string;
 };
 
 export type DoctorResult = { ok: boolean; message: string; details: string[] };
+export type AgentDoctorResult = {
+  provider: DoctorResult;
+  projectEnvironment: { ok: boolean; message: string; revisionId: string | null };
+};
+
+export type EnvironmentRepository = {
+  id: string;
+  projectEnvironmentId: string;
+  name: string;
+  gitUrl: string;
+  prepareCommand: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProjectEnvironmentRevision = {
+  id: string;
+  projectEnvironmentId: string;
+  status: "preparing" | "ready" | "failed";
+  workspacePath: string | null;
+  inputFingerprint: string;
+  failureStage: string | null;
+  error: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+};
+
+export type ProjectEnvironment = {
+  id: string;
+  name: string;
+  currentRevisionId: string | null;
+  lastCheckedAt: string | null;
+  repositories: EnvironmentRepository[];
+  currentRevision: ProjectEnvironmentRevision | null;
+  latestRevision: ProjectEnvironmentRevision | null;
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type Session = {
   id: string;
@@ -21,6 +60,7 @@ export type Session = {
   status: "idle" | "running";
   providerSessionId: string | null;
   workspacePath: string;
+  projectEnvironmentRevisionId: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -68,6 +108,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   headers.set("authorization", `Bearer ${token}`);
   const response = await fetch(`/api${path}`, { ...init, headers });
   if (!response.ok) throw await response.json();
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 

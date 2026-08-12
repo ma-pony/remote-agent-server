@@ -1,14 +1,16 @@
 import { FormEvent, useEffect, useState } from "react";
 
 import { AgentsPage } from "./pages/agents-page.js";
+import { ProjectEnvironmentsPage } from "./pages/project-environments-page.js";
 import { SessionPage } from "./pages/session-page.js";
 import { SessionsPage } from "./pages/sessions-page.js";
 
-type Route = { page: "agents" } | { page: "sessions" } | { page: "session"; id: string };
+type Route = { page: "agents" } | { page: "project-environments" } | { page: "sessions" } | { page: "session"; id: string };
 
 const currentRoute = (): Route => {
   const match = window.location.pathname.match(/^\/sessions\/([^/]+)$/);
   if (match?.[1] !== undefined) return { page: "session", id: decodeURIComponent(match[1]) };
+  if (window.location.pathname === "/project-environments") return { page: "project-environments" };
   if (window.location.pathname === "/sessions") return { page: "sessions" };
   return { page: "agents" };
 };
@@ -40,7 +42,8 @@ export const App = () => {
         <button className="wordmark" onClick={() => navigate("/agents")}>REMOTE / AGENT</button>
         <nav aria-label="主导航">
           <button aria-current={route.page === "agents" ? "page" : undefined} onClick={() => navigate("/agents")}>Agent</button>
-          <button aria-current={route.page !== "agents" ? "page" : undefined} onClick={() => navigate("/sessions")}>Session</button>
+          <button aria-current={route.page === "project-environments" ? "page" : undefined} onClick={() => navigate("/project-environments")}>项目环境</button>
+          <button aria-current={route.page === "sessions" || route.page === "session" ? "page" : undefined} onClick={() => navigate("/sessions")}>Session</button>
         </nav>
         <button className="quiet-button" onClick={() => {
           sessionStorage.removeItem("apiToken");
@@ -49,6 +52,7 @@ export const App = () => {
       </header>
       <main>
         {route.page === "agents" ? <AgentsPage /> : null}
+        {route.page === "project-environments" ? <ProjectEnvironmentsPage /> : null}
         {route.page === "sessions" ? <SessionsPage navigate={navigate} /> : null}
         {route.page === "session" ? <SessionPage sessionId={route.id} /> : null}
       </main>

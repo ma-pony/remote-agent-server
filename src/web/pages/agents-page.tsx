@@ -1,6 +1,13 @@
 import { FormEvent, useEffect, useState } from "react";
 
-import { api, errorMessage, type Agent, type DoctorResult, type Provider } from "../api.js";
+import {
+  api,
+  errorMessage,
+  type Agent,
+  type AgentDoctorResult,
+  type ProjectEnvironment,
+  type Provider
+} from "../api.js";
 
 const providerNames: Record<Provider, string> = {
   claude_code: "Claude Code",
@@ -11,14 +18,23 @@ export const AgentsPage = () => {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<Provider>("codex");
-  const [doctorResults, setDoctorResults] = useState<Record<string, DoctorResult>>({});
+  const [projectEnvironments, setProjectEnvironments] = useState<ProjectEnvironment[]>([]);
+  const [projectEnvironmentId, setProjectEnvironmentId] = useState("");
+  const [doctorResults, setDoctorResults] = useState<Record<string, AgentDoctorResult>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
-    void api<Agent[]>("/agents", { signal: controller.signal })
-      .then((items) => setAgents(items))
+    void Promise.all([
+      api<Agent[]>("/agents", { signal: controller.signal }),
+      api<ProjectEnvironment[]>("/project-environments", { signal: controller.signal })
+    ])
+      .then(([items, environments]) => {
+        setAgents(items);
+        setProjectEnvironments(environments);
+        setProjectEnvironmentId(environments.find((item) => item.currentRevisionId !== null)?.id ?? "");
+      })
       .catch((reason: unknown) => {
         if (!controller.signal.aborted) setError(errorMessage(reason));
       });
@@ -27,13 +43,13 @@ export const AgentsPage = () => {
 
   const create = async (event: FormEvent) => {
     event.preventDefault();
-    if (name.trim() === "") return;
+    if (name.trim() === "" || projectEnvironmentId === "") return;
     setBusy("create");
     setError("");
     try {
       const created = await api<Agent>("/agents", {
         method: "POST",
-        body: JSON.stringify({ name: name.trim(), provider })
+        body: JSON.stringify({ name: name.trim(), provider, projectEnvironmentId })
       });
       setAgents((current) => [...current, created]);
       setName("");
@@ -64,12 +80,15 @@ export const AgentsPage = () => {
     setBusy(`doctor-${agentId}`);
     setError("");
     try {
-      const result = await api<DoctorResult>(`/agents/${agentId}/doctor`);
+      const result = await api<AgentDoctorResult>(`/agents/${agentId}/doctor`);
       setDoctorResults((current) => ({ ...current, [agentId]: result }));
     } catch (reason) {
       setDoctorResults((current) => ({
         ...current,
-        [agentId]: { ok: false, message: errorMessage(reason), details: [] }
+        [agentId]: {
+          provider: { ok: false, message: errorMessage(reason), details: [] },
+          projectEnvironment: { ok: false, message: "项目环境检查失败", revisionId: null }
+        }
       }));
     } finally {
       setBusy(null);
@@ -85,12 +104,16 @@ export const AgentsPage = () => {
 
       <section className="control-strip" aria-labelledby="create-agent-title">
         <h2 id="create-agent-title">新建 Agent</h2>
-        <form className="inline-form" onSubmit={create}>
+        <form className="inline-form agent-create-form" onSubmit={create}>
           <div><label htmlFor="agent-name">Agent 名称</label><input id="agent-name" value={name} onChange={(event) => setName(event.target.value)} /></div>
           <div><label htmlFor="provider">Provider</label><select id="provider" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>
             {Object.entries(providerNames).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select></div>
-          <button className="primary-button" type="submit" disabled={busy === "create"}>{busy === "create" ? "创建中…" : "创建 Agent"}</button>
+          <div><label htmlFor="agent-environment">项目环境</label><select id="agent-environment" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}>
+            <option value="" disabled>请选择可用环境</option>
+            {projectEnvironments.filter((item) => item.currentRevisionId !== null).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+          </select></div>
+          <button className="primary-button" type="submit" disabled={busy === "create" || projectEnvironmentId === ""}>{busy === "create" ? "创建中…" : "创建 Agent"}</button>
         </form>
       </section>
 
@@ -108,10 +131,10 @@ export const AgentsPage = () => {
               <button onClick={() => void doctor(agent.id)} disabled={busy === `doctor-${agent.id}`}>运行检查</button>
               <button onClick={() => void toggle(agent)} disabled={busy === agent.id}>{agent.enabled ? "停用" : "启用"}</button>
             </div>
-            {result !== undefined ? <div className={`doctor-result ${result.ok ? "passed" : "failed"}`} aria-live="polite">
-              <strong>{result.ok ? "可用" : result.message}</strong>
-              {result.ok && result.message !== "ready" ? <span>{result.message}</span> : null}
-              {result.details.length > 0 ? <details><summary>检查详情</summary><pre>{result.details.join("\n")}</pre></details> : null}
+            {result !== undefined ? <div className={`doctor-result ${result.provider.ok && result.projectEnvironment.ok ? "passed" : "failed"}`} aria-live="polite">
+              <strong>{result.provider.ok ? "可用" : result.provider.message}</strong>
+              <span>项目环境：{result.projectEnvironment.ok ? "可用" : result.projectEnvironment.message}</span>
+              {result.provider.details.length > 0 ? <details><summary>检查详情</summary><pre>{result.provider.details.join("\n")}</pre></details> : null}
             </div> : null}
           </article>;
         })}

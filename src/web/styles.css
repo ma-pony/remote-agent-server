@@ -38,6 +38,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .control-strip { margin: 28px 0 8px; padding: 22px; background: #dde1d8; border: 1px solid #b8beb4; box-shadow: 5px 5px 0 #c4c9bf; }
 .control-strip h2 { margin: 0 0 16px; font-size: 14px; text-transform: uppercase; letter-spacing: .06em; }
 .inline-form { display: grid; grid-template-columns: minmax(200px, 1.5fr) minmax(170px, 1fr) auto; gap: 14px; align-items: end; }
+.agent-create-form { grid-template-columns: minmax(180px, 1.3fr) minmax(145px, .8fr) minmax(190px, 1fr) auto; }
+.environment-create-form { grid-template-columns: minmax(240px, 1fr) auto; }
 label { display: block; margin-bottom: 6px; color: #4e584e; font-size: 12px; font-weight: 800; letter-spacing: .04em; }
 input, select, textarea { width: 100%; color: var(--ink); background: var(--paper); border: 1px solid #939b91; border-radius: 0; padding: 11px 12px; }
 textarea { resize: vertical; line-height: 1.55; }
@@ -47,6 +49,7 @@ textarea { resize: vertical; line-height: 1.55; }
 .danger-button { color: white; background: var(--danger); border-color: #732219; }
 
 .error-banner { min-height: 24px; margin: 12px 0; color: var(--danger); font-weight: 700; }
+.notice-banner { min-height: 22px; margin: 4px 0 12px; color: #215b2c; font-weight: 700; }
 .load-error { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .load-error button { padding: 7px 11px; color: var(--danger); background: transparent; border: 1px solid currentColor; font-weight: 800; }
 .record-list { display: grid; gap: 10px; }
@@ -73,6 +76,18 @@ textarea { resize: vertical; line-height: 1.55; }
 details summary { cursor: pointer; }
 pre { max-width: 100%; overflow: auto; margin: 10px 0 0; padding: 10px; background: #161b17; color: #dfe6da; font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 12px; white-space: pre-wrap; }
 .empty-state { padding: 48px 24px; color: var(--muted); background: rgba(247, 248, 243, .7); border: 1px dashed #aab1a7; text-align: center; }
+
+.environment-list { display: grid; gap: 18px; }
+.environment-card { background: var(--paper); border: 1px solid var(--line); border-top: 5px solid var(--ink); }
+.environment-card > header { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto; gap: 18px; align-items: center; padding: 20px; border-bottom: 1px solid var(--line); }
+.environment-card h2 { margin: 0 0 5px; font-family: Georgia, "Songti SC", serif; font-size: 24px; }
+.environment-card header p { margin: 0; color: var(--muted); }
+.environment-card header button, .repository-editor button { min-height: 38px; padding: 8px 12px; color: var(--ink); background: transparent; border: 1px solid var(--ink); font-weight: 800; }
+.repository-list { display: grid; }
+.repository-editor { display: grid; grid-template-columns: minmax(140px, .8fr) minmax(220px, 1.4fr) minmax(190px, 1fr) auto auto; gap: 12px; align-items: end; padding: 16px 20px; border-bottom: 1px solid #dde0d8; }
+.repository-new { background: #e5e8df; border-bottom: 0; }
+.repository-editor .danger-link { color: var(--danger); border-color: currentColor; }
+.build-failure { display: flex; gap: 12px; padding: 12px 20px; color: #79291f; background: #f3ddd8; border-bottom: 1px solid #d3a199; }
 
 .session-record { display: grid; grid-template-columns: minmax(200px, 1fr) auto 120px; align-items: center; gap: 22px; padding: 18px 20px; }
 .session-record:hover { transform: translateX(3px); border-color: #7c857a; background: #fff; transition: transform 120ms ease, background-color 120ms ease; }
@@ -113,7 +128,7 @@ pre { max-width: 100%; overflow: auto; margin: 10px 0 0; padding: 10px; backgrou
   .page-frame { width: min(100% - 24px, 1180px); padding-top: 34px; }
   .page-heading { display: block; }
   .page-heading > p { margin-top: 18px; }
-  .inline-form, .agent-record, .session-record { grid-template-columns: 1fr; }
+  .inline-form, .agent-create-form, .agent-record, .session-record, .environment-card > header, .repository-editor { grid-template-columns: 1fr; }
   .record-actions { flex-wrap: wrap; }
   .session-record time { text-align: left; }
   .user-message { width: 92%; }

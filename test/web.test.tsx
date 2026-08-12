@@ -26,6 +26,7 @@ const agent = {
   name: "主力 Codex",
   provider: "codex",
   enabled: true,
+  projectEnvironmentId: "environment-1",
   createdAt: now,
   updatedAt: now
 };
@@ -36,6 +37,7 @@ const session = {
   status: "idle",
   providerSessionId: "provider-session-1",
   workspacePath: "/sessions/session-1/workspace",
+  projectEnvironmentRevisionId: "revision-1",
   createdAt: now,
   updatedAt: now
 };
@@ -82,6 +84,66 @@ afterEach(() => {
 });
 
 describe("最小管理界面", () => {
+  it("项目环境页面创建多项目环境、添加项目并立即检查", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", "/project-environments");
+    const environments: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/api/project-environments" && (init?.method ?? "GET") === "GET") {
+        return jsonResponse(environments);
+      }
+      if (url === "/api/project-environments" && init?.method === "POST") {
+        const created = {
+          id: "environment-1",
+          name: "Grab Manager 研发环境",
+          currentRevisionId: null,
+          lastCheckedAt: null,
+          repositories: [],
+          currentRevision: null,
+          latestRevision: null,
+          createdAt: now,
+          updatedAt: now
+        };
+        environments.push(created);
+        return jsonResponse(created, 201);
+      }
+      if (url === "/api/project-environments/environment-1/repositories" && init?.method === "POST") {
+        const repository = {
+          id: "repository-1",
+          projectEnvironmentId: "environment-1",
+          name: "grab-manager-api",
+          gitUrl: "git@example.test:rcc/grab-manager-api.git",
+          prepareCommand: "bundle install",
+          createdAt: now,
+          updatedAt: now
+        };
+        (environments[0]!.repositories as unknown[]).push(repository);
+        return jsonResponse(repository, 201);
+      }
+      if (url === "/api/project-environments/environment-1/check" && init?.method === "POST") {
+        return jsonResponse({ accepted: true }, 202);
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByText("暂无项目环境")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("项目环境名称"), { target: { value: "Grab Manager 研发环境" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建项目环境" }));
+    expect(await screen.findByRole("heading", { name: "Grab Manager 研发环境" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("项目目录名"), { target: { value: "grab-manager-api" } });
+    fireEvent.change(screen.getByLabelText("Git 地址"), { target: { value: "git@example.test:rcc/grab-manager-api.git" } });
+    fireEvent.change(screen.getByLabelText("环境准备命令"), { target: { value: "bundle install" } });
+    fireEvent.click(screen.getByRole("button", { name: "添加项目" }));
+    expect(await screen.findByDisplayValue("git@example.test:rcc/grab-manager-api.git")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "立即检查" }));
+    expect(await screen.findByText("检查请求已提交")).toBeInTheDocument();
+  });
+
   it("Fastify 对前端深层路由回退 index.html，但不把 API 404 伪装成页面", async () => {
     const webRoot = mkdtempSync(join(tmpdir(), "remote-agent-web-"));
     mkdirSync(join(webRoot, "assets"));
@@ -154,16 +216,26 @@ describe("最小管理界面", () => {
       const headers = new Headers(init?.headers);
       expect(headers.get("authorization")).toBe("Bearer secret-token");
       if (url === "/api/agents" && (init?.method ?? "GET") === "GET") return jsonResponse(agents);
+      if (url === "/api/project-environments") return jsonResponse([{
+        id: "environment-1", name: "默认项目环境", currentRevisionId: "revision-1",
+        repositories: [], currentRevision: { id: "revision-1", status: "ready" }, latestRevision: null
+      }]);
       if (url === "/api/agents" && init?.method === "POST") {
-        const body = JSON.parse(String(init.body)) as { name: string; provider: string };
+        const body = JSON.parse(String(init.body)) as { name: string; provider: string; projectEnvironmentId: string };
         const created = { ...agent, id: `agent-${agents.length + 1}`, ...body };
         agents.push(created);
         return jsonResponse(created, 201);
       }
       if (url.endsWith("/doctor")) {
         return url.includes("agent-1")
-          ? jsonResponse({ ok: true, message: "ready", details: [] })
-          : jsonResponse({ ok: false, message: "未登录 Provider", details: ["请先登录"] });
+          ? jsonResponse({
+            provider: { ok: true, message: "ready", details: [] },
+            projectEnvironment: { ok: true, message: "Project environment is ready", revisionId: "revision-1" }
+          })
+          : jsonResponse({
+            provider: { ok: false, message: "未登录 Provider", details: ["请先登录"] },
+            projectEnvironment: { ok: true, message: "Project environment is ready", revisionId: "revision-1" }
+          });
       }
       if (url.startsWith("/api/agents/") && init?.method === "PATCH") {
         const id = url.split("/").at(-1);
