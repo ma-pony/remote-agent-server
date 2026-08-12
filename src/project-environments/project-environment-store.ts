@@ -251,6 +251,16 @@ export class ProjectEnvironmentStore {
     return rows.map(toRevision);
   }
 
+  markChecked(projectEnvironmentId: string): void {
+    const now = new Date().toISOString();
+    this.db.prepare("UPDATE project_environments SET last_checked_at = ?, updated_at = ? WHERE id = ?")
+      .run(now, now, projectEnvironmentId);
+  }
+
+  clearRevisionWorkspacePath(id: string): void {
+    this.db.prepare("UPDATE project_environment_revisions SET workspace_path = NULL WHERE id = ?").run(id);
+  }
+
   private environmentRow(id: string): EnvironmentRow | undefined {
     return this.db.prepare("SELECT * FROM project_environments WHERE id = ?").get(id) as EnvironmentRow | undefined;
   }
