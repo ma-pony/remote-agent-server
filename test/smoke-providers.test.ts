@@ -4,6 +4,7 @@ import {
   assertEventHistory,
   createSmokeApi,
   ensureAgent,
+  ensureReadyProjectEnvironment,
   main,
   readSmokeConfig,
   waitForTerminalRun
@@ -64,7 +65,13 @@ describe("provider smoke configuration", () => {
       ])
     };
 
-    await expect(ensureAgent(api, "codex")).rejects.toThrow("agent-1, agent-2");
+    await expect(ensureAgent(api, "codex", "environment-1")).rejects.toThrow("agent-1, agent-2");
+  });
+
+  it("requires a ready project environment before preparing Agents", async () => {
+    const api = { request: vi.fn(async () => [{ id: "environment-1", name: "未准备", currentRevisionId: null }]) };
+
+    await expect(ensureReadyProjectEnvironment(api)).rejects.toThrow("ready project environment");
   });
 
   it("prepare only ensures Agents and does not create Sessions or Runs", async () => {
@@ -72,14 +79,18 @@ describe("provider smoke configuration", () => {
       id: `agent-${provider}`,
       name: `remote-agent-smoke-${provider}`,
       provider,
-      enabled: true
+      enabled: true,
+      projectEnvironmentId: "environment-1"
     }));
-    const api = { request: vi.fn(async () => agents) };
+    const api = { request: vi.fn(async (path: string) => path === "/project-environments"
+      ? [{ id: "environment-1", name: "默认项目环境", currentRevisionId: "revision-1" }]
+      : agents) };
 
     await main({ API_TOKEN: "test-token" }, { args: ["--prepare"], api });
 
-    expect(api.request).toHaveBeenCalledTimes(3);
-    expect(api.request.mock.calls.every(([path]) => path === "/agents")).toBe(true);
+    expect(api.request).toHaveBeenCalledTimes(4);
+    expect(api.request.mock.calls[0]?.[0]).toBe("/project-environments");
+    expect(api.request.mock.calls.slice(1).every(([path]) => path === "/agents")).toBe(true);
   });
 
   it("fails immediately when a Run endpoint returns an unknown status", async () => {

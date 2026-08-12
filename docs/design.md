@@ -16,7 +16,7 @@ Remote Agent Server 是部署在 Agent 服务器上的远程执行服务。调�
 - 持久化 Agent 回复、工具调用、运行状态和错误。
 - 通过 SSE 实时查看执行过程，断开后可以重新读取已有记录。
 - 不同 Session 并行执行，同一 Session 串行执行。
-- 每个 Session 从完整环境模板创建独立的 Btrfs 可写快照。
+- Agent 绑定系统维护的多项目环境；Session 从当时的不可变环境版本创建独立 APFS/Btrfs 可写快照。
 - 在具有桌面环境的服务器上运行有头浏览器。
 - 从具体 Agent 的目录加载原生 Skills 和简单 Memory 文件。
 
@@ -117,7 +117,7 @@ created_at
 
 ## 5. 执行流程
 
-1. 用户选择 Agent 创建 Session，服务从基础 Workspace 模板创建 Btrfs 可写快照。
+1. 用户选择 Agent 创建 Session，服务从 Agent 当前项目环境版本创建 APFS/Btrfs 可写快照。
 2. 用户发送消息，服务创建 `queued` Run。
 3. Session 空闲且未超过全局并发数时，Run 进入 `running`。
 4. 服务将 Skills、Memory 和 Provider 配置放入已经准备好的 Session Workspace。
@@ -137,33 +137,27 @@ MAX_CONCURRENT_RUNS=4
 
 如果 ACP Session 恢复失败，本次 Run 进入 `failed`。用户可以明确重置 Agent 上下文后继续使用原 Workspace，服务不得静默创建新上下文并伪装成成功接续。
 
-## 6. Workspace 和多仓库
+## 6. 项目环境、Workspace 和多仓库
 
-服务器维护一个长期基础模板，模板中包含第一版允许使用的全部 Git 项目及其已安装环境：
+管理员在“项目环境”页面登记一个或多个 Git 项目及可选准备命令。系统首次构建时 clone 项目并安装依赖，之后每三小时检查远程默认分支；只有构建全部成功才发布新的不可变环境版本。
+
+Agent 绑定项目环境。创建 Session 时，服务固化 Agent 当时的环境版本，并通过 APFS Clone 或 Btrfs Snapshot 生成独立 Workspace：
 
 ```text
-/srv/remote-agent/template/workspace/
+/srv/remote-agent/environments/<environment-id>/revisions/<revision-id>/workspace/
   grab-manager-api/
   grab-manager-web/
   bid-spiders/
-```
 
-基础模板是一个 Btrfs Subvolume，内部不再嵌套其他 Subvolume。项目代码、依赖、本地配置和基础运行环境由管理员预先准备好；第一版不提供模板管理界面。
-
-创建 Session 时，Remote Agent Server 直接为模板创建可写快照：
-
-```text
 /srv/remote-agent/sessions/<session-id>/
-  workspace/     # 基础模板的 Btrfs 可写快照
+  workspace/     # 从不可变项目环境版本创建的独立副本
   runtime/       # ACP Provider 运行目录
   browser/       # 独立浏览器 Profile
 ```
 
-Agent 启动时，所有项目和依赖环境已经可用。Agent 自行判断任务涉及哪些项目，但不负责克隆仓库、创建 Git worktree 或安装基础依赖。
+Agent 启动时项目和基础依赖已经可用，自行判断任务涉及哪些项目。Session 创建不 clone 仓库、不安装基础依赖，也不创建 Git worktree。
 
-不同 Session 的 Workspace 初始共享底层数据块，修改后由 Btrfs Copy-on-Write 保存为各自的数据。同一 Session 后续 Run 始终复用自己的快照。
-
-管理员更新基础模板后，只影响之后创建的 Session；已经存在的 Session 不变化。第一版不提供模板版本、环境池、仓库 MCP 和 Git worktree 管理。
+项目环境发布新版本只影响之后创建的 Session；已有 Session 永远复用自己的 Workspace。第一版不提供环境池、仓库 MCP、任意分支选择或自动升级 Session。
 
 ## 7. 有头浏览器
 
@@ -245,6 +239,6 @@ Session 的 Workspace 和 Provider Session ID 在 Run 失败后仍然保留。
 3. 页面能够实时展示回复、工具调用、状态和错误。
 4. SSE 断开后能够继续读取未展示的事件。
 5. 两个不同 Session 能够并行执行，同一 Session 不会并行执行两个 Run。
-6. 新 Session 能够直接使用模板中的两个以上项目，并在后续 Run 中保留自己的代码和环境变更。
+6. 新 Session 能够直接使用项目环境中的两个以上项目，并在后续 Run 中保留自己的代码和环境变更。
 7. Agent 能够在独立浏览器目录下完成一次有头浏览器操作。
 8. 服务重启后不会把中断的 Run 错误标记为成功，也不会自动重放。

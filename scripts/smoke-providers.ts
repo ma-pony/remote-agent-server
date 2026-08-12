@@ -6,9 +6,15 @@ export type Agent = {
   name: string;
   provider: Provider;
   enabled: boolean;
+  projectEnvironmentId: string | null;
 };
 
 type Doctor = { ok: boolean; message: string; details: string[] };
+type AgentDoctor = {
+  provider: Doctor;
+  projectEnvironment: { ok: boolean; message: string; revisionId: string | null };
+};
+type ProjectEnvironment = { id: string; name: string; currentRevisionId: string | null };
 type Session = { id: string };
 type Run = { id: string; status: string; result: string | null; error: string | null };
 type RunEvent = { id: string; seq: number; type: "message" | "tool" | "status" | "error" };
@@ -145,7 +151,11 @@ const logTrace = (trace: SmokeTrace, outcome: "prepared" | "succeeded" | "failed
 const smokeAgentName = (provider: Provider): string => `remote-agent-smoke-${provider}`;
 
 /** Finds exactly one durable smoke Agent, creating it only when none exists. */
-export const ensureAgent = async (api: SmokeApi, provider: Provider): Promise<Agent> => {
+export const ensureAgent = async (
+  api: SmokeApi,
+  provider: Provider,
+  projectEnvironmentId: string
+): Promise<Agent> => {
   const agents = await api.request<Agent[]>("/agents");
   const matches = agents.filter((agent) => agent.name === smokeAgentName(provider) && agent.provider === provider);
   if (matches.length > 1) {
@@ -153,15 +163,36 @@ export const ensureAgent = async (api: SmokeApi, provider: Provider): Promise<Ag
   }
   const existing = matches[0];
   if (existing === undefined) {
-    return api.request<Agent>("/agents", "POST", { name: smokeAgentName(provider), provider });
+    return api.request<Agent>("/agents", "POST", {
+      name: smokeAgentName(provider),
+      provider,
+      projectEnvironmentId
+    });
   }
-  return existing.enabled ? existing : api.request<Agent>(`/agents/${existing.id}`, "PATCH", { enabled: true });
+  return existing.enabled && existing.projectEnvironmentId === projectEnvironmentId
+    ? existing
+    : api.request<Agent>(`/agents/${existing.id}`, "PATCH", { enabled: true, projectEnvironmentId });
+};
+
+/** Selects one deterministic ready project environment for the complete smoke. */
+export const ensureReadyProjectEnvironment = async (api: SmokeApi): Promise<ProjectEnvironment> => {
+  const environments = await api.request<ProjectEnvironment[]>("/project-environments");
+  const ready = environments
+    .filter((environment) => environment.currentRevisionId !== null)
+    .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+  if (ready.length === 0) {
+    throw new Error("No ready project environment exists; create and prepare one before Provider smoke");
+  }
+  return ready[0]!;
 };
 
 const assertDoctor = async (api: SmokeApi, agent: Agent): Promise<void> => {
-  const doctor = await api.request<Doctor>(`/agents/${agent.id}/doctor`);
-  if (!doctor.ok) {
-    throw new Error(`Provider doctor failed for ${agent.provider}: ${doctor.message}${doctor.details.length === 0 ? "" : ` (${doctor.details.join("; ")})`}`);
+  const doctor = await api.request<AgentDoctor>(`/agents/${agent.id}/doctor`);
+  if (!doctor.provider.ok) {
+    throw new Error(`Provider doctor failed for ${agent.provider}: ${doctor.provider.message}${doctor.provider.details.length === 0 ? "" : ` (${doctor.provider.details.join("; ")})`}`);
+  }
+  if (!doctor.projectEnvironment.ok) {
+    throw new Error(`Project environment doctor failed for ${agent.provider}: ${doctor.projectEnvironment.message}`);
   }
 };
 
@@ -210,10 +241,15 @@ export const assertEventHistory = async (api: SmokeApi, runId: string): Promise<
   }
 };
 
-const verifyProvider = async (api: SmokeApi, config: SmokeConfig, provider: Provider): Promise<void> => {
+const verifyProvider = async (
+  api: SmokeApi,
+  config: SmokeConfig,
+  provider: Provider,
+  projectEnvironmentId: string
+): Promise<void> => {
   const trace: SmokeTrace = { provider, runIds: [] };
   try {
-    const agent = await ensureAgent(api, provider);
+    const agent = await ensureAgent(api, provider, projectEnvironmentId);
     trace.agentId = agent.id;
     await assertDoctor(api, agent);
     const session = await createSession(api, agent, trace);
@@ -228,10 +264,11 @@ const verifyProvider = async (api: SmokeApi, config: SmokeConfig, provider: Prov
 };
 
 export const prepareProviders = async (api: SmokeApi): Promise<void> => {
+  const environment = await ensureReadyProjectEnvironment(api);
   for (const provider of PROVIDERS) {
     const trace: SmokeTrace = { provider, runIds: [] };
     try {
-      trace.agentId = (await ensureAgent(api, provider)).id;
+      trace.agentId = (await ensureAgent(api, provider, environment.id)).id;
       logTrace(trace, "prepared");
     } catch (error) {
       logTrace(trace, "failed");
@@ -266,9 +303,10 @@ export const main = async (
   const config = readSmokeConfig(env);
   const api = dependencies.api ?? createSmokeApi(config);
   if (args.includes("--prepare")) return prepareProviders(api);
+  const environment = await ensureReadyProjectEnvironment(api);
   for (const provider of PROVIDERS) {
     console.log(`Starting real smoke for ${provider}`);
-    await verifyProvider(api, config, provider);
+    await verifyProvider(api, config, provider, environment.id);
   }
 };
 
