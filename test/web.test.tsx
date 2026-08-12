@@ -144,6 +144,28 @@ describe("最小管理界面", () => {
     expect(await screen.findByText("检查请求已提交")).toBeInTheDocument();
   });
 
+  it("项目环境页面会自动刷新尚未进入准备状态的构建", async () => {
+    vi.useFakeTimers();
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", "/project-environments");
+    let listRequests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/api/project-environments" && (init?.method ?? "GET") === "GET") {
+        listRequests += 1;
+        return jsonResponse([]);
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    }));
+
+    render(<App />);
+    await act(async () => { await Promise.resolve(); });
+    expect(listRequests).toBe(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(listRequests).toBe(2);
+  });
+
   it("Fastify 对前端深层路由回退 index.html，但不把 API 404 伪装成页面", async () => {
     const webRoot = mkdtempSync(join(tmpdir(), "remote-agent-web-"));
     mkdirSync(join(webRoot, "assets"));

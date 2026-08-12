@@ -66,6 +66,11 @@ export class ProjectEnvironmentScheduler implements ProjectEnvironmentCheckSched
     this.stopped = true;
     if (this.timer !== undefined) clearInterval(this.timer);
     this.timer = undefined;
+    const queued = this.queue.splice(0);
+    for (const entry of queued) {
+      this.pending.delete(entry.id);
+      entry.reject(new Error("environment_scheduler_stopped"));
+    }
     await this.dependencies.builder.stop();
     await this.draining;
   }

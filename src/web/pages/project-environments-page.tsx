@@ -34,9 +34,12 @@ export const ProjectEnvironmentsPage = () => {
   }, [load]);
 
   useEffect(() => {
-    if (!environments.some((item) => item.latestRevision?.status === "preparing")) return;
-    const timer = setInterval(() => { void load().catch((reason: unknown) => setError(errorMessage(reason))); }, 2_000);
-    return () => clearInterval(timer);
+    const preparing = environments.some((item) => item.latestRevision?.status === "preparing");
+    const timer = setTimeout(
+      () => { void load().catch((reason: unknown) => setError(errorMessage(reason))); },
+      preparing ? 2_000 : 5_000
+    );
+    return () => clearTimeout(timer);
   }, [environments, load]);
 
   const create = async (event: FormEvent) => {

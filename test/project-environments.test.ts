@@ -293,6 +293,38 @@ describe("ProjectEnvironmentScheduler", () => {
     await scheduler.stop();
     db.close();
   });
+
+  it("停止时取消排队请求且不再启动新的环境构建", async () => {
+    const { db, store } = createBuilderFixture();
+    const first = store.create({ name: "环境一" });
+    const second = store.create({ name: "环境二" });
+    const started: string[] = [];
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const scheduler = new ProjectEnvironmentScheduler({
+      store,
+      builder: {
+        checkAndBuild: async (id) => {
+          started.push(id);
+          if (id === first.id) await firstBlocked;
+          return { outcome: "unchanged" as const };
+        },
+        stop: async () => { releaseFirst(); }
+      },
+      intervalMs: 3 * 60 * 60 * 1000
+    });
+
+    const firstRequest = scheduler.requestCheck(first.id);
+    const queuedRequest = scheduler.requestCheck(second.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const stopped = scheduler.stop();
+
+    await expect(queuedRequest).rejects.toThrow("environment_scheduler_stopped");
+    await firstRequest;
+    await stopped;
+    expect(started).toEqual([first.id]);
+    db.close();
+  });
 });
 
 describe("Project environment API", () => {
