@@ -10,6 +10,14 @@ import { AgentManager } from "./agents/agent-manager.js";
 import { requireApiToken } from "./auth.js";
 import type { AppConfig } from "./config.js";
 import { EventStore } from "./events/event-store.js";
+import { ProjectEnvironmentBuilder } from "./project-environments/project-environment-builder.js";
+import { SystemProjectEnvironmentCommands } from "./project-environments/project-environment-commands.js";
+import { registerProjectEnvironmentRoutes } from "./project-environments/project-environment-routes.js";
+import {
+  ProjectEnvironmentScheduler,
+  type ProjectEnvironmentCheckScheduler
+} from "./project-environments/project-environment-scheduler.js";
+import { ProjectEnvironmentStore } from "./project-environments/project-environment-store.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { SkillProjector } from "./runtime/skill-projector.js";
@@ -31,6 +39,8 @@ export type AppDependencies = {
   runRepository?: RunRepository;
   eventStore?: EventStore;
   skillProjector?: SkillProjector;
+  projectEnvironmentStore?: ProjectEnvironmentStore;
+  projectEnvironmentScheduler?: ProjectEnvironmentCheckScheduler;
   webRoot?: string;
 };
 
@@ -60,6 +70,18 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const runRepository = deps.runRepository ?? new RunRepository({ db: deps.db });
   const eventStore = deps.eventStore ?? new EventStore({ db: deps.db });
   const skillProjector = deps.skillProjector ?? new SkillProjector(deps.config.dataDir);
+  const projectEnvironmentStore = deps.projectEnvironmentStore ?? new ProjectEnvironmentStore({ db: deps.db });
+  const projectEnvironmentScheduler = deps.projectEnvironmentScheduler ?? new ProjectEnvironmentScheduler({
+    store: projectEnvironmentStore,
+    builder: new ProjectEnvironmentBuilder({
+      store: projectEnvironmentStore,
+      workspaceManager,
+      commands: new SystemProjectEnvironmentCommands(),
+      projectEnvironmentsRoot: deps.config.projectEnvironmentsRoot ?? "/srv/remote-agent/environments",
+      prepareTimeoutMs: deps.config.projectPrepareTimeoutMs ?? 30 * 60 * 1000
+    }),
+    intervalMs: deps.config.projectEnvironmentCheckIntervalMs ?? 3 * 60 * 60 * 1000
+  });
   const executor = new RunExecutor({ runtime, skillProjector, runRepository, eventStore, sessionManager });
   const scheduler = new RunScheduler({
     runRepository,
@@ -70,6 +92,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   app.get("/api/health", () => ({ ok: true }));
   app.register((api) => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
+    registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager);
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
@@ -105,6 +128,11 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
       failures.push(error);
     }
     try {
+      await projectEnvironmentScheduler.stop();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
       await runtime.shutdown();
     } catch (error) {
       failures.push(error);
@@ -116,6 +144,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     if (shutdownError !== undefined) throw shutdownError;
   });
   scheduler.start();
+  projectEnvironmentScheduler.start();
 
   return app;
 };

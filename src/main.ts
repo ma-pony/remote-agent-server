@@ -9,11 +9,13 @@ import { buildApp } from "./app.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { migrate, openDatabase } from "./db.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
+import { importLegacyProjectEnvironment } from "./project-environments/import-legacy-project-environment.js";
+import { ProjectEnvironmentStore } from "./project-environments/project-environment-store.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { RunRepository } from "./runs/run-repository.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import { type FileSystemInspector } from "./workspaces/apfs-workspace.js";
-import { type CommandRunner } from "./workspaces/workspace-manager.js";
+import { systemCommandRunner, type CommandRunner } from "./workspaces/workspace-manager.js";
 
 export type StartServerOptions = {
   env?: Record<string, string | undefined>;
@@ -43,6 +45,7 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
   const config = loadConfig(options.env ?? process.env);
   mkdirSync(config.dataDir, { recursive: true });
   mkdirSync(dirname(config.databasePath), { recursive: true });
+  mkdirSync(config.projectEnvironmentsRoot, { recursive: true });
   mkdirSync(config.sessionsRoot, { recursive: true });
   const db = openDatabase(config.databasePath);
   let app: FastifyInstance | undefined;
@@ -58,10 +61,28 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     });
     await workspaceManager.check();
 
+    const projectEnvironmentStore = new ProjectEnvironmentStore({ db });
+    const interruptedRevisions = projectEnvironmentStore.recoverPreparing();
+    for (const revision of interruptedRevisions) {
+      if (revision.workspacePath === null) continue;
+      try {
+        await workspaceManager.removeRevision(revision.workspacePath);
+        projectEnvironmentStore.clearRevisionWorkspacePath(revision.id);
+      } catch (_error) {
+        // The failed revision stays visible so its exact Workspace can be cleaned manually.
+      }
+    }
+    await importLegacyProjectEnvironment({
+      db,
+      store: projectEnvironmentStore,
+      workspaceTemplate: config.workspaceTemplate,
+      commandRunner: options.commandRunner ?? systemCommandRunner
+    });
+
     const runRepository = new RunRepository({ db });
     runRepository.recoverAfterRestart();
     const runtime = options.runtime ?? new AcpxAgentRuntime(config);
-    app = buildApp({ config, db, runtime, workspaceManager, runRepository });
+    app = buildApp({ config, db, runtime, workspaceManager, runRepository, projectEnvironmentStore });
 
     let closing: Promise<void> | undefined;
     let onSignal: (() => void) | undefined;

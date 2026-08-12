@@ -105,6 +105,7 @@ export class ProjectEnvironmentStore {
   }
 
   update(id: string, input: { name: string }): ProjectEnvironment | undefined {
+    this.assertMutable(id);
     const now = new Date().toISOString();
     const result = this.db.prepare("UPDATE project_environments SET name = ?, updated_at = ? WHERE id = ?")
       .run(input.name, now, id);
@@ -122,6 +123,7 @@ export class ProjectEnvironmentStore {
   }
 
   addRepository(projectEnvironmentId: string, input: CreateEnvironmentRepositoryInput): EnvironmentRepository {
+    this.assertMutable(projectEnvironmentId);
     const id = randomUUID();
     const now = new Date().toISOString();
     this.db.prepare(`
@@ -137,6 +139,7 @@ export class ProjectEnvironmentStore {
     id: string,
     input: Partial<CreateEnvironmentRepositoryInput>
   ): EnvironmentRepository | undefined {
+    this.assertMutable(projectEnvironmentId);
     const existing = this.repositoryRow(id);
     if (existing === undefined || existing.project_environment_id !== projectEnvironmentId) return undefined;
     const now = new Date().toISOString();
@@ -156,6 +159,7 @@ export class ProjectEnvironmentStore {
   }
 
   removeRepository(projectEnvironmentId: string, id: string): boolean {
+    this.assertMutable(projectEnvironmentId);
     return this.db.prepare("DELETE FROM environment_repositories WHERE id = ? AND project_environment_id = ?")
       .run(id, projectEnvironmentId).changes === 1;
   }
@@ -259,6 +263,14 @@ export class ProjectEnvironmentStore {
 
   clearRevisionWorkspacePath(id: string): void {
     this.db.prepare("UPDATE project_environment_revisions SET workspace_path = NULL WHERE id = ?").run(id);
+  }
+
+  private assertMutable(projectEnvironmentId: string): void {
+    const preparing = this.db.prepare(`
+      SELECT 1 FROM project_environment_revisions
+      WHERE project_environment_id = ? AND status = 'preparing'
+    `).get(projectEnvironmentId);
+    if (preparing !== undefined) throw new Error("environment_busy");
   }
 
   private environmentRow(id: string): EnvironmentRow | undefined {

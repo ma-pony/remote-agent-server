@@ -380,6 +380,7 @@ describe("Server startup and shutdown", () => {
       DATA_DIR: join(root, "data"),
       DATABASE_PATH: join(root, "server.sqlite3"),
       WORKSPACE_TEMPLATE: join(root, "template"),
+      PROJECT_ENVIRONMENTS_ROOT: join(root, "environments"),
       SESSIONS_ROOT: join(root, "sessions"),
       MAX_CONCURRENT_RUNS: "1"
     },

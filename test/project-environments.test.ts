@@ -4,11 +4,13 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { buildApp } from "../src/app.js";
 import { ProjectEnvironmentBuilder } from "../src/project-environments/project-environment-builder.js";
+import { ProjectEnvironmentScheduler } from "../src/project-environments/project-environment-scheduler.js";
 import { ProjectEnvironmentStore } from "../src/project-environments/project-environment-store.js";
 import type { ProjectEnvironmentCommands } from "../src/project-environments/project-environment-commands.js";
 import type { WorkspaceManager } from "../src/workspaces/workspace-manager.js";
-import { createTestDatabase } from "./helpers.js";
+import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const tempDirectories: string[] = [];
 
@@ -225,5 +227,152 @@ describe("ProjectEnvironmentBuilder", () => {
     expect(failed).toMatchObject({ status: "failed", failureStage: "prepare:api", workspacePath: null });
     expect(existsSync(join(root, environment.id, "revisions", failed.id, "workspace"))).toBe(false);
     db.close();
+  });
+});
+
+describe("ProjectEnvironmentScheduler", () => {
+  it("每三小时检查所有项目环境并在停止时清理定时器", async () => {
+    const { db, store } = createBuilderFixture();
+    const first = store.create({ name: "环境一" });
+    const second = store.create({ name: "环境二" });
+    const checked: string[] = [];
+    const scheduler = new ProjectEnvironmentScheduler({
+      store,
+      builder: {
+        checkAndBuild: async (id) => { checked.push(id); return { outcome: "unchanged" as const }; },
+        stop: async () => undefined
+      },
+      intervalMs: 3 * 60 * 60 * 1000
+    });
+    scheduler.start();
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(checked).toEqual([]);
+    await scheduler.runScheduledCheck();
+    expect(new Set(checked)).toEqual(new Set([first.id, second.id]));
+
+    await scheduler.stop();
+    await expect(scheduler.requestCheck(first.id)).rejects.toThrow("environment_scheduler_stopped");
+    db.close();
+  });
+
+  it("合并重复请求并全局串行构建", async () => {
+    const { db, store } = createBuilderFixture();
+    const first = store.create({ name: "环境一" });
+    const second = store.create({ name: "环境二" });
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const scheduler = new ProjectEnvironmentScheduler({
+      store,
+      builder: {
+        checkAndBuild: async (id) => {
+          order.push(`start:${id}`);
+          if (id === first.id) await firstBlocked;
+          order.push(`end:${id}`);
+          return { outcome: "unchanged" as const };
+        },
+        stop: async () => undefined
+      },
+      intervalMs: 3 * 60 * 60 * 1000
+    });
+    scheduler.start();
+
+    const firstRequest = scheduler.requestCheck(first.id);
+    const duplicate = scheduler.requestCheck(first.id);
+    const secondRequest = scheduler.requestCheck(second.id);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual([`start:${first.id}`]);
+    releaseFirst();
+    await Promise.all([firstRequest, duplicate, secondRequest]);
+
+    expect(order).toEqual([
+      `start:${first.id}`,
+      `end:${first.id}`,
+      `start:${second.id}`,
+      `end:${second.id}`
+    ]);
+    await scheduler.stop();
+    db.close();
+  });
+});
+
+describe("Project environment API", () => {
+  it("鉴权后管理多项目环境，并在项目变化时自动请求构建", async () => {
+    const fixture = createBuilderFixture();
+    const checks: string[] = [];
+    const scheduler = {
+      start: () => undefined,
+      stop: async () => undefined,
+      requestCheck: async (id: string) => { checks.push(id); }
+    };
+    const app = buildApp({
+      config: {
+        host: "127.0.0.1",
+        port: 3000,
+        apiToken: "secret-token",
+        dataDir: fixture.root,
+        databasePath: ":memory:",
+        workspaceTemplate: join(fixture.root, "template"),
+        projectEnvironmentsRoot: fixture.root,
+        sessionsRoot: join(fixture.root, "sessions"),
+        maxConcurrentRuns: 1,
+        projectEnvironmentCheckIntervalMs: 10_800_000,
+        projectPrepareTimeoutMs: 1_800_000
+      },
+      db: fixture.db,
+      runtime: createFakeRuntime(),
+      workspaceManager: {
+        check: async () => undefined,
+        create: async () => { throw new Error("unused"); },
+        rollback: async () => undefined,
+        createSession: async () => { throw new Error("unused"); },
+        rollbackSession: async () => undefined,
+        createRevision: async () => undefined,
+        removeRevision: async () => undefined
+      },
+      projectEnvironmentStore: fixture.store,
+      projectEnvironmentScheduler: scheduler
+    });
+    await app.ready();
+    const headers = { authorization: "Bearer secret-token" };
+
+    const unauthorized = await app.inject({ method: "GET", url: "/api/project-environments" });
+    const created = await app.inject({
+      method: "POST", url: "/api/project-environments", headers, payload: { name: "研发环境" }
+    });
+    const environmentId = (created.json() as { id: string }).id;
+    const invalid = await app.inject({
+      method: "POST",
+      url: `/api/project-environments/${environmentId}/repositories`,
+      headers,
+      payload: { name: "../escape", gitUrl: "git:escape" }
+    });
+    const repository = await app.inject({
+      method: "POST",
+      url: `/api/project-environments/${environmentId}/repositories`,
+      headers,
+      payload: { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" }
+    });
+    const accepted = await app.inject({
+      method: "POST", url: `/api/project-environments/${environmentId}/check`, headers
+    });
+    const detail = await app.inject({
+      method: "GET", url: `/api/project-environments/${environmentId}`, headers
+    });
+
+    expect(unauthorized.statusCode).toBe(401);
+    expect(created.statusCode).toBe(201);
+    expect(invalid.statusCode).toBe(400);
+    expect(repository.statusCode).toBe(201);
+    expect(accepted.statusCode).toBe(202);
+    expect(detail.json()).toMatchObject({
+      id: environmentId,
+      name: "研发环境",
+      repositories: [{ name: "api", gitUrl: "git:api", prepareCommand: "bundle install" }]
+    });
+    expect(checks).toEqual([environmentId, environmentId]);
+    await app.close();
+    fixture.db.close();
   });
 });

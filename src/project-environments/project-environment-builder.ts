@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 import type { EnvironmentRepository } from "../domain.js";
 import type { WorkspaceManager } from "../workspaces/workspace-manager.js";
@@ -26,6 +26,11 @@ const fingerprint = (values: ManifestRepository[]): string =>
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
+const isInside = (root: string, path: string): boolean => {
+  const relativePath = relative(resolve(root), resolve(path));
+  return relativePath !== "" && !relativePath.startsWith("..") && !relativePath.startsWith("/");
+};
+
 export type ProjectEnvironmentBuilderDependencies = {
   store: ProjectEnvironmentStore;
   workspaceManager: WorkspaceManager;
@@ -37,6 +42,7 @@ export type ProjectEnvironmentBuilderDependencies = {
 /** Builds immutable project-environment revisions and atomically publishes successful output. */
 export class ProjectEnvironmentBuilder {
   private activeAbortController: AbortController | undefined;
+  private activeBuild: Promise<{ outcome: "unchanged" | "published"; revisionId?: string }> | undefined;
 
   constructor(private readonly dependencies: ProjectEnvironmentBuilderDependencies) {}
 
@@ -44,15 +50,23 @@ export class ProjectEnvironmentBuilder {
     if (this.activeAbortController !== undefined) throw new Error("environment_builder_busy");
     const controller = new AbortController();
     this.activeAbortController = controller;
+    const build = this.build(environmentId, controller.signal);
+    this.activeBuild = build;
     try {
-      return await this.build(environmentId, controller.signal);
+      return await build;
     } finally {
       if (this.activeAbortController === controller) this.activeAbortController = undefined;
+      if (this.activeBuild === build) this.activeBuild = undefined;
     }
   }
 
   async stop(): Promise<void> {
     this.activeAbortController?.abort();
+    try {
+      await this.activeBuild;
+    } catch (_error) {
+      // The active request receives the build failure; shutdown only waits for cleanup.
+    }
   }
 
   private async build(
@@ -161,6 +175,7 @@ export class ProjectEnvironmentBuilder {
     const ready = this.dependencies.store.listRevisions(environmentId).filter((item) => item.status === "ready");
     for (const revision of ready.slice(2)) {
       if (revision.workspacePath === null) continue;
+      if (!isInside(this.dependencies.projectEnvironmentsRoot, revision.workspacePath)) continue;
       await this.dependencies.workspaceManager.removeRevision(revision.workspacePath);
       await rm(dirname(revision.workspacePath), { recursive: true, force: true });
       this.dependencies.store.clearRevisionWorkspacePath(revision.id);
