@@ -106,7 +106,7 @@ describe("BtrfsWorkspaceManager", () => {
     };
     const manager = new BtrfsWorkspaceManager({ workspaceTemplate: template, sessionsRoot, commandRunner: runner });
 
-    const workspace = await manager.create("session-123");
+    const workspace = await manager.createSession("session-123", template);
 
     const sessionDir = join(sessionsRoot, "session-123");
     expect(workspace).toEqual({
@@ -157,7 +157,7 @@ describe("BtrfsWorkspaceManager", () => {
       commandRunner: { run: async () => Promise.reject(new Error("snapshot failed")) }
     });
 
-    await expect(manager.create("session-123")).rejects.toMatchObject({ code: "workspace_create_failed" });
+    await expect(manager.createSession("session-123", join(root, "template"))).rejects.toMatchObject({ code: "workspace_create_failed" });
     expect(existsSync(join(sessionsRoot, "session-123"))).toBe(false);
   });
 });
@@ -233,7 +233,7 @@ describe("ApfsWorkspaceManager", () => {
     };
     const manager = new ApfsWorkspaceManager({ workspaceTemplate: template, sessionsRoot, commandRunner: runner });
 
-    const workspace = await manager.create("session-123");
+    const workspace = await manager.createSession("session-123", template);
 
     expect(calls).toEqual([{ command: "cp", args: ["-cR", template, workspace.workspacePath] }]);
     expect(existsSync(workspace.runtimePath)).toBe(true);
@@ -277,7 +277,7 @@ describe("ApfsWorkspaceManager", () => {
       commandRunner: { run: async () => Promise.reject(new Error("clone failed")) }
     });
 
-    await expect(manager.create("session-123")).rejects.toMatchObject({ code: "workspace_create_failed" });
+    await expect(manager.createSession("session-123", join(root, "template"))).rejects.toMatchObject({ code: "workspace_create_failed" });
     expect(existsSync(join(sessionsRoot, "session-123"))).toBe(false);
   });
 
