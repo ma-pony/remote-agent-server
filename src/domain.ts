@@ -1,4 +1,5 @@
-export type AgentProvider = "claude_code" | "codex" | "hermes";
+export type Provider = "claude_code" | "codex" | "hermes";
+export type AgentProvider = Provider;
 export type SessionStatus = "idle" | "running";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type EventType = "message" | "tool" | "status" | "error";
