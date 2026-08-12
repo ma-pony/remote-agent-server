@@ -96,32 +96,67 @@ sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && pnpm build'
 sudo -u remote-agent btrfs subvolume show /srv/remote-agent/template/workspace
 ```
 
-不要假设 systemd 能加载 login shell 的 PATH。先在**同一个服务用户**下找出实际绝对路径；任何一个命令找不到都先修复安装，不要写 unit：
+不要假设 systemd 能加载 login shell 的 PATH。先在**同一个服务用户**下记录 login shell 首次命中的实际绝对路径；任何一个命令找不到都先修复安装，不要写 unit：
 
 ```bash
-sudo -u remote-agent -H bash -lc '
-  for command in node pnpm npx claude codex hermes; do
-    command -v "$command" || exit 1
-  done
-'
+REMOTE_AGENT_LOGIN_PATH="$(sudo -u remote-agent -H bash -lc 'printf %s "$PATH"')"
+NODE_BIN="$(sudo -u remote-agent -H bash -lc 'command -v node')"
+PNPM_BIN="$(sudo -u remote-agent -H bash -lc 'command -v pnpm')"
+NPX_BIN="$(sudo -u remote-agent -H bash -lc 'command -v npx')"
+CLAUDE_BIN="$(sudo -u remote-agent -H bash -lc 'command -v claude')"
+CODEX_BIN="$(sudo -u remote-agent -H bash -lc 'command -v codex')"
+HERMES_BIN="$(sudo -u remote-agent -H bash -lc 'command -v hermes')"
 
-REMOTE_AGENT_NODE="$(sudo -u remote-agent -H bash -lc 'command -v node')"
-REMOTE_AGENT_PNPM="$(sudo -u remote-agent -H bash -lc 'command -v pnpm')"
-REMOTE_AGENT_PATH="$(sudo -u remote-agent -H bash -lc '
-  for command in node pnpm npx claude codex hermes; do dirname "$(command -v "$command")"; done | sort -u | paste -sd: -
-'):/usr/bin:/bin"
+for bin in "$NODE_BIN" "$PNPM_BIN" "$NPX_BIN" "$CLAUDE_BIN" "$CODEX_BIN" "$HERMES_BIN"; do
+  test -n "$bin" && test -x "$bin" || { echo "Provider command is missing" >&2; exit 1; }
+done
 
-sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
-  "$REMOTE_AGENT_NODE" --version
-sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
-  "$REMOTE_AGENT_PNPM" --version
-sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
-  npx --version && claude --version && codex --version && hermes --version
+# 先保留 login PATH 的目录顺序，再按 node/pnpm/npx/claude/codex/hermes 的原命中顺序补目录。
+# awk 只删除后续重复项，绝不 sort，因此不会改变 command -v 的优先级。
+REMOTE_AGENT_PATH="$({
+  printf '%s\n' "$REMOTE_AGENT_LOGIN_PATH" | tr ':' '\n'
+  dirname "$NODE_BIN"
+  dirname "$PNPM_BIN"
+  dirname "$NPX_BIN"
+  dirname "$CLAUDE_BIN"
+  dirname "$CODEX_BIN"
+  dirname "$HERMES_BIN"
+} | awk 'NF && !seen[$0]++ { printf "%s%s", separator, $0; separator=":" }')"
+test -n "$REMOTE_AGENT_PATH" || { echo "Generated PATH is empty" >&2; exit 1; }
+
+verify_systemd_path_command() {
+  command_name="$1"
+  expected_bin="$2"
+  actual_bin="$(sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
+    /bin/bash -c 'command -v "$1"' bash "$command_name")"
+  test "$actual_bin" = "$expected_bin" || {
+    echo "PATH changes $command_name: expected $expected_bin, got $actual_bin" >&2
+    exit 1
+  }
+}
+
+verify_systemd_path_command node "$NODE_BIN"
+verify_systemd_path_command pnpm "$PNPM_BIN"
+verify_systemd_path_command npx "$NPX_BIN"
+verify_systemd_path_command claude "$CLAUDE_BIN"
+verify_systemd_path_command codex "$CODEX_BIN"
+verify_systemd_path_command hermes "$HERMES_BIN"
+
+# 按 systemd 的绝对 ExecStart 与精确 PATH 验证 pnpm 和实际启动的 Node。
+sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" "$PNPM_BIN" --version
+sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" "$NODE_BIN" --version
+PNPM_NODE_BIN="$(sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
+  "$PNPM_BIN" exec node -p 'process.execPath')"
+test "$PNPM_NODE_BIN" = "$NODE_BIN" || {
+  echo "pnpm would start $PNPM_NODE_BIN, expected $NODE_BIN" >&2
+  exit 1
+}
 ```
 
-以刚验证的变量写入 `/etc/systemd/system/remote-agent.service`；不要使用 `/usr/bin/env pnpm`、不受控 wrapper 或 root：
+将刚验证的**精确** PATH 和绝对 pnpm 路径写入 `/etc/systemd/system/remote-agent.service`；不要使用 `/usr/bin/env pnpm`、不受控 wrapper 或 root：
 
-```ini
+```bash
+sudo tee /etc/systemd/system/remote-agent.service >/dev/null <<EOF
 [Unit]
 Description=Remote Agent Server
 After=network-online.target
@@ -134,8 +169,8 @@ Group=remote-agent
 WorkingDirectory=/opt/remote-agent-server
 EnvironmentFile=/opt/remote-agent-server/.env
 Environment=HOME=/home/remote-agent
-Environment="PATH=<replace-with-REMOTE_AGENT_PATH>"
-ExecStart=<replace-with-REMOTE_AGENT_PNPM> start
+Environment="PATH=$REMOTE_AGENT_PATH"
+ExecStart=$PNPM_BIN start
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=45
@@ -144,9 +179,10 @@ PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
+EOF
 ```
 
-将尖括号替换为上一步输出的实际值，例如 `Environment="PATH=/home/remote-agent/.local/bin:/usr/local/bin:/usr/bin:/bin"` 与 `ExecStart=/home/remote-agent/.local/share/pnpm/pnpm start`。`pnpm start` 在此项目固定执行 `node dist/server/main.js`，因此 `WorkingDirectory` 必须是已执行 `pnpm build` 的发布目录。不要使用 `DynamicUser=yes`：Provider CLI 原生登录状态、Btrfs 权限和 Hermes home 都需要稳定的 `remote-agent` UID/HOME。
+这里 `Environment="PATH=..."` 是 systemd 的 Environment 赋值格式；不要手动改写为排序后的 PATH，也不要留下尖括号占位符。`pnpm start` 在此项目固定执行 `node dist/server/main.js`，因此 `WorkingDirectory` 必须是已执行 `pnpm build` 的发布目录。不要使用 `DynamicUser=yes`：Provider CLI 原生登录状态、Btrfs 权限和 Hermes home 都需要稳定的 `remote-agent` UID/HOME。
 
 启用服务并确认健康接口：
 
