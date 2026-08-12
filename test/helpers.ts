@@ -1,6 +1,16 @@
 import type Database from "better-sqlite3";
 
 import { migrate, openDatabase } from "../src/db.js";
+import type {
+  AgentRuntime,
+  RuntimeDoctor,
+  RuntimeEvent,
+  RuntimeSession,
+  RuntimeSessionInput,
+  RuntimeTurn,
+  RuntimeTurnInput,
+  RuntimeTurnResult
+} from "../src/runtime/agent-runtime.js";
 
 let nextId = 0;
 
@@ -40,3 +50,34 @@ export const createTestDatabase = (): {
     }
   };
 };
+
+export type FakeRuntimeOptions = {
+  events?: RuntimeEvent[];
+  result?: RuntimeTurnResult;
+  providerSessionId?: string | null;
+  doctor?: RuntimeDoctor;
+};
+
+/**
+ * Creates a deterministic in-memory AgentRuntime for API and executor tests.
+ */
+export const createFakeRuntime = (options: FakeRuntimeOptions = {}): AgentRuntime => ({
+  ensureSession: async (_input: RuntimeSessionInput): Promise<RuntimeSession> => ({
+    providerSessionId: options.providerSessionId ?? null
+  }),
+  startTurn: (_input: RuntimeTurnInput): RuntimeTurn => {
+    const events = options.events ?? [];
+    return {
+      events: {
+        async *[Symbol.asyncIterator]() {
+          yield* events;
+        }
+      },
+      result: Promise.resolve(options.result ?? { status: "completed" }),
+      cancel: async (): Promise<void> => undefined
+    };
+  },
+  cancel: async (_sessionId: string): Promise<void> => undefined,
+  reset: async (_input: RuntimeSessionInput): Promise<void> => undefined,
+  doctor: async (): Promise<RuntimeDoctor> => options.doctor ?? ({ ok: true, message: "ready", details: [] })
+});
