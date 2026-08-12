@@ -197,6 +197,7 @@ data/agents/<agent-id>/
 GET  /api/agents
 POST /api/agents
 PATCH /api/agents/:id
+GET  /api/agents/:id/doctor
 
 GET  /api/sessions
 POST /api/sessions
