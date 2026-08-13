@@ -350,6 +350,72 @@ describe("最小管理界面", () => {
     expect(screen.getByText("主力 Codex")).toBeInTheDocument();
   });
 
+  it("在 Agent 卡片中按主机目录管理 Skills", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    const skills = [{
+      id: "skill-review",
+      name: "code-review",
+      description: "Review current changes",
+      source: "codex",
+      enabled: false,
+      available: true
+    }, {
+      id: "skill-browser",
+      name: "browser",
+      description: "Control a browser",
+      source: "plugin",
+      enabled: true,
+      available: true
+    }];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/api/agents") return jsonResponse([agent]);
+      if (url === "/api/project-environments") return jsonResponse([{
+        id: "environment-1", name: "默认项目环境", currentRevisionId: "revision-1",
+        repositories: [], currentRevision: { id: "revision-1", status: "ready" }, latestRevision: null
+      }]);
+      if (url === "/api/agents/agent-1/skills" && (init?.method ?? "GET") === "GET") return jsonResponse(skills);
+      if (url === "/api/agents/agent-1/skills/skill-review" && init?.method === "PUT") {
+        expect(JSON.parse(String(init.body))).toEqual({ enabled: true });
+        skills[0] = { ...skills[0]!, enabled: true };
+        return jsonResponse(skills[0]);
+      }
+      if (url === "/api/agents/agent-1/skills/upload" && init?.method === "POST") {
+        const body = JSON.parse(String(init.body)) as { fileName: string; contentBase64: string };
+        expect(body.fileName).toBe("custom.zip");
+        expect(body.contentBase64).not.toBe("");
+        const uploaded = {
+          id: "upload-custom",
+          name: "custom",
+          description: "Uploaded Skill",
+          source: "upload",
+          enabled: true,
+          available: true
+        };
+        skills.push(uploaded);
+        return jsonResponse(uploaded, 201);
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    }));
+
+    render(<App />);
+    const card = (await screen.findByText("主力 Codex")).closest("article")!;
+    fireEvent.click(within(card).getByRole("button", { name: "Skills" }));
+
+    expect(await within(card).findByText("code-review")).toBeInTheDocument();
+    expect(within(card).getByText("Review current changes")).toBeInTheDocument();
+    const review = within(card).getByRole("checkbox", { name: "启用 code-review" });
+    expect(review).not.toBeChecked();
+    fireEvent.click(review);
+    await waitFor(() => expect(review).toBeChecked());
+    expect(within(card).getByRole("checkbox", { name: "启用 browser" })).toBeChecked();
+
+    const upload = within(card).getByLabelText("上传 Skill ZIP");
+    fireEvent.change(upload, { target: { files: [new File(["zip-content"], "custom.zip", { type: "application/zip" })] } });
+    expect(await within(card).findByText("custom")).toBeInTheDocument();
+    expect(within(card).getByRole("checkbox", { name: "启用 custom" })).toBeChecked();
+  });
+
   it("Session 列表可创建 Session 并进入详情", async () => {
     sessionStorage.setItem("apiToken", "secret-token");
     window.history.replaceState({}, "", "/sessions");

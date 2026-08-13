@@ -21,6 +21,7 @@ import { ProjectEnvironmentStore } from "./project-environments/project-environm
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { SkillProjector } from "./runtime/skill-projector.js";
+import { SkillManager } from "./skills/skill-manager.js";
 import { RunExecutor } from "./runs/run-executor.js";
 import { RunRepository } from "./runs/run-repository.js";
 import { registerRunRoutes } from "./runs/run-routes.js";
@@ -39,6 +40,7 @@ export type AppDependencies = {
   runRepository?: RunRepository;
   eventStore?: EventStore;
   skillProjector?: SkillProjector;
+  skillManager?: SkillManager;
   projectEnvironmentStore?: ProjectEnvironmentStore;
   projectEnvironmentScheduler?: ProjectEnvironmentCheckScheduler;
   webRoot?: string;
@@ -49,7 +51,8 @@ export type AppDependencies = {
  */
 export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const app = Fastify({ forceCloseConnections: true });
-  const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config);
+  const skillManager = deps.skillManager ?? new SkillManager({ dataDir: deps.config.dataDir });
+  const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config, skillManager);
   const projectEnvironmentStore = deps.projectEnvironmentStore ?? new ProjectEnvironmentStore({ db: deps.db });
   const agentManager = new AgentManager({
     db: deps.db,
@@ -95,7 +98,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   app.register((api) => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
-    registerAgentRoutes(api, agentManager);
+    registerAgentRoutes(api, agentManager, skillManager);
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });

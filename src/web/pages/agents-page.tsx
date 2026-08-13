@@ -5,6 +5,7 @@ import {
   errorMessage,
   type Agent,
   type AgentDoctorResult,
+  type AgentSkill,
   type ProjectEnvironment,
   type Provider
 } from "../api.js";
@@ -14,6 +15,25 @@ const providerNames: Record<Provider, string> = {
   codex: "Codex",
   hermes: "Hermes"
 };
+const skillSourceNames: Record<AgentSkill["source"], string> = {
+  codex: "Codex",
+  agents: "共享目录",
+  claude: "Claude",
+  plugin: "插件",
+  upload: "已上传",
+  missing: "来源已移除"
+};
+const maxSkillArchiveBytes = 10 * 1024 * 1024;
+
+const fileBase64 = (file: File): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onerror = () => reject(reader.error ?? new Error("读取 ZIP 失败"));
+  reader.onload = () => {
+    if (typeof reader.result !== "string") return reject(new Error("读取 ZIP 失败"));
+    resolve(reader.result.split(",", 2)[1] ?? "");
+  };
+  reader.readAsDataURL(file);
+});
 export const AgentsPage = () => {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [name, setName] = useState("");
@@ -21,6 +41,9 @@ export const AgentsPage = () => {
   const [projectEnvironments, setProjectEnvironments] = useState<ProjectEnvironment[]>([]);
   const [projectEnvironmentId, setProjectEnvironmentId] = useState("");
   const [doctorResults, setDoctorResults] = useState<Record<string, AgentDoctorResult>>({});
+  const [skillsByAgent, setSkillsByAgent] = useState<Record<string, AgentSkill[]>>({});
+  const [skillsAgentId, setSkillsAgentId] = useState<string | null>(null);
+  const [skillQuery, setSkillQuery] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
   const [editProjectEnvironmentId, setEditProjectEnvironmentId] = useState("");
@@ -146,6 +169,75 @@ export const AgentsPage = () => {
     }
   };
 
+  const openSkills = async (agentId: string) => {
+    if (skillsAgentId === agentId) {
+      setSkillsAgentId(null);
+      return;
+    }
+    setSkillsAgentId(agentId);
+    setSkillQuery("");
+    setBusy(`skills-${agentId}`);
+    setError("");
+    try {
+      const skills = await api<AgentSkill[]>(`/agents/${agentId}/skills`);
+      setSkillsByAgent((current) => ({ ...current, [agentId]: skills }));
+    } catch (reason) {
+      setSkillsAgentId(null);
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const toggleSkill = async (agentId: string, skill: AgentSkill) => {
+    setBusy(`skill-${agentId}-${skill.id}`);
+    setError("");
+    try {
+      const updated = await api<AgentSkill>(`/agents/${agentId}/skills/${skill.id}`, {
+        method: "PUT",
+        body: JSON.stringify({ enabled: !skill.enabled })
+      });
+      setSkillsByAgent((current) => ({
+        ...current,
+        [agentId]: (current[agentId] ?? []).map((item) => item.id === updated.id ? updated : item)
+      }));
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const uploadSkill = async (agentId: string, file: File | undefined, input: HTMLInputElement) => {
+    if (file === undefined) return;
+    if (!file.name.toLowerCase().endsWith(".zip") || file.size > maxSkillArchiveBytes) {
+      setError("请选择不超过 10 MB 的 Skill ZIP 文件");
+      input.value = "";
+      return;
+    }
+    setBusy(`skill-upload-${agentId}`);
+    setError("");
+    try {
+      const uploaded = await api<AgentSkill>(`/agents/${agentId}/skills/upload`, {
+        method: "POST",
+        body: JSON.stringify({ fileName: file.name, contentBase64: await fileBase64(file) })
+      });
+      setSkillsByAgent((current) => {
+        const skills = current[agentId] ?? [];
+        return {
+          ...current,
+          [agentId]: [...skills.filter((skill) => skill.id !== uploaded.id), uploaded]
+            .sort((left, right) => left.name.localeCompare(right.name))
+        };
+      });
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      input.value = "";
+      setBusy(null);
+    }
+  };
+
   return (
     <div className="page-frame">
       <header className="page-heading">
@@ -181,6 +273,7 @@ export const AgentsPage = () => {
             <div className="record-actions">
               <button onClick={() => void doctor(agent.id)} disabled={busy === `doctor-${agent.id}`}>运行检查</button>
               <button onClick={() => void toggle(agent)} disabled={busy === agent.id}>{agent.enabled ? "停用" : "启用"}</button>
+              <button onClick={() => void openSkills(agent.id)} disabled={busy !== null}>Skills</button>
               <button onClick={() => startEdit(agent)} disabled={busy !== null}>修改</button>
               <button className="danger-link" onClick={() => void deleteAgent(agent)} disabled={busy !== null}>删除</button>
             </div>
@@ -195,6 +288,39 @@ export const AgentsPage = () => {
                 <button className="primary-button" type="submit" disabled={busy === `edit-${agent.id}`}>保存修改</button>
               </div>
             </form> : null}
+            {skillsAgentId === agent.id ? <section className="agent-skills" aria-label={`${agent.name} Skills`}>
+              <div className="agent-skills-heading">
+                <div><h3>Skills</h3><p>只在下一次运行时加载已启用项。</p></div>
+                <div className="agent-skills-controls">
+                  <input aria-label="搜索 Skills" placeholder="搜索名称或描述" value={skillQuery} onChange={(event) => setSkillQuery(event.target.value)} />
+                  <label className="skill-upload">上传 ZIP<input
+                    type="file"
+                    accept=".zip,application/zip"
+                    aria-label="上传 Skill ZIP"
+                    disabled={busy !== null}
+                    onChange={(event) => void uploadSkill(agent.id, event.target.files?.[0], event.currentTarget)}
+                  /></label>
+                </div>
+              </div>
+              {busy === `skills-${agent.id}` && skillsByAgent[agent.id] === undefined
+                ? <p className="muted">正在读取主机 Skills…</p>
+                : <div className="skill-list">
+                  {(skillsByAgent[agent.id] ?? [])
+                    .filter((skill) => `${skill.name} ${skill.description}`.toLowerCase().includes(skillQuery.trim().toLowerCase()))
+                    .map((skill) => <label className="skill-row" key={skill.id}>
+                      <input
+                        type="checkbox"
+                        aria-label={`启用 ${skill.name}`}
+                        checked={skill.enabled}
+                        disabled={busy !== null || (!skill.available && !skill.enabled)}
+                        onChange={() => void toggleSkill(agent.id, skill)}
+                      />
+                      <span><strong>{skill.name}</strong><small>{skill.description || "暂无描述"}</small></span>
+                      <span className={`badge ${skill.available ? "neutral" : "failed"}`}>{skillSourceNames[skill.source]}</span>
+                    </label>)}
+                  {(skillsByAgent[agent.id] ?? []).length === 0 ? <p className="muted">主机上没有可用 Skill。</p> : null}
+                </div>}
+            </section> : null}
             {result !== undefined ? <div className={`doctor-result ${result.provider.ok && result.projectEnvironment.ok ? "passed" : "failed"}`} aria-live="polite">
               <strong>{result.provider.ok ? "可用" : result.provider.message}</strong>
               <span>项目环境：{result.projectEnvironment.ok ? "可用" : result.projectEnvironment.message}</span>

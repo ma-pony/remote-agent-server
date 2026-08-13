@@ -70,7 +70,9 @@ export class AgentManager {
     const agentDir = join(this.dataDir, "agents", id);
 
     mkdirSync(join(agentDir, "skills"), { recursive: true });
-    mkdirSync(join(agentDir, "provider-home", "hermes"), { recursive: true });
+    for (const providerHome of ["claude", "codex", "hermes"]) {
+      mkdirSync(join(agentDir, "provider-home", providerHome), { recursive: true });
+    }
     writeFileSync(join(agentDir, "MEMORY.md"), "", { flag: "a" });
     this.db
       .prepare(

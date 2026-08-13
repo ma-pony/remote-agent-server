@@ -19,6 +19,15 @@ export type AgentDoctorResult = {
   projectEnvironment: { ok: boolean; message: string; revisionId: string | null };
 };
 
+export type AgentSkill = {
+  id: string;
+  name: string;
+  description: string;
+  source: "codex" | "agents" | "claude" | "plugin" | "upload" | "missing";
+  enabled: boolean;
+  available: boolean;
+};
+
 export type EnvironmentRepository = {
   id: string;
   projectEnvironmentId: string;

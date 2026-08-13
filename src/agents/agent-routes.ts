@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import { AgentManager, AgentManagerError } from "./agent-manager.js";
+import { SkillManagerError, type SkillManager } from "../skills/skill-manager.js";
 
 const createAgentSchema = z.object({
   name: z.string().trim().min(1),
@@ -19,6 +20,12 @@ const updateAgentSchema = z.object({
   message: "At least one field must be provided"
   }
 );
+
+const updateSkillSchema = z.object({ enabled: z.boolean() }).strict();
+const uploadSkillSchema = z.object({
+  fileName: z.string().trim().min(1).max(255).regex(/\.zip$/i),
+  contentBase64: z.string().min(1).max(14_000_000).regex(/^[A-Za-z0-9+/]*={0,2}$/)
+}).strict();
 
 const badRequest = (reply: FastifyReply, message: string) =>
   reply.code(400).send({ error: { code: "invalid_request", message } });
@@ -46,7 +53,11 @@ const handleAgentError = (reply: FastifyReply, error: unknown) => {
 /**
  * Registers the authenticated Agent management routes.
  */
-export const registerAgentRoutes = (app: FastifyInstance, agentManager: AgentManager): void => {
+export const registerAgentRoutes = (
+  app: FastifyInstance,
+  agentManager: AgentManager,
+  skillManager: SkillManager
+): void => {
   app.get("/agents", () => agentManager.list());
 
   app.post("/agents", (request, reply) => {
@@ -85,4 +96,47 @@ export const registerAgentRoutes = (app: FastifyInstance, agentManager: AgentMan
     const result = await agentManager.doctor(request.params.id);
     return result === undefined ? notFound(reply) : result;
   });
+
+  app.get<{ Params: { id: string } }>("/agents/:id/skills", (request, reply) => {
+    if (agentManager.get(request.params.id) === undefined) return notFound(reply);
+    return skillManager.list(request.params.id);
+  });
+
+  app.put<{ Params: { id: string; skillId: string } }>("/agents/:id/skills/:skillId", (request, reply) => {
+    if (agentManager.get(request.params.id) === undefined) return notFound(reply);
+    const parsed = updateSkillSchema.safeParse(request.body);
+    if (!parsed.success) return badRequest(reply, "Invalid Skill update");
+    const skill = skillManager.setEnabled(request.params.id, request.params.skillId, parsed.data.enabled);
+    return skill === undefined
+      ? reply.code(404).send({ error: { code: "skill_not_found", message: "Skill not found" } })
+      : skill;
+  });
+
+  app.post<{ Params: { id: string } }>(
+    "/agents/:id/skills/upload",
+    { bodyLimit: 14 * 1024 * 1024 },
+    (request, reply) => {
+      if (agentManager.get(request.params.id) === undefined) return notFound(reply);
+      const parsed = uploadSkillSchema.safeParse(request.body);
+      if (!parsed.success) return badRequest(reply, "Invalid Skill ZIP upload");
+      try {
+        const skill = skillManager.upload(
+          request.params.id,
+          parsed.data.fileName,
+          Buffer.from(parsed.data.contentBase64, "base64")
+        );
+        return reply.code(201).send(skill);
+      } catch (error) {
+        if (error instanceof SkillManagerError) {
+          const message = error.code === "skill_archive_too_large"
+            ? "Skill ZIP exceeds the upload limit"
+            : error.code === "skill_name_conflict"
+              ? "A host Skill already uses this name"
+              : "Skill ZIP is invalid";
+          return reply.code(400).send({ error: { code: error.code, message } });
+        }
+        throw error;
+      }
+    }
+  );
 };

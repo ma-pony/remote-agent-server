@@ -111,7 +111,9 @@ describe("Agent API", () => {
     const agentDir = join(dataDir, "agents", agent.id);
     expect(existsSync(join(agentDir, "skills"))).toBe(true);
     expect(readFileSync(join(agentDir, "MEMORY.md"), "utf8")).toBe("");
-    expect(existsSync(join(agentDir, "provider-home", "hermes"))).toBe(true);
+    for (const providerHome of ["claude", "codex", "hermes"]) {
+      expect(existsSync(join(agentDir, "provider-home", providerHome))).toBe(true);
+    }
   });
 
   it("对不同长度 Token 使用固定长度的安全比较", () => {

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { existsSync, lstatSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -15,6 +17,7 @@ import {
 
 import type { AppConfig } from "../config.js";
 import type { Provider } from "../domain.js";
+import { SkillManager } from "../skills/skill-manager.js";
 import type {
   AgentRuntime,
   RuntimeDoctor,
@@ -58,6 +61,19 @@ export class AgentRuntimeError extends Error {
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
+const pathEntryExists = (path: string): boolean => {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const linkSharedFile = (source: string, destination: string): void => {
+  if (existsSync(source) && !pathEntryExists(destination)) symlinkSync(source, destination);
+};
+
 const assertTarget = (provider: Provider, agentId: string, sessionId: string): void => {
   if (!providers.has(provider) || !uuidPattern.test(agentId) || !uuidPattern.test(sessionId)) {
     throw new AgentRuntimeError("invalid_runtime_target", "Runtime target must contain a known Provider and UUID identifiers");
@@ -72,7 +88,7 @@ const targetName = (target: RuntimeTarget): string => {
 class RemoteAgentRegistry implements AcpAgentRegistry {
   private readonly targets = new Map<string, RuntimeTarget>();
 
-  constructor(private readonly dataDir: string) {}
+  constructor(private readonly dataDir: string, private readonly skillManager: SkillManager) {}
 
   register(target: RuntimeTarget): string {
     const name = targetName(target);
@@ -86,11 +102,33 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       throw new AgentRuntimeError("invalid_runtime_target", "Unknown Runtime target");
     }
 
+    const providerHome = join(this.dataDir, "agents", target.agentId, "provider-home");
     const environment = [`REMOTE_AGENT_BROWSER_PROFILE=${shellQuote(target.browserProfilePath)}`];
     if (target.provider === "hermes") {
-      environment.push(
-        `HERMES_HOME=${shellQuote(join(this.dataDir, "agents", target.agentId, "provider-home", "hermes"))}`
-      );
+      const home = join(providerHome, "hermes");
+      mkdirSync(home, { recursive: true });
+      const hostHome = process.env.HERMES_HOME ?? join(homedir(), ".hermes");
+      for (const file of ["config.yaml", "auth.json", ".env"]) {
+        linkSharedFile(join(hostHome, file), join(home, file));
+      }
+      environment.push(`HERMES_HOME=${shellQuote(home)}`);
+    } else if (target.provider === "codex") {
+      const home = join(providerHome, "codex");
+      mkdirSync(home, { recursive: true });
+      const hostAuth = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json");
+      const agentAuth = join(home, "auth.json");
+      linkSharedFile(hostAuth, agentAuth);
+      const disabledSkills = this.skillManager.hostSkillFiles().map((path) => [
+        "[[skills.config]]",
+        `path = ${JSON.stringify(path)}`,
+        "enabled = false"
+      ].join("\n")).join("\n\n");
+      writeFileSync(join(home, "config.toml"), disabledSkills === "" ? "" : `${disabledSkills}\n`, { mode: 0o600 });
+      environment.push(`CODEX_HOME=${shellQuote(home)}`);
+    } else {
+      const home = join(providerHome, "claude");
+      mkdirSync(home, { recursive: true });
+      environment.push(`CLAUDE_CONFIG_DIR=${shellQuote(home)}`);
     }
     return `env ${environment.join(" ")} ${ACP_COMMAND[ACP_AGENT[target.provider]]}`;
   }
@@ -203,8 +241,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private shutdownPromise: Promise<void> | undefined;
   private readonly shutdownFailures: RuntimeShutdownFailure[] = [];
 
-  constructor(private readonly config: AppConfig) {
-    this.registry = new RemoteAgentRegistry(config.dataDir);
+  constructor(private readonly config: AppConfig, private readonly skillManager = new SkillManager({ dataDir: config.dataDir })) {
+    this.registry = new RemoteAgentRegistry(config.dataDir, skillManager);
     this.runtime = this.createRuntime(this.registry);
   }
 
@@ -216,11 +254,15 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private async ensureSessionLocked(input: RuntimeSessionInput): Promise<RuntimeSession> {
     assertTarget(input.provider, input.agentId, input.sessionId);
     const existing = this.sessions.get(input.sessionId);
-    if (existing !== undefined && this.canReuse(existing, input)) {
+    const reusable = existing !== undefined && this.canReuse(existing, input);
+    if (reusable && input.providerSessionId === null) {
       return { providerSessionId: existing.providerSessionId };
     }
     if (existing !== undefined) {
-      await this.runtime.close({ handle: existing.handle, reason: "session_handle_replaced" });
+      await this.runtime.close({
+        handle: existing.handle,
+        reason: reusable ? "session_handle_refreshed" : "session_handle_replaced"
+      });
       this.sessions.delete(input.sessionId);
       this.registry.unregister(existing.target);
     }
@@ -375,7 +417,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     this.assertRunning();
     const sessionId = randomUUID();
     assertTarget(provider, agentId, sessionId);
-    const registry = new RemoteAgentRegistry(this.config.dataDir);
+    const registry = new RemoteAgentRegistry(this.config.dataDir, this.skillManager);
     const probeAgent = registry.register({
       provider,
       agentId,
