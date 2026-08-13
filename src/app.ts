@@ -11,6 +11,7 @@ import { requireApiToken } from "./auth.js";
 import type { AppConfig } from "./config.js";
 import { EventStore } from "./events/event-store.js";
 import { registerIntegrationAdminRoutes } from "./integrations/integration-admin-routes.js";
+import { IntegrationCoordinator } from "./integrations/integration-coordinator.js";
 import { IntegrationEndpointManager } from "./integrations/integration-endpoint-manager.js";
 import { registerIntegrationRoutes } from "./integrations/integration-routes.js";
 import { IntegrationStore } from "./integrations/integration-store.js";
@@ -78,9 +79,10 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     runtime,
     projectEnvironmentStore
   });
+  const integrationStore = new IntegrationStore({ db: deps.db });
   const integrationEndpointManager = new IntegrationEndpointManager({
     db: deps.db,
-    store: new IntegrationStore({ db: deps.db }),
+    store: integrationStore,
     secrets
   });
   const workspaceManager = deps.workspaceManager ?? createWorkspaceManager({
@@ -96,6 +98,13 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     workspaceManager,
     projectEnvironmentStore,
     mcpManager
+  });
+  const integrationCoordinator = new IntegrationCoordinator({
+    db: deps.db,
+    store: integrationStore,
+    endpointManager: integrationEndpointManager,
+    sessionManager,
+    secrets
   });
   const runRepository = deps.runRepository ?? new RunRepository({ db: deps.db });
   const eventStore = deps.eventStore ?? new EventStore({ db: deps.db });
@@ -128,7 +137,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });
-  registerIntegrationRoutes(app, integrationEndpointManager);
+  registerIntegrationRoutes(app, { manager: integrationEndpointManager, coordinator: integrationCoordinator });
 
   const webRoot = deps.webRoot ?? resolve(process.cwd(), "dist/web");
   const hasWebRoot = existsSync(webRoot);

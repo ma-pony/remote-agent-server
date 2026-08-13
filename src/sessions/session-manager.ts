@@ -165,6 +165,21 @@ export class SessionManager {
     return row === undefined ? undefined : this.withMcpStatus(toSession(row));
   }
 
+  /** Replaces all MCP values after a caller claims an idle Session in its own transaction. */
+  replaceMcpParametersInTransaction(id: string, values: Record<string, string | null>): void {
+    if (!this.db.inTransaction) throw new Error("session_mcp_transaction_required");
+    const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
+    if (row === undefined) throw new SessionManagerError("session_not_found");
+    const activeRun = this.db.prepare(`
+      SELECT 1 FROM runs WHERE session_id = ? AND status IN ('queued', 'running') LIMIT 1
+    `).get(id);
+    if (row.status !== "running" || activeRun !== undefined) throw new SessionManagerError("session_busy");
+
+    const normalized = this.mcpManager.normalizeSessionValues(row.agent_id, values, true);
+    this.db.prepare("DELETE FROM session_mcp_parameter_values WHERE session_id = ?").run(id);
+    this.mcpManager.insertSessionValuesInTransaction(id, normalized);
+  }
+
   /** Updates only the supplied MCP parameter values while the Session is idle. */
   updateMcpParameters(id: string, values: Record<string, string | null>): SessionWithMcpStatus {
     return this.inImmediateTransaction(() => {

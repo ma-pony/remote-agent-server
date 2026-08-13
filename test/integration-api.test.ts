@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
+import type { WorkspaceManager } from "../src/workspaces/workspace-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const apiToken = "integration-admin-token";
@@ -23,9 +24,24 @@ const validEndpointInput = (agentId: string, slug = "support-bot") => ({
 
 const apps: Array<{ app: FastifyInstance; close: () => Promise<void> }> = [];
 
-const createTestApp = async (): Promise<{ app: FastifyInstance; agentId: string }> => {
+const createTestApp = async (): Promise<{
+  app: FastifyInstance;
+  agentId: string;
+  db: ReturnType<typeof createTestDatabase>["db"];
+}> => {
   const { db, seed } = createTestDatabase();
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-integration-api-"));
+  const workspaceManager: WorkspaceManager = {
+    check: async () => undefined,
+    createSession: async (id) => ({
+      workspacePath: join(dataDir, "sessions", id, "workspace"),
+      runtimePath: join(dataDir, "sessions", id, "runtime"),
+      browserProfilePath: join(dataDir, "sessions", id, "browser")
+    }),
+    deleteSession: async () => undefined,
+    createRevision: async () => undefined,
+    removeRevision: async () => undefined
+  };
   const app = buildApp({
     config: {
       host: "127.0.0.1",
@@ -38,7 +54,8 @@ const createTestApp = async (): Promise<{ app: FastifyInstance; agentId: string 
       maxConcurrentRuns: 1
     },
     db,
-    runtime: createFakeRuntime()
+    runtime: createFakeRuntime(),
+    workspaceManager
   });
   apps.push({
     app,
@@ -49,7 +66,7 @@ const createTestApp = async (): Promise<{ app: FastifyInstance; agentId: string 
     }
   });
   await app.ready();
-  return { app, agentId: seed.agent.id };
+  return { app, agentId: seed.agent.id, db };
 };
 
 afterEach(async () => {
@@ -161,13 +178,191 @@ describe("Integration endpoint API", () => {
     expect(crossEndpointToken.json()).toEqual({
       error: { code: "invalid_endpoint_token", message: "Invalid integration endpoint token" }
     });
-    expect(validEndpointToken.statusCode).toBe(404);
+    expect(validEndpointToken.statusCode).toBe(400);
     expect(validEndpointToken.json()).toEqual({
-      error: { code: "not_found", message: "Integration route not found" }
+      error: { code: "invalid_request", message: "Invalid Integration Task input" }
     });
-    expect(validSecondEndpointToken.statusCode).toBe(404);
+    expect(validSecondEndpointToken.statusCode).toBe(400);
     expect(validSecondEndpointToken.json()).toEqual({
-      error: { code: "not_found", message: "Integration route not found" }
+      error: { code: "invalid_request", message: "Invalid Integration Task input" }
+    });
+  });
+
+  it("外部提交幂等 Task、查询状态并续接 Conversation", async () => {
+    const { app, agentId, db } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId)
+    });
+    const endpoint = created.json() as { endpoint: { id: string; slug: string }; token: string };
+    const payload = {
+      requestId: "request-1",
+      conversationKey: "ticket/1332",
+      message: "Investigate the failing transfer",
+      parameters: {}
+    };
+
+    const first = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(endpoint.token),
+      payload
+    });
+    const repeated = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(endpoint.token),
+      payload
+    });
+    const firstTask = first.json() as { id: string; sessionId: string; runId: string | null; effectivePrompt: string };
+    const queried = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${firstTask.id}`,
+      headers: endpointHeaders(endpoint.token)
+    });
+    const continued = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(endpoint.token),
+      payload: { ...payload, requestId: "request-2", message: "Continue the investigation" }
+    });
+
+    expect(first.statusCode).toBe(202);
+    expect(repeated.statusCode).toBe(202);
+    expect(repeated.json()).toMatchObject({ id: firstTask.id });
+    expect(queried.statusCode).toBe(200);
+    expect(queried.json()).toMatchObject({ id: firstTask.id, status: "queued" });
+    expect(continued.statusCode).toBe(202);
+    expect(continued.json()).toMatchObject({ sessionId: firstTask.sessionId });
+    expect(firstTask.runId).toBeNull();
+    expect(firstTask.effectivePrompt).toBe("Resolve the support request.\n\nInvestigate the failing transfer");
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 0 });
+  });
+
+  it("外部提交冲突返回 409，繁忙 Conversation 不能结束", async () => {
+    const { app, agentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId)
+    });
+    const endpoint = created.json() as { endpoint: { slug: string }; token: string };
+    const taskUrl = `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`;
+    await app.inject({
+      method: "POST",
+      url: taskUrl,
+      headers: endpointHeaders(endpoint.token),
+      payload: { requestId: "request-1", conversationKey: "ticket-1332", message: "first", parameters: {} }
+    });
+
+    const conflict = await app.inject({
+      method: "POST",
+      url: taskUrl,
+      headers: endpointHeaders(endpoint.token),
+      payload: { requestId: "request-1", conversationKey: "ticket-1332", message: "changed", parameters: {} }
+    });
+    const busy = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/conversations/ticket-1332/end`,
+      headers: endpointHeaders(endpoint.token)
+    });
+
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json()).toEqual({
+      error: { code: "idempotency_conflict", message: "requestId was already used with different input" }
+    });
+    expect(busy.statusCode).toBe(409);
+    expect(busy.json()).toEqual({
+      error: { code: "conversation_busy", message: "Conversation has an active Task" }
+    });
+  });
+
+  it("结束 Conversation 后保留历史并为同 key 创建新 Session", async () => {
+    const { app, agentId, db } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId)
+    });
+    const endpoint = created.json() as { endpoint: { id: string; slug: string }; token: string };
+    const taskUrl = `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`;
+    const first = await app.inject({
+      method: "POST",
+      url: taskUrl,
+      headers: endpointHeaders(endpoint.token),
+      payload: { requestId: "request-1", conversationKey: "ticket-1332", message: "first", parameters: {} }
+    });
+    const firstTask = first.json() as { sessionId: string };
+    db.prepare("UPDATE integration_tasks SET status = 'succeeded', finished_at = ?").run(new Date().toISOString());
+
+    const ended = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/conversations/ticket-1332/end`,
+      headers: endpointHeaders(endpoint.token)
+    });
+    const next = await app.inject({
+      method: "POST",
+      url: taskUrl,
+      headers: endpointHeaders(endpoint.token),
+      payload: { requestId: "request-2", conversationKey: "ticket-1332", message: "next", parameters: {} }
+    });
+
+    expect(ended.statusCode).toBe(200);
+    expect(ended.json()).toMatchObject({ status: "ended", sessionId: firstTask.sessionId });
+    expect(next.statusCode).toBe(202);
+    expect(next.json()).not.toMatchObject({ sessionId: firstTask.sessionId });
+    expect(db.prepare("SELECT count(*) AS count FROM integration_conversations").get()).toEqual({ count: 2 });
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 2 });
+  });
+
+  it("Task 查询拒绝其他 Endpoint Token，提交拒绝额外字段", async () => {
+    const { app, agentId } = await createTestApp();
+    const firstEndpointResponse = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId, "first-endpoint")
+    });
+    const secondEndpointResponse = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId, "second-endpoint")
+    });
+    const firstEndpoint = firstEndpointResponse.json() as { endpoint: { slug: string }; token: string };
+    const secondEndpoint = secondEndpointResponse.json() as { token: string };
+    const createdTask = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${firstEndpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(firstEndpoint.token),
+      payload: { requestId: "request-1", message: "work", parameters: {} }
+    });
+    const task = createdTask.json() as { id: string };
+
+    const crossEndpointRead = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${task.id}`,
+      headers: endpointHeaders(secondEndpoint.token)
+    });
+    const invalidSubmit = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${firstEndpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(firstEndpoint.token),
+      payload: { requestId: "request-2", message: "work", parameters: {}, unexpected: true }
+    });
+
+    expect(crossEndpointRead.statusCode).toBe(401);
+    expect(crossEndpointRead.json()).toEqual({
+      error: { code: "invalid_endpoint_token", message: "Invalid integration endpoint token" }
+    });
+    expect(invalidSubmit.statusCode).toBe(400);
+    expect(invalidSubmit.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid Integration Task input" }
     });
   });
 
@@ -243,9 +438,9 @@ describe("Integration endpoint API", () => {
     expect(invalidRotation.json()).toEqual({
       error: { code: "invalid_request", message: "Invalid Integration Endpoint token rotation" }
     });
-    expect(stillAuthorized.statusCode).toBe(404);
+    expect(stillAuthorized.statusCode).toBe(400);
     expect(stillAuthorized.json()).toEqual({
-      error: { code: "not_found", message: "Integration route not found" }
+      error: { code: "invalid_request", message: "Invalid Integration Task input" }
     });
   });
 

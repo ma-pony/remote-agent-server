@@ -146,6 +146,12 @@ export type CreateWebhookDeliveryInput = {
   nextAttemptAt: string;
 };
 
+export type AppendTaskEventInput = {
+  taskId: string;
+  eventType: string;
+  payload: Record<string, unknown>;
+};
+
 const toEndpoint = (row: EndpointRow): IntegrationEndpoint => ({
   id: row.id,
   name: row.name,
@@ -326,6 +332,16 @@ export class IntegrationStore {
     return row === undefined ? undefined : toConversation(row);
   }
 
+  getLatestConversation(endpointId: string, conversationKey: string): IntegrationConversation | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM integration_conversations
+      WHERE endpoint_id = ? AND conversation_key = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `).get(endpointId, conversationKey) as ConversationRow | undefined;
+    return row === undefined ? undefined : toConversation(row);
+  }
+
   createConversation(input: CreateIntegrationConversationInput): IntegrationConversation {
     return this.immediateTransaction(() => this.createConversationInTransaction(input));
   }
@@ -362,6 +378,13 @@ export class IntegrationStore {
     return row === undefined ? undefined : toTask(row);
   }
 
+  getTaskByRequestId(endpointId: string, requestId: string): IntegrationTask | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM integration_tasks WHERE endpoint_id = ? AND request_id = ?
+    `).get(endpointId, requestId) as TaskRow | undefined;
+    return row === undefined ? undefined : toTask(row);
+  }
+
   createTask(input: CreateIntegrationTaskInput): IntegrationTask {
     return this.immediateTransaction(() => this.createTaskInTransaction(input));
   }
@@ -379,6 +402,14 @@ export class IntegrationStore {
       input.message, input.effectivePrompt, input.encryptedParameters, now
     );
     return toTask(this.taskRow(id)!);
+  }
+
+  conversationHasActiveTasks(conversationId: string): boolean {
+    return this.db.prepare(`
+      SELECT 1 FROM integration_tasks
+      WHERE conversation_id = ? AND status IN ('queued', 'running')
+      LIMIT 1
+    `).get(conversationId) !== undefined;
   }
 
   listSubscriptions(endpointId: string): WebhookSubscription[] {
@@ -407,8 +438,47 @@ export class IntegrationStore {
 
   listDeliveries(subscriptionId: string): WebhookDelivery[] {
     return (this.db.prepare(`
-      SELECT * FROM webhook_deliveries WHERE subscription_id = ? ORDER BY created_at ASC, id ASC
+      SELECT * FROM webhook_deliveries WHERE subscription_id = ? ORDER BY sequence ASC, created_at ASC, id ASC
     `).all(subscriptionId) as DeliveryRow[]).map(toDelivery);
+  }
+
+  /** Appends one Task event and its subscribed Deliveries inside the caller's transaction. */
+  appendTaskEventInTransaction(input: AppendTaskEventInput): WebhookDelivery[] {
+    const task = this.taskRow(input.taskId);
+    if (task === undefined) return [];
+    const sequence = task.event_sequence + 1;
+    const eventId = randomUUID();
+    const eventKey = `${task.id}:${sequence}`;
+    const occurredAt = new Date().toISOString();
+    this.db.prepare("UPDATE integration_tasks SET event_sequence = ? WHERE id = ?").run(sequence, task.id);
+
+    const subscriptions = this.db.prepare(`
+      SELECT * FROM webhook_subscriptions
+      WHERE endpoint_id = ? AND enabled = 1
+      ORDER BY created_at ASC, id ASC
+    `).all(task.endpoint_id) as SubscriptionRow[];
+    const payloadJson = JSON.stringify({
+      id: eventId,
+      type: input.eventType,
+      sequence,
+      taskId: task.id,
+      occurredAt,
+      data: input.payload
+    });
+    return subscriptions.flatMap((row) => {
+      const events = JSON.parse(row.events_json) as string[];
+      if (!events.includes(input.eventType)) return [];
+      return [this.createDeliveryInTransaction({
+        eventId,
+        eventKey,
+        sequence,
+        subscriptionId: row.id,
+        taskId: task.id,
+        eventType: input.eventType,
+        payloadJson,
+        nextAttemptAt: occurredAt
+      })];
+    });
   }
 
   createDelivery(input: CreateWebhookDeliveryInput): WebhookDelivery {
