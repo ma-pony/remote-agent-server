@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, ChevronDown, Send, Square, XCircle } from "lucide-react";
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
 
 import { api, errorMessage, isRunStreamPermanentError, streamRunEvents, type Agent, type Run, type RunEvent, type RunStatus, type SessionDetail } from "../api.js";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -10,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { PageHeader } from "@/components/page-header";
+import { SessionDeleteDialog } from "./session-pages.js";
 
 type RunView = { run: Run; events: RunEvent[]; historyError: string | null };
 const activeStatuses = new Set<RunStatus>(["queued", "running"]);
@@ -63,6 +64,7 @@ const mergeEvent = (views: RunView[], runId: string, item: RunEvent): RunView[] 
 });
 
 export const SessionPage = ({ sessionId }: { sessionId: string }) => {
+  const navigate = useNavigate();
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [agentName, setAgentName] = useState("");
   const [views, setViews] = useState<RunView[]>([]);
@@ -243,7 +245,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   return (
     <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
       <Button asChild variant="ghost" className="mb-4"><Link to="/sessions"><ArrowLeft />返回 Session</Link></Button>
-      <PageHeader eyebrow={`SESSION / ${initialLoading ? "LOADING" : activeRunId !== null ? "RUNNING" : "IDLE"}`} title={session?.title ?? "加载 Session…"} description={agentName === "" ? "正在读取 Agent…" : `Agent · ${agentName}`} action={<Badge variant={activeRunId === null ? "secondary" : "default"}>{activeRunId === null ? "空闲" : "活动中"}</Badge>} />
+      <PageHeader eyebrow={`SESSION / ${initialLoading ? "LOADING" : activeRunId !== null ? "RUNNING" : "IDLE"}`} title={session?.title ?? "加载 Session…"} description={agentName === "" ? "正在读取 Agent…" : `Agent · ${agentName}`} action={<div className="flex items-center gap-2"><Badge variant={activeRunId === null ? "secondary" : "default"}>{activeRunId === null ? "空闲" : "活动中"}</Badge>{session === null ? null : <SessionDeleteDialog session={activeRunId === null ? session : { ...session, status: "running" }} onDeleted={() => navigate("/sessions")} onError={setError} />}</div>} />
       <div className="flex flex-col gap-4">
         {loadError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>Session 加载失败</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{loadError}</span><Button size="sm" variant="outline" type="button" onClick={() => setReloadGeneration((current) => current + 1)}>重试加载</Button></AlertDescription></Alert> : error !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>操作失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
         {streamError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>实时连接异常</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{streamError}</span>{streamError.includes("自动重连已停止") ? <Button size="sm" variant="outline" type="button" onClick={() => setStreamReconnectGeneration((current) => current + 1)}>重新连接实时事件</Button> : null}</AlertDescription></Alert> : null}
