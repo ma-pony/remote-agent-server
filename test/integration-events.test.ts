@@ -84,9 +84,26 @@ const linkRun = (context: ReturnType<typeof setup>): string => {
 };
 
 const parsedEvents = (writer: FakeSseWriter): Event[] => writer.chunks.flatMap((chunk) => {
+  if (!chunk.includes("id: ")) return [];
   const data = chunk.split("\n").find((line) => line.startsWith("data: "));
   return data === undefined ? [] : [JSON.parse(data.slice("data: ".length)) as Event];
 });
+
+const taskStatusFrames = (writer: FakeSseWriter): Array<{ status: string }> => writer.chunks.flatMap((chunk) => {
+  if (!chunk.includes("event: task.status")) return [];
+  const data = chunk.split("\n").find((line) => line.startsWith("data: "));
+  return data === undefined ? [] : [JSON.parse(data.slice("data: ".length)) as { status: string }];
+});
+
+const finishTask = (
+  context: ReturnType<typeof setup>,
+  status: "succeeded" | "failed" | "cancelled"
+): void => {
+  context.db.prepare(
+    "UPDATE integration_tasks SET status = ?, finished_at = ? WHERE id = ?"
+  ).run(status, new Date().toISOString(), context.task.id);
+  context.store.notifyTaskChanged(context.task.id);
+};
 
 describe("Integration Task events", () => {
   it("Task 尚未关联 Run 时历史为空，关联后按 afterSeq 补读", () => {
@@ -130,15 +147,13 @@ describe("Integration Task events", () => {
     context.eventStore.append(runId, "message", { text: "one" });
     context.eventStore.append(runId, "tool", { title: "two" });
     context.eventStore.append(runId, "status", { status: "succeeded" });
-    context.db.prepare(
-      "UPDATE integration_tasks SET status = 'succeeded', result = 'done', finished_at = ? WHERE id = ?"
-    ).run(new Date().toISOString(), context.task.id);
-    context.store.notifyTaskChanged(context.task.id);
+    finishTask(context, "succeeded");
 
     await vi.runAllTimersAsync();
     await streaming;
 
     expect(parsedEvents(writer).map((event) => event.seq)).toEqual([1, 2, 3]);
+    expect(taskStatusFrames(writer)).toEqual([{ status: "succeeded" }]);
     expect(writer.writableEnded).toBe(true);
     expect(unsubscribed).toHaveBeenCalledTimes(2);
     expect(vi.getTimerCount()).toBe(0);
@@ -155,5 +170,185 @@ describe("Integration Task events", () => {
 
     expect(cancelled).toMatchObject({ status: "cancelled", runId: null });
     expect(observed).toHaveBeenCalledTimes(1);
+  });
+
+  it("连接后 queued 取消会发送一次不占 Run seq 的 canonical terminal frame", async () => {
+    const context = setup();
+    const writer = new FakeSseWriter();
+    const streaming = streamIntegrationTaskEvents({
+      store: context.store,
+      eventStore: context.eventStore,
+      taskId: context.task.id,
+      endpointId: context.endpoint.id,
+      afterSeq: 99,
+      writer
+    });
+
+    context.store.cancelUnlinkedQueuedTask(context.task.id, context.endpoint.id);
+    await streaming;
+
+    expect(taskStatusFrames(writer)).toEqual([{ status: "cancelled" }]);
+    expect(writer.chunks).toContain('event: task.status\ndata: {"status":"cancelled"}\n\n');
+    expect(writer.chunks.join("")).not.toContain("id:");
+    expect(writer.writableEnded).toBe(true);
+  });
+
+  it("Task 在 SSE 连接前已终态也发送 canonical terminal frame 后关闭", async () => {
+    const context = setup();
+    context.store.cancelUnlinkedQueuedTask(context.task.id, context.endpoint.id);
+    const writer = new FakeSseWriter();
+
+    await streamIntegrationTaskEvents({
+      store: context.store,
+      eventStore: context.eventStore,
+      taskId: context.task.id,
+      endpointId: context.endpoint.id,
+      afterSeq: 0,
+      writer
+    });
+
+    expect(taskStatusFrames(writer)).toEqual([{ status: "cancelled" }]);
+    expect(writer.writableEnded).toBe(true);
+  });
+
+  it("已关联 queued Run 没有 status Event 时仍发送 canonical terminal frame", async () => {
+    const context = setup();
+    linkRun(context);
+    const writer = new FakeSseWriter();
+    const streaming = streamIntegrationTaskEvents({
+      store: context.store,
+      eventStore: context.eventStore,
+      taskId: context.task.id,
+      endpointId: context.endpoint.id,
+      afterSeq: 0,
+      writer
+    });
+
+    finishTask(context, "cancelled");
+    await streaming;
+
+    expect(parsedEvents(writer)).toEqual([]);
+    expect(taskStatusFrames(writer)).toEqual([{ status: "cancelled" }]);
+  });
+
+  it("等待 Run 的 heartbeat 遇到背压会等待 drain 后继续且不并发写", async () => {
+    vi.useFakeTimers();
+    const context = setup();
+    const writer = new FakeSseWriter();
+    let writes = 0;
+    const write = vi.spyOn(writer, "write").mockImplementation((chunk) => {
+      writer.chunks.push(chunk);
+      writes += 1;
+      return writes > 1;
+    });
+    const streaming = streamIntegrationTaskEvents({
+      store: context.store,
+      eventStore: context.eventStore,
+      taskId: context.task.id,
+      endpointId: context.endpoint.id,
+      afterSeq: 0,
+      writer
+    });
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(writer.writableEnded).toBe(false);
+    writer.emit("drain");
+    await vi.advanceTimersByTimeAsync(0);
+    context.store.cancelUnlinkedQueuedTask(context.task.id, context.endpoint.id);
+    await streaming;
+
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(taskStatusFrames(writer)).toEqual([{ status: "cancelled" }]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("等待 Run 的 heartbeat 永不 drain 时在 timeout 后结束并清理 listener/timer", async () => {
+    vi.useFakeTimers();
+    const context = setup();
+    const writer = new FakeSseWriter();
+    vi.spyOn(writer, "write").mockReturnValue(false);
+    const streaming = streamIntegrationTaskEvents({
+      store: context.store,
+      eventStore: context.eventStore,
+      taskId: context.task.id,
+      endpointId: context.endpoint.id,
+      afterSeq: 0,
+      writer
+    });
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(writer.writableEnded).toBe(false);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await streaming;
+
+    expect(writer.writableEnded).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("Run live heartbeat 背压期间缓存 Event，drain 后按单一管线继续", async () => {
+    vi.useFakeTimers();
+    const context = setup();
+    const runId = linkRun(context);
+    const writer = new FakeSseWriter();
+    let writes = 0;
+    const write = vi.spyOn(writer, "write").mockImplementation((chunk) => {
+      writer.chunks.push(chunk);
+      writes += 1;
+      return writes > 1;
+    });
+    const streaming = streamIntegrationTaskEvents({
+      store: context.store,
+      eventStore: context.eventStore,
+      taskId: context.task.id,
+      endpointId: context.endpoint.id,
+      afterSeq: 0,
+      writer
+    });
+
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(write).toHaveBeenCalledTimes(1);
+    context.eventStore.append(runId, "message", { text: "buffered" });
+    expect(write).toHaveBeenCalledTimes(1);
+
+    writer.emit("drain");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(write).toHaveBeenCalledTimes(2));
+    finishTask(context, "cancelled");
+    await streaming;
+
+    expect(writer.chunks[0]).toBe(": heartbeat\n\n");
+    expect(writer.chunks[1]).toContain("id: 1");
+    expect(taskStatusFrames(writer)).toEqual([{ status: "cancelled" }]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("Task listener 异常互相隔离，事务回滚时不通知", async () => {
+    const context = setup();
+    const observed = vi.fn();
+    context.store.subscribeTask(context.task.id, () => { throw new Error("sync listener failed"); });
+    context.store.subscribeTask(context.task.id, async () => { throw new Error("async listener failed"); });
+    context.store.subscribeTask(context.task.id, observed);
+
+    expect(() => context.store.cancelUnlinkedQueuedTask(context.task.id, context.endpoint.id)).not.toThrow();
+    await Promise.resolve();
+    expect(observed).toHaveBeenCalledTimes(1);
+
+    const rollback = setup();
+    const rollbackObserved = vi.fn();
+    rollback.store.subscribeTask(rollback.task.id, rollbackObserved);
+    rollback.db.exec(`
+      CREATE TRIGGER reject_task_cancel
+      BEFORE UPDATE ON integration_tasks
+      WHEN NEW.id = 'task-1' AND NEW.status = 'cancelled'
+      BEGIN
+        SELECT RAISE(ABORT, 'cancel rejected');
+      END;
+    `);
+
+    expect(() => rollback.store.cancelUnlinkedQueuedTask(rollback.task.id, rollback.endpoint.id))
+      .toThrow("cancel rejected");
+    expect(rollback.store.getTask(rollback.task.id)?.status).toBe("queued");
+    expect(rollbackObserved).not.toHaveBeenCalled();
   });
 });

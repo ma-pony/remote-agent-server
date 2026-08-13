@@ -8,7 +8,8 @@ import type { RunExecutor } from "../runs/run-executor.js";
 import {
   SSE_HEARTBEAT_INTERVAL_MS,
   streamRunEvents,
-  type SseWriter
+  type SseWriter,
+  writeChunkWithDrain
 } from "../runs/run-routes.js";
 import { SessionManagerError } from "../sessions/session-manager.js";
 import { WorkspaceCreateError } from "../workspaces/workspace-manager.js";
@@ -74,6 +75,18 @@ const bearerToken = (authorization: string | undefined): string | undefined =>
 const isTerminalTask = (task: IntegrationTask | undefined): boolean =>
   task?.status === "succeeded" || task?.status === "failed" || task?.status === "cancelled";
 
+const terminalTaskFrame = (task: IntegrationTask): string =>
+  `event: task.status\ndata: ${JSON.stringify({ status: task.status })}\n\n`;
+
+const closeWriter = (writer: SseWriter): void => {
+  if (writer.destroyed || writer.writableEnded) return;
+  try {
+    writer.end();
+  } catch (_error) {
+    // A broken external SSE connection has no effect on its Task.
+  }
+};
+
 export const listIntegrationTaskEvents = (
   store: IntegrationStore,
   eventStore: EventStore,
@@ -90,40 +103,50 @@ const waitForLinkedRun = async (
   taskId: string,
   endpointId: string,
   writer: SseWriter
-): Promise<IntegrationTask | undefined> => new Promise((resolve) => {
-  let settled = false;
-  const finish = (task: IntegrationTask | undefined): void => {
-    if (settled) return;
-    settled = true;
-    clearInterval(heartbeatTimer);
-    unsubscribe();
-    writer.off("close", onClose);
-    writer.off("error", onError);
-    resolve(task);
+): Promise<IntegrationTask | undefined> => {
+  let closed = false;
+  let heartbeatPending = false;
+  let wake: (() => void) | undefined;
+  const signal = (): void => wake?.();
+  const onClose = (): void => {
+    closed = true;
+    signal();
   };
-  const current = (): IntegrationTask | undefined => store.getTaskForEndpoint(taskId, endpointId);
-  const check = (): void => {
-    const task = current();
-    if (task === undefined || task.runId !== null || isTerminalTask(task)) finish(task);
-  };
-  const onClose = (): void => finish(undefined);
-  const onError = (_error: Error): void => finish(undefined);
-  const unsubscribe = store.subscribeTask(taskId, check);
+  const onError = (_error: Error): void => onClose();
+  const unsubscribe = store.subscribeTask(taskId, signal);
   const heartbeatTimer = setInterval(() => {
-    try {
-      if (!writer.write(": heartbeat\n\n")) {
-        if (!writer.destroyed && !writer.writableEnded) writer.end();
-        finish(undefined);
-      }
-    } catch (_error) {
-      finish(undefined);
-    }
+    heartbeatPending = true;
+    signal();
   }, SSE_HEARTBEAT_INTERVAL_MS);
   heartbeatTimer.unref?.();
   writer.on("close", onClose);
   writer.on("error", onError);
-  check();
-});
+
+  try {
+    while (!closed) {
+      const task = store.getTaskForEndpoint(taskId, endpointId);
+      if (task === undefined || task.runId !== null || isTerminalTask(task)) return task;
+      if (heartbeatPending) {
+        heartbeatPending = false;
+        if (!await writeChunkWithDrain(writer, ": heartbeat\n\n")) return undefined;
+        continue;
+      }
+      await new Promise<void>((resolve) => {
+        wake = () => {
+          wake = undefined;
+          resolve();
+        };
+        if (closed || heartbeatPending) wake();
+      });
+    }
+    return undefined;
+  } finally {
+    clearInterval(heartbeatTimer);
+    unsubscribe();
+    writer.off("close", onClose);
+    writer.off("error", onError);
+  }
+};
 
 /** Waits for Task-to-Run linkage, then reuses the canonical Run Event stream. */
 export const streamIntegrationTaskEvents = async (input: {
@@ -137,12 +160,19 @@ export const streamIntegrationTaskEvents = async (input: {
   const task = await waitForLinkedRun(input.store, input.taskId, input.endpointId, input.writer);
   if (task === undefined) return;
   if (task.runId === null) {
-    if (!input.writer.destroyed && !input.writer.writableEnded) input.writer.end();
+    if (isTerminalTask(task)) await writeChunkWithDrain(input.writer, terminalTaskFrame(task));
+    closeWriter(input.writer);
     return;
   }
+  const currentTask = (): IntegrationTask | undefined =>
+    input.store.getTaskForEndpoint(input.taskId, input.endpointId);
   await streamRunEvents(input.eventStore, task.runId, input.afterSeq, input.writer, {
     heartbeatMs: SSE_HEARTBEAT_INTERVAL_MS,
-    isTerminal: () => isTerminalTask(input.store.getTaskForEndpoint(input.taskId, input.endpointId)),
+    isTerminal: () => isTerminalTask(currentTask()),
+    terminalFrame: () => {
+      const current = currentTask();
+      return current !== undefined && isTerminalTask(current) ? terminalTaskFrame(current) : undefined;
+    },
     subscribeStateChange: (listener) => input.store.subscribeTask(input.taskId, listener)
   });
 };

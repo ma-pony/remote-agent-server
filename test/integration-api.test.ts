@@ -533,15 +533,20 @@ describe("Integration endpoint API", () => {
     });
   });
 
-  it("running Task 取消委托 Runtime，终态重复取消幂等", async () => {
+  it("running Task 取消委托 Runtime，终态幂等并继续调度同 Conversation 下一 Task", async () => {
     const result = deferred<RuntimeTurnResult>();
     const runtime = createFakeRuntime();
-    runtime.startTurn = () => ({
-      events: { async *[Symbol.asyncIterator]() {} },
-      result: result.promise,
-      cancel: async () => undefined,
-      closeEvents: async () => undefined
-    });
+    const succeedingTurn = runtime.startTurn;
+    let turnCount = 0;
+    runtime.startTurn = (input) => {
+      turnCount += 1;
+      return turnCount === 1 ? {
+        events: { async *[Symbol.asyncIterator]() {} },
+        result: result.promise,
+        cancel: async () => undefined,
+        closeEvents: async () => undefined
+      } : succeedingTurn(input);
+    };
     runtime.cancel = vi.fn(async () => result.resolve({ status: "cancelled" }));
     const { app, agentId, db } = await createTestApp(runtime);
     const created = await app.inject({
@@ -555,12 +560,32 @@ describe("Integration endpoint API", () => {
       method: "POST",
       url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
       headers: endpointHeaders(endpoint.token),
-      payload: { requestId: "cancel-request", message: "long work", parameters: {} }
+      payload: {
+        requestId: "cancel-request",
+        conversationKey: "cancel-conversation",
+        message: "long work",
+        parameters: {}
+      }
     });
     const task = submitted.json() as { taskId: string; sessionId: string };
     await vi.waitFor(() => expect(
       db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(task.taskId)
     ).toEqual({ status: "running" }));
+    const nextSubmitted = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(endpoint.token),
+      payload: {
+        requestId: "next-request",
+        conversationKey: "cancel-conversation",
+        message: "next work",
+        parameters: {}
+      }
+    });
+    const nextTask = nextSubmitted.json() as { taskId: string; sessionId: string };
+    expect(nextTask.sessionId).toBe(task.sessionId);
+    expect(db.prepare("SELECT status, run_id FROM integration_tasks WHERE id = ?").get(nextTask.taskId))
+      .toEqual({ status: "queued", run_id: null });
 
     const cancelled = await app.inject({
       method: "POST",
@@ -570,6 +595,9 @@ describe("Integration endpoint API", () => {
     await vi.waitFor(() => expect(
       db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(task.taskId)
     ).toEqual({ status: "cancelled" }));
+    await vi.waitFor(() => expect(
+      db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(nextTask.taskId)
+    ).toEqual({ status: "succeeded" }));
     const repeated = await app.inject({
       method: "POST",
       url: `/integration/v1/tasks/${task.taskId}/cancel`,
@@ -578,6 +606,7 @@ describe("Integration endpoint API", () => {
 
     expect(cancelled.statusCode).toBe(200);
     expect(runtime.cancel).toHaveBeenCalledWith(task.sessionId);
+    expect(turnCount).toBe(2);
     expect(repeated.statusCode).toBe(200);
     expect(repeated.json()).toMatchObject({ taskId: task.taskId, status: "cancelled" });
   });

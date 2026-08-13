@@ -49,7 +49,54 @@ const sseFrame = (event: Event): string =>
 export type RunEventStreamOptions = {
   heartbeatMs?: number;
   isTerminal?: () => boolean;
+  terminalFrame?: () => string | undefined;
   subscribeStateChange?: (listener: () => void) => () => void;
+};
+
+const endWriter = (writer: SseWriter): void => {
+  if (writer.destroyed || writer.writableEnded) return;
+  try {
+    writer.end();
+  } catch (_error) {
+    // A broken SSE writer is already unusable.
+  }
+};
+
+/** Writes one complete SSE frame and applies the same bounded drain policy to every frame type. */
+export const writeChunkWithDrain = async (writer: SseWriter, chunk: string): Promise<boolean> => {
+  if (writer.destroyed || writer.writableEnded) return false;
+  try {
+    if (writer.write(chunk)) return true;
+  } catch (_error) {
+    endWriter(writer);
+    return false;
+  }
+
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const settle = (written: boolean): void => {
+      if (settled) return;
+      settled = true;
+      writer.off("drain", onDrain);
+      writer.off("close", onClose);
+      writer.off("error", onError);
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(written);
+    };
+    const onDrain = (): void => settle(true);
+    const onClose = (): void => settle(false);
+    const onError = (_error: Error): void => settle(false);
+    writer.once("drain", onDrain);
+    writer.on("close", onClose);
+    writer.on("error", onError);
+    timer = setTimeout(() => {
+      endWriter(writer);
+      settle(false);
+    }, SSE_DRAIN_TIMEOUT_MS);
+    timer.unref?.();
+    if (writer.destroyed || writer.writableEnded) settle(false);
+  });
 };
 
 /**
@@ -66,13 +113,13 @@ export const streamRunEvents = async (
   let closed = false;
   let unsubscribe: (() => void) | undefined;
   let wakeLive: (() => void) | undefined;
-  let wakeDrain: (() => void) | undefined;
   let unsubscribeState: (() => void) | undefined;
   let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   let heartbeatPending = false;
+  let terminalFrameSent = false;
   const liveBuffer: Event[] = [];
 
-  const finish = (endWriter: boolean): void => {
+  const finish = (shouldEndWriter: boolean): void => {
     if (closed) return;
     closed = true;
     unsubscribe?.();
@@ -82,14 +129,7 @@ export const streamRunEvents = async (
     if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
     heartbeatTimer = undefined;
     wakeLive?.();
-    wakeDrain?.();
-    if (endWriter && !writer.destroyed && !writer.writableEnded) {
-      try {
-        writer.end();
-      } catch (_error) {
-        // A broken SSE writer is isolated from the Agent Run.
-      }
-    }
+    if (shouldEndWriter) endWriter(writer);
   };
   const onClose = (): void => finish(false);
   const onError = (_error: Error): void => finish(false);
@@ -106,36 +146,12 @@ export const streamRunEvents = async (
 
   const write = async (event: Event): Promise<void> => {
     if (closed || event.seq <= cursor) return;
-    let accepted: boolean;
-    try {
-      accepted = writer.write(sseFrame(event));
-    } catch (_error) {
+    const written = await writeChunkWithDrain(writer, sseFrame(event));
+    if (!written) {
       finish(true);
       return;
     }
     cursor = event.seq;
-    if (accepted || closed) return;
-
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const onDrain = (): void => {
-        if (settled) return;
-        settled = true;
-        writer.off("drain", onDrain);
-        if (wakeDrain === onDrain) wakeDrain = undefined;
-        if (timer !== undefined) clearTimeout(timer);
-        resolve();
-      };
-      wakeDrain = onDrain;
-      writer.once("drain", onDrain);
-      timer = setTimeout(() => {
-        finish(true);
-        onDrain();
-      }, SSE_DRAIN_TIMEOUT_MS);
-      timer.unref?.();
-      if (closed) onDrain();
-    });
   };
 
   const replayThrough = async (throughSeq: number): Promise<void> => {
@@ -178,16 +194,20 @@ export const streamRunEvents = async (
         continue;
       }
       if (options.isTerminal?.() === true) {
+        if (!terminalFrameSent) {
+          terminalFrameSent = true;
+          const frame = options.terminalFrame?.();
+          if (frame !== undefined && !await writeChunkWithDrain(writer, frame)) {
+            finish(true);
+            continue;
+          }
+        }
         finish(true);
         continue;
       }
       if (heartbeatPending) {
         heartbeatPending = false;
-        try {
-          if (!writer.write(": heartbeat\n\n")) finish(true);
-        } catch (_error) {
-          finish(true);
-        }
+        if (!await writeChunkWithDrain(writer, ": heartbeat\n\n")) finish(true);
         continue;
       }
       await new Promise<void>((resolve) => {
