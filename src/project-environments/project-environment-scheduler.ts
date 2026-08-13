@@ -6,9 +6,17 @@ export interface ProjectEnvironmentBuilderLike {
   stop(): Promise<void>;
 }
 
+export type ProjectEnvironmentSyncState = {
+  status: "idle" | "queued" | "running";
+  automatic: true;
+  intervalMs: number;
+  nextScheduledAt: string;
+};
+
 export interface ProjectEnvironmentCheckScheduler {
   start(): void;
   requestCheck(environmentId: string): Promise<void>;
+  getState(environmentId: string): ProjectEnvironmentSyncState;
   stop(): Promise<void>;
 }
 
@@ -26,16 +34,24 @@ export class ProjectEnvironmentScheduler implements ProjectEnvironmentCheckSched
   private queue: QueueEntry[] = [];
   private pending = new Map<string, QueueEntry>();
   private draining: Promise<void> | undefined;
+  private runningEnvironmentId: string | undefined;
+  private nextScheduledAtMs: number;
 
   constructor(private readonly dependencies: {
     store: ProjectEnvironmentStore;
     builder: ProjectEnvironmentBuilderLike | ProjectEnvironmentBuilder;
     intervalMs: number;
-  }) {}
+  }) {
+    this.nextScheduledAtMs = Date.now() + dependencies.intervalMs;
+  }
 
   start(): void {
     if (this.timer !== undefined || this.stopped) return;
-    this.timer = setInterval(() => { void this.runScheduledCheck(); }, this.dependencies.intervalMs);
+    this.nextScheduledAtMs = Date.now() + this.dependencies.intervalMs;
+    this.timer = setInterval(() => {
+      this.nextScheduledAtMs = Date.now() + this.dependencies.intervalMs;
+      void this.runScheduledCheck();
+    }, this.dependencies.intervalMs);
     this.timer.unref();
   }
 
@@ -61,6 +77,18 @@ export class ProjectEnvironmentScheduler implements ProjectEnvironmentCheckSched
     return promise;
   }
 
+  getState(environmentId: string): ProjectEnvironmentSyncState {
+    const status = this.runningEnvironmentId === environmentId
+      ? "running"
+      : this.pending.has(environmentId) ? "queued" : "idle";
+    return {
+      status,
+      automatic: true,
+      intervalMs: this.dependencies.intervalMs,
+      nextScheduledAt: new Date(this.nextScheduledAtMs).toISOString()
+    };
+  }
+
   async stop(): Promise<void> {
     if (this.stopped) return this.draining;
     this.stopped = true;
@@ -78,12 +106,14 @@ export class ProjectEnvironmentScheduler implements ProjectEnvironmentCheckSched
   private async drain(): Promise<void> {
     while (this.queue.length > 0) {
       const entry = this.queue.shift()!;
+      this.runningEnvironmentId = entry.id;
       try {
         await this.dependencies.builder.checkAndBuild(entry.id);
         entry.resolve();
       } catch (error) {
         entry.reject(error);
       } finally {
+        if (this.runningEnvironmentId === entry.id) this.runningEnvironmentId = undefined;
         this.pending.delete(entry.id);
       }
     }

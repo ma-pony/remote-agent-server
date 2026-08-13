@@ -1,6 +1,9 @@
+import { join } from "node:path";
+
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
+import type { ProjectEnvironmentDetail } from "../domain.js";
 import type { ProjectEnvironmentCheckScheduler } from "./project-environment-scheduler.js";
 import type { ProjectEnvironmentStore } from "./project-environment-store.js";
 
@@ -36,7 +39,20 @@ export const registerProjectEnvironmentRoutes = (
   store: ProjectEnvironmentStore,
   scheduler: ProjectEnvironmentCheckScheduler
 ): void => {
-  app.get("/project-environments", () => store.list());
+  const presentEnvironment = (environment: ProjectEnvironmentDetail) => {
+    const workspacePath = environment.currentRevision?.workspacePath ?? null;
+    return {
+      ...environment,
+      workspacePath,
+      sync: scheduler.getState(environment.id),
+      repositories: environment.repositories.map((repository) => ({
+        ...repository,
+        workspacePath: workspacePath === null ? null : join(workspacePath, repository.name)
+      }))
+    };
+  };
+
+  app.get("/project-environments", () => store.list().map(presentEnvironment));
 
   app.post("/project-environments", (request, reply) => {
     const parsed = environmentSchema.safeParse(request.body);
@@ -50,7 +66,9 @@ export const registerProjectEnvironmentRoutes = (
 
   app.get<{ Params: { id: string } }>("/project-environments/:id", (request, reply) => {
     const environment = store.get(request.params.id);
-    return environment ?? sendError(reply, 404, "not_found", "Project environment not found");
+    return environment === undefined
+      ? sendError(reply, 404, "not_found", "Project environment not found")
+      : presentEnvironment(environment);
   });
 
   app.patch<{ Params: { id: string } }>("/project-environments/:id", (request, reply) => {
@@ -110,7 +128,7 @@ export const registerProjectEnvironmentRoutes = (
     }
   );
 
-  app.post<{ Params: { id: string } }>("/project-environments/:id/check", (request, reply) => {
+  app.post<{ Params: { id: string } }>("/project-environments/:id/sync", (request, reply) => {
     if (store.get(request.params.id) === undefined) {
       return sendError(reply, 404, "not_found", "Project environment not found");
     }

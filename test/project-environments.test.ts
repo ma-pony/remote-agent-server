@@ -2,7 +2,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { ProjectEnvironmentBuilder } from "../src/project-environments/project-environment-builder.js";
@@ -18,6 +18,7 @@ import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 const tempDirectories: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   tempDirectories.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true }));
 });
 
@@ -249,6 +250,45 @@ describe("ProjectEnvironmentBuilder", () => {
 });
 
 describe("ProjectEnvironmentScheduler", () => {
+  it("展示运行、排队和下一次自动同步时间", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
+    const { db, store } = createBuilderFixture();
+    const first = store.create({ name: "环境一" });
+    const second = store.create({ name: "环境二" });
+    let releaseFirst!: () => void;
+    const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const scheduler = new ProjectEnvironmentScheduler({
+      store,
+      builder: {
+        checkAndBuild: async (id) => {
+          if (id === first.id) await firstBlocked;
+          return { outcome: "unchanged" as const };
+        },
+        stop: async () => { releaseFirst(); }
+      },
+      intervalMs: 3 * 60 * 60 * 1000
+    });
+    scheduler.start();
+
+    const firstRequest = scheduler.requestCheck(first.id);
+    const secondRequest = scheduler.requestCheck(second.id);
+    expect(scheduler.getState(first.id)).toEqual({
+      status: "running",
+      automatic: true,
+      intervalMs: 10_800_000,
+      nextScheduledAt: "2026-08-13T03:00:00.000Z"
+    });
+    expect(scheduler.getState(second.id).status).toBe("queued");
+
+    releaseFirst();
+    await Promise.all([firstRequest, secondRequest]);
+    expect(scheduler.getState(first.id).status).toBe("idle");
+    expect(scheduler.getState(second.id).status).toBe("idle");
+    await scheduler.stop();
+    db.close();
+  });
+
   it("每三小时检查所有项目环境并在停止时清理定时器", async () => {
     const { db, store } = createBuilderFixture();
     const first = store.create({ name: "环境一" });
@@ -354,7 +394,13 @@ describe("Project environment API", () => {
     const scheduler = {
       start: () => undefined,
       stop: async () => undefined,
-      requestCheck: async (id: string) => { checks.push(id); }
+      requestCheck: async (id: string) => { checks.push(id); },
+      getState: () => ({
+        status: "idle" as const,
+        automatic: true as const,
+        intervalMs: 10_800_000,
+        nextScheduledAt: "2026-08-13T03:00:00.000Z"
+      })
     };
     const app = buildApp({
       config: {
@@ -402,9 +448,15 @@ describe("Project environment API", () => {
       headers,
       payload: { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" }
     });
-    const accepted = await app.inject({
-      method: "POST", url: `/api/project-environments/${environmentId}/check`, headers
+    const configurationFingerprint = fixture.store.configurationFingerprint(environmentId);
+    const revision = fixture.store.beginRevision({
+      projectEnvironmentId: environmentId,
+      configurationFingerprint,
+      inputFingerprint: "input-v1",
+      workspacePath: `/environments/${environmentId}/revisions/revision-1/workspace`
     });
+    fixture.store.publishRevision(revision.id);
+    const accepted = await app.inject({ method: "POST", url: `/api/project-environments/${environmentId}/sync`, headers });
     const detail = await app.inject({
       method: "GET", url: `/api/project-environments/${environmentId}`, headers
     });
@@ -417,7 +469,19 @@ describe("Project environment API", () => {
     expect(detail.json()).toMatchObject({
       id: environmentId,
       name: "研发环境",
-      repositories: [{ name: "api", gitUrl: "git:api", prepareCommand: "bundle install" }]
+      workspacePath: `/environments/${environmentId}/revisions/revision-1/workspace`,
+      sync: {
+        status: "idle",
+        automatic: true,
+        intervalMs: 10_800_000,
+        nextScheduledAt: "2026-08-13T03:00:00.000Z"
+      },
+      repositories: [{
+        name: "api",
+        gitUrl: "git:api",
+        prepareCommand: "bundle install",
+        workspacePath: `/environments/${environmentId}/revisions/revision-1/workspace/api`
+      }]
     });
     expect(checks).toEqual([environmentId, environmentId]);
     await app.close();
