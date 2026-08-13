@@ -2,7 +2,7 @@
 
 ## 1. 目标
 
-Remote Agent Server 为每个 Agent 提供独立的 MCP 配置能力，同时支持 Streamable HTTP 和 stdio 两种传输方式。管理员在管理台直接配置 URL、Header、命令、参数和环境变量；不同 Session 可以为同一个 Agent 提供不同的 MCP 参数；Claude Code、Codex、Hermes 在每次 Run 开始前获得当前 Session 的原生 MCP 配置。
+Remote Agent Server 为每个 Agent 提供独立的 MCP 配置能力，同时支持 Streamable HTTP 和 stdio 两种传输方式。管理员在管理台直接配置 URL、Header、命令、参数和环境变量；不同 Session 可以为同一个 Agent 提供不同的 MCP 参数；Claude Code、Codex、Hermes 在每次 Run 开始前通过 ACP `mcpServers` 获得当前 Session 的 MCP 配置。
 
 本设计只覆盖 Agent MCP 管理。通用外部调用 API 和 Grab Manager 迁移分别作为后续任务，不在本次实现中混入。
 
@@ -27,12 +27,12 @@ Remote Agent Server 为每个 Agent 提供独立的 MCP 配置能力，同时支
 - 固定值、Session 参数和 Runtime 参数三种值来源。
 - HTTP Header。
 - stdio 有序 Arguments 和独立 Environment。
-- 连接超时和工具调用超时。
+- 连接检查超时。
 - 敏感固定值和敏感 Session 参数加密。
 - MCP 新增、查看、修改、启停、删除和连接检查。
 - Session 创建时填写 MCP 参数。
 - Session 空闲时修改 MCP 参数。
-- Claude Code、Codex、Hermes 原生配置投影。
+- Claude Code、Codex、Hermes 的 ACP `mcpServers` 注入。
 - Run 开始前 MCP `initialize` 和 `tools/list` 预检。
 - Agent Doctor 汇总 MCP 配置和最近检查状态。
 
@@ -63,8 +63,7 @@ transport                   TEXT NOT NULL CHECK (transport IN ('http', 'stdio'))
 enabled                     INTEGER NOT NULL CHECK (enabled IN (0, 1))
 url                         TEXT
 command                     TEXT
-connect_timeout_seconds     INTEGER NOT NULL DEFAULT 30
-tool_timeout_seconds        INTEGER NOT NULL DEFAULT 120
+check_timeout_seconds       INTEGER NOT NULL DEFAULT 30
 last_checked_at             TEXT
 last_check_status           TEXT CHECK (last_check_status IN ('passed', 'failed'))
 last_check_message          TEXT
@@ -81,6 +80,7 @@ UNIQUE(agent_id, name)
 - `name` 使用 Provider 均能接受的稳定标识：`[A-Za-z0-9_-]`，长度 1 至 64。
 - URL 只允许 `http` 和 `https`。
 - `command` 是单个可执行文件名或绝对路径，不能包含 Shell 拼接。
+- `check_timeout_seconds` 范围为 1 至 300 秒。
 - 修改连接配置后清空最近检查结果。
 
 ### 4.2 `agent_session_parameters`
@@ -206,7 +206,7 @@ DATA_DIR/secret.key
 
 规则：
 
-- 第一次启动且没有密文数据时自动生成 32 字节密钥，文件权限设为 `0600`。
+- 第一次启动且没有密文数据时自动生成原始 32 字节密钥文件，不做文本或 base64 编码，文件权限设为 `0600`。
 - 已有密文但密钥缺失、长度错误或权限不安全时，服务启动失败。
 - 不会生成新密钥覆盖旧密钥。
 - API、日志、Run result 和 Event 不返回解密值。
@@ -214,7 +214,7 @@ DATA_DIR/secret.key
 - 修改敏感值时不传 `value` 表示保留；传新值表示替换；显式 `clear: true` 表示清除。
 - 备份和恢复敏感配置时必须安全保存数据库及 `secret.key`。
 
-解密后的值可能需要进入 Session 私有 Provider 原生配置。相关 Session Runtime 目录权限为 `0700`，配置文件权限为 `0600`，Session 删除时一并清理。
+解密后的 MCP 值只存在于当前 Session 的服务进程与 Provider 进程内存中，并通过 ACP 传入 Agent；它们不写入 acpx Session Store、Event、Run error 或 Remote Agent Server 生成的 Provider 配置。Session Runtime 目录仍设为 `0700`，其中的 Provider 基础配置文件权限为 `0600`，Session 删除时一并清理。
 
 ## 7. Session Runtime 隔离
 
@@ -240,13 +240,17 @@ sessions/<session-id>/runtime/
 
 Provider 处理：
 
-- Claude Code：在当前 Session 的 Claude Home 中生成 MCP 配置。
-- Codex：在当前 Session 的 Codex Home 中生成 `config.toml`，同时保留 Remote Agent Server 管理的 Skills 禁用规则。
-- Hermes：读取主机 Hermes 基础模型配置，移除主机 MCP 和 Skills 配置，再加入当前 Agent Skills 和当前 Session MCP，写入 Session Hermes Home。
-- Provider 登录凭证继续通过现有只读文件链接或 Provider 原生登录状态复用，不复制到数据库。
+- Remote Agent Server 将解析后的 HTTP 或 stdio 配置转换成 ACP `McpServer[]`，由 Agent 适配器接入 Claude Code、Codex 或 Hermes。
+- 每个 Session 持有独立的 acpx Runtime；同一 Agent 的不同 Session 不共享 `mcpServers` 或 Provider Handle。
+- Claude Code：使用当前 Session 的 Claude Home，不写主机 MCP 配置。
+- Codex：使用当前 Session 的 Codex Home，同时保留 Remote Agent Server 管理的 Skills 禁用规则。
+- Hermes：读取主机 Hermes 基础模型配置，移除 `mcp_servers`，写入 Session Hermes Home；Agent Skills 投影到该 Session Home，主机 Skills 不被继承。
+- Provider 登录凭证不复制到数据库。Codex 和 Hermes 继续只读链接各自登录文件；Claude 在 Linux 存在 `~/.claude/.credentials.json` 时只读链接，在 macOS 从系统 Keychain 的 `Claude Code-credentials` 项读取并以 `0600` 写入 Session Claude Home，Session 删除时清理。
 - 不修改主机用户的 Claude Code、Codex 或 Hermes 配置。
 
-已有 Session 已具备 `runtime/` 目录。第一次执行新版本 Run 时直接生成 Session 级 Provider 配置，不读取旧 Agent 共享 MCP 配置。
+ACP 当前的通用 `McpServer` 结构只包含连接字段，不包含可移植的 Provider 工具调用超时。因此第一版只配置 Remote Agent Server 自己执行检查和 Run 前预检时使用的 `check_timeout_seconds`；模型运行中的工具超时继续使用各 Provider 默认值，避免提供名义存在但实际不能跨 Provider 生效的选项。
+
+已有 Session 已具备 `runtime/` 目录。第一次执行新版本 Run 时直接准备 Session 级 Provider Home，并通过 ACP 注入 MCP，不读取旧 Agent 共享 MCP 配置。
 
 ## 8. Run 准备流程
 
@@ -257,14 +261,14 @@ Run 标记 running
   -> 解析 Runtime 参数
   -> 对所有 enabled MCP 执行 initialize + tools/list 预检
   -> 投影 Agent Skills
-  -> 原子生成当前 Session 的 Provider 原生配置
+  -> 转换为当前 Session 的 ACP mcpServers
   -> ensure/resume ACP Session
   -> 启动模型 Turn
 ```
 
 每个启用的 MCP 都必须预检成功。HTTP MCP 建立临时连接；stdio MCP 启动临时子进程并在检查完成后关闭。第一版不做预检缓存，也不区分 required/optional。
 
-配置文件通过“临时文件 -> 权限校验 -> 原子 rename”写入。生成失败时保留上一份完整文件，不留下半写配置。
+Session Provider 基础配置通过“临时文件 -> 权限校验 -> 原子 rename”写入。生成失败时保留上一份完整文件，不留下半写配置。MCP 本身只通过 ACP `mcpServers` 注入，不写入这些文件。
 
 Run 失败时：
 
@@ -292,8 +296,7 @@ HTTP MCP 创建示例：
   "name": "grab-manager",
   "transport": "http",
   "url": "https://grab-manager.example.com/api/mcp/v1/rpc",
-  "connectTimeoutSeconds": 30,
-  "toolTimeoutSeconds": 120,
+  "checkTimeoutSeconds": 30,
   "headers": [
     {
       "name": "X-Api-Key",
@@ -322,8 +325,7 @@ stdio MCP 创建示例：
   "name": "filesystem",
   "transport": "stdio",
   "command": "npx",
-  "connectTimeoutSeconds": 30,
-  "toolTimeoutSeconds": 120,
+  "checkTimeoutSeconds": 30,
   "arguments": [
     { "source": "fixed", "value": "-y" },
     { "source": "fixed", "value": "@modelcontextprotocol/server-filesystem" },
@@ -381,6 +383,8 @@ PATCH /api/sessions/:id/mcp-parameters
 ```
 
 Session 参数修改必须在同一个 `BEGIN IMMEDIATE` 事务内重新确认 Session 为 `idle` 且不存在 queued/running Run。否则返回 `409 session_busy`。
+
+PATCH 采用字段级合并：只替换请求中出现的参数，`null` 清除可选参数，未出现的参数保持原值。这样可以单独轮换一个敏感参数而不覆盖其他 Session 配置。
 
 Session 详情增加：
 
@@ -476,7 +480,7 @@ mcp_connection_failed
 mcp_authentication_failed
 mcp_protocol_failed
 mcp_process_failed
-mcp_projection_failed
+mcp_resolution_failed
 ```
 
 错误 Event 可以包含 MCP 名称、错误分类和脱敏消息，不能包含 Header 值、Session 敏感参数、stdio 敏感 Environment 或完整敏感命令行。
@@ -502,7 +506,7 @@ mcp_projection_failed
 - HTTP MCP `initialize`、`tools/list` 和关闭。
 - stdio MCP 启动、握手、关闭及子进程回收。
 - MCP 失败时模型 Turn 从未启动。
-- Claude Code、Codex、Hermes 配置投影。
+- Claude Code、Codex、Hermes 的 ACP `mcpServers` 注入。
 - Hermes 主机 MCP 和 Skills 不被继承。
 - 同一 Agent 的两个 Session 使用不同 MCP 参数并发投影时互不覆盖。
 - 配置更新在下一次 Run 生效，ACP Session 仍然续接。
@@ -528,5 +532,5 @@ mcp_projection_failed
 4. 同一个 Agent 的两个 Session 可以使用不同认证或租户参数并发执行，互不串值。
 5. 修改 Agent MCP 或空闲 Session 参数后，下一次 Run 使用新值并续接原 ACP Session。
 6. 任一启用 MCP 预检失败时，Run 明确失败且模型 Turn 不启动。
-7. MCP 配置不会修改或继承主机用户的 MCP 和 Skills。
+7. MCP 配置通过 ACP 注入，不修改或继承主机用户的 MCP 和 Skills。
 8. 全量自动化测试、类型检查和生产构建通过。
