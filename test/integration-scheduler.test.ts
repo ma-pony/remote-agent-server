@@ -20,7 +20,11 @@ import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const temporaryDirectories: string[] = [];
 
-const createHarness = (options: { databasePath?: string; retryDelayMs?: number } = {}) => {
+const createHarness = (options: {
+  databasePath?: string;
+  retryDelayMs?: number;
+  onSchedulerError?: (failure: { taskId: string; code: string }) => undefined;
+} = {}) => {
   const { db, seed } = createTestDatabase(options.databasePath);
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-integration-scheduler-"));
   temporaryDirectories.push(dataDir);
@@ -79,7 +83,8 @@ const createHarness = (options: { databasePath?: string; retryDelayMs?: number }
     sessionManager,
     secrets,
     projection,
-    retryDelayMs: options.retryDelayMs
+    retryDelayMs: options.retryDelayMs,
+    onSchedulerError: options.onSchedulerError
   });
   let nextTask = 0;
   const createTask = (options: {
@@ -281,6 +286,77 @@ describe("IntegrationTaskScheduler", () => {
 
       expect(harness.store.getTask(task.id)?.runId).not.toBeNull();
       expect(harness.runScheduler.enqueue).toHaveBeenCalledTimes(1);
+      harness.scheduler.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      if (locker.inTransaction) locker.exec("ROLLBACK");
+      locker.close();
+      harness.scheduler.stop();
+      harness.db.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("public notify 吞掉一次 drain 异常并在受控 timer 后重新唤醒", async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = createHarness({ retryDelayMs: 1_000 });
+      const task = harness.createTask();
+      const listDispatchableTasks = harness.store.listDispatchableTasks.bind(harness.store);
+      vi.spyOn(harness.store, "listDispatchableTasks")
+        .mockImplementationOnce(() => { throw new Error("temporary scheduler drain failure"); })
+        .mockImplementation(listDispatchableTasks);
+
+      expect(() => harness.scheduler.start()).not.toThrow();
+      expect(harness.store.getTask(task.id)).toMatchObject({ status: "queued", runId: null });
+      expect(vi.getTimerCount()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(harness.store.getTask(task.id)?.runId).not.toBeNull();
+      harness.scheduler.stop();
+      expect(vi.getTimerCount()).toBe(0);
+      harness.db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("每个 queued Task 最多自动重试 3 次，exhausted 后跳过且不阻塞其他 Task", async () => {
+    vi.useFakeTimers();
+    const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-integration-exhausted-"));
+    temporaryDirectories.push(dataDir);
+    const databasePath = join(dataDir, "database.sqlite3");
+    const onSchedulerError = vi.fn(() => undefined);
+    const harness = createHarness({ databasePath, retryDelayMs: 1_000, onSchedulerError });
+    harness.db.pragma("busy_timeout = 0");
+    const exhaustedTask = harness.createTask({ conversationKey: "exhausted" });
+    const createRun = vi.spyOn(harness.runRepository, "create");
+    const locker = openDatabase(databasePath);
+    locker.pragma("busy_timeout = 0");
+    locker.exec("BEGIN IMMEDIATE");
+    try {
+      harness.scheduler.start();
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(createRun).toHaveBeenCalledTimes(4);
+      expect(harness.store.getTask(exhaustedTask.id)).toMatchObject({ status: "queued", runId: null });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(onSchedulerError).toHaveBeenCalledTimes(1);
+      expect(onSchedulerError).toHaveBeenCalledWith({
+        taskId: exhaustedTask.id,
+        code: "integration_retry_exhausted"
+      });
+
+      locker.exec("ROLLBACK");
+      const nextTask = harness.createTask({ conversationKey: "next" });
+      harness.scheduler.notify();
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(createRun).toHaveBeenCalledTimes(5);
+      expect(harness.store.getTask(exhaustedTask.id)).toMatchObject({ status: "queued", runId: null });
+      expect(harness.store.getTask(nextTask.id)?.runId).not.toBeNull();
+      expect(onSchedulerError).toHaveBeenCalledTimes(1);
       harness.scheduler.stop();
       expect(vi.getTimerCount()).toBe(0);
     } finally {

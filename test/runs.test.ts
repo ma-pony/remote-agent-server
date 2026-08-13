@@ -159,6 +159,29 @@ describe("RunRepository", () => {
     db.close();
   });
 
+  it("afterCommit thenable 被报告但不反抛或产生 unhandled rejection", async () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    const onPostCommitError = vi.fn();
+    const repository = new RunRepository({
+      db,
+      projection: {
+        onStarted: () => undefined,
+        onFinished: () => undefined,
+        afterCommit: (() => Promise.reject(new Error("async notifier rejected"))) as unknown as () => undefined
+      },
+      onPostCommitError
+    });
+    const run = repository.create({ sessionId: session.id, input: "work" });
+
+    expect(repository.markRunning(run.id)).toMatchObject({ status: "running" });
+    await Promise.resolve();
+
+    expect(repository.get(run.id)?.status).toBe("running");
+    expect(onPostCommitError).toHaveBeenCalledWith(run.id, "started");
+    db.close();
+  });
+
   it("同一个 Session 的第二个活动 Run 返回 session_busy", () => {
     const { db, seed } = createTestDatabase();
     const session = seed.session();
@@ -263,6 +286,65 @@ describe("RunRepository", () => {
 });
 
 describe("RunScheduler", () => {
+  it("每个 queued Run 最多自动重试 3 次，exhausted 后同实例跳过而新实例恢复", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, seed } = createTestDatabase();
+      const session = seed.session();
+      const repository = new RunRepository({
+        db,
+        projection: {
+          onStarted: () => { throw new Error("persistent start projection failure"); },
+          onFinished: () => undefined,
+          afterCommit: () => undefined
+        }
+      });
+      const run = repository.create({ sessionId: session.id, input: "retry exhausted" });
+      const execute = vi.fn(async (runId: string) => repository.markRunning(runId));
+      const onExecutionError = vi.fn();
+      const scheduler = new RunScheduler({
+        runRepository: repository,
+        executor: { execute, cancel: async () => ({}) as Run },
+        maxConcurrentRuns: 1,
+        retryDelayMs: 1_000,
+        onExecutionError
+      });
+
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(execute).toHaveBeenCalledTimes(4);
+      expect(repository.get(run.id)?.status).toBe("queued");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(onExecutionError).toHaveBeenCalledWith(expect.objectContaining({
+        code: "run_retry_exhausted"
+      }), run.id);
+
+      scheduler.enqueue(run.id);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(execute).toHaveBeenCalledTimes(4);
+      await scheduler.stop();
+
+      const restartedExecute = vi.fn(async (runId: string) => repository.markRunning(runId));
+      const restarted = new RunScheduler({
+        runRepository: repository,
+        executor: { execute: restartedExecute, cancel: async () => ({}) as Run },
+        maxConcurrentRuns: 1,
+        retryDelayMs: 1_000,
+        onExecutionError: vi.fn()
+      });
+      restarted.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(restartedExecute).toHaveBeenCalledTimes(1);
+      await restarted.stop();
+      expect(vi.getTimerCount()).toBe(0);
+      db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("markRunning 投影失败且 Run 仍 queued 时有界延迟重试成功", async () => {
     vi.useFakeTimers();
     try {

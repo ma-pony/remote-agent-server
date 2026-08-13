@@ -1,6 +1,5 @@
 import type { SecretStore } from "../mcp/secret-store.js";
 import type { RunRepository } from "../runs/run-repository.js";
-import { RunRepositoryError } from "../runs/run-repository.js";
 import type { RunScheduler } from "../runs/run-scheduler.js";
 import type { SessionManager } from "../sessions/session-manager.js";
 import type { IntegrationProjection } from "./integration-projection.js";
@@ -15,7 +14,10 @@ export type IntegrationTaskSchedulerDependencies = {
   secrets: Pick<SecretStore, "decrypt">;
   projection: Pick<IntegrationProjection, "recover">;
   retryDelayMs?: number;
+  onSchedulerError?: (failure: { taskId: string; code: "integration_retry_exhausted" }) => undefined;
 };
+
+const MAX_AUTOMATIC_RETRIES = 3;
 
 const INVALID_PARAMETER_SNAPSHOT = {
   code: "invalid_parameter_snapshot",
@@ -40,7 +42,11 @@ export class IntegrationTaskScheduler {
   private started = false;
   private draining = false;
   private notifiedWhileDraining = false;
-  private retryTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly retryAttempts = new Map<string, number>();
+  private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly exhaustedTasks = new Set<string>();
+  private drainRetryAttempts = 0;
+  private drainRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly dependencies: IntegrationTaskSchedulerDependencies) {}
 
@@ -61,8 +67,13 @@ export class IntegrationTaskScheduler {
     try {
       do {
         this.notifiedWhileDraining = false;
-        for (const task of this.dependencies.store.listDispatchableTasks()) this.dispatch(task);
+        for (const task of this.dependencies.store.listDispatchableTasks()) {
+          if (!this.exhaustedTasks.has(task.id) && !this.retryTimers.has(task.id)) this.dispatch(task);
+        }
       } while (this.notifiedWhileDraining && this.started);
+      this.clearDrainRetry();
+    } catch (_error) {
+      this.scheduleDrainRetry();
     } finally {
       this.draining = false;
     }
@@ -71,8 +82,11 @@ export class IntegrationTaskScheduler {
   stop(): void {
     this.started = false;
     this.notifiedWhileDraining = false;
-    if (this.retryTimer !== undefined) clearTimeout(this.retryTimer);
-    this.retryTimer = undefined;
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
+    this.retryTimers.clear();
+    this.retryAttempts.clear();
+    this.exhaustedTasks.clear();
+    this.clearDrainRetry();
   }
 
   recover(): void {
@@ -101,31 +115,79 @@ export class IntegrationTaskScheduler {
           }
         }
       );
+      this.clearTaskRetry(task.id);
       this.dependencies.runScheduler.enqueue(run.id);
-    } catch (error) {
-      if (error instanceof RunRepositoryError && error.code === "session_busy") {
-        this.scheduleRetry();
-        return;
-      }
-      this.scheduleRetry();
+    } catch (_error) {
+      this.scheduleTaskRetry(task.id);
     }
   }
 
   private failBeforeRun(task: IntegrationTask): void {
     try {
       const failed = this.dependencies.store.failTaskBeforeRun(task.id, INVALID_PARAMETER_SNAPSHOT);
-      if (failed !== undefined) this.notify();
+      if (failed !== undefined) {
+        this.clearTaskRetry(task.id);
+        this.notify();
+      }
     } catch (_error) {
-      this.scheduleRetry();
+      this.scheduleTaskRetry(task.id);
     }
   }
 
-  private scheduleRetry(): void {
-    if (!this.started || this.retryTimer !== undefined) return;
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = undefined;
+  private scheduleTaskRetry(taskId: string): void {
+    if (!this.started || this.exhaustedTasks.has(taskId) || this.retryTimers.has(taskId)) return;
+    const attempts = this.retryAttempts.get(taskId) ?? 0;
+    if (attempts >= MAX_AUTOMATIC_RETRIES) {
+      this.exhaustedTasks.add(taskId);
+      this.reportSchedulerError({ taskId, code: "integration_retry_exhausted" });
+      return;
+    }
+
+    this.retryAttempts.set(taskId, attempts + 1);
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(taskId);
+      if (!this.started || this.exhaustedTasks.has(taskId)) return;
+      const task = this.dependencies.store.getTask(taskId);
+      if (task?.status === "queued" && task.runId === null) this.dispatch(task);
+      else this.clearTaskRetry(taskId);
+    }, this.dependencies.retryDelayMs ?? 1_000);
+    timer.unref?.();
+    this.retryTimers.set(taskId, timer);
+  }
+
+  private clearTaskRetry(taskId: string): void {
+    const timer = this.retryTimers.get(taskId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.retryTimers.delete(taskId);
+    this.retryAttempts.delete(taskId);
+    this.exhaustedTasks.delete(taskId);
+  }
+
+  private scheduleDrainRetry(): void {
+    if (!this.started || this.drainRetryTimer !== undefined || this.drainRetryAttempts >= MAX_AUTOMATIC_RETRIES) return;
+    this.drainRetryAttempts += 1;
+    this.drainRetryTimer = setTimeout(() => {
+      this.drainRetryTimer = undefined;
       this.notify();
     }, this.dependencies.retryDelayMs ?? 1_000);
-    this.retryTimer.unref?.();
+    this.drainRetryTimer.unref?.();
+  }
+
+  private clearDrainRetry(): void {
+    if (this.drainRetryTimer !== undefined) clearTimeout(this.drainRetryTimer);
+    this.drainRetryTimer = undefined;
+    this.drainRetryAttempts = 0;
+  }
+
+  private reportSchedulerError(failure: { taskId: string; code: "integration_retry_exhausted" }): void {
+    try {
+      const result = this.dependencies.onSchedulerError?.(failure) as unknown;
+      if (result !== null && (typeof result === "object" || typeof result === "function")
+        && typeof (result as { then?: unknown }).then === "function") {
+        void Promise.resolve(result).catch(() => undefined);
+      }
+    } catch (_error) {
+      // Scheduler error reporting is best effort and contains no raw failure details.
+    }
   }
 }

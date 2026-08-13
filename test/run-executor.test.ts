@@ -31,7 +31,8 @@ const deferred = <T>() => {
 const setup = (
   runtime: AgentRuntime,
   prepare = vi.fn(() => "remember this"),
-  mcpPrepare = vi.fn(async () => [])
+  mcpPrepare = vi.fn(async () => []),
+  runRepositoryOptions: Record<string, unknown> = {}
 ) => {
   const root = mkdtempSync(join(tmpdir(), "remote-agent-executor-"));
   tempDirectories.push(root);
@@ -56,7 +57,7 @@ const setup = (
     commandRunner: { run: async () => ({ stdout: "", stderr: "" }) }
   });
   const sessionManager = new SessionManager({ db, dataDir, agentManager, runtime, workspaceManager });
-  const runRepository = new RunRepository({ db });
+  const runRepository = new RunRepository({ db, ...runRepositoryOptions });
   const eventStore = new EventStore({ db });
   const run = runRepository.create({ sessionId: "session-1", input: "修复问题" });
   const skillProjector = { prepare };
@@ -76,6 +77,30 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("terminal post-commit notifier 同步异常不改变成功 Run 或 Session", async () => {
+    const runtime = createFakeRuntime({ result: { status: "completed" } });
+    const onPostCommitError = vi.fn();
+    const setupResult = setup(runtime, undefined, undefined, {
+      projection: {
+        onStarted: () => undefined,
+        onFinished: () => undefined,
+        afterCommit: (run: { status: string }) => {
+          if (run.status === "succeeded") throw new Error("notification secret must stay internal");
+          return undefined;
+        }
+      },
+      onPostCommitError
+    });
+
+    const result = await setupResult.executor.execute(setupResult.run.id);
+
+    expect(result).toMatchObject({ status: "succeeded" });
+    expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({ status: "succeeded" });
+    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    expect(onPostCommitError).toHaveBeenCalledWith(setupResult.run.id, "finished");
+    setupResult.db.close();
+  });
+
   it("既有 Session 的 Agent 被禁用后稳定失败且不启动 Runtime", async () => {
     const runtime = createFakeRuntime();
     runtime.ensureSession = vi.fn(runtime.ensureSession);

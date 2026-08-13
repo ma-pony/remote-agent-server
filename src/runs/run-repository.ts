@@ -49,6 +49,8 @@ export type RunStateProjection = {
   afterCommit(run: Run): undefined;
 };
 
+export type RunPostCommitTransition = "started" | "finished" | "cancelled";
+
 const noOpRunStateProjection: RunStateProjection = {
   onStarted: () => undefined,
   onFinished: () => undefined,
@@ -58,6 +60,7 @@ const noOpRunStateProjection: RunStateProjection = {
 export type RunRepositoryDependencies = {
   db: Database.Database;
   projection?: RunStateProjection;
+  onPostCommitError?: (runId: string, transition: RunPostCommitTransition) => undefined;
 };
 
 export class RunRepositoryError extends Error {
@@ -72,10 +75,16 @@ export class RunRepositoryError extends Error {
 export class RunRepository {
   private readonly db: Database.Database;
   private readonly projection: RunStateProjection;
+  private readonly onPostCommitError: (runId: string, transition: RunPostCommitTransition) => undefined;
 
-  constructor({ db, projection = noOpRunStateProjection }: RunRepositoryDependencies) {
+  constructor({
+    db,
+    projection = noOpRunStateProjection,
+    onPostCommitError = () => undefined
+  }: RunRepositoryDependencies) {
     this.db = db;
     this.projection = projection;
+    this.onPostCommitError = onPostCommitError;
   }
 
   /**
@@ -158,7 +167,7 @@ export class RunRepository {
       assertSynchronousTransactionHook(this.projection.onStarted(started));
       return started;
     });
-    this.projection.afterCommit(started);
+    this.runAfterCommit(started, "started");
     return started;
   }
 
@@ -183,7 +192,7 @@ export class RunRepository {
       assertSynchronousTransactionHook(this.projection.onFinished(finished));
       return finished;
     });
-    this.projection.afterCommit(finished);
+    this.runAfterCommit(finished, "finished");
     return finished;
   }
 
@@ -202,7 +211,7 @@ export class RunRepository {
       assertSynchronousTransactionHook(this.projection.onFinished(cancelled));
       return cancelled;
     });
-    this.projection.afterCommit(cancelled);
+    this.runAfterCommit(cancelled, "cancelled");
     return cancelled;
   }
 
@@ -225,6 +234,18 @@ export class RunRepository {
     const run = this.get(id);
     if (run === undefined) throw new RunRepositoryError("run_not_found");
     return run;
+  }
+
+  private runAfterCommit(run: Run, transition: RunPostCommitTransition): void {
+    try {
+      assertSynchronousTransactionHook(this.projection.afterCommit(run));
+    } catch (_error) {
+      try {
+        assertSynchronousTransactionHook(this.onPostCommitError(run.id, transition));
+      } catch (_reportingError) {
+        // Post-commit notification and reporting are best effort; source state is already committed.
+      }
+    }
   }
 
   private inImmediateTransaction<T>(operation: () => T): T {
