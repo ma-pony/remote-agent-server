@@ -31,6 +31,7 @@ type EndpointManagerErrorCode =
   | "conversation_busy"
   | "missing_request_parameter"
   | "unknown_request_parameter"
+  | "invalid_parameter_mapping"
   | "invalid_endpoint";
 
 export class IntegrationEndpointManagerError extends Error {
@@ -64,17 +65,21 @@ export class IntegrationEndpointManager {
   }
 
   list(): IntegrationEndpointSummary[] {
-    return this.store.listEndpoints().map(({ promptPrefix: _promptPrefix, parameterMappings: _parameterMappings, ...summary }) => summary);
+    return this.store.listEndpoints().map(({ id, name, slug, agentId, enabled, createdAt, updatedAt }) => ({
+      id, name, slug, agentId, enabled, createdAt, updatedAt
+    }));
   }
 
   get(id: string): IntegrationEndpointDetail | undefined {
-    return this.store.getEndpoint(id);
+    const endpoint = this.store.getEndpoint(id);
+    return endpoint === undefined ? undefined : this.toDetail(endpoint);
   }
 
   create(input: CreateIntegrationEndpointInput): { endpoint: IntegrationEndpointDetail; token: string } {
     const token = endpointToken();
     const record = this.toPersistenceInput(input, tokenHash(token));
-    return { endpoint: this.store.createEndpoint(record), token };
+    const endpoint = this.store.createEndpoint(record);
+    return { endpoint: this.get(endpoint.id)!, token };
   }
 
   update(id: string, input: UpdateIntegrationEndpointInput): IntegrationEndpointDetail {
@@ -99,13 +104,15 @@ export class IntegrationEndpointManager {
       promptPrefix: input.promptPrefix ?? existing.promptPrefix,
       parameterMappings: input.parameterMappings ?? this.toInputMappings(existing.parameterMappings, fixedValues)
     }, this.store.endpointTokenHash(id)!, parameterMappings, fixedValues);
-    return this.store.updateEndpoint(id, record)!;
+    this.store.updateEndpoint(id, record);
+    return this.get(id)!;
   }
 
   rotateToken(id: string): { endpoint: IntegrationEndpointDetail; token: string } {
     if (this.store.getEndpoint(id) === undefined) throw new IntegrationEndpointManagerError("endpoint_not_found");
     const token = endpointToken();
-    return { endpoint: this.store.rotateEndpointToken(id, tokenHash(token))!, token };
+    this.store.rotateEndpointToken(id, tokenHash(token));
+    return { endpoint: this.get(id)!, token };
   }
 
   delete(id: string): void {
@@ -124,6 +131,13 @@ export class IntegrationEndpointManager {
     const endpoint = this.store.getEndpoint(endpointId);
     if (endpoint === undefined) throw new IntegrationEndpointManagerError("endpoint_not_found");
     const definitions = this.parameterDefinitions(endpoint.agentId);
+    const mappedKeys = new Set(endpoint.parameterMappings.map((mapping) => mapping.parameterKey));
+    if (
+      endpoint.parameterMappings.some((mapping) => !definitions.has(mapping.parameterKey))
+      || (endpoint.enabled && [...definitions.values()].some(({ key, required }) => required && !mappedKeys.has(key)))
+    ) {
+      throw new IntegrationEndpointManagerError("invalid_parameter_mapping");
+    }
     const requestMappings = endpoint.parameterMappings.filter((mapping) => mapping.source === "request");
     const allowedRequestKeys = new Set(requestMappings.map((mapping) => mapping.requestKey));
     if (Object.keys(parameters).some((key) => !allowedRequestKeys.has(key))) {
@@ -137,7 +151,7 @@ export class IntegrationEndpointManager {
         continue;
       }
       const value = parameters[mapping.requestKey];
-      if (value === undefined && definitions.get(mapping.parameterKey)?.required) {
+      if ((value === undefined || value.trim() === "") && definitions.get(mapping.parameterKey)?.required) {
         throw new IntegrationEndpointManagerError("missing_request_parameter");
       }
       resolved[mapping.parameterKey] = value ?? null;
@@ -172,6 +186,11 @@ export class IntegrationEndpointManager {
       throw new IntegrationEndpointManagerError("agent_not_found");
     }
     const definitions = this.parameterDefinitions(input.agentId);
+    if (input.parameterMappings.some((mapping) =>
+      mapping.source === "fixed" && definitions.get(mapping.parameterKey)?.required && mapping.value.trim() === ""
+    )) {
+      throw new IntegrationEndpointManagerError("invalid_endpoint");
+    }
     const targetKeys = new Set<string>();
     const requestKeys = new Set<string>();
     for (const mapping of mappings) {
@@ -198,7 +217,7 @@ export class IntegrationEndpointManager {
   private publicMappings(mappings: ParameterMappingInput[]): ParameterMapping[] {
     return mappings.map((mapping) => mapping.source === "request"
       ? { parameterKey: mapping.parameterKey, source: "request", requestKey: mapping.requestKey }
-      : { parameterKey: mapping.parameterKey, source: "fixed", configured: true });
+      : { parameterKey: mapping.parameterKey, source: "fixed", configured: mapping.value.trim() !== "" });
   }
 
   private fixedValuesFromInput(mappings: ParameterMappingInput[]): Record<string, string> {
@@ -216,5 +235,17 @@ export class IntegrationEndpointManager {
     return mappings.map((mapping) => mapping.source === "request"
       ? mapping
       : { parameterKey: mapping.parameterKey, source: "fixed", value: fixedValues[mapping.parameterKey] ?? "" });
+  }
+
+  private toDetail(endpoint: IntegrationEndpoint): IntegrationEndpointDetail {
+    const fixedValues = this.fixedValues(endpoint.id);
+    return {
+      ...endpoint,
+      parameterMappings: endpoint.parameterMappings.map((mapping) => {
+        if (mapping.source === "request") return mapping;
+        const fixedValue = fixedValues[mapping.parameterKey];
+        return { ...mapping, configured: fixedValue !== undefined && fixedValue.trim() !== "" };
+      })
+    };
   }
 }

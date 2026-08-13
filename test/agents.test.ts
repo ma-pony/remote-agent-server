@@ -288,6 +288,34 @@ describe("Agent API", () => {
     expect(db.prepare("SELECT id FROM agents WHERE id = ?").get(id)).toEqual({ id });
   });
 
+  it("已有 Integration Endpoint 的 Agent 删除时返回明确冲突且保留数据", async () => {
+    const { app, db, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "Integration owner", provider: "codex", projectEnvironmentId }
+    });
+    const { id } = created.json() as { id: string };
+    const timestamp = "2026-08-13T00:00:00.000Z";
+    db.prepare(`
+      INSERT INTO integration_endpoints
+        (id, name, slug, agent_id, enabled, token_hash, prompt_prefix, parameter_mappings_json, encrypted_fixed_values, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 1, ?, '', '[]', NULL, ?, ?)
+    `).run("endpoint-with-agent", "Integration", "integration-owner", id, "a".repeat(64), timestamp, timestamp);
+
+    const response = await app.inject({ method: "DELETE", url: `/api/agents/${id}`, headers: authHeaders() });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: {
+        code: "agent_has_integration_endpoints",
+        message: "Agent has Integration Endpoints and cannot be deleted; delete or reassign them first"
+      }
+    });
+    expect(db.prepare("SELECT id FROM agents WHERE id = ?").get(id)).toEqual({ id });
+  });
+
   it("通过注入 Runtime 返回 Agent doctor 结果", async () => {
     const { app, projectEnvironmentId } = await createTestApp();
     const created = await app.inject({

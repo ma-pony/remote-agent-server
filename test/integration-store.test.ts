@@ -18,7 +18,7 @@ const createHarness = () => {
   temporaryDirectories.push(dataDir);
   const store = new IntegrationStore({ db });
   const manager = new IntegrationEndpointManager({ db, store, secrets: SecretStore.open({ dataDir }) });
-  return { db, seed, manager, store };
+  return { db, seed, dataDir, manager, store };
 };
 
 const validEndpointInput = (agentId: string) => ({
@@ -76,6 +76,39 @@ describe("Integration endpoint domain", () => {
     db.close();
   });
 
+  it("required 固定参数拒绝空白值，详情仅将真实固定值标为 configured", () => {
+    const { db, seed, dataDir, manager } = createHarness();
+    db.prepare(`
+      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES ('parameter-api', ?, 'api_token', 'Token', NULL, 1, 1, ?, ?)
+    `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+
+    expect(() => manager.create({
+      ...endpointInputWithFixedSecret(seed.agent.id, "   "),
+      enabled: true
+    })).toThrowError(new IntegrationEndpointManagerError("invalid_endpoint"));
+
+    const created = manager.create({
+      ...endpointInputWithFixedSecret(seed.agent.id, "configured-secret"),
+      enabled: true
+    });
+    expect(() => manager.update(created.endpoint.id, {
+      parameterMappings: [{ parameterKey: "api_token", source: "fixed", value: "" }]
+    })).toThrowError(new IntegrationEndpointManagerError("invalid_endpoint"));
+
+    db.prepare("UPDATE integration_endpoints SET encrypted_fixed_values = ? WHERE id = ?")
+      .run(SecretStore.open({ dataDir }).encrypt(JSON.stringify({ api_token: "" })), created.endpoint.id);
+    expect(manager.get(created.endpoint.id)?.parameterMappings).toEqual([
+      { parameterKey: "api_token", source: "fixed", configured: false }
+    ]);
+    db.prepare("UPDATE integration_endpoints SET encrypted_fixed_values = ? WHERE id = ?")
+      .run(SecretStore.open({ dataDir }).encrypt(JSON.stringify({})), created.endpoint.id);
+    expect(manager.get(created.endpoint.id)?.parameterMappings).toEqual([
+      { parameterKey: "api_token", source: "fixed", configured: false }
+    ]);
+    db.close();
+  });
+
   it("启用端点要求覆盖 Agent 的必填参数，并解析请求和固定值", () => {
     const { db, seed, manager } = createHarness();
     db.prepare(`
@@ -105,6 +138,23 @@ describe("Integration endpoint domain", () => {
     });
     expect(() => manager.resolveRequest(created.endpoint.id, { ticket: "1332", ignored: "x" }))
       .toThrowError(new IntegrationEndpointManagerError("unknown_request_parameter"));
+    db.close();
+  });
+
+  it("required 请求参数将空白视为缺失", () => {
+    const { db, seed, manager } = createHarness();
+    db.prepare(`
+      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES ('parameter-ticket', ?, 'ticket_id', 'Ticket', NULL, 1, 0, ?, ?)
+    `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+    const created = manager.create({
+      ...validEndpointInput(seed.agent.id),
+      enabled: true,
+      parameterMappings: [{ parameterKey: "ticket_id", source: "request", requestKey: "ticket" }]
+    });
+
+    expect(() => manager.resolveRequest(created.endpoint.id, { ticket: "  \t" }))
+      .toThrowError(new IntegrationEndpointManagerError("missing_request_parameter"));
     db.close();
   });
 
@@ -156,6 +206,61 @@ describe("Integration endpoint domain", () => {
     `).run(secondAgentId, seed.projectEnvironment.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
     expect(() => manager.update(created.endpoint.id, { agentId: secondAgentId }))
       .toThrowError(new IntegrationEndpointManagerError("conversation_busy"));
+    db.close();
+  });
+
+  it("Endpoint 有 Webhook Subscription 时拒绝删除", () => {
+    const { db, seed, manager, store } = createHarness();
+    const endpoint = manager.create(validEndpointInput(seed.agent.id)).endpoint;
+    store.createSubscription({
+      endpointId: endpoint.id,
+      name: "callback",
+      url: "https://example.test/webhook",
+      enabled: true,
+      eventsJson: "[]",
+      encryptedHeaders: null,
+      encryptedSigningSecret: "encrypted-secret",
+      timeoutSeconds: 10
+    });
+
+    expect(() => manager.delete(endpoint.id)).toThrowError(new IntegrationEndpointManagerError("endpoint_in_use"));
+    db.close();
+  });
+
+  it("每次解析都拒绝失效映射和新增未覆盖的 required 参数", () => {
+    const { db, seed, manager } = createHarness();
+    db.prepare(`
+      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES ('parameter-ticket', ?, 'ticket_id', 'Ticket', NULL, 1, 0, ?, ?)
+    `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+    const created = manager.create({
+      ...validEndpointInput(seed.agent.id),
+      enabled: true,
+      parameterMappings: [{ parameterKey: "ticket_id", source: "request", requestKey: "ticket" }]
+    });
+
+    db.prepare(`
+      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES ('parameter-new', ?, 'new_required', 'New', NULL, 1, 0, ?, ?)
+    `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+    expect(() => manager.resolveRequest(created.endpoint.id, { ticket: "1332" }))
+      .toThrowError("invalid_parameter_mapping");
+
+    db.prepare("DELETE FROM agent_session_parameters WHERE id = 'parameter-new'").run();
+    db.prepare("DELETE FROM agent_session_parameters WHERE id = 'parameter-ticket'").run();
+    expect(() => manager.resolveRequest(created.endpoint.id, { ticket: "1332" }))
+      .toThrowError("invalid_parameter_mapping");
+    db.close();
+  });
+
+  it("仅保存 SHA-256 hex Token hash", () => {
+    const { db, seed, manager } = createHarness();
+    const created = manager.create(validEndpointInput(seed.agent.id));
+    const row = db.prepare("SELECT token_hash FROM integration_endpoints WHERE id = ?")
+      .get(created.endpoint.id) as { token_hash: string };
+
+    expect(row.token_hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(row.token_hash).not.toContain(created.token);
     db.close();
   });
 

@@ -435,8 +435,10 @@ export class IntegrationStore {
       SELECT 1 FROM integration_conversations WHERE endpoint_id = ?
       UNION ALL
       SELECT 1 FROM integration_tasks WHERE endpoint_id = ?
+      UNION ALL
+      SELECT 1 FROM webhook_subscriptions WHERE endpoint_id = ?
       LIMIT 1
-    `).get(id, id) !== undefined;
+    `).get(id, id, id) !== undefined;
   }
 
   endpointHasActiveWork(id: string): boolean {

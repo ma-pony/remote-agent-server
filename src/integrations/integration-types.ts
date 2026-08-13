@@ -13,7 +13,7 @@ export type ParameterMappingInput =
 export type IntegrationErrorCode =
   | "endpoint_not_found" | "endpoint_disabled" | "invalid_endpoint_token"
   | "task_not_found" | "idempotency_conflict" | "conversation_busy"
-  | "missing_request_parameter" | "unknown_request_parameter";
+  | "missing_request_parameter" | "unknown_request_parameter" | "invalid_parameter_mapping";
 
 export type IntegrationEndpoint = {
   id: string;

@@ -122,6 +122,8 @@ export class AgentManager {
     if (this.get(id) === undefined) return "not_found";
     const session = this.db.prepare("SELECT 1 FROM sessions WHERE agent_id = ? LIMIT 1").get(id);
     if (session !== undefined) throw new AgentManagerError("agent_has_sessions");
+    const endpoint = this.db.prepare("SELECT 1 FROM integration_endpoints WHERE agent_id = ? LIMIT 1").get(id);
+    if (endpoint !== undefined) throw new AgentManagerError("agent_has_integration_endpoints");
 
     this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
     rmSync(join(this.dataDir, "agents", id), { recursive: true, force: true });
@@ -154,7 +156,7 @@ export class AgentManager {
 }
 
 export class AgentManagerError extends Error {
-  constructor(readonly code: "project_environment_unavailable" | "agent_has_sessions") {
+  constructor(readonly code: "project_environment_unavailable" | "agent_has_sessions" | "agent_has_integration_endpoints") {
     super(code);
   }
 }

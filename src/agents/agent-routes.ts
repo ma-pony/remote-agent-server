@@ -35,11 +35,13 @@ const notFound = (reply: FastifyReply) =>
 
 const handleAgentError = (reply: FastifyReply, error: unknown) => {
   if (error instanceof AgentManagerError) {
-    if (error.code === "agent_has_sessions") {
+    if (error.code === "agent_has_sessions" || error.code === "agent_has_integration_endpoints") {
       return reply.code(409).send({
         error: {
           code: error.code,
-          message: "Agent has Sessions and cannot be deleted; disable it instead"
+          message: error.code === "agent_has_sessions"
+            ? "Agent has Sessions and cannot be deleted; disable it instead"
+            : "Agent has Integration Endpoints and cannot be deleted; delete or reassign them first"
         }
       });
     }
