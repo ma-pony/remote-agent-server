@@ -109,11 +109,11 @@ export class RunStreamPermanentError extends Error {
 export const isRunStreamPermanentError = (error: unknown): error is RunStreamPermanentError =>
   error instanceof RunStreamPermanentError;
 
-/** Sends one authenticated JSON request to the server API. */
+/** Sends one authenticated request to the server API. */
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = sessionStorage.getItem("apiToken");
   const headers = new Headers(init.headers);
-  headers.set("content-type", "application/json");
+  if (init.body != null && !headers.has("content-type")) headers.set("content-type", "application/json");
   headers.set("authorization", `Bearer ${token}`);
   const response = await fetch(`/api${path}`, { ...init, headers });
   if (!response.ok) throw await response.json();
