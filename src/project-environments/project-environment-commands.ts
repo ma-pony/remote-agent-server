@@ -42,11 +42,18 @@ const runProcess = (
   });
   let stdout = "";
   let stderr = "";
+  let output = "";
   let settled = false;
   const append = (current: string, chunk: Buffer): string =>
     (current + chunk.toString("utf8")).slice(-OUTPUT_LIMIT);
-  child.stdout.on("data", (chunk: Buffer) => { stdout = append(stdout, chunk); });
-  child.stderr.on("data", (chunk: Buffer) => { stderr = append(stderr, chunk); });
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout = append(stdout, chunk);
+    output = append(output, chunk);
+  });
+  child.stderr.on("data", (chunk: Buffer) => {
+    stderr = append(stderr, chunk);
+    output = append(output, chunk);
+  });
 
   const terminate = () => child.kill("SIGTERM");
   options.signal.addEventListener("abort", terminate, { once: true });
@@ -65,7 +72,7 @@ const runProcess = (
     if (options.signal.aborted) {
       reject(new Error("project_environment_command_aborted"));
     } else if (signal !== null || code !== 0) {
-      reject(new Error((stderr || stdout || `Command exited with ${String(code)}`).trim()));
+      reject(new Error((output || `Command exited with ${String(code)}`).trim()));
     } else {
       resolve({ stdout, stderr });
     }

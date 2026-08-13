@@ -8,7 +8,10 @@ import { buildApp } from "../src/app.js";
 import { ProjectEnvironmentBuilder } from "../src/project-environments/project-environment-builder.js";
 import { ProjectEnvironmentScheduler } from "../src/project-environments/project-environment-scheduler.js";
 import { ProjectEnvironmentStore } from "../src/project-environments/project-environment-store.js";
-import type { ProjectEnvironmentCommands } from "../src/project-environments/project-environment-commands.js";
+import {
+  SystemProjectEnvironmentCommands,
+  type ProjectEnvironmentCommands
+} from "../src/project-environments/project-environment-commands.js";
 import type { WorkspaceManager } from "../src/workspaces/workspace-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
@@ -161,6 +164,23 @@ describe("ProjectEnvironmentStore", () => {
     expect(recovered).toEqual([expect.objectContaining({ id: first.id, status: "failed", failureStage: "interrupted" })]);
     expect(store.get(environment.id)?.currentRevisionId).toBeNull();
     db.close();
+  });
+});
+
+describe("SystemProjectEnvironmentCommands", () => {
+  it("准备失败时同时保留 stderr 警告和 stdout 的真正错误", async () => {
+    const commands = new SystemProjectEnvironmentCommands();
+    const controller = new AbortController();
+
+    await expect(commands.prepare({
+      id: "repository-1",
+      projectEnvironmentId: "environment-1",
+      name: "api",
+      gitUrl: "git@example.test:api.git",
+      prepareCommand: "printf 'warning\\n' >&2; sleep 0.05; printf 'actual failure\\n'; exit 1",
+      createdAt: "2026-08-13T00:00:00.000Z",
+      updatedAt: "2026-08-13T00:00:00.000Z"
+    }, "/tmp", 1_000, controller.signal)).rejects.toThrow("warning\nactual failure");
   });
 });
 
