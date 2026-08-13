@@ -6,6 +6,9 @@ import type Database from "better-sqlite3";
 
 import type { AgentManager } from "../agents/agent-manager.js";
 import type { Agent, Session, SessionStatus } from "../domain.js";
+import { McpManager } from "../mcp/mcp-manager.js";
+import { SecretStore } from "../mcp/secret-store.js";
+import type { SessionMcpStatus } from "../mcp/mcp-types.js";
 import { ProjectEnvironmentStore } from "../project-environments/project-environment-store.js";
 import type { AgentRuntime } from "../runtime/agent-runtime.js";
 import { WorkspaceCreateError, type WorkspaceManager } from "../workspaces/workspace-manager.js";
@@ -34,7 +37,12 @@ const toSession = (row: SessionRow): Session => ({
   updatedAt: row.updated_at
 });
 
-export type CreateSessionInput = { agentId: string; title: string };
+export type CreateSessionInput = {
+  agentId: string;
+  title: string;
+  mcpParameters: Record<string, string | null>;
+};
+export type SessionWithMcpStatus = Session & SessionMcpStatus;
 export type SessionRuntimeContext = { agent: Agent; session: Session };
 
 export class SessionManagerError extends Error {
@@ -53,6 +61,7 @@ export type SessionManagerDependencies = {
   runtime: AgentRuntime;
   workspaceManager: WorkspaceManager;
   projectEnvironmentStore?: ProjectEnvironmentStore;
+  mcpManager?: McpManager;
 };
 
 /**
@@ -65,20 +74,30 @@ export class SessionManager {
   private readonly runtime: AgentRuntime;
   private readonly workspaceManager: WorkspaceManager;
   private readonly projectEnvironmentStore: ProjectEnvironmentStore;
+  private readonly mcpManager: McpManager;
 
-  constructor({ db, dataDir, agentManager, runtime, workspaceManager, projectEnvironmentStore }: SessionManagerDependencies) {
+  constructor({
+    db,
+    dataDir,
+    agentManager,
+    runtime,
+    workspaceManager,
+    projectEnvironmentStore,
+    mcpManager
+  }: SessionManagerDependencies) {
     this.db = db;
     this.dataDir = dataDir;
     this.agentManager = agentManager;
     this.runtime = runtime;
     this.workspaceManager = workspaceManager;
     this.projectEnvironmentStore = projectEnvironmentStore ?? new ProjectEnvironmentStore({ db });
+    this.mcpManager = mcpManager ?? new McpManager({ db, secrets: SecretStore.open({ dataDir }) });
   }
 
   /**
    * Creates the workspace before storing the Session record.
    */
-  async create(input: CreateSessionInput): Promise<Session> {
+  async create(input: CreateSessionInput): Promise<SessionWithMcpStatus> {
     const agent = this.agentManager.get(input.agentId);
     if (agent === undefined) throw new SessionManagerError("agent_not_found");
     if (!agent.enabled) throw new SessionManagerError("agent_disabled");
@@ -87,6 +106,7 @@ export class SessionManager {
     if (revision?.status !== "ready" || revision.workspacePath === null) {
       throw new SessionManagerError("project_environment_unavailable");
     }
+    const mcpValues = this.mcpManager.normalizeSessionValues(agent.id, input.mcpParameters, true);
 
     const id = randomUUID();
     let workspace;
@@ -99,11 +119,14 @@ export class SessionManager {
 
     const createdAt = new Date().toISOString();
     try {
-      this.db
-        .prepare(
-          "INSERT INTO sessions (id, agent_id, title, status, provider_session_id, workspace_path, project_environment_revision_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .run(id, agent.id, input.title, "idle", null, workspace.workspacePath, revision.id, createdAt, createdAt);
+      this.inImmediateTransaction(() => {
+        this.db
+          .prepare(
+            "INSERT INTO sessions (id, agent_id, title, status, provider_session_id, workspace_path, project_environment_revision_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+          )
+          .run(id, agent.id, input.title, "idle", null, workspace.workspacePath, revision.id, createdAt, createdAt);
+        this.mcpManager.insertSessionValuesInTransaction(id, mcpValues);
+      });
     } catch (_error) {
       try {
         await this.workspaceManager.deleteSession(id);
@@ -113,7 +136,7 @@ export class SessionManager {
       throw new SessionManagerError("session_create_failed");
     }
 
-    return {
+    return this.withMcpStatus({
       id,
       agentId: agent.id,
       title: input.title,
@@ -123,23 +146,38 @@ export class SessionManager {
       projectEnvironmentRevisionId: revision.id,
       createdAt,
       updatedAt: createdAt
-    };
+    });
   }
 
   /**
    * Lists persisted Sessions in creation order.
    */
-  list(): Session[] {
+  list(): SessionWithMcpStatus[] {
     const rows = this.db.prepare("SELECT * FROM sessions ORDER BY created_at ASC, id ASC").all() as SessionRow[];
-    return rows.map(toSession);
+    return rows.map((row) => this.withMcpStatus(toSession(row)));
   }
 
   /**
    * Looks up a Session by its identifier.
    */
-  get(id: string): Session | undefined {
+  get(id: string): SessionWithMcpStatus | undefined {
     const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
-    return row === undefined ? undefined : toSession(row);
+    return row === undefined ? undefined : this.withMcpStatus(toSession(row));
+  }
+
+  /** Updates only the supplied MCP parameter values while the Session is idle. */
+  updateMcpParameters(id: string, values: Record<string, string | null>): SessionWithMcpStatus {
+    return this.inImmediateTransaction(() => {
+      const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
+      if (row === undefined) throw new SessionManagerError("session_not_found");
+      const active = this.db.prepare(
+        "SELECT 1 FROM runs WHERE session_id = ? AND status IN ('queued', 'running') LIMIT 1"
+      ).get(id);
+      if (row.status !== "idle" || active !== undefined) throw new SessionManagerError("session_busy");
+      const normalized = this.mcpManager.normalizeSessionValues(row.agent_id, values, false);
+      this.mcpManager.applySessionValuePatchInTransaction(id, normalized);
+      return this.withMcpStatus(toSession(row));
+    });
   }
 
   /**
@@ -334,5 +372,9 @@ export class SessionManager {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  private withMcpStatus(session: Session): SessionWithMcpStatus {
+    return { ...session, ...this.mcpManager.getSessionStatus(session.id) };
   }
 }

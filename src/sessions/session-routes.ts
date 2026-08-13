@@ -2,12 +2,17 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import type { RunRepository } from "../runs/run-repository.js";
+import { McpManagerError } from "../mcp/mcp-manager.js";
 import { WorkspaceCreateError } from "../workspaces/workspace-manager.js";
 import { SessionManager, SessionManagerError } from "./session-manager.js";
 
 const createSessionSchema = z.object({
   agentId: z.string().uuid(),
-  title: z.string().trim().min(1)
+  title: z.string().trim().min(1),
+  mcpParameters: z.record(z.string(), z.string().nullable()).default({})
+}).strict();
+const updateMcpParametersSchema = z.object({
+  values: z.record(z.string(), z.string().nullable())
 }).strict();
 
 const sendError = (reply: FastifyReply, statusCode: number, code: string, message: string) =>
@@ -16,6 +21,9 @@ const sendError = (reply: FastifyReply, statusCode: number, code: string, messag
 const handleError = (reply: FastifyReply, error: unknown) => {
   if (error instanceof WorkspaceCreateError) {
     return sendError(reply, 500, error.code, error.message);
+  }
+  if (error instanceof McpManagerError) {
+    return sendError(reply, 400, error.code, "Invalid Session MCP parameters");
   }
   if (!(error instanceof SessionManagerError)) throw error;
 
@@ -65,6 +73,16 @@ export const registerSessionRoutes = (
     return session === undefined
       ? sendError(reply, 404, "not_found", "Session not found")
       : { ...session, runs: runRepository.listBySession(session.id) };
+  });
+
+  app.patch<{ Params: { id: string } }>("/sessions/:id/mcp-parameters", (request, reply) => {
+    const parsed = updateMcpParametersSchema.safeParse(request.body);
+    if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Session MCP parameters");
+    try {
+      return sessionManager.updateMcpParameters(request.params.id, parsed.data.values);
+    } catch (error) {
+      return handleError(reply, error);
+    }
   });
 
   app.post<{ Params: { id: string } }>("/sessions/:id/reset", async (request, reply) => {

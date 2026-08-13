@@ -82,7 +82,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     agentManager,
     runtime,
     workspaceManager,
-    projectEnvironmentStore
+    projectEnvironmentStore,
+    mcpManager
   });
   const runRepository = deps.runRepository ?? new RunRepository({ db: deps.db });
   const eventStore = deps.eventStore ?? new EventStore({ db: deps.db });

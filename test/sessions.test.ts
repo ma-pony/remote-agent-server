@@ -104,6 +104,114 @@ afterEach(async () => {
 });
 
 describe("Session API", () => {
+  it("创建 Session 时校验并加密保存必填 MCP 参数", async () => {
+    const { app, db } = await createTestApp();
+    const agent = await createAgent(app);
+    await app.inject({
+      method: "POST",
+      url: `/api/agents/${agent.id}/session-parameters`,
+      headers: authHeaders(),
+      payload: {
+        key: "access_token",
+        label: "访问令牌",
+        description: "当前租户令牌",
+        required: true,
+        secret: true
+      }
+    });
+
+    const missing = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: authHeaders(),
+      payload: { agentId: agent.id, title: "缺少令牌", mcpParameters: {} }
+    });
+    expect(missing.statusCode).toBe(400);
+    expect(missing.json()).toMatchObject({ error: { code: "missing_session_mcp_parameters" } });
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: authHeaders(),
+      payload: {
+        agentId: agent.id,
+        title: "带令牌",
+        mcpParameters: { access_token: "session-secret-token" }
+      }
+    });
+    expect(created.statusCode).toBe(201);
+    expect(JSON.stringify(created.json())).not.toContain("session-secret-token");
+    expect(created.json()).toMatchObject({
+      mcpParametersValid: true,
+      missingMcpParameters: [],
+      mcpParameters: [{ key: "access_token", secret: true, configured: true }]
+    });
+    const row = db.prepare(
+      "SELECT plain_value, encrypted_value FROM session_mcp_parameter_values LIMIT 1"
+    ).get() as { plain_value: string | null; encrypted_value: string | null };
+    expect(row.plain_value).toBeNull();
+    expect(row.encrypted_value).toEqual(expect.any(String));
+    expect(row.encrypted_value).not.toContain("session-secret-token");
+  });
+
+  it("空闲 Session 可局部修改 MCP 参数，活动 Run 期间拒绝", async () => {
+    const { app, db } = await createTestApp();
+    const agent = await createAgent(app);
+    for (const parameter of [
+      { key: "tenant", label: "租户", required: true, secret: false },
+      { key: "note", label: "备注", required: false, secret: false }
+    ]) {
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/agents/${agent.id}/session-parameters`,
+        headers: authHeaders(),
+        payload: { ...parameter, description: null }
+      });
+      expect(response.statusCode).toBe(201);
+    }
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: authHeaders(),
+      payload: { agentId: agent.id, title: "参数测试", mcpParameters: { tenant: "team-a", note: "old" } }
+    });
+    const sessionId = (created.json() as { id: string }).id;
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/api/sessions/${sessionId}/mcp-parameters`,
+      headers: authHeaders(),
+      payload: { values: { tenant: "team-b", note: null } }
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      mcpParametersValid: true,
+      mcpParameters: [
+        { key: "tenant", configured: true, value: "team-b" },
+        { key: "note", configured: false }
+      ]
+    });
+
+    db.prepare(
+      "INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, 'queued', ?, ?)"
+    ).run("busy-run", sessionId, "queued", "2026-08-13T00:00:00.000Z");
+    const busy = await app.inject({
+      method: "PATCH",
+      url: `/api/sessions/${sessionId}/mcp-parameters`,
+      headers: authHeaders(),
+      payload: { values: { tenant: "team-c" } }
+    });
+    expect(busy.statusCode).toBe(409);
+    expect(busy.json()).toEqual({ error: { code: "session_busy", message: "Session is running" } });
+
+    const detail = await app.inject({ method: "GET", url: `/api/sessions/${sessionId}`, headers: authHeaders() });
+    expect(detail.json()).toMatchObject({
+      mcpParametersValid: true,
+      mcpParameters: [{ key: "tenant", value: "team-b" }, { key: "note", configured: false }]
+    });
+  });
+
   it("拒绝为禁用 Agent 创建 Session", async () => {
     const { app, db } = await createTestApp();
     const agent = await createAgent(app);
@@ -235,7 +343,7 @@ describe("Session API", () => {
     const manager = new SessionManager({ db, dataDir, agentManager, runtime, workspaceManager });
     const agent = db.prepare("SELECT id FROM agents").get() as { id: string };
 
-    await expect(manager.create({ agentId: agent.id, title: "修复工单 1332" })).rejects.toMatchObject({
+    await expect(manager.create({ agentId: agent.id, title: "修复工单 1332", mcpParameters: {} })).rejects.toMatchObject({
       code: "session_create_failed"
     });
 
