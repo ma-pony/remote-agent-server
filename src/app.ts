@@ -10,6 +10,10 @@ import { AgentManager } from "./agents/agent-manager.js";
 import { requireApiToken } from "./auth.js";
 import type { AppConfig } from "./config.js";
 import { EventStore } from "./events/event-store.js";
+import { SdkMcpChecker, type McpChecker } from "./mcp/mcp-checker.js";
+import { McpManager } from "./mcp/mcp-manager.js";
+import { registerMcpRoutes } from "./mcp/mcp-routes.js";
+import { SecretStore } from "./mcp/secret-store.js";
 import { ProjectEnvironmentBuilder } from "./project-environments/project-environment-builder.js";
 import { SystemProjectEnvironmentCommands } from "./project-environments/project-environment-commands.js";
 import { registerProjectEnvironmentRoutes } from "./project-environments/project-environment-routes.js";
@@ -43,6 +47,8 @@ export type AppDependencies = {
   skillManager?: SkillManager;
   projectEnvironmentStore?: ProjectEnvironmentStore;
   projectEnvironmentScheduler?: ProjectEnvironmentCheckScheduler;
+  mcpManager?: McpManager;
+  mcpChecker?: McpChecker;
   webRoot?: string;
 };
 
@@ -52,6 +58,11 @@ export type AppDependencies = {
 export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const app = Fastify({ forceCloseConnections: true });
   const skillManager = deps.skillManager ?? new SkillManager({ dataDir: deps.config.dataDir });
+  const mcpManager = deps.mcpManager ?? new McpManager({
+    db: deps.db,
+    secrets: SecretStore.open({ dataDir: deps.config.dataDir })
+  });
+  const mcpChecker = deps.mcpChecker ?? new SdkMcpChecker();
   const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config, skillManager);
   const projectEnvironmentStore = deps.projectEnvironmentStore ?? new ProjectEnvironmentStore({ db: deps.db });
   const agentManager = new AgentManager({
@@ -99,6 +110,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager, skillManager);
+    registerMcpRoutes(api, { mcpManager, mcpChecker });
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });

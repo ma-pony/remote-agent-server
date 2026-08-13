@@ -8,6 +8,8 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "./app.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { migrate, openDatabase } from "./db.js";
+import { McpManager } from "./mcp/mcp-manager.js";
+import { SecretStore } from "./mcp/secret-store.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import { importLegacyProjectEnvironment } from "./project-environments/import-legacy-project-environment.js";
 import { ProjectEnvironmentStore } from "./project-environments/project-environment-store.js";
@@ -82,7 +84,8 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     const runRepository = new RunRepository({ db });
     runRepository.recoverAfterRestart();
     const runtime = options.runtime ?? new AcpxAgentRuntime(config);
-    app = buildApp({ config, db, runtime, workspaceManager, runRepository, projectEnvironmentStore });
+    const mcpManager = new McpManager({ db, secrets: SecretStore.open({ dataDir: config.dataDir }) });
+    app = buildApp({ config, db, runtime, workspaceManager, runRepository, projectEnvironmentStore, mcpManager });
 
     let closing: Promise<void> | undefined;
     let onSignal: (() => void) | undefined;
