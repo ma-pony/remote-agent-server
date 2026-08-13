@@ -60,6 +60,52 @@ export const migrate = (db: Database.Database): void => {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS agent_mcp_servers (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      transport TEXT NOT NULL CHECK (transport IN ('http', 'stdio')),
+      enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+      url TEXT,
+      command TEXT,
+      check_timeout_seconds INTEGER NOT NULL DEFAULT 30,
+      last_checked_at TEXT,
+      last_check_status TEXT CHECK (last_check_status IN ('passed', 'failed')),
+      last_check_message TEXT,
+      last_tool_count INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(agent_id, name)
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_session_parameters (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      description TEXT,
+      required INTEGER NOT NULL CHECK (required IN (0, 1)),
+      secret INTEGER NOT NULL CHECK (secret IN (0, 1)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(agent_id, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_mcp_values (
+      id TEXT PRIMARY KEY,
+      mcp_server_id TEXT NOT NULL REFERENCES agent_mcp_servers(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN ('argument', 'header', 'environment')),
+      position INTEGER NOT NULL,
+      target_name TEXT,
+      source_type TEXT NOT NULL CHECK (source_type IN ('fixed', 'session_parameter', 'runtime')),
+      plain_value TEXT,
+      encrypted_value TEXT,
+      secret INTEGER NOT NULL DEFAULT 0 CHECK (secret IN (0, 1)),
+      session_parameter_id TEXT REFERENCES agent_session_parameters(id),
+      runtime_key TEXT,
+      UNIQUE(mcp_server_id, kind, position)
+    );
+
     CREATE TABLE IF NOT EXISTS sessions (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL REFERENCES agents(id),
@@ -70,6 +116,16 @@ export const migrate = (db: Database.Database): void => {
       project_environment_revision_id TEXT REFERENCES project_environment_revisions(id),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS session_mcp_parameter_values (
+      session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      parameter_id TEXT NOT NULL REFERENCES agent_session_parameters(id) ON DELETE RESTRICT,
+      plain_value TEXT,
+      encrypted_value TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(session_id, parameter_id)
     );
 
     CREATE TABLE IF NOT EXISTS runs (

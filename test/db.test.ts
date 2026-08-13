@@ -32,7 +32,7 @@ describe("configuration", () => {
 });
 
 describe("database migration", () => {
-  it("创建执行记录和项目环境七张业务表", () => {
+  it("创建执行记录、项目环境和 MCP 十一张业务表", () => {
     const { db } = createTestDatabase();
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -40,12 +40,16 @@ describe("database migration", () => {
       .map((row) => (row as { name: string }).name);
 
     expect(tables).toEqual([
+      "agent_mcp_servers",
+      "agent_mcp_values",
+      "agent_session_parameters",
       "agents",
       "environment_repositories",
       "events",
       "project_environment_revisions",
       "project_environments",
       "runs",
+      "session_mcp_parameter_values",
       "sessions"
     ]);
   });
