@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -169,6 +169,29 @@ describe("ProjectEnvironmentStore", () => {
 });
 
 describe("SystemProjectEnvironmentCommands", () => {
+  it("项目准备命令可使用用户 local bin 中的工具", async () => {
+    const home = mkdtempSync(join(tmpdir(), "project-environment-home-"));
+    tempDirectories.push(home);
+    const localBin = join(home, ".local", "bin");
+    mkdirSync(localBin, { recursive: true });
+    const tool = join(localBin, "project-tool");
+    writeFileSync(tool, "#!/bin/sh\nprintf 'tool-found\\n'\n", { mode: 0o700 });
+    chmodSync(tool, 0o700);
+    const commands = new SystemProjectEnvironmentCommands({
+      environment: { HOME: home, PATH: "/usr/bin:/bin" }
+    });
+
+    await expect(commands.prepare({
+      id: "repository-1",
+      projectEnvironmentId: "environment-1",
+      name: "api",
+      gitUrl: "git@example.test:api.git",
+      prepareCommand: "test \"$(project-tool)\" = tool-found",
+      createdAt: "2026-08-13T00:00:00.000Z",
+      updatedAt: "2026-08-13T00:00:00.000Z"
+    }, "/tmp", 1_000, new AbortController().signal)).resolves.toBeUndefined();
+  });
+
   it("准备失败时同时保留 stderr 警告和 stdout 的真正错误", async () => {
     const commands = new SystemProjectEnvironmentCommands();
     const controller = new AbortController();
