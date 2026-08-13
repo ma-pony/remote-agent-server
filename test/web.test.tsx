@@ -232,7 +232,7 @@ describe("最小管理界面", () => {
   });
 
   it("Token 只进入 sessionStorage，随后可创建三种 Provider Agent、检查环境并启停", async () => {
-    const agents = [agent];
+    const agents = [{ ...agent }];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
       const headers = new Headers(init?.headers);
@@ -241,6 +241,9 @@ describe("最小管理界面", () => {
       if (url === "/api/project-environments") return jsonResponse([{
         id: "environment-1", name: "默认项目环境", currentRevisionId: "revision-1",
         repositories: [], currentRevision: { id: "revision-1", status: "ready" }, latestRevision: null
+      }, {
+        id: "environment-2", name: "爬虫环境", currentRevisionId: "revision-2",
+        repositories: [], currentRevision: { id: "revision-2", status: "ready" }, latestRevision: null
       }]);
       if (url === "/api/agents" && init?.method === "POST") {
         const body = JSON.parse(String(init.body)) as { name: string; provider: string; projectEnvironmentId: string };
@@ -264,6 +267,11 @@ describe("最小管理界面", () => {
         const target = agents.find((item) => item.id === id)!;
         Object.assign(target, JSON.parse(String(init.body)) as object);
         return jsonResponse(target);
+      }
+      if (url.startsWith("/api/agents/") && init?.method === "DELETE") {
+        const id = url.split("/").at(-1);
+        agents.splice(agents.findIndex((item) => item.id === id), 1);
+        return new Response(null, { status: 204 });
       }
       throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
     }));
@@ -300,6 +308,46 @@ describe("最小管理界面", () => {
     expect(await within(primaryAgent).findByText("已停用")).toBeInTheDocument();
     fireEvent.click(within(primaryAgent).getByRole("button", { name: "启用" }));
     expect(await within(primaryAgent).findByText("已启用")).toBeInTheDocument();
+
+    fireEvent.click(within(primaryAgent).getByRole("button", { name: "修改" }));
+    fireEvent.change(within(primaryAgent).getByLabelText("Agent 名称"), { target: { value: "主力 Codex 二" } });
+    fireEvent.change(within(primaryAgent).getByLabelText("项目环境"), { target: { value: "environment-2" } });
+    fireEvent.click(within(primaryAgent).getByRole("button", { name: "保存修改" }));
+    expect(await screen.findByText("主力 Codex 二")).toBeInTheDocument();
+
+    const hermesAgent = screen.getByText("Hermes 运维").closest("article")!;
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(within(hermesAgent).getByRole("button", { name: "删除" }));
+    await waitFor(() => expect(screen.queryByText("Hermes 运维")).not.toBeInTheDocument());
+  });
+
+  it("已有 Session 的 Agent 删除失败时提示停用", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/api/agents" && (init?.method ?? "GET") === "GET") return jsonResponse([agent]);
+      if (url === "/api/project-environments") return jsonResponse([{
+        id: "environment-1", name: "默认项目环境", currentRevisionId: "revision-1",
+        repositories: [], currentRevision: { id: "revision-1", status: "ready" }, latestRevision: null
+      }]);
+      if (url === "/api/agents/agent-1" && init?.method === "DELETE") {
+        return jsonResponse({
+          error: {
+            code: "agent_has_sessions",
+            message: "该 Agent 已有 Session，不能删除，可将其停用"
+          }
+        }, 409);
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    }));
+
+    render(<App />);
+    const primaryAgent = (await screen.findByText("主力 Codex")).closest("article")!;
+    fireEvent.click(within(primaryAgent).getByRole("button", { name: "删除" }));
+
+    expect(await screen.findByText("该 Agent 已有 Session，不能删除，可将其停用")).toBeInTheDocument();
+    expect(screen.getByText("主力 Codex")).toBeInTheDocument();
   });
 
   it("Session 列表可创建 Session 并进入详情", async () => {

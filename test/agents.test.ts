@@ -31,7 +31,12 @@ const createFakeRuntime = (): AgentRuntime => ({
 
 const apps: Array<{ app: FastifyInstance; close: () => Promise<void> }> = [];
 
-const createTestApp = async (): Promise<{ app: FastifyInstance; dataDir: string; projectEnvironmentId: string }> => {
+const createTestApp = async (): Promise<{
+  app: FastifyInstance;
+  dataDir: string;
+  db: ReturnType<typeof createTestDatabase>["db"];
+  projectEnvironmentId: string;
+}> => {
   const { db, seed } = createTestDatabase();
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-server-"));
   const app = buildApp({
@@ -59,7 +64,7 @@ const createTestApp = async (): Promise<{ app: FastifyInstance; dataDir: string;
   });
 
   await app.ready();
-  return { app, dataDir, projectEnvironmentId: seed.projectEnvironment.id };
+  return { app, dataDir, db, projectEnvironmentId: seed.projectEnvironment.id };
 };
 
 afterEach(async () => {
@@ -162,6 +167,96 @@ describe("Agent API", () => {
     expect(disabled.json()).toMatchObject({ id, enabled: false });
     expect(enabled.statusCode).toBe(200);
     expect(enabled.json()).toMatchObject({ id, enabled: true });
+  });
+
+  it("可以修改名称和项目环境，但不能修改 Provider", async () => {
+    const { app, db, projectEnvironmentId } = await createTestApp();
+    const secondEnvironmentId = "22222222-2222-4222-8222-222222222222";
+    const secondRevisionId = "33333333-3333-4333-8333-333333333333";
+    const timestamp = "2026-08-13T00:00:00.000Z";
+    db.prepare(
+      "INSERT INTO project_environments (id, name, current_revision_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(secondEnvironmentId, "Second environment", secondRevisionId, timestamp, timestamp);
+    db.prepare(`
+      INSERT INTO project_environment_revisions
+        (id, project_environment_id, status, workspace_path, input_fingerprint, created_at, finished_at)
+      VALUES (?, ?, 'ready', ?, ?, ?, ?)
+    `).run(secondRevisionId, secondEnvironmentId, "/tmp/second/workspace", "second-input", timestamp, timestamp);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "Codex", provider: "codex", projectEnvironmentId }
+    });
+    const { id } = created.json() as { id: string };
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${id}`,
+      headers: authHeaders(),
+      payload: { name: "Codex Review", projectEnvironmentId: secondEnvironmentId }
+    });
+    const providerChange = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${id}`,
+      headers: authHeaders(),
+      payload: { provider: "hermes" }
+    });
+
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      id,
+      name: "Codex Review",
+      provider: "codex",
+      projectEnvironmentId: secondEnvironmentId
+    });
+    expect(providerChange.statusCode).toBe(400);
+  });
+
+  it("只删除没有 Session 的 Agent，并清理其专属目录", async () => {
+    const { app, dataDir, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "Disposable", provider: "codex", projectEnvironmentId }
+    });
+    const { id } = created.json() as { id: string };
+    const agentDirectory = join(dataDir, "agents", id);
+
+    const deleted = await app.inject({ method: "DELETE", url: `/api/agents/${id}`, headers: authHeaders() });
+    const missing = await app.inject({ method: "DELETE", url: `/api/agents/${id}`, headers: authHeaders() });
+
+    expect(deleted.statusCode).toBe(204);
+    expect(missing.statusCode).toBe(404);
+    expect(existsSync(agentDirectory)).toBe(false);
+  });
+
+  it("已有 Session 的 Agent 删除时返回明确冲突且保留数据", async () => {
+    const { app, db, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "In use", provider: "hermes", projectEnvironmentId }
+    });
+    const { id } = created.json() as { id: string };
+    const timestamp = "2026-08-13T00:00:00.000Z";
+    db.prepare(`
+      INSERT INTO sessions (id, agent_id, title, status, workspace_path, created_at, updated_at)
+      VALUES (?, ?, ?, 'idle', ?, ?, ?)
+    `).run("session-with-agent", id, "History", "/tmp/session-with-agent", timestamp, timestamp);
+
+    const response = await app.inject({ method: "DELETE", url: `/api/agents/${id}`, headers: authHeaders() });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toEqual({
+      error: {
+        code: "agent_has_sessions",
+        message: "Agent has Sessions and cannot be deleted; disable it instead"
+      }
+    });
+    expect(db.prepare("SELECT id FROM agents WHERE id = ?").get(id)).toEqual({ id });
   });
 
   it("通过注入 Runtime 返回 Agent doctor 结果", async () => {

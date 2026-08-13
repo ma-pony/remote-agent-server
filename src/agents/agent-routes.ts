@@ -28,6 +28,14 @@ const notFound = (reply: FastifyReply) =>
 
 const handleAgentError = (reply: FastifyReply, error: unknown) => {
   if (error instanceof AgentManagerError) {
+    if (error.code === "agent_has_sessions") {
+      return reply.code(409).send({
+        error: {
+          code: error.code,
+          message: "Agent has Sessions and cannot be deleted; disable it instead"
+        }
+      });
+    }
     return reply.code(400).send({
       error: { code: error.code, message: "Project environment has no ready revision" }
     });
@@ -59,6 +67,15 @@ export const registerAgentRoutes = (app: FastifyInstance, agentManager: AgentMan
     try {
       const agent = agentManager.update(request.params.id, parsed.data);
       return agent === undefined ? notFound(reply) : agent;
+    } catch (error) {
+      return handleAgentError(reply, error);
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/agents/:id", (request, reply) => {
+    try {
+      const result = agentManager.delete(request.params.id);
+      return result === "not_found" ? notFound(reply) : reply.code(204).send();
     } catch (error) {
       return handleAgentError(reply, error);
     }

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type Database from "better-sqlite3";
@@ -116,6 +116,16 @@ export class AgentManager {
     return { ...agent, name, enabled, projectEnvironmentId, updatedAt };
   }
 
+  delete(id: string): "deleted" | "not_found" {
+    if (this.get(id) === undefined) return "not_found";
+    const session = this.db.prepare("SELECT 1 FROM sessions WHERE agent_id = ? LIMIT 1").get(id);
+    if (session !== undefined) throw new AgentManagerError("agent_has_sessions");
+
+    this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+    rmSync(join(this.dataDir, "agents", id), { recursive: true, force: true });
+    return "deleted";
+  }
+
   async doctor(id: string): Promise<{
     provider: RuntimeDoctor;
     projectEnvironment: { ok: boolean; message: string; revisionId: string | null };
@@ -142,7 +152,7 @@ export class AgentManager {
 }
 
 export class AgentManagerError extends Error {
-  constructor(readonly code: "project_environment_unavailable") {
+  constructor(readonly code: "project_environment_unavailable" | "agent_has_sessions") {
     super(code);
   }
 }
