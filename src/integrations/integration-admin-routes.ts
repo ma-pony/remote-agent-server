@@ -32,6 +32,7 @@ const updateEndpointSchema = createEndpointSchema.partial().strict().refine(
   (input) => Object.keys(input).length > 0,
   { message: "At least one field must be provided" }
 );
+const rotateTokenSchema = z.object({}).strict().optional();
 
 const invalidRequest = (reply: FastifyReply, message: string) =>
   reply.code(400).send({ error: { code: "invalid_request", message } });
@@ -44,6 +45,11 @@ const handleManagerError = (reply: FastifyReply, error: unknown) => {
   if (error.code === "endpoint_not_found") return endpointNotFound(reply);
   if (error.code === "agent_not_found") {
     return reply.code(404).send({ error: { code: "agent_not_found", message: "Agent not found" } });
+  }
+  if (error.code === "slug_conflict") {
+    return reply.code(409).send({
+      error: { code: "slug_conflict", message: "Integration endpoint slug already exists" }
+    });
   }
   if (error.code === "endpoint_in_use" || error.code === "conversation_busy") {
     return reply.code(409).send({
@@ -92,6 +98,8 @@ export const registerIntegrationAdminRoutes = (app: FastifyInstance, manager: In
   });
 
   app.post<{ Params: { id: string } }>("/integration-endpoints/:id/rotate-token", (request, reply) => {
+    const parsed = rotateTokenSchema.safeParse(request.body);
+    if (!parsed.success) return invalidRequest(reply, "Invalid Integration Endpoint token rotation");
     try {
       return manager.rotateToken(request.params.id);
     } catch (error) {

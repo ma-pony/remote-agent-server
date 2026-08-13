@@ -8,6 +8,7 @@ import type { IntegrationEndpointManager } from "./integration-endpoint-manager.
  * Task handlers are registered in the subsequent integration task.
  */
 export const registerIntegrationRoutes = (app: FastifyInstance, manager: IntegrationEndpointManager): void => {
+  app.decorateRequest("integrationEndpoint", null);
   app.all<{ Params: { slug: string } }>("/integration/v1/endpoints/:slug/*", {
     onRequest: requireIntegrationEndpoint(manager)
   }, (_request, reply) => reply.code(404).send({

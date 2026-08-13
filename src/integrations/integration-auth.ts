@@ -5,7 +5,7 @@ import type { IntegrationEndpointManager } from "./integration-endpoint-manager.
 
 declare module "fastify" {
   interface FastifyRequest {
-    integrationEndpoint?: IntegrationEndpoint;
+    integrationEndpoint: IntegrationEndpoint | null;
   }
 }
 

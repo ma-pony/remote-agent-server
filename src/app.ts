@@ -131,23 +131,24 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   registerIntegrationRoutes(app, integrationEndpointManager);
 
   const webRoot = deps.webRoot ?? resolve(process.cwd(), "dist/web");
-  if (existsSync(webRoot)) {
+  const hasWebRoot = existsSync(webRoot);
+  if (hasWebRoot) {
     app.register(fastifyStatic, { root: webRoot, wildcard: false });
-    app.setNotFoundHandler((request, reply) => {
-      const path = request.url.split("?", 1)[0] ?? request.url;
-      if (path === "/api" || path?.startsWith("/api/") || path === "/integration" || path?.startsWith("/integration/")) {
-        return reply.code(404).send({ error: { code: "not_found", message: "API route not found" } });
-      }
-      const acceptsHtml = request.headers.accept?.includes("text/html") ?? false;
-      const lastSegment = path.split("/").at(-1) ?? "";
-      const assetLike = /\.[^./]+$/.test(lastSegment);
-      const assetPath = path === "/assets" || path.startsWith("/assets/");
-      if ((request.method === "GET" || request.method === "HEAD") && acceptsHtml && !assetPath && !assetLike) {
-        return reply.sendFile("index.html");
-      }
-      return reply.code(404).send({ error: { code: "not_found", message: "Route not found" } });
-    });
   }
+  app.setNotFoundHandler((request, reply) => {
+    const path = request.url.split("?", 1)[0] ?? request.url;
+    if (path === "/api" || path?.startsWith("/api/") || path === "/integration" || path?.startsWith("/integration/")) {
+      return reply.code(404).send({ error: { code: "not_found", message: "API route not found" } });
+    }
+    const acceptsHtml = request.headers.accept?.includes("text/html") ?? false;
+    const lastSegment = path.split("/").at(-1) ?? "";
+    const assetLike = /\.[^./]+$/.test(lastSegment);
+    const assetPath = path === "/assets" || path.startsWith("/assets/");
+    if (hasWebRoot && (request.method === "GET" || request.method === "HEAD") && acceptsHtml && !assetPath && !assetLike) {
+      return reply.sendFile("index.html");
+    }
+    return reply.code(404).send({ error: { code: "not_found", message: "Route not found" } });
+  });
   let stopped = false;
   let shutdownError: unknown;
   app.addHook("preClose", async () => {

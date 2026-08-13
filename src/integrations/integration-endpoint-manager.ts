@@ -27,6 +27,7 @@ type ParameterDefinitionRow = {
 type EndpointManagerErrorCode =
   | "agent_not_found"
   | "endpoint_not_found"
+  | "slug_conflict"
   | "endpoint_in_use"
   | "conversation_busy"
   | "missing_request_parameter"
@@ -76,6 +77,9 @@ export class IntegrationEndpointManager {
   }
 
   create(input: CreateIntegrationEndpointInput): { endpoint: IntegrationEndpointDetail; token: string } {
+    if (this.store.getEndpointBySlug(input.slug.trim()) !== undefined) {
+      throw new IntegrationEndpointManagerError("slug_conflict");
+    }
     const token = endpointToken();
     const record = this.toPersistenceInput(input, tokenHash(token));
     const endpoint = this.store.createEndpoint(record);
@@ -85,6 +89,10 @@ export class IntegrationEndpointManager {
   update(id: string, input: UpdateIntegrationEndpointInput): IntegrationEndpointDetail {
     const existing = this.store.getEndpoint(id);
     if (existing === undefined) throw new IntegrationEndpointManagerError("endpoint_not_found");
+    const conflictingEndpoint = this.store.getEndpointBySlug((input.slug ?? existing.slug).trim());
+    if (conflictingEndpoint !== undefined && conflictingEndpoint.id !== id) {
+      throw new IntegrationEndpointManagerError("slug_conflict");
+    }
     const nextAgentId = input.agentId ?? existing.agentId;
     if (nextAgentId !== existing.agentId && this.store.endpointHasActiveWork(id)) {
       throw new IntegrationEndpointManagerError("conversation_busy");
