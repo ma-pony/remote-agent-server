@@ -152,6 +152,94 @@ export const migrate = (db: Database.Database): void => {
       created_at TEXT NOT NULL,
       UNIQUE(run_id, seq)
     );
+
+    CREATE TABLE IF NOT EXISTS integration_endpoints (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      agent_id TEXT NOT NULL REFERENCES agents(id),
+      enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+      token_hash TEXT NOT NULL UNIQUE,
+      prompt_prefix TEXT NOT NULL DEFAULT '',
+      parameter_mappings_json TEXT NOT NULL DEFAULT '[]',
+      encrypted_fixed_values TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS integration_conversations (
+      id TEXT PRIMARY KEY,
+      endpoint_id TEXT NOT NULL REFERENCES integration_endpoints(id),
+      conversation_key TEXT NOT NULL,
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      status TEXT NOT NULL CHECK (status IN ('active', 'ended')),
+      created_at TEXT NOT NULL,
+      ended_at TEXT
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS one_active_conversation_per_key
+    ON integration_conversations(endpoint_id, conversation_key) WHERE status = 'active';
+
+    CREATE TABLE IF NOT EXISTS integration_tasks (
+      id TEXT PRIMARY KEY,
+      endpoint_id TEXT NOT NULL REFERENCES integration_endpoints(id),
+      conversation_id TEXT REFERENCES integration_conversations(id),
+      session_id TEXT NOT NULL REFERENCES sessions(id),
+      run_id TEXT UNIQUE REFERENCES runs(id),
+      request_id TEXT NOT NULL,
+      request_fingerprint TEXT NOT NULL,
+      message TEXT NOT NULL,
+      effective_prompt TEXT NOT NULL,
+      encrypted_parameters TEXT,
+      status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
+      result TEXT,
+      error TEXT,
+      event_sequence INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
+      UNIQUE(endpoint_id, request_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS integration_tasks_dispatch_order
+    ON integration_tasks(status, created_at, id);
+
+    CREATE TABLE IF NOT EXISTS webhook_subscriptions (
+      id TEXT PRIMARY KEY,
+      endpoint_id TEXT NOT NULL REFERENCES integration_endpoints(id),
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+      events_json TEXT NOT NULL,
+      encrypted_headers TEXT,
+      encrypted_signing_secret TEXT NOT NULL,
+      timeout_seconds INTEGER NOT NULL DEFAULT 10,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
+      id TEXT PRIMARY KEY,
+      event_id TEXT NOT NULL,
+      event_key TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      subscription_id TEXT NOT NULL REFERENCES webhook_subscriptions(id),
+      task_id TEXT REFERENCES integration_tasks(id),
+      event_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'delivering', 'succeeded', 'failed')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT NOT NULL,
+      last_status_code INTEGER,
+      last_duration_ms INTEGER,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(subscription_id, event_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_due
+    ON webhook_deliveries(status, next_attempt_at, created_at);
   `);
 
   const hasColumn = (table: string, column: string): boolean =>

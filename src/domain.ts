@@ -2,6 +2,7 @@ export type Provider = "claude_code" | "codex" | "hermes";
 export type AgentProvider = Provider;
 export type SessionStatus = "idle" | "running";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type IntegrationTaskStatus = RunStatus;
 export type EventType = "message" | "tool" | "status" | "error";
 export type ProjectEnvironmentRevisionStatus = "preparing" | "ready" | "failed";
 

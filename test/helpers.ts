@@ -23,6 +23,7 @@ export const createTestDatabase = (): {
   db: Database.Database;
   seed: {
     projectEnvironment: { id: string; revisionId: string; workspacePath: string };
+    agent: { id: string };
     session: () => { id: string };
     run: (sessionId: string, status: "queued" | "running" | "succeeded" | "failed" | "cancelled") => void;
   };
@@ -61,6 +62,7 @@ export const createTestDatabase = (): {
         revisionId: projectEnvironmentRevisionId,
         workspacePath: projectEnvironmentWorkspacePath
       },
+      agent: { id: agentId },
       session: () => {
         const sessionId = id("session");
         db.prepare(

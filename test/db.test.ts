@@ -32,7 +32,7 @@ describe("configuration", () => {
 });
 
 describe("database migration", () => {
-  it("创建执行记录、项目环境和 MCP 十一张业务表", () => {
+  it("创建执行记录、项目环境、MCP 和 Integration 十六张业务表", () => {
     const { db } = createTestDatabase();
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -46,12 +46,30 @@ describe("database migration", () => {
       "agents",
       "environment_repositories",
       "events",
+      "integration_conversations",
+      "integration_endpoints",
+      "integration_tasks",
       "project_environment_revisions",
       "project_environments",
       "runs",
       "session_mcp_parameter_values",
-      "sessions"
+      "sessions",
+      "webhook_deliveries",
+      "webhook_subscriptions"
     ]);
+  });
+
+  it("创建 Integration 表和必要唯一索引", () => {
+    const { db } = createTestDatabase();
+    const indexes = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'")
+      .all().map((row) => (row as { name: string }).name);
+
+    expect(indexes).toEqual(expect.arrayContaining([
+      "one_active_conversation_per_key",
+      "integration_tasks_dispatch_order",
+      "webhook_deliveries_due"
+    ]));
+    db.close();
   });
 
   it("为 Agent 和 Session 增加项目环境关联", () => {
