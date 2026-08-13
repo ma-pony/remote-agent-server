@@ -93,6 +93,38 @@ describe("RunRepository", () => {
     db.close();
   });
 
+  it("Run insert 后的关联失败时回滚 Run 和 Session claim", () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    const repository = new RunRepository({ db });
+
+    expect(() => repository.create(
+      { sessionId: session.id, input: "work" },
+      { afterInsert: () => { throw new Error("link failed"); } }
+    )).toThrow("link failed");
+
+    expect(repository.listQueued()).toEqual([]);
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id)).toEqual({ status: "idle" });
+    db.close();
+  });
+
+  it("状态投影异常时回滚 Run 状态转换", () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    const projection = {
+      onStarted: () => { throw new Error("projection failed"); },
+      onFinished: () => undefined
+    };
+    const repository = new RunRepository({ db, projection });
+    const run = repository.create({ sessionId: session.id, input: "work" });
+
+    expect(() => repository.markRunning(run.id)).toThrow("projection failed");
+
+    expect(repository.get(run.id)).toMatchObject({ status: "queued", startedAt: null });
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id)).toEqual({ status: "running" });
+    db.close();
+  });
+
   it("同一个 Session 的第二个活动 Run 返回 session_busy", () => {
     const { db, seed } = createTestDatabase();
     const session = seed.session();
@@ -366,6 +398,18 @@ describe("Server startup and shutdown", () => {
     if (includeRunning) {
       db.prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
         .run("old-run", "old-session", "running", "do not replay", timestamp);
+      db.prepare(`
+        INSERT INTO integration_endpoints
+          (id, name, slug, agent_id, enabled, token_hash, prompt_prefix, parameter_mappings_json, created_at, updated_at)
+        VALUES ('endpoint-1', 'Endpoint', 'endpoint-1', 'agent-1', 1, 'token-hash', '', '[]', ?, ?)
+      `).run(timestamp, timestamp);
+      db.prepare(`
+        INSERT INTO integration_tasks
+          (id, endpoint_id, conversation_id, session_id, run_id, request_id, request_fingerprint, message,
+           effective_prompt, status, created_at)
+        VALUES ('old-task', 'endpoint-1', NULL, 'old-session', 'old-run', 'request-1', 'fingerprint-1',
+                'old message', 'do not replay', 'running', ?)
+      `).run(timestamp);
     }
     db.prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
       .run("queued-run", "queued-session", "queued", "resume queued", timestamp);
@@ -401,6 +445,10 @@ describe("Server startup and shutdown", () => {
       order.push("runtime");
       const observer = openDatabase(databasePath);
       expect(observer.prepare("SELECT status, error FROM runs WHERE id = 'old-run'").get()).toEqual({
+        status: "failed",
+        error: "server_restarted"
+      });
+      expect(observer.prepare("SELECT status, error FROM integration_tasks WHERE id = 'old-task'").get()).toEqual({
         status: "failed",
         error: "server_restarted"
       });
@@ -458,6 +506,10 @@ describe("Server startup and shutdown", () => {
 
     const observer = openDatabase(databasePath);
     expect(observer.prepare("SELECT status, error FROM runs WHERE id = 'old-run'").get()).toEqual({
+      status: "running",
+      error: null
+    });
+    expect(observer.prepare("SELECT status, error FROM integration_tasks WHERE id = 'old-task'").get()).toEqual({
       status: "running",
       error: null
     });

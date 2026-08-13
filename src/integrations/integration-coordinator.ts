@@ -53,6 +53,7 @@ export class IntegrationCoordinator {
     endpointManager: IntegrationEndpointManager;
     sessionManager: SessionManager;
     secrets: SecretStore;
+    notifyTaskQueued?: () => void;
   }) {}
 
   async submit(endpoint: IntegrationEndpoint, input: SubmitIntegrationTaskInput): Promise<IntegrationTask> {
@@ -107,11 +108,13 @@ export class IntegrationCoordinator {
           this.dependencies.store.appendTaskEventInTransaction({
             taskId: createdTask.id,
             eventType: "task.queued",
+            eventKey: `${createdTask.id}:task.queued`,
             payload: { status: "queued" }
           });
           this.dependencies.store.appendTaskEventInTransaction({
             taskId: createdTask.id,
             eventType: "message.user.received",
+            eventKey: `${createdTask.id}:message.user.received`,
             payload: { message: input.message }
           });
           return this.dependencies.store.getTask(createdTask.id)!;
@@ -120,6 +123,7 @@ export class IntegrationCoordinator {
         if (createdSession !== undefined && task.sessionId !== createdSession.id) {
           await this.deleteCreatedSession(createdSession.id);
         }
+        this.dependencies.notifyTaskQueued?.();
         return task;
       } catch (error) {
         if (createdSession !== undefined) await this.deleteCreatedSession(createdSession.id);

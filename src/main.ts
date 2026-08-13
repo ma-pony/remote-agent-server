@@ -8,6 +8,9 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "./app.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { migrate, openDatabase } from "./db.js";
+import { EventStore } from "./events/event-store.js";
+import { IntegrationProjection } from "./integrations/integration-projection.js";
+import { IntegrationStore } from "./integrations/integration-store.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { SecretStore } from "./mcp/secret-store.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
@@ -81,11 +84,32 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       commandRunner: options.commandRunner ?? systemCommandRunner
     });
 
-    const runRepository = new RunRepository({ db });
+    const integrationStore = new IntegrationStore({ db });
+    let eventStore!: EventStore;
+    const integrationProjection = new IntegrationProjection({
+      db,
+      store: integrationStore,
+      listEvents: (runId) => eventStore.list(runId, 0)
+    });
+    const runRepository = new RunRepository({ db, projection: integrationProjection });
+    eventStore = new EventStore({ db, projection: integrationProjection });
     runRepository.recoverAfterRestart();
+    integrationProjection.recover();
+    // Task 6 WebhookDispatcher recovery belongs here, before the HTTP app is created.
     const runtime = options.runtime ?? new AcpxAgentRuntime(config);
     const mcpManager = new McpManager({ db, secrets: SecretStore.open({ dataDir: config.dataDir }) });
-    app = buildApp({ config, db, runtime, workspaceManager, runRepository, projectEnvironmentStore, mcpManager });
+    app = buildApp({
+      config,
+      db,
+      runtime,
+      workspaceManager,
+      runRepository,
+      eventStore,
+      projectEnvironmentStore,
+      mcpManager,
+      integrationStore,
+      integrationProjection
+    });
 
     let closing: Promise<void> | undefined;
     let onSignal: (() => void) | undefined;

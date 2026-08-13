@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
+import type { Run, RunStatus } from "../domain.js";
 import type {
   IntegrationConversation,
   IntegrationConversationStatus,
@@ -91,6 +92,18 @@ type DeliveryRow = {
   updated_at: string;
 };
 
+type LinkedRunRow = {
+  id: string;
+  session_id: string;
+  status: RunStatus;
+  input: string;
+  result: string | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
 export type EndpointPersistenceInput = {
   id?: string;
   name: string;
@@ -149,6 +162,7 @@ export type CreateWebhookDeliveryInput = {
 export type AppendTaskEventInput = {
   taskId: string;
   eventType: string;
+  eventKey?: string;
   payload: Record<string, unknown>;
 };
 
@@ -225,6 +239,18 @@ const toDelivery = (row: DeliveryRow): WebhookDelivery => ({
   lastError: row.last_error,
   createdAt: row.created_at,
   updatedAt: row.updated_at
+});
+
+const toRun = (row: LinkedRunRow): Run => ({
+  id: row.id,
+  sessionId: row.session_id,
+  status: row.status,
+  input: row.input,
+  result: row.result,
+  error: row.error,
+  createdAt: row.created_at,
+  startedAt: row.started_at,
+  finishedAt: row.finished_at
 });
 
 /** Stores integration state; InTransaction methods join a caller-owned SQLite transaction. */
@@ -404,6 +430,107 @@ export class IntegrationStore {
     return row === undefined ? undefined : toTask(row);
   }
 
+  getTaskByRun(runId: string): IntegrationTask | undefined {
+    const row = this.db.prepare("SELECT * FROM integration_tasks WHERE run_id = ?").get(runId) as TaskRow | undefined;
+    return row === undefined ? undefined : toTask(row);
+  }
+
+  /** Returns only the first unlinked queued Task for each free Conversation, plus every one-off Task. */
+  listDispatchableTasks(): IntegrationTask[] {
+    const rows = this.db.prepare(`
+      SELECT task.*
+      FROM integration_tasks task
+      WHERE task.status = 'queued'
+        AND task.run_id IS NULL
+        AND (
+          task.conversation_id IS NULL
+          OR (
+            NOT EXISTS (
+              SELECT 1 FROM integration_tasks active
+              WHERE active.conversation_id = task.conversation_id
+                AND (
+                  active.status = 'running'
+                  OR (active.status = 'queued' AND active.run_id IS NOT NULL)
+                )
+            )
+            AND task.id = (
+              SELECT queued.id FROM integration_tasks queued
+              WHERE queued.conversation_id = task.conversation_id AND queued.status = 'queued'
+              ORDER BY queued.created_at ASC, queued.id ASC
+              LIMIT 1
+            )
+          )
+        )
+      ORDER BY task.created_at ASC, task.id ASC
+    `).all() as TaskRow[];
+    return rows.map(toTask);
+  }
+
+  /** Links an unclaimed queued Task to a newly-inserted Run in the caller's transaction. */
+  linkTaskRunInTransaction(taskId: string, runId: string): IntegrationTask {
+    const result = this.db.prepare(`
+      UPDATE integration_tasks SET run_id = ?
+      WHERE id = ? AND status = 'queued' AND run_id IS NULL
+    `).run(runId, taskId);
+    if (result.changes !== 1) throw new Error("integration_task_not_dispatchable");
+    return toTask(this.taskRow(taskId)!);
+  }
+
+  markTaskRunningInTransaction(runId: string, startedAt: string): IntegrationTask | undefined {
+    const result = this.db.prepare(`
+      UPDATE integration_tasks SET status = 'running', started_at = ?
+      WHERE run_id = ? AND status = 'queued'
+    `).run(startedAt, runId);
+    return result.changes === 0 ? undefined : this.getTaskByRun(runId);
+  }
+
+  finishTaskInTransaction(run: Run): IntegrationTask | undefined {
+    const result = this.db.prepare(`
+      UPDATE integration_tasks
+      SET status = ?, result = ?, error = ?, finished_at = ?
+      WHERE run_id = ? AND status IN ('queued', 'running')
+    `).run(run.status, run.result, run.error, run.finishedAt, run.id);
+    return result.changes === 0 ? undefined : this.getTaskByRun(run.id);
+  }
+
+  /** Terminates a queued Task that cannot create a Run. */
+  failTaskBeforeRun(id: string, error: string): IntegrationTask | undefined {
+    return this.immediateTransaction(() => {
+      const finishedAt = new Date().toISOString();
+      const result = this.db.prepare(`
+        UPDATE integration_tasks SET status = 'failed', error = ?, finished_at = ?
+        WHERE id = ? AND status = 'queued' AND run_id IS NULL
+      `).run(error, finishedAt, id);
+      if (result.changes === 0) return undefined;
+      this.appendTaskEventInTransaction({
+        taskId: id,
+        eventType: "task.failed",
+        eventKey: `${id}:task.failed`,
+        payload: { status: "failed", error }
+      });
+      this.appendTaskEventInTransaction({
+        taskId: id,
+        eventType: "message.system.notice",
+        eventKey: `${id}:message.system.notice:dispatch_failed`,
+        payload: { message: error }
+      });
+      return this.getTask(id);
+    });
+  }
+
+  /** Finds linked Runs whose current state has not yet been projected to their Task. */
+  listRunsNeedingProjection(): Run[] {
+    const rows = this.db.prepare(`
+      SELECT run.*
+      FROM runs run
+      JOIN integration_tasks task ON task.run_id = run.id
+      WHERE (run.status = 'running' AND task.status = 'queued')
+         OR (run.status IN ('succeeded', 'failed', 'cancelled') AND task.status IN ('queued', 'running'))
+      ORDER BY run.created_at ASC, run.id ASC
+    `).all() as LinkedRunRow[];
+    return rows.map(toRun);
+  }
+
   createTask(input: CreateIntegrationTaskInput): IntegrationTask {
     return this.immediateTransaction(() => this.createTaskInTransaction(input));
   }
@@ -467,7 +594,7 @@ export class IntegrationStore {
     if (task === undefined) return [];
     const sequence = task.event_sequence + 1;
     const eventId = randomUUID();
-    const eventKey = `${task.id}:${sequence}`;
+    const eventKey = input.eventKey ?? `${task.id}:${sequence}`;
     const occurredAt = new Date().toISOString();
     this.db.prepare("UPDATE integration_tasks SET event_sequence = ? WHERE id = ?").run(sequence, task.id);
 
@@ -512,11 +639,15 @@ export class IntegrationStore {
         (id, event_id, event_key, sequence, subscription_id, task_id, event_type, payload_json, status, attempt_count,
          next_attempt_at, last_status_code, last_duration_ms, last_error, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, ?, ?)
+      ON CONFLICT(subscription_id, event_key) DO NOTHING
     `).run(
       id, input.eventId, input.eventKey, input.sequence, input.subscriptionId, input.taskId, input.eventType,
       input.payloadJson, input.nextAttemptAt, now, now
     );
-    return toDelivery(this.deliveryRow(id)!);
+    const row = this.deliveryRow(id) ?? this.db.prepare(`
+      SELECT * FROM webhook_deliveries WHERE subscription_id = ? AND event_key = ?
+    `).get(input.subscriptionId, input.eventKey) as DeliveryRow | undefined;
+    return toDelivery(row!);
   }
 
   endpointHasHistory(id: string): boolean {

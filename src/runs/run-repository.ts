@@ -42,8 +42,19 @@ export type FinishRunInput = {
   error?: string;
 };
 
+export type RunStateProjection = {
+  onStarted(run: Run): void;
+  onFinished(run: Run): void;
+};
+
+const noOpRunStateProjection: RunStateProjection = {
+  onStarted: () => undefined,
+  onFinished: () => undefined
+};
+
 export type RunRepositoryDependencies = {
   db: Database.Database;
+  projection?: RunStateProjection;
 };
 
 export class RunRepositoryError extends Error {
@@ -57,15 +68,17 @@ export class RunRepositoryError extends Error {
  */
 export class RunRepository {
   private readonly db: Database.Database;
+  private readonly projection: RunStateProjection;
 
-  constructor({ db }: RunRepositoryDependencies) {
+  constructor({ db, projection = noOpRunStateProjection }: RunRepositoryDependencies) {
     this.db = db;
+    this.projection = projection;
   }
 
   /**
    * Creates a queued Run and marks its Session active in one transaction.
    */
-  create(input: CreateRunInput): Run {
+  create(input: CreateRunInput, options?: { afterInsert?(run: Run): void }): Run {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     const run: Run = {
@@ -89,6 +102,7 @@ export class RunRepository {
         this.db
           .prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
           .run(run.id, run.sessionId, run.status, run.input, run.createdAt);
+        options?.afterInsert?.(run);
         return run;
       });
     } catch (error) {
@@ -137,7 +151,9 @@ export class RunRepository {
 
       const startedAt = new Date().toISOString();
       this.db.prepare("UPDATE runs SET status = ?, started_at = ? WHERE id = ?").run("running", startedAt, id);
-      return { ...run, status: "running", startedAt };
+      const started = { ...run, status: "running" as const, startedAt };
+      this.projection.onStarted(started);
+      return started;
     });
   }
 
@@ -158,7 +174,9 @@ export class RunRepository {
         .prepare("UPDATE runs SET status = ?, result = ?, error = ?, finished_at = ? WHERE id = ?")
         .run(input.status, result, error, finishedAt, id);
       this.db.prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?").run("idle", finishedAt, run.sessionId);
-      return { ...run, status: input.status, result, error, finishedAt };
+      const finished = { ...run, status: input.status, result, error, finishedAt };
+      this.projection.onFinished(finished);
+      return finished;
     });
   }
 
@@ -173,7 +191,9 @@ export class RunRepository {
       const finishedAt = new Date().toISOString();
       this.db.prepare("UPDATE runs SET status = ?, finished_at = ? WHERE id = ?").run("cancelled", finishedAt, id);
       this.db.prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?").run("idle", finishedAt, run.sessionId);
-      return { ...run, status: "cancelled", finishedAt };
+      const cancelled = { ...run, status: "cancelled" as const, finishedAt };
+      this.projection.onFinished(cancelled);
+      return cancelled;
     });
   }
 

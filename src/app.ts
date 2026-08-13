@@ -13,7 +13,9 @@ import { EventStore } from "./events/event-store.js";
 import { registerIntegrationAdminRoutes } from "./integrations/integration-admin-routes.js";
 import { IntegrationCoordinator } from "./integrations/integration-coordinator.js";
 import { IntegrationEndpointManager } from "./integrations/integration-endpoint-manager.js";
+import { IntegrationProjection } from "./integrations/integration-projection.js";
 import { registerIntegrationRoutes } from "./integrations/integration-routes.js";
+import { IntegrationTaskScheduler } from "./integrations/integration-scheduler.js";
 import { IntegrationStore } from "./integrations/integration-store.js";
 import { SdkMcpChecker, type McpChecker } from "./mcp/mcp-checker.js";
 import { McpManager } from "./mcp/mcp-manager.js";
@@ -55,6 +57,8 @@ export type AppDependencies = {
   projectEnvironmentScheduler?: ProjectEnvironmentCheckScheduler;
   mcpManager?: McpManager;
   mcpChecker?: McpChecker;
+  integrationStore?: IntegrationStore;
+  integrationProjection?: IntegrationProjection;
   webRoot?: string;
 };
 
@@ -79,7 +83,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     runtime,
     projectEnvironmentStore
   });
-  const integrationStore = new IntegrationStore({ db: deps.db });
+  const integrationStore = deps.integrationStore ?? new IntegrationStore({ db: deps.db });
   const integrationEndpointManager = new IntegrationEndpointManager({
     db: deps.db,
     store: integrationStore,
@@ -99,15 +103,14 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     projectEnvironmentStore,
     mcpManager
   });
-  const integrationCoordinator = new IntegrationCoordinator({
+  let eventStore = deps.eventStore;
+  const integrationProjection = deps.integrationProjection ?? new IntegrationProjection({
     db: deps.db,
     store: integrationStore,
-    endpointManager: integrationEndpointManager,
-    sessionManager,
-    secrets
+    listEvents: (runId) => eventStore!.list(runId, 0)
   });
-  const runRepository = deps.runRepository ?? new RunRepository({ db: deps.db });
-  const eventStore = deps.eventStore ?? new EventStore({ db: deps.db });
+  const runRepository = deps.runRepository ?? new RunRepository({ db: deps.db, projection: integrationProjection });
+  eventStore ??= new EventStore({ db: deps.db, projection: integrationProjection });
   const skillProjector = deps.skillProjector ?? new SkillProjector(deps.config.dataDir);
   const projectEnvironmentScheduler = deps.projectEnvironmentScheduler ?? new ProjectEnvironmentScheduler({
     store: projectEnvironmentStore,
@@ -125,6 +128,23 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     runRepository,
     executor,
     maxConcurrentRuns: deps.config.maxConcurrentRuns
+  });
+  const integrationTaskScheduler = new IntegrationTaskScheduler({
+    store: integrationStore,
+    runRepository,
+    runScheduler: scheduler,
+    sessionManager,
+    secrets,
+    projection: integrationProjection
+  });
+  integrationProjection.setNotify(() => integrationTaskScheduler.notify());
+  const integrationCoordinator = new IntegrationCoordinator({
+    db: deps.db,
+    store: integrationStore,
+    endpointManager: integrationEndpointManager,
+    sessionManager,
+    secrets,
+    notifyTaskQueued: () => integrationTaskScheduler.notify()
   });
 
   app.get("/api/health", () => ({ ok: true }));
@@ -164,6 +184,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     if (stopped) return;
     stopped = true;
     const failures: unknown[] = [];
+    integrationTaskScheduler.stop();
     try {
       await scheduler.stop();
     } catch (error) {
@@ -186,6 +207,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     if (shutdownError !== undefined) throw shutdownError;
   });
   scheduler.start();
+  integrationTaskScheduler.start();
   projectEnvironmentScheduler.start();
 
   return app;

@@ -3,9 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { FastifyInstance } from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
+import type { AgentRuntime, RuntimeTurnResult } from "../src/runtime/agent-runtime.js";
 import type { WorkspaceManager } from "../src/workspaces/workspace-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
@@ -30,9 +31,15 @@ const validEndpointInput = (agentId: string, slug = "support-bot") => ({
   parameterMappings: []
 });
 
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
 const apps: Array<{ app: FastifyInstance; close: () => Promise<void> }> = [];
 
-const createTestApp = async (): Promise<{
+const createTestApp = async (runtime: AgentRuntime = createFakeRuntime()): Promise<{
   app: FastifyInstance;
   agentId: string;
   db: ReturnType<typeof createTestDatabase>["db"];
@@ -62,7 +69,7 @@ const createTestApp = async (): Promise<{
       maxConcurrentRuns: 1
     },
     db,
-    runtime: createFakeRuntime(),
+    runtime,
     workspaceManager
   });
   apps.push({
@@ -243,12 +250,15 @@ describe("Integration endpoint API", () => {
       headers: endpointHeaders(endpoint.token),
       payload: { ...payload, requestId: "request-2", message: "Continue the investigation" }
     });
+    await vi.waitFor(() => expect(
+      (db.prepare("SELECT count(*) AS count FROM integration_tasks WHERE status = 'succeeded'").get() as { count: number }).count
+    ).toBe(2));
 
     expect(first.statusCode).toBe(202);
     expect(repeated.statusCode).toBe(202);
     expect(repeated.json()).toMatchObject({ taskId: firstTask.taskId });
     expect(queried.statusCode).toBe(200);
-    expect(queried.json()).toMatchObject({ taskId: firstTask.taskId, status: "queued" });
+    expect(queried.json()).toMatchObject({ taskId: firstTask.taskId, status: "succeeded" });
     expect(continued.statusCode).toBe(202);
     expect(continued.json()).toMatchObject({ sessionId: firstTask.sessionId });
     for (const response of [first, repeated, queried, continued]) {
@@ -264,11 +274,20 @@ describe("Integration endpoint API", () => {
     });
     expect(firstTask.runId).toBeNull();
     expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
-    expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 2 });
   });
 
   it("外部提交冲突返回 409，繁忙 Conversation 不能结束", async () => {
-    const { app, agentId } = await createTestApp();
+    const result = deferred<RuntimeTurnResult>();
+    const runtime = createFakeRuntime();
+    runtime.startTurn = () => ({
+      events: { async *[Symbol.asyncIterator]() {} },
+      result: result.promise,
+      cancel: async () => undefined,
+      closeEvents: async () => undefined
+    });
+    runtime.cancel = async () => result.resolve({ status: "cancelled" });
+    const { app, agentId } = await createTestApp(runtime);
     const created = await app.inject({
       method: "POST",
       url: "/api/integration-endpoints",

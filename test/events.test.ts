@@ -161,6 +161,31 @@ describe("EventStore", () => {
     observerDb.close();
     db.close();
   });
+
+  it("事件投影异常时回滚 Event 且不通知 listener", () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    seed.run(session.id, "queued");
+    const run = db.prepare("SELECT id FROM runs").get() as { id: string };
+    const listener = vi.fn();
+    const projection = {
+      onAppended: vi.fn(() => {
+        expect(db.inTransaction).toBe(true);
+        throw new Error("projection failed");
+      })
+    };
+    const store = new EventStore({ db, projection });
+    store.subscribe(run.id, listener);
+
+    expect(() => store.append(run.id, "tool", {
+      toolCallId: "tool-1",
+      status: "completed"
+    })).toThrow("projection failed");
+
+    expect(store.list(run.id, 0)).toEqual([]);
+    expect(listener).not.toHaveBeenCalled();
+    db.close();
+  });
 });
 
 describe("Event API", () => {

@@ -24,6 +24,15 @@ const toEvent = (row: EventRow): Event => ({
 
 export type EventStoreDependencies = {
   db: Database.Database;
+  projection?: RunEventProjection;
+};
+
+export type RunEventProjection = {
+  onAppended(event: Event): void;
+};
+
+const noOpRunEventProjection: RunEventProjection = {
+  onAppended: () => undefined
 };
 
 /**
@@ -31,10 +40,12 @@ export type EventStoreDependencies = {
  */
 export class EventStore {
   private readonly db: Database.Database;
+  private readonly projection: RunEventProjection;
   private readonly listeners = new Map<string, Set<(event: Event) => unknown>>();
 
-  constructor({ db }: EventStoreDependencies) {
+  constructor({ db, projection = noOpRunEventProjection }: EventStoreDependencies) {
     this.db = db;
+    this.projection = projection;
   }
 
   /**
@@ -58,6 +69,7 @@ export class EventStore {
         .prepare("INSERT INTO events (id, run_id, seq, type, content_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .run(row.id, row.run_id, row.seq, row.type, row.content_json, row.created_at);
       event = toEvent(row);
+      this.projection.onAppended(event);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
