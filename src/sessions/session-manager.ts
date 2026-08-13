@@ -224,7 +224,8 @@ export class SessionManager {
         workspacePath: session.workspacePath,
         browserProfilePath: join(dirname(session.workspacePath), "browser"),
         providerSessionId: session.providerSessionId,
-        memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8")
+        memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8"),
+        mcpServers: []
       });
     } catch (error) {
       try {
@@ -259,7 +260,8 @@ export class SessionManager {
       workspacePath: session.workspacePath,
       browserProfilePath: join(dirname(session.workspacePath), "browser"),
       providerSessionId: session.providerSessionId,
-      memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8")
+      memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8"),
+      mcpServers: []
     };
 
     try {

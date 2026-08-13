@@ -13,6 +13,7 @@ import { EventStore } from "./events/event-store.js";
 import { SdkMcpChecker, type McpChecker } from "./mcp/mcp-checker.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { registerMcpRoutes } from "./mcp/mcp-routes.js";
+import { RunMcpPreparer } from "./mcp/run-mcp-preparer.js";
 import { SecretStore } from "./mcp/secret-store.js";
 import { ProjectEnvironmentBuilder } from "./project-environments/project-environment-builder.js";
 import { SystemProjectEnvironmentCommands } from "./project-environments/project-environment-commands.js";
@@ -63,6 +64,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     secrets: SecretStore.open({ dataDir: deps.config.dataDir })
   });
   const mcpChecker = deps.mcpChecker ?? new SdkMcpChecker();
+  const mcpPreparer = new RunMcpPreparer({ manager: mcpManager, checker: mcpChecker });
   const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config, skillManager);
   const projectEnvironmentStore = deps.projectEnvironmentStore ?? new ProjectEnvironmentStore({ db: deps.db });
   const agentManager = new AgentManager({
@@ -99,7 +101,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     }),
     intervalMs: deps.config.projectEnvironmentCheckIntervalMs ?? 3 * 60 * 60 * 1000
   });
-  const executor = new RunExecutor({ runtime, skillProjector, runRepository, eventStore, sessionManager });
+  const executor = new RunExecutor({ runtime, skillProjector, runRepository, eventStore, sessionManager, mcpPreparer });
   const scheduler = new RunScheduler({
     runRepository,
     executor,

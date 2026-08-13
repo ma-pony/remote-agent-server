@@ -147,6 +147,8 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
 }
 
 type ManagedSession = {
+  runtime: AcpRuntime;
+  registry: RemoteAgentRegistry;
   handle: AcpRuntimeHandle;
   providerSessionId: string | null;
   provider: Provider;
@@ -232,8 +234,6 @@ const systemPrompt = (input: RuntimeSessionInput): string => {
  * Adapts the embedded acpx API to the service's provider-neutral Runtime contract.
  */
 export class AcpxAgentRuntime implements AgentRuntime {
-  private readonly registry: RemoteAgentRegistry;
-  private readonly runtime: AcpRuntime;
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly sessionOperations = new Map<string, SessionOperation>();
@@ -241,10 +241,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private shutdownPromise: Promise<void> | undefined;
   private readonly shutdownFailures: RuntimeShutdownFailure[] = [];
 
-  constructor(private readonly config: AppConfig, private readonly skillManager = new SkillManager({ dataDir: config.dataDir })) {
-    this.registry = new RemoteAgentRegistry(config.dataDir, skillManager);
-    this.runtime = this.createRuntime(this.registry);
-  }
+  constructor(private readonly config: AppConfig, private readonly skillManager = new SkillManager({ dataDir: config.dataDir })) {}
 
   async ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession> {
     this.assertRunning();
@@ -259,21 +256,23 @@ export class AcpxAgentRuntime implements AgentRuntime {
       return { providerSessionId: existing.providerSessionId };
     }
     if (existing !== undefined) {
-      await this.runtime.close({
+      await existing.runtime.close({
         handle: existing.handle,
         reason: reusable ? "session_handle_refreshed" : "session_handle_replaced"
       });
       this.sessions.delete(input.sessionId);
-      this.registry.unregister(existing.target);
+      existing.registry.unregister(existing.target);
     }
 
-    const agent = this.registry.register({
+    const registry = new RemoteAgentRegistry(this.config.dataDir, this.skillManager);
+    const agent = registry.register({
       provider: input.provider,
       agentId: input.agentId,
       sessionId: input.sessionId,
       browserProfilePath: input.browserProfilePath
     });
-    const handle = await this.runtime.ensureSession({
+    const runtime = this.createRuntime(registry, undefined, input.mcpServers);
+    const handle = await runtime.ensureSession({
       sessionKey: `remote-agent:${input.sessionId}`,
       agent,
       mode: "persistent",
@@ -285,11 +284,13 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const providerSessionId = handle.agentSessionId ?? handle.backendSessionId ?? null;
 
     if (this.shuttingDown) {
-      const outcome = await settleBestEffort(() => this.runtime.close({ handle, reason: "service_shutdown" }));
+      const outcome = await settleBestEffort(() => runtime.close({ handle, reason: "service_shutdown" }));
       if (outcome.status === "fulfilled") {
-        this.registry.unregister(agent);
+        registry.unregister(agent);
       } else {
         this.sessions.set(input.sessionId, {
+          runtime,
+          registry,
           handle,
           providerSessionId,
           provider: input.provider,
@@ -309,13 +310,13 @@ export class AcpxAgentRuntime implements AgentRuntime {
       && providerSessionId !== input.providerSessionId
     ) {
       try {
-        await this.runtime.close({
+        await runtime.close({
           handle,
           reason: "provider_session_id_mismatch"
         });
       } finally {
         this.sessions.delete(input.sessionId);
-        this.registry.unregister(agent);
+        registry.unregister(agent);
       }
       throw new AgentRuntimeError(
         "session_resume_failed",
@@ -324,6 +325,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
     }
 
     this.sessions.set(input.sessionId, {
+      runtime,
+      registry,
       handle,
       providerSessionId,
       provider: input.provider,
@@ -347,7 +350,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     if (this.activeTurns.has(input.sessionId)) {
       throw new AgentRuntimeError("session_not_ready", "Runtime session still has an active Turn");
     }
-    const turn = this.runtime.startTurn({
+    const turn = session.runtime.startTurn({
       handle: session.handle,
       text: input.text,
       mode: "prompt",
@@ -390,7 +393,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     }
     const session = this.sessions.get(sessionId);
     if (session !== undefined) {
-      await this.runtime.cancel({ handle: session.handle, reason: "cancelled_by_request" });
+      await session.runtime.cancel({ handle: session.handle, reason: "cancelled_by_request" });
     }
   }
 
@@ -402,14 +405,14 @@ export class AcpxAgentRuntime implements AgentRuntime {
       if (session === undefined) {
         throw new AgentRuntimeError("session_not_ready", "Runtime session has not been ensured");
       }
-      await this.runtime.close({
+      await session.runtime.close({
         handle: session.handle,
         reason: "provider_session_reset",
         discardPersistentState: true
       });
       this.sessions.delete(input.sessionId);
       this.activeTurns.delete(input.sessionId);
-      this.registry.unregister(session.target);
+      session.registry.unregister(session.target);
     });
   }
 
@@ -484,18 +487,17 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const sessions = [...this.sessions.entries()];
     await Promise.all(sessions.map(async ([sessionId, session]) => {
       const outcome = await settleBestEffort(() => this.serializeSession(sessionId, async () => {
-        await this.runtime.close({ handle: session.handle, reason: "service_shutdown" });
+        await session.runtime.close({ handle: session.handle, reason: "service_shutdown" });
       }));
       if (outcome.status === "fulfilled") {
         if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId);
-        this.registry.unregister(session.target);
+        session.registry.unregister(session.target);
         this.activeTurns.delete(sessionId);
       } else {
         this.recordShutdownFailure("handle_close", sessionId, outcome.reason);
       }
     }));
 
-    if (this.sessions.size === 0 && this.sessionOperations.size === 0) this.registry.clear();
     if (this.shutdownFailures.length > 0) {
       const error = this.createShutdownError();
       console.error(error);
@@ -554,13 +556,18 @@ export class AcpxAgentRuntime implements AgentRuntime {
     });
   }
 
-  private createRuntime(agentRegistry: AcpAgentRegistry, probeAgent?: string): AcpRuntime {
+  private createRuntime(
+    agentRegistry: AcpAgentRegistry,
+    probeAgent?: string,
+    mcpServers: RuntimeSessionInput["mcpServers"] = []
+  ): AcpRuntime {
     const options: AcpRuntimeOptions = {
       cwd: this.config.workspaceTemplate,
       sessionStore: createRuntimeStore({ stateDir: join(this.config.dataDir, "acpx") }),
       agentRegistry,
       permissionMode: "approve-all",
       nonInteractivePermissions: "fail",
+      mcpServers,
       ...(probeAgent === undefined ? {} : { probeAgent })
     };
     return createAcpRuntime(options);

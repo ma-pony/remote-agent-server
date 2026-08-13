@@ -28,7 +28,11 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 
-const setup = (runtime: AgentRuntime, prepare = vi.fn(() => "remember this")) => {
+const setup = (
+  runtime: AgentRuntime,
+  prepare = vi.fn(() => "remember this"),
+  mcpPrepare = vi.fn(async () => [])
+) => {
   const root = mkdtempSync(join(tmpdir(), "remote-agent-executor-"));
   tempDirectories.push(root);
   const { db, seed } = createTestDatabase();
@@ -56,7 +60,14 @@ const setup = (runtime: AgentRuntime, prepare = vi.fn(() => "remember this")) =>
   const eventStore = new EventStore({ db });
   const run = runRepository.create({ sessionId: "session-1", input: "修复问题" });
   const skillProjector = { prepare };
-  const executor = new RunExecutor({ runtime, skillProjector, runRepository, eventStore, sessionManager });
+  const executor = new RunExecutor({
+    runtime,
+    skillProjector,
+    runRepository,
+    eventStore,
+    sessionManager,
+    mcpPreparer: { prepare: mcpPrepare }
+  });
   return { db, eventStore, executor, prepare, run, runRepository, sessionManager, workspacePath };
 };
 
@@ -65,6 +76,32 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("MCP 预检失败时不投影 Skill、不创建 Runtime Session 且安全失败 Run", async () => {
+    const runtime = createFakeRuntime();
+    runtime.ensureSession = vi.fn(runtime.ensureSession);
+    runtime.startTurn = vi.fn(runtime.startTurn);
+    const prepare = vi.fn(() => "remember this");
+    const mcpPrepare = vi.fn(async () => { throw new Error("MCP private_mcp check failed"); });
+    const setupResult = setup(runtime, prepare, mcpPrepare);
+
+    await setupResult.executor.execute(setupResult.run.id);
+
+    expect(mcpPrepare).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: expect.any(String),
+      sessionId: "session-1",
+      runId: setupResult.run.id,
+      workspacePath: setupResult.workspacePath,
+      browserProfilePath: join(dirname(setupResult.workspacePath), "browser")
+    }));
+    expect(prepare).not.toHaveBeenCalled();
+    expect(runtime.ensureSession).not.toHaveBeenCalled();
+    expect(runtime.startTurn).not.toHaveBeenCalled();
+    expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+      status: "failed", error: "MCP private_mcp check failed"
+    });
+    setupResult.db.close();
+  });
+
   it("preparation 期间按 runId 记录取消且不影响同 Session 后续 Run", async () => {
     const ensured = deferred<RuntimeSession>();
     const runtime = createFakeRuntime();

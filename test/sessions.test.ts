@@ -407,7 +407,8 @@ describe("Session API", () => {
       providerSessionId: "provider-session-1",
       workspacePath: session.workspacePath,
       browserProfilePath: join(dirname(session.workspacePath), "browser"),
-      memory: "remember reset"
+      memory: "remember reset",
+      mcpServers: []
     });
     expect(providerSessionIdDuringRuntime).toBe("provider-session-1");
     expect(db.prepare("SELECT status, provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({

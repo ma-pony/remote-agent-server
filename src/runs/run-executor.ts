@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 
 import type { EventType, Run } from "../domain.js";
 import type { EventStore } from "../events/event-store.js";
+import type { RunMcpPreparer } from "../mcp/run-mcp-preparer.js";
 import type { AgentRuntime, RuntimeEvent, RuntimeTurn, RuntimeTurnResult } from "../runtime/agent-runtime.js";
 import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { SkillProjector } from "../runtime/skill-projector.js";
@@ -14,6 +15,7 @@ export type RunExecutorDependencies = {
   runRepository: RunRepository;
   eventStore: EventStore;
   sessionManager: SessionManager;
+  mcpPreparer: Pick<RunMcpPreparer, "prepare">;
 };
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -49,14 +51,16 @@ export class RunExecutor {
   private readonly runRepository: RunRepository;
   private readonly eventStore: EventStore;
   private readonly sessionManager: SessionManager;
+  private readonly mcpPreparer: Pick<RunMcpPreparer, "prepare">;
   private readonly cancellationIntents = new Set<string>();
 
-  constructor({ runtime, skillProjector, runRepository, eventStore, sessionManager }: RunExecutorDependencies) {
+  constructor({ runtime, skillProjector, runRepository, eventStore, sessionManager, mcpPreparer }: RunExecutorDependencies) {
     this.runtime = runtime;
     this.skillProjector = skillProjector;
     this.runRepository = runRepository;
     this.eventStore = eventStore;
     this.sessionManager = sessionManager;
+    this.mcpPreparer = mcpPreparer;
   }
 
   /**
@@ -69,15 +73,25 @@ export class RunExecutor {
 
     try {
       const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
+      const browserProfilePath = join(dirname(session.workspacePath), "browser");
+      const mcpPreparation = this.mcpPreparer.prepare({
+        agentId: agent.id,
+        sessionId: session.id,
+        runId: run.id,
+        workspacePath: session.workspacePath,
+        browserProfilePath
+      });
+      const mcpServers = mcpPreparation instanceof Promise ? await mcpPreparation : mcpPreparation;
       const memory = this.skillProjector.prepare(agent, session);
       const runtimeSession = await this.runtime.ensureSession({
         sessionId: session.id,
         agentId: agent.id,
         provider: agent.provider,
         workspacePath: session.workspacePath,
-        browserProfilePath: join(dirname(session.workspacePath), "browser"),
+        browserProfilePath,
         providerSessionId: session.providerSessionId,
-        memory
+        memory,
+        mcpServers
       });
       this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
 

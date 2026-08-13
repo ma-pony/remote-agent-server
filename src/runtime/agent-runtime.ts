@@ -1,4 +1,5 @@
 import type { Provider } from "../domain.js";
+import type { RuntimeMcpServer } from "../mcp/mcp-types.js";
 
 export type RuntimeSessionInput = {
   sessionId: string;
@@ -8,6 +9,7 @@ export type RuntimeSessionInput = {
   browserProfilePath: string;
   providerSessionId: string | null;
   memory: string;
+  mcpServers: RuntimeMcpServer[];
 };
 
 export type RuntimeSession = { providerSessionId: string | null };

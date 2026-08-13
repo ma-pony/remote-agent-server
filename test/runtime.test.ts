@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
 import type { RuntimeSessionInput } from "../src/runtime/agent-runtime.js";
+import type { RuntimeMcpServer } from "../src/mcp/mcp-types.js";
 import { createFakeRuntime } from "./helpers.js";
 
 const acpxMocks = vi.hoisted(() => ({
@@ -62,6 +63,7 @@ const sessionInput = (root: string, overrides: Partial<RuntimeSessionInput> = {}
   browserProfilePath: join(root, "browser's profile"),
   providerSessionId: null,
   memory: "Always inspect the current code.",
+  mcpServers: [],
   ...overrides
 });
 
@@ -376,6 +378,36 @@ describe("AcpxAgentRuntime", () => {
     expect(acp.ensureSession.mock.calls[0]?.[0]).not.toHaveProperty("sessionOptions");
   });
 
+  it("为当前 Session 创建独立 Runtime 并通过 ACP 注入 HTTP/stdio MCP", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    const mcpServers: RuntimeMcpServer[] = [
+      {
+        type: "http",
+        name: "remote_http",
+        url: "https://example.test/mcp",
+        headers: [{ name: "Authorization", value: "Bearer secret" }]
+      },
+      {
+        type: "stdio",
+        name: "local_stdio",
+        command: "/usr/bin/true",
+        args: ["--mode", "safe"],
+        env: [{ name: "TOKEN", value: "secret" }]
+      }
+    ];
+
+    await runtime.ensureSession(sessionInput(root, { mcpServers }));
+
+    expect(acpxMocks.createAcpRuntime).toHaveBeenCalledTimes(1);
+    expect(acpxMocks.createAcpRuntime.mock.calls[0]?.[0]).toMatchObject({ mcpServers });
+    expect(acp.ensureSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: `remote-agent:${SESSION_ID}`
+    }));
+  });
+
   it("恢复得到不同 Provider ID 时关闭新 Handle 并报 session_resume_failed", async () => {
     const root = makeRoot();
     const acp = runtimeStub({ handle: { agentSessionId: "wrong-provider-session" } });
@@ -514,7 +546,8 @@ describe("AcpxAgentRuntime", () => {
       providerSessionId: "provider-session-2"
     }));
 
-    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    expect(acpxMocks.createAcpRuntime).toHaveBeenCalledTimes(2);
+    const options = acpxMocks.createAcpRuntime.mock.calls[1]?.[0] as AcpRuntimeOptions;
     expect(options.agentRegistry.list()).toEqual([
       `remote:claude_code:${SECOND_AGENT_ID}:${SESSION_ID}`
     ]);
@@ -889,9 +922,8 @@ describe("AcpxAgentRuntime", () => {
 
   it.each(["claude_code", "codex", "hermes"] as const)("doctor probe 指向指定的 %s Provider", async (provider) => {
     const root = makeRoot();
-    const main = runtimeStub();
     const probe = runtimeStub({ doctor: { ok: false, message: `${provider} unavailable`, details: ["missing"] } });
-    acpxMocks.createAcpRuntime.mockReturnValueOnce(main).mockReturnValueOnce(probe);
+    acpxMocks.createAcpRuntime.mockReturnValue(probe);
     const runtime = new AcpxAgentRuntime(makeConfig(root));
 
     await expect(runtime.doctor(provider, AGENT_ID)).resolves.toEqual({
@@ -900,18 +932,17 @@ describe("AcpxAgentRuntime", () => {
       details: ["missing"]
     });
 
-    const options = acpxMocks.createAcpRuntime.mock.calls[1]?.[0] as AcpRuntimeOptions;
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
     expect(options.probeAgent).toMatch(new RegExp(`^remote:${provider}:${AGENT_ID}:`));
     expect(options.agentRegistry.list()).toEqual([]);
   });
 
   it.each(["success", "undefined", "error"] as const)("doctor 在 %s 路径清理临时 Registry", async (outcome) => {
     const root = makeRoot();
-    const main = runtimeStub();
     const probe = runtimeStub();
     if (outcome === "undefined") probe.doctor = undefined as never;
     if (outcome === "error") probe.doctor.mockRejectedValueOnce(new Error("probe crashed"));
-    acpxMocks.createAcpRuntime.mockReturnValueOnce(main).mockReturnValueOnce(probe);
+    acpxMocks.createAcpRuntime.mockReturnValue(probe);
     const runtime = new AcpxAgentRuntime(makeConfig(root));
 
     if (outcome === "error") {
@@ -920,7 +951,7 @@ describe("AcpxAgentRuntime", () => {
       await runtime.doctor("codex", AGENT_ID);
     }
 
-    const options = acpxMocks.createAcpRuntime.mock.calls[1]?.[0] as AcpRuntimeOptions;
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
     expect(options.agentRegistry.list()).toEqual([]);
   });
 });
