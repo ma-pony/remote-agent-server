@@ -109,7 +109,7 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
    * Removes a newly-created APFS Session after persistence fails.
    */
   /** Removes a newly-created Session directory. */
-  async rollbackSession(id: string): Promise<void> {
+  async deleteSession(id: string): Promise<void> {
     await rm(join(this.sessionsRoot, id), { force: true, recursive: true });
   }
 

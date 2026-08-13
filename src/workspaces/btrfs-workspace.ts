@@ -1,4 +1,4 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { join } from "node:path";
 
@@ -59,7 +59,11 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
       await mkdir(browserProfilePath);
       await this.commandRunner.run("btrfs", ["subvolume", "snapshot", sourcePath, workspacePath]);
     } catch (_error) {
-      await rm(sessionPath, { force: true, recursive: true });
+      try {
+        await this.deleteSession(id);
+      } catch (_cleanupError) {
+        // The snapshot failure remains authoritative.
+      }
       throw new WorkspaceCreateError();
     }
 
@@ -70,11 +74,16 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
    * Removes a newly-created snapshot after Session persistence fails.
    */
   /** Removes a newly-created Session snapshot and its runtime directories. */
-  async rollbackSession(id: string): Promise<void> {
+  async deleteSession(id: string): Promise<void> {
     const sessionPath = join(this.sessionsRoot, id);
     const workspacePath = join(sessionPath, "workspace");
 
-    await this.commandRunner.run("btrfs", ["subvolume", "delete", workspacePath]);
+    try {
+      await stat(workspacePath);
+      await this.commandRunner.run("btrfs", ["subvolume", "delete", workspacePath]);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     await rm(sessionPath, { force: true, recursive: true });
   }
 

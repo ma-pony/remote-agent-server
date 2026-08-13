@@ -160,6 +160,25 @@ describe("BtrfsWorkspaceManager", () => {
     await expect(manager.createSession("session-123", join(root, "template"))).rejects.toMatchObject({ code: "workspace_create_failed" });
     expect(existsSync(join(sessionsRoot, "session-123"))).toBe(false);
   });
+
+  it("先删除 Btrfs Workspace Subvolume 再删除整个 Session 目录", async () => {
+    const root = createTempDir();
+    const sessionsRoot = join(root, "sessions");
+    const sessionPath = join(sessionsRoot, "session-123");
+    const workspacePath = join(sessionPath, "workspace");
+    mkdirSync(workspacePath, { recursive: true });
+    const { runner, calls } = createRunner();
+    const manager = new BtrfsWorkspaceManager({
+      workspaceTemplate: join(root, "template"),
+      sessionsRoot,
+      commandRunner: runner
+    });
+
+    await manager.deleteSession("session-123");
+
+    expect(calls).toEqual([{ command: "btrfs", args: ["subvolume", "delete", workspacePath] }]);
+    expect(existsSync(sessionPath)).toBe(false);
+  });
 });
 
 describe("ApfsWorkspaceManager", () => {
@@ -281,7 +300,7 @@ describe("ApfsWorkspaceManager", () => {
     expect(existsSync(join(sessionsRoot, "session-123"))).toBe(false);
   });
 
-  it("rollback 删除整个 Session 目录", async () => {
+  it("幂等删除整个 APFS Session 目录", async () => {
     const root = createTempDir();
     const sessionsRoot = join(root, "sessions");
     const sessionPath = join(sessionsRoot, "session-123");
@@ -292,7 +311,8 @@ describe("ApfsWorkspaceManager", () => {
       commandRunner: createRunner().runner
     });
 
-    await manager.rollbackSession("session-123");
+    await manager.deleteSession("session-123");
+    await manager.deleteSession("session-123");
 
     expect(existsSync(sessionPath)).toBe(false);
   });

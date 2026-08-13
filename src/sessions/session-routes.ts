@@ -34,6 +34,8 @@ const handleError = (reply: FastifyReply, error: unknown) => {
       return sendError(reply, 500, error.code, "Failed to save session");
     case "runtime_reset_failed":
       return sendError(reply, 500, error.code, "Failed to reset runtime session");
+    case "session_delete_failed":
+      return sendError(reply, 500, error.code, "Failed to delete session");
   }
 };
 
@@ -68,6 +70,15 @@ export const registerSessionRoutes = (
   app.post<{ Params: { id: string } }>("/sessions/:id/reset", async (request, reply) => {
     try {
       return await sessionManager.resetProviderSession(request.params.id);
+    } catch (error) {
+      return handleError(reply, error);
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/sessions/:id", async (request, reply) => {
+    try {
+      await sessionManager.delete(request.params.id);
+      return reply.code(204).send();
     } catch (error) {
       return handleError(reply, error);
     }

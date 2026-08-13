@@ -47,7 +47,7 @@ const createBuilderFixture = () => {
   const workspaceManager: WorkspaceManager = {
     check: async () => undefined,
     createSession: async () => { throw new Error("unused"); },
-    rollbackSession: async () => undefined,
+    deleteSession: async () => undefined,
     createRevision: async (target, source) => {
       mkdirSync(join(target, ".."), { recursive: true });
       if (source === null) mkdirSync(target);
@@ -421,7 +421,7 @@ describe("Project environment API", () => {
       workspaceManager: {
         check: async () => undefined,
         createSession: async () => { throw new Error("unused"); },
-        rollbackSession: async () => undefined,
+        deleteSession: async () => undefined,
         createRevision: async () => undefined,
         removeRevision: async () => undefined
       },

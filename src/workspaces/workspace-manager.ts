@@ -16,7 +16,7 @@ export type Workspace = {
 export interface WorkspaceManager {
   check(): Promise<void>;
   createSession(id: string, sourcePath: string): Promise<Workspace>;
-  rollbackSession(id: string): Promise<void>;
+  deleteSession(id: string): Promise<void>;
   createRevision(targetPath: string, sourcePath: string | null): Promise<void>;
   removeRevision(path: string): Promise<void>;
 }

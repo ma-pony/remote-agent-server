@@ -369,4 +369,115 @@ describe("Session API", () => {
     expect(response.json()).toEqual({ error: { code: "session_busy", message: "Session is running" } });
     expect(reset).not.toHaveBeenCalled();
   });
+
+  it("永久删除空闲 Session 的 Provider、Workspace、Run 和 Event", async () => {
+    const reset = vi.fn(async (_input: RuntimeSessionInput): Promise<void> => undefined);
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const { app, db, dataDir } = await createTestApp({
+      runtime: createFakeRuntime(reset),
+      commandRunner: {
+        run: async (command, args) => {
+          calls.push({ command, args });
+          if (args[1] === "snapshot") mkdirSync(args[3]);
+          return { stdout: "", stderr: "" };
+        }
+      }
+    });
+    const agent = await createAgent(app);
+    const session = await createSession(app, agent.id);
+    writeFileSync(join(dataDir, "agents", agent.id, "MEMORY.md"), "remember delete");
+    db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
+    db.prepare(`
+      INSERT INTO runs (id, session_id, status, input, result, created_at, started_at, finished_at)
+      VALUES ('run-delete-1', ?, 'succeeded', 'question', 'answer', ?, ?, ?)
+    `).run(session.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:01.000Z", "2026-08-13T00:00:02.000Z");
+    db.prepare(`
+      INSERT INTO events (id, run_id, seq, type, content_json, created_at)
+      VALUES ('event-delete-1', 'run-delete-1', 1, 'message', '{"text":"answer"}', ?)
+    `).run("2026-08-13T00:00:01.000Z");
+
+    const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
+
+    expect(response.statusCode).toBe(204);
+    expect(reset).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: session.id,
+      agentId: agent.id,
+      providerSessionId: "provider-session-1",
+      workspacePath: session.workspacePath,
+      memory: "remember delete"
+    }));
+    expect(calls.at(-1)).toEqual({
+      command: "btrfs",
+      args: ["subvolume", "delete", session.workspacePath]
+    });
+    expect(existsSync(dirname(session.workspacePath))).toBe(false);
+    expect(db.prepare("SELECT count(*) AS count FROM events").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+  });
+
+  it("删除 Session 需要鉴权并区分不存在与运行中", async () => {
+    const reset = vi.fn(async (_input: RuntimeSessionInput): Promise<void> => undefined);
+    const { app, db } = await createTestApp({ runtime: createFakeRuntime(reset) });
+    const agent = await createAgent(app);
+    const session = await createSession(app, agent.id);
+    db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(session.id);
+
+    const unauthorized = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}` });
+    const missing = await app.inject({ method: "DELETE", url: "/api/sessions/00000000-0000-0000-0000-000000000000", headers: authHeaders() });
+    const busy = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
+
+    expect(unauthorized.statusCode).toBe(401);
+    expect(missing.statusCode).toBe(404);
+    expect(busy.statusCode).toBe(409);
+    expect(busy.json()).toEqual({ error: { code: "session_busy", message: "Session is running" } });
+    expect(reset).not.toHaveBeenCalled();
+  });
+
+  it("Provider 清理失败时释放删除 claim 并保留全部本地资源", async () => {
+    const reset = vi.fn(async () => Promise.reject(new Error("provider delete failed")));
+    const { app, db } = await createTestApp({ runtime: createFakeRuntime(reset) });
+    const agent = await createAgent(app);
+    const session = await createSession(app, agent.id);
+    db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
+
+    const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({ error: { code: "session_delete_failed", message: "Failed to delete session" } });
+    expect(db.prepare("SELECT status, provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
+      status: "idle",
+      provider_session_id: "provider-session-1"
+    });
+    expect(existsSync(dirname(session.workspacePath))).toBe(true);
+  });
+
+  it("Workspace 清理失败时清除 Provider ID、释放 claim 并保留历史", async () => {
+    const reset = vi.fn(async (_input: RuntimeSessionInput): Promise<void> => undefined);
+    const { app, db } = await createTestApp({
+      runtime: createFakeRuntime(reset),
+      commandRunner: {
+        run: async (_command, args) => {
+          if (args[1] === "snapshot") mkdirSync(args[3]);
+          if (args[1] === "delete") throw new Error("workspace delete failed");
+          return { stdout: "", stderr: "" };
+        }
+      }
+    });
+    const agent = await createAgent(app);
+    const session = await createSession(app, agent.id);
+    db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
+    db.prepare(`INSERT INTO runs (id, session_id, status, input, created_at) VALUES ('run-preserved', ?, 'succeeded', 'question', ?)`)
+      .run(session.id, "2026-08-13T00:00:00.000Z");
+
+    const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
+
+    expect(response.statusCode).toBe(500);
+    expect(db.prepare("SELECT status, provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
+      status: "idle",
+      provider_session_id: null
+    });
+    expect(db.prepare("SELECT count(*) AS count FROM runs WHERE session_id = ?").get(session.id)).toEqual({ count: 1 });
+    expect(existsSync(dirname(session.workspacePath))).toBe(true);
+  });
 });

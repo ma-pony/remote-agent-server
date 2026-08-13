@@ -39,7 +39,7 @@ export type SessionRuntimeContext = { agent: Agent; session: Session };
 
 export class SessionManagerError extends Error {
   constructor(
-    readonly code: "agent_not_found" | "agent_disabled" | "project_environment_unavailable" | "session_not_found" | "session_busy" | "session_create_failed" | "runtime_reset_failed",
+    readonly code: "agent_not_found" | "agent_disabled" | "project_environment_unavailable" | "session_not_found" | "session_busy" | "session_create_failed" | "runtime_reset_failed" | "session_delete_failed",
     options?: ErrorOptions
   ) {
     super(code, options);
@@ -106,7 +106,7 @@ export class SessionManager {
         .run(id, agent.id, input.title, "idle", null, workspace.workspacePath, revision.id, createdAt, createdAt);
     } catch (_error) {
       try {
-        await this.workspaceManager.rollbackSession(id);
+        await this.workspaceManager.deleteSession(id);
       } catch (_rollbackError) {
         // The database failure remains the primary error; rollback was still attempted.
       }
@@ -204,6 +204,92 @@ export class SessionManager {
     } catch (error) {
       throw new SessionManagerError("runtime_reset_failed", { cause: error });
     }
+  }
+
+  /** Permanently removes an idle Session and every resource it owns. */
+  async delete(id: string): Promise<void> {
+    const session = this.get(id);
+    if (session === undefined) throw new SessionManagerError("session_not_found");
+    const agent = this.agentManager.get(session.agentId);
+    if (agent === undefined) throw new SessionManagerError("agent_not_found");
+    this.claimForDelete(id);
+
+    const runtimeInput = {
+      sessionId: session.id,
+      agentId: agent.id,
+      provider: agent.provider,
+      workspacePath: session.workspacePath,
+      browserProfilePath: join(dirname(session.workspacePath), "browser"),
+      providerSessionId: session.providerSessionId,
+      memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8")
+    };
+
+    try {
+      await this.runtime.reset(runtimeInput);
+    } catch (error) {
+      this.releaseDeleteClaim(id, false, error);
+    }
+
+    try {
+      await this.workspaceManager.deleteSession(id);
+    } catch (error) {
+      this.releaseDeleteClaim(id, true, error);
+    }
+
+    try {
+      this.inImmediateTransaction(() => {
+        this.db.prepare("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?)").run(id);
+        this.db.prepare("DELETE FROM runs WHERE session_id = ?").run(id);
+        const deleted = this.db.prepare("DELETE FROM sessions WHERE id = ? AND status = 'running'").run(id);
+        if (deleted.changes !== 1) throw new Error("session_delete_claim_lost");
+      });
+    } catch (error) {
+      try {
+        this.releaseDeleteClaim(id, true, error);
+      } catch (releaseError) {
+        if (releaseError instanceof SessionManagerError) throw releaseError;
+        throw new SessionManagerError("session_delete_failed", { cause: releaseError });
+      }
+    }
+  }
+
+  private claimForDelete(id: string): void {
+    this.inImmediateTransaction(() => {
+      const updatedAt = new Date().toISOString();
+      const result = this.db.prepare(`
+        UPDATE sessions SET status = 'running', updated_at = ?
+        WHERE id = ? AND status = 'idle'
+          AND NOT EXISTS (
+            SELECT 1 FROM runs
+            WHERE session_id = sessions.id AND status IN ('queued', 'running')
+          )
+      `).run(updatedAt, id);
+      if (result.changes === 1) return;
+      if (this.get(id) === undefined) throw new SessionManagerError("session_not_found");
+      throw new SessionManagerError("session_busy");
+    });
+  }
+
+  private releaseDeleteClaim(id: string, clearProviderSessionId: boolean, cause: unknown): never {
+    try {
+      this.inImmediateTransaction(() => {
+        const providerAssignment = clearProviderSessionId ? "provider_session_id = NULL," : "";
+        const result = this.db.prepare(`
+          UPDATE sessions SET ${providerAssignment} status = 'idle', updated_at = ?
+          WHERE id = ? AND status = 'running'
+            AND NOT EXISTS (
+              SELECT 1 FROM runs
+              WHERE session_id = sessions.id AND status IN ('queued', 'running')
+            )
+        `).run(new Date().toISOString(), id);
+        if (result.changes !== 1) throw new Error("session_delete_claim_release_failed");
+      });
+    } catch (releaseError) {
+      throw new SessionManagerError("session_delete_failed", {
+        cause: new AggregateError([cause, releaseError], "Session deletion and claim release failed")
+      });
+    }
+    throw new SessionManagerError("session_delete_failed", { cause });
   }
 
   private claimForReset(id: string): void {
