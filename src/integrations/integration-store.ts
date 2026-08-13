@@ -258,6 +258,13 @@ export class IntegrationStore {
     return row === undefined ? undefined : { endpoint: toEndpoint(row), tokenHash: row.token_hash };
   }
 
+  getEndpointByTokenHash(tokenHash: string): IntegrationEndpoint | undefined {
+    const row = this.db.prepare("SELECT * FROM integration_endpoints WHERE token_hash = ?").get(tokenHash) as
+      | EndpointRow
+      | undefined;
+    return row === undefined ? undefined : toEndpoint(row);
+  }
+
   endpointEncryptedFixedValues(id: string): string | null | undefined {
     const row = this.db.prepare("SELECT encrypted_fixed_values FROM integration_endpoints WHERE id = ?").get(id) as
       | { encrypted_fixed_values: string | null }
@@ -342,6 +349,11 @@ export class IntegrationStore {
     return row === undefined ? undefined : toConversation(row);
   }
 
+  getConversation(id: string): IntegrationConversation | undefined {
+    const row = this.conversationRow(id);
+    return row === undefined ? undefined : toConversation(row);
+  }
+
   createConversation(input: CreateIntegrationConversationInput): IntegrationConversation {
     return this.immediateTransaction(() => this.createConversationInTransaction(input));
   }
@@ -382,6 +394,13 @@ export class IntegrationStore {
     const row = this.db.prepare(`
       SELECT * FROM integration_tasks WHERE endpoint_id = ? AND request_id = ?
     `).get(endpointId, requestId) as TaskRow | undefined;
+    return row === undefined ? undefined : toTask(row);
+  }
+
+  getTaskForEndpoint(id: string, endpointId: string): IntegrationTask | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM integration_tasks WHERE id = ? AND endpoint_id = ?
+    `).get(id, endpointId) as TaskRow | undefined;
     return row === undefined ? undefined : toTask(row);
   }
 

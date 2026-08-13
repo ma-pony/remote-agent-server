@@ -13,6 +13,14 @@ const apiToken = "integration-admin-token";
 
 const authHeaders = (): Record<string, string> => ({ authorization: `Bearer ${apiToken}` });
 const endpointHeaders = (token: string): Record<string, string> => ({ authorization: `Bearer ${token}` });
+const queuedTaskResponseKeys = [
+  "conversationKey",
+  "requestId",
+  "runId",
+  "sessionId",
+  "status",
+  "taskId"
+].sort();
 const validEndpointInput = (agentId: string, slug = "support-bot") => ({
   name: "Support Bot",
   slug,
@@ -216,10 +224,17 @@ describe("Integration endpoint API", () => {
       headers: endpointHeaders(endpoint.token),
       payload
     });
-    const firstTask = first.json() as { id: string; sessionId: string; runId: string | null; effectivePrompt: string };
+    const firstTask = first.json() as {
+      taskId: string;
+      requestId: string;
+      conversationKey: string | null;
+      sessionId: string;
+      runId: string | null;
+      status: string;
+    };
     const queried = await app.inject({
       method: "GET",
-      url: `/integration/v1/tasks/${firstTask.id}`,
+      url: `/integration/v1/tasks/${firstTask.taskId}`,
       headers: endpointHeaders(endpoint.token)
     });
     const continued = await app.inject({
@@ -231,13 +246,23 @@ describe("Integration endpoint API", () => {
 
     expect(first.statusCode).toBe(202);
     expect(repeated.statusCode).toBe(202);
-    expect(repeated.json()).toMatchObject({ id: firstTask.id });
+    expect(repeated.json()).toMatchObject({ taskId: firstTask.taskId });
     expect(queried.statusCode).toBe(200);
-    expect(queried.json()).toMatchObject({ id: firstTask.id, status: "queued" });
+    expect(queried.json()).toMatchObject({ taskId: firstTask.taskId, status: "queued" });
     expect(continued.statusCode).toBe(202);
     expect(continued.json()).toMatchObject({ sessionId: firstTask.sessionId });
+    for (const response of [first, repeated, queried, continued]) {
+      expect(Object.keys(response.json() as Record<string, unknown>).sort()).toEqual(queuedTaskResponseKeys);
+    }
+    expect(firstTask).toEqual({
+      taskId: firstTask.taskId,
+      requestId: "request-1",
+      conversationKey: "ticket/1332",
+      sessionId: firstTask.sessionId,
+      runId: null,
+      status: "queued"
+    });
     expect(firstTask.runId).toBeNull();
-    expect(firstTask.effectivePrompt).toBe("Resolve the support request.\n\nInvestigate the failing transfer");
     expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 0 });
   });
@@ -320,7 +345,7 @@ describe("Integration endpoint API", () => {
     expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 2 });
   });
 
-  it("Task 查询拒绝其他 Endpoint Token，提交拒绝额外字段", async () => {
+  it("Task 查询先校验 Token，并让跨 Endpoint 与随机 ID 返回相同 404", async () => {
     const { app, agentId } = await createTestApp();
     const firstEndpointResponse = await app.inject({
       method: "POST",
@@ -342,11 +367,22 @@ describe("Integration endpoint API", () => {
       headers: endpointHeaders(firstEndpoint.token),
       payload: { requestId: "request-1", message: "work", parameters: {} }
     });
-    const task = createdTask.json() as { id: string };
+    const task = createdTask.json() as { taskId: string };
+
+    const invalidTokenRead = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${task.taskId}`,
+      headers: endpointHeaders("invalid-token")
+    });
 
     const crossEndpointRead = await app.inject({
       method: "GET",
-      url: `/integration/v1/tasks/${task.id}`,
+      url: `/integration/v1/tasks/${task.taskId}`,
+      headers: endpointHeaders(secondEndpoint.token)
+    });
+    const randomIdRead = await app.inject({
+      method: "GET",
+      url: "/integration/v1/tasks/does-not-exist",
       headers: endpointHeaders(secondEndpoint.token)
     });
     const invalidSubmit = await app.inject({
@@ -356,10 +392,16 @@ describe("Integration endpoint API", () => {
       payload: { requestId: "request-2", message: "work", parameters: {}, unexpected: true }
     });
 
-    expect(crossEndpointRead.statusCode).toBe(401);
-    expect(crossEndpointRead.json()).toEqual({
+    expect(invalidTokenRead.statusCode).toBe(401);
+    expect(invalidTokenRead.json()).toEqual({
       error: { code: "invalid_endpoint_token", message: "Invalid integration endpoint token" }
     });
+    expect(crossEndpointRead.statusCode).toBe(404);
+    expect(randomIdRead.statusCode).toBe(404);
+    expect(crossEndpointRead.json()).toEqual({
+      error: { code: "task_not_found", message: "Integration Task not found" }
+    });
+    expect(randomIdRead.json()).toEqual(crossEndpointRead.json());
     expect(invalidSubmit.statusCode).toBe(400);
     expect(invalidSubmit.json()).toEqual({
       error: { code: "invalid_request", message: "Invalid Integration Task input" }

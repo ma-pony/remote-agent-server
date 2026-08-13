@@ -19,7 +19,13 @@ import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const temporaryDirectories: string[] = [];
 
-const createHarness = () => {
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+};
+
+const createHarness = (options: { beforeWorkspaceCreate?: () => Promise<void> } = {}) => {
   const { db, seed } = createTestDatabase();
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-integration-coordinator-"));
   temporaryDirectories.push(dataDir);
@@ -30,6 +36,7 @@ const createHarness = () => {
   const mcpManager = new McpManager({ db, secrets });
   const createSession = vi.fn(async (id: string) => {
     expect(db.inTransaction).toBe(false);
+    await options.beforeWorkspaceCreate?.();
     return {
       workspacePath: join(dataDir, "sessions", id, "workspace"),
       runtimePath: join(dataDir, "sessions", id, "runtime"),
@@ -114,6 +121,54 @@ describe("IntegrationCoordinator", () => {
     expect(first.effectivePrompt).toBe("Process this ticket.\n\n处理工单");
     expect(sessionManager.list()).toHaveLength(1);
     expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 0 });
+    db.close();
+  });
+
+  it("相同 requestId 和 conversationKey 并发提交只创建一个 Session workspace", async () => {
+    const workspaceCreateEntered = deferred<void>();
+    const releaseWorkspaceCreate = deferred<void>();
+    const harness = createHarness({
+      beforeWorkspaceCreate: async () => {
+        workspaceCreateEntered.resolve();
+        await releaseWorkspaceCreate.promise;
+      }
+    });
+    const { db, endpoint, coordinator, workspaceManager } = harness;
+
+    const firstPromise = coordinator.submit(endpoint, request("req-race", "ticket-race", "并发消息"));
+    await workspaceCreateEntered.promise;
+    const secondPromise = coordinator.submit(endpoint, request("req-race", "ticket-race", "并发消息"));
+    releaseWorkspaceCreate.resolve();
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+    expect(second.id).toBe(first.id);
+    expect(workspaceManager.createSession).toHaveBeenCalledTimes(1);
+    expect(workspaceManager.deleteSession).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
+    db.close();
+  });
+
+  it("同一 conversationKey 的不同 requestId 并发提交复用一个 Session", async () => {
+    const workspaceCreateEntered = deferred<void>();
+    const releaseWorkspaceCreate = deferred<void>();
+    const harness = createHarness({
+      beforeWorkspaceCreate: async () => {
+        workspaceCreateEntered.resolve();
+        await releaseWorkspaceCreate.promise;
+      }
+    });
+    const { db, endpoint, coordinator, workspaceManager } = harness;
+
+    const firstPromise = coordinator.submit(endpoint, request("req-race-1", "ticket-race", "第一条"));
+    await workspaceCreateEntered.promise;
+    const secondPromise = coordinator.submit(endpoint, request("req-race-2", "ticket-race", "第二条"));
+    releaseWorkspaceCreate.resolve();
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(workspaceManager.createSession).toHaveBeenCalledTimes(1);
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 2 });
     db.close();
   });
 
@@ -221,7 +276,22 @@ describe("IntegrationCoordinator", () => {
     db.close();
   });
 
-  it("只在 caller-owned transaction 中替换已 claim Session 的完整 MCP 参数", async () => {
+  it("caller-owned transaction 未 claim idle Session 时拒绝替换 MCP 参数", async () => {
+    const { db, endpoint, sessionManager } = createHarness();
+    const session = await sessionManager.create({
+      agentId: endpoint.agentId,
+      title: "Ticket",
+      mcpParameters: {}
+    });
+
+    db.exec("BEGIN IMMEDIATE");
+    expect(() => sessionManager.replaceMcpParametersInTransaction(session.id, {}))
+      .toThrowError(expect.objectContaining({ code: "session_busy" }));
+    db.exec("ROLLBACK");
+    db.close();
+  });
+
+  it("queued Run 插入后可替换已 claim Session 参数且 caller rollback 恢复旧值", async () => {
     const { db, endpoint, sessionManager } = createHarness();
     db.prepare(`
       INSERT INTO agent_session_parameters
@@ -236,12 +306,21 @@ describe("IntegrationCoordinator", () => {
 
     db.exec("BEGIN IMMEDIATE");
     db.prepare("UPDATE sessions SET status = 'running' WHERE id = ? AND status = 'idle'").run(session.id);
+    db.prepare(`
+      INSERT INTO runs (id, session_id, status, input, created_at)
+      VALUES ('queued-run', ?, 'queued', 'new run', ?)
+    `).run(session.id, new Date().toISOString());
     sessionManager.replaceMcpParametersInTransaction(session.id, { ticket: "new" });
-    db.exec("COMMIT");
-
     expect(db.prepare(`
       SELECT plain_value FROM session_mcp_parameter_values WHERE session_id = ?
     `).get(session.id)).toEqual({ plain_value: "new" });
+    db.exec("ROLLBACK");
+
+    expect(db.prepare(`
+      SELECT plain_value FROM session_mcp_parameter_values WHERE session_id = ?
+    `).get(session.id)).toEqual({ plain_value: "old" });
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id)).toEqual({ status: "idle" });
+    expect(db.prepare("SELECT count(*) AS count FROM runs WHERE id = 'queued-run'").get()).toEqual({ count: 0 });
     db.close();
   });
 });

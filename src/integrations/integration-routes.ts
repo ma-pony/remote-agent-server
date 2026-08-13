@@ -7,7 +7,6 @@ import { WorkspaceCreateError } from "../workspaces/workspace-manager.js";
 import { requireIntegrationEndpoint } from "./integration-auth.js";
 import { IntegrationCoordinator, IntegrationCoordinatorError } from "./integration-coordinator.js";
 import { IntegrationEndpointManager, IntegrationEndpointManagerError } from "./integration-endpoint-manager.js";
-import type { IntegrationTask } from "./integration-types.js";
 
 const submitTaskSchema = z.object({
   requestId: z.string().refine((value) => value.trim() !== ""),
@@ -18,11 +17,6 @@ const submitTaskSchema = z.object({
 
 const sendError = (reply: FastifyReply, statusCode: number, code: string, message: string) =>
   reply.code(statusCode).send({ error: { code, message } });
-
-const publicTask = (task: IntegrationTask) => {
-  const { encryptedParameters: _encryptedParameters, requestFingerprint: _requestFingerprint, ...result } = task;
-  return result;
-};
 
 const handleError = (reply: FastifyReply, error: unknown) => {
   if (error instanceof IntegrationCoordinatorError) {
@@ -81,7 +75,8 @@ export const registerIntegrationRoutes = (
     const parsed = submitTaskSchema.safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Integration Task input");
     try {
-      return reply.code(202).send(publicTask(await coordinator.submit(request.integrationEndpoint!, parsed.data)));
+      const task = await coordinator.submit(request.integrationEndpoint!, parsed.data);
+      return reply.code(202).send(coordinator.toExternalTask(task));
     } catch (error) {
       return handleError(reply, error);
     }
@@ -100,14 +95,15 @@ export const registerIntegrationRoutes = (
   );
 
   app.get<{ Params: { taskId: string } }>("/integration/v1/tasks/:taskId", (request, reply) => {
-    const task = coordinator.getTask(request.params.taskId);
-    if (task === undefined) return sendError(reply, 404, "task_not_found", "Integration Task not found");
-    const endpoint = manager.get(task.endpointId);
     const token = bearerToken(request.headers.authorization);
-    if (endpoint === undefined || token === undefined || manager.authenticate(endpoint.slug, token) === undefined) {
+    const endpoint = token === undefined ? undefined : manager.authenticateToken(token);
+    if (endpoint === undefined) {
       return sendError(reply, 401, "invalid_endpoint_token", "Invalid integration endpoint token");
     }
-    return publicTask(task);
+    const task = coordinator.getTaskForEndpoint(request.params.taskId, endpoint.id);
+    return task === undefined
+      ? sendError(reply, 404, "task_not_found", "Integration Task not found")
+      : coordinator.toExternalTask(task);
   });
 
   app.all<{ Params: { slug: string } }>("/integration/v1/endpoints/:slug/*", {

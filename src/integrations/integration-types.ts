@@ -73,6 +73,15 @@ export type IntegrationTask = {
   finishedAt: string | null;
 };
 
+export type ExternalIntegrationTask = {
+  taskId: string;
+  requestId: string;
+  conversationKey: string | null;
+  sessionId: string;
+  runId: string | null;
+  status: IntegrationTaskStatus;
+};
+
 export type WebhookSubscription = {
   id: string;
   endpointId: string;

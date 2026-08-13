@@ -135,6 +135,10 @@ export class IntegrationEndpointManager {
     return stored.endpoint;
   }
 
+  authenticateToken(token: string): IntegrationEndpoint | undefined {
+    return this.store.getEndpointByTokenHash(tokenHash(token));
+  }
+
   resolveRequest(endpointId: string, parameters: Record<string, string>): ResolvedIntegrationParameters {
     const endpoint = this.store.getEndpoint(endpointId);
     if (endpoint === undefined) throw new IntegrationEndpointManagerError("endpoint_not_found");

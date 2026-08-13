@@ -6,7 +6,12 @@ import type { SecretStore } from "../mcp/secret-store.js";
 import type { SessionManager } from "../sessions/session-manager.js";
 import type { IntegrationEndpointManager } from "./integration-endpoint-manager.js";
 import type { IntegrationStore } from "./integration-store.js";
-import type { IntegrationConversation, IntegrationEndpoint, IntegrationTask } from "./integration-types.js";
+import type {
+  ExternalIntegrationTask,
+  IntegrationConversation,
+  IntegrationEndpoint,
+  IntegrationTask
+} from "./integration-types.js";
 
 export type SubmitIntegrationTaskInput = {
   requestId: string;
@@ -138,8 +143,22 @@ export class IntegrationCoordinator {
     }));
   }
 
-  getTask(id: string): IntegrationTask | undefined {
-    return this.dependencies.store.getTask(id);
+  getTaskForEndpoint(id: string, endpointId: string): IntegrationTask | undefined {
+    return this.dependencies.store.getTaskForEndpoint(id, endpointId);
+  }
+
+  toExternalTask(task: IntegrationTask): ExternalIntegrationTask {
+    const conversationKey = task.conversationId === null
+      ? null
+      : this.dependencies.store.getConversation(task.conversationId)?.conversationKey ?? null;
+    return {
+      taskId: task.id,
+      requestId: task.requestId,
+      conversationKey,
+      sessionId: task.sessionId,
+      runId: task.runId,
+      status: task.status
+    };
   }
 
   getConversation(endpointId: string, conversationKey: string): IntegrationConversation | undefined {
