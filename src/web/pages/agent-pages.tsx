@@ -149,7 +149,7 @@ export const AgentDetailLayout = () => {
     void api<Agent>(`/agents/${id}`, { signal: controller.signal }).then(setAgent).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [id]);
-  const section = pathname.endsWith("/skills") ? "skills" : pathname.endsWith("/settings") ? "settings" : "overview";
+  const section = pathname.endsWith("/skills") ? "skills" : pathname.endsWith("/mcp") ? "mcp" : pathname.endsWith("/settings") ? "settings" : "overview";
   if (error !== "") return <div className="mx-auto max-w-5xl p-8"><ErrorAlert message={error} /><Button asChild variant="outline" className="mt-4"><Link to="/agents">返回 Agent</Link></Button></div>;
   if (agent === null) return <div className="mx-auto max-w-5xl p-8"><Skeleton className="h-10 w-72" /><Skeleton className="mt-8 h-64" /></div>;
 
@@ -157,7 +157,7 @@ export const AgentDetailLayout = () => {
     <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />返回 Agent</Link></Button>
     <PageHeader eyebrow={providerNames[agent.provider]} title={agent.name} description={`项目环境、运行检查和 Skill 均在这个 Agent 范围内管理。`} action={<Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? "已启用" : "已停用"}</Badge>} />
     <Tabs value={section} onValueChange={(value) => navigate(value === "overview" ? `/agents/${id}` : `/agents/${id}/${value}`)}>
-      <TabsList variant="line" aria-label="Agent 管理"><TabsTrigger value="overview">概览</TabsTrigger><TabsTrigger value="skills">Skills</TabsTrigger><TabsTrigger value="settings">设置</TabsTrigger></TabsList>
+      <TabsList variant="line" aria-label="Agent 管理"><TabsTrigger value="overview">概览</TabsTrigger><TabsTrigger value="skills">Skills</TabsTrigger><TabsTrigger value="mcp">MCP</TabsTrigger><TabsTrigger value="settings">设置</TabsTrigger></TabsList>
     </Tabs>
     <div className="mt-6"><Outlet context={{ agent, setAgent } satisfies AgentDetailContext} /></div>
   </div>;

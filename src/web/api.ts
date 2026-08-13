@@ -80,7 +80,63 @@ export type Session = {
   projectEnvironmentRevisionId: string | null;
   createdAt: string;
   updatedAt: string;
+  mcpParametersValid?: boolean;
+  missingMcpParameters?: string[];
+  mcpParameters?: SessionMcpParameterStatus[];
 };
+
+export type SessionMcpParameterStatus = {
+  key: string;
+  label: string;
+  description: string | null;
+  required: boolean;
+  secret: boolean;
+  configured: boolean;
+  value?: string;
+};
+
+export type AgentSessionParameter = {
+  id: string;
+  agentId: string;
+  key: string;
+  label: string;
+  description: string | null;
+  required: boolean;
+  secret: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type McpValueView = {
+  id: string;
+  source: "fixed" | "session_parameter" | "runtime";
+  name?: string;
+  value?: string;
+  secret?: boolean;
+  configured?: boolean;
+  parameterKey?: string;
+  runtimeKey?: "agent_id" | "session_id" | "run_id" | "workspace_path" | "browser_profile_path";
+};
+
+export type AgentMcpServerSummary = {
+  id: string;
+  agentId: string;
+  name: string;
+  transport: "http" | "stdio";
+  enabled: boolean;
+  checkTimeoutSeconds: number;
+  lastCheckedAt: string | null;
+  lastCheckStatus: "passed" | "failed" | null;
+  lastCheckMessage: string | null;
+  lastToolCount: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentMcpServerDetail = AgentMcpServerSummary & (
+  | { transport: "http"; url: string; headers: McpValueView[] }
+  | { transport: "stdio"; command: string; arguments: McpValueView[]; environment: McpValueView[] }
+);
 
 export type Run = {
   id: string;

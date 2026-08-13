@@ -53,6 +53,8 @@ SESSIONS_ROOT="/Users/当前用户/Library/Application Support/remote-agent-serv
 MAX_CONCURRENT_RUNS=4
 ```
 
+`DATA_DIR/secret.key` 是 MCP 固定敏感值和 Session 敏感参数的 AES-256-GCM 主密钥。服务首次启动会自动创建，权限为 `0600`。该文件必须与 SQLite 数据库一起持久化和备份；丢失后，数据库中已有密文无法恢复。不要把该密钥写入镜像、日志或源码仓库。
+
 使用同一个 macOS 用户完成 Provider 登录并确认命令可执行：
 
 ```bash

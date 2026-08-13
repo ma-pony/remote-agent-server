@@ -10,12 +10,14 @@ import {
   AgentCreatePage, AgentDetailLayout, AgentListPage, AgentOverviewPage,
   AgentSettingsPage, AgentSkillsPage
 } from "./pages/agent-pages.js";
+import { AgentMcpEditorPage, AgentMcpPage } from "./pages/agent-mcp-pages.js";
 import {
   ProjectEnvironmentCreatePage, ProjectEnvironmentDetailLayout, ProjectEnvironmentListPage,
   ProjectEnvironmentOverviewPage, ProjectEnvironmentRepositoriesPage
 } from "./pages/project-environment-pages.js";
 import { SessionPage } from "./pages/session-page.js";
 import { SessionCreatePage, SessionListPage } from "./pages/session-pages.js";
+import { SessionSettingsPage } from "./pages/session-settings-page.js";
 
 export const App = () => {
   const [token, setToken] = useState(() => sessionStorage.getItem("apiToken"));
@@ -37,8 +39,11 @@ export const App = () => {
       <Route path="/agents/:id" element={<AgentDetailLayout />}>
         <Route index element={<AgentOverviewPage />} />
         <Route path="skills" element={<AgentSkillsPage />} />
+        <Route path="mcp" element={<AgentMcpPage />} />
         <Route path="settings" element={<AgentSettingsPage />} />
       </Route>
+      <Route path="/agents/:id/mcp/new" element={<AgentMcpEditorPage />} />
+      <Route path="/agents/:id/mcp/:mcpServerId" element={<AgentMcpEditorPage />} />
       <Route path="/project-environments" element={<ProjectEnvironmentListPage />} />
       <Route path="/project-environments/new" element={<ProjectEnvironmentCreatePage />} />
       <Route path="/project-environments/:id" element={<ProjectEnvironmentDetailLayout />}>
@@ -48,6 +53,7 @@ export const App = () => {
       <Route path="/sessions" element={<SessionListPage />} />
       <Route path="/sessions/new" element={<SessionCreatePage />} />
       <Route path="/sessions/:id" element={<SessionRoute />} />
+      <Route path="/sessions/:id/settings" element={<SessionSettingsPage />} />
       <Route path="*" element={<Navigate to="/agents" replace />} />
     </Route>
   </Routes></BrowserRouter>;

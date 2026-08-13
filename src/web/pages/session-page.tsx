@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronDown, Send, Square, XCircle } from "lucide-react";
+import { ArrowLeft, ChevronDown, Send, Settings2, Square, XCircle } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 
 import { api, errorMessage, isRunStreamPermanentError, streamRunEvents, type Agent, type Run, type RunEvent, type RunStatus, type SessionDetail } from "../api.js";
@@ -118,6 +118,8 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   }, [sessionId, reloadGeneration]);
 
   const activeRunId = useMemo(() => views.findLast((view) => activeStatuses.has(view.run.status))?.run.id ?? null, [views]);
+  const mcpParametersValid = session?.mcpParametersValid ?? true;
+  const missingMcpParameters = session?.missingMcpParameters ?? [];
 
   useEffect(() => {
     if (activeRunId === null) return;
@@ -212,7 +214,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   const send = async (event: FormEvent) => {
     event.preventDefault();
     const text = input.trim();
-    if (text === "" || activeRunId !== null || initialLoading || loadError !== "" || session === null) return;
+    if (text === "" || activeRunId !== null || initialLoading || loadError !== "" || session === null || !mcpParametersValid) return;
     setSubmitting(true);
     setError("");
     try {
@@ -240,12 +242,12 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     }
   };
 
-  const composerDisabled = initialLoading || loadError !== "" || session === null || activeRunId !== null || submitting;
+  const composerDisabled = initialLoading || loadError !== "" || session === null || activeRunId !== null || submitting || !mcpParametersValid;
 
   return (
     <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
       <Button asChild variant="ghost" className="mb-4"><Link to="/sessions"><ArrowLeft />返回 Session</Link></Button>
-      <PageHeader eyebrow={`SESSION / ${initialLoading ? "LOADING" : activeRunId !== null ? "RUNNING" : "IDLE"}`} title={session?.title ?? "加载 Session…"} description={agentName === "" ? "正在读取 Agent…" : `Agent · ${agentName}`} action={<div className="flex items-center gap-2"><Badge variant={activeRunId === null ? "secondary" : "default"}>{activeRunId === null ? "空闲" : "活动中"}</Badge>{session === null ? null : <SessionDeleteDialog session={activeRunId === null ? session : { ...session, status: "running" }} onDeleted={() => navigate("/sessions")} onError={setError} />}</div>} />
+      <PageHeader eyebrow={`SESSION / ${initialLoading ? "LOADING" : activeRunId !== null ? "RUNNING" : "IDLE"}`} title={session?.title ?? "加载 Session…"} description={agentName === "" ? "正在读取 Agent…" : `Agent · ${agentName}`} action={<div className="flex items-center gap-2">{session === null ? null : <Button asChild size="sm" variant="outline"><Link to={`/sessions/${session.id}/settings`}><Settings2 />设置</Link></Button>}<Badge variant={activeRunId === null ? "secondary" : "default"}>{activeRunId === null ? "空闲" : "活动中"}</Badge>{session === null ? null : <SessionDeleteDialog session={activeRunId === null ? session : { ...session, status: "running" }} onDeleted={() => navigate("/sessions")} onError={setError} />}</div>} />
       <div className="flex flex-col gap-4">
         {loadError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>Session 加载失败</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{loadError}</span><Button size="sm" variant="outline" type="button" onClick={() => setReloadGeneration((current) => current + 1)}>重试加载</Button></AlertDescription></Alert> : error !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>操作失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
         {streamError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>实时连接异常</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{streamError}</span>{streamError.includes("自动重连已停止") ? <Button size="sm" variant="outline" type="button" onClick={() => setStreamReconnectGeneration((current) => current + 1)}>重新连接实时事件</Button> : null}</AlertDescription></Alert> : null}
@@ -253,6 +255,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       <section className="mt-6 flex flex-col gap-5" aria-label="运行历史" aria-live="polite">
         {views.length === 0 && session !== null ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">还没有消息，输入任务开始第一轮。</CardContent></Card> : views.map((view) => <RunBlock key={view.run.id} view={view} />)}
       </section>
+      {session !== null && !mcpParametersValid ? <Alert className="mt-6"><XCircle /><AlertTitle>缺少 MCP 参数</AlertTitle><AlertDescription>请先在 <Link className="underline" to={`/sessions/${session.id}/settings`}>Session 设置</Link> 中填写：{missingMcpParameters.join("、")}</AlertDescription></Alert> : null}
       <Card className="sticky bottom-4 mt-6 shadow-lg"><CardContent className="p-4"><form className="flex flex-col gap-3" onSubmit={send}>
         <Field data-disabled={composerDisabled || undefined}><FieldLabel htmlFor="run-input">发送给 Agent</FieldLabel><Textarea id="run-input" rows={3} value={input} onChange={(event) => setInput(event.target.value)} disabled={composerDisabled} placeholder={activeRunId === null ? "描述下一步任务…" : "当前 Run 结束后可继续输入"} /></Field>
         <div className="flex justify-end gap-2">

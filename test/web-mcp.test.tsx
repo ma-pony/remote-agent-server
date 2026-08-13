@@ -1,0 +1,218 @@
+// @vitest-environment jsdom
+
+import "@testing-library/jest-dom/vitest";
+
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+
+import { App } from "../src/web/app.js";
+
+const now = "2026-08-13T00:00:00.000Z";
+const agent = {
+  id: "agent-1", name: "主力 Codex", provider: "codex", enabled: true,
+  projectEnvironmentId: "environment-1", createdAt: now, updatedAt: now
+};
+const server = {
+  id: "mcp-1", agentId: agent.id, name: "grab_manager", transport: "http", enabled: true,
+  checkTimeoutSeconds: 30, lastCheckedAt: null, lastCheckStatus: null, lastCheckMessage: null,
+  lastToolCount: null, createdAt: now, updatedAt: now
+};
+const session = {
+  id: "session-1", agentId: agent.id, title: "租户 A", status: "idle", providerSessionId: null,
+  workspacePath: "/workspace", projectEnvironmentRevisionId: "revision-1", createdAt: now, updatedAt: now
+};
+const response = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), {
+  status, headers: { "content-type": "application/json" }
+});
+
+beforeEach(() => {
+  sessionStorage.setItem("apiToken", "secret-token");
+  window.history.replaceState({}, "", `/agents/${agent.id}/mcp`);
+});
+
+afterEach(() => {
+  cleanup();
+  sessionStorage.clear();
+  vi.unstubAllGlobals();
+});
+
+it("Agent MCP 独立页面展示服务器、连接检查和 Session 参数", async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
+      id: "parameter-1", agentId: agent.id, key: "tenant", label: "租户", description: null,
+      required: true, secret: false, createdAt: now, updatedAt: now
+    }]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+      return response({ status: "passed", toolCount: 4, message: "4 tools available" });
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+
+  expect(await screen.findByText("MCP 服务器")).toBeInTheDocument();
+  expect(await screen.findByText("grab_manager")).toBeInTheDocument();
+  expect(screen.getByDisplayValue("租户")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
+  expect(await screen.findByText("4 个工具可用")).toBeInTheDocument();
+});
+
+it("使用指定 Session 检查引用动态参数的 MCP", async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+      expect(JSON.parse(String(init.body))).toEqual({ sessionId: session.id });
+      return response({ status: "passed", toolCount: 2, message: "2 tools available" });
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+  fireEvent.change(await screen.findByLabelText("检查使用的 Session"), { target: { value: session.id } });
+  fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
+  expect(await screen.findByText("2 个工具可用")).toBeInTheDocument();
+});
+
+it("从独立页面创建带敏感 Header 的 HTTP MCP", async () => {
+  window.history.replaceState({}, "", `/agents/${agent.id}/mcp/new`);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers` && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      expect(body).toMatchObject({
+        name: "grab_manager", transport: "http", url: "https://example.test/mcp",
+        headers: [{ name: "Authorization", source: "fixed", value: "Bearer secret-token", secret: true }]
+      });
+      return response({ ...server, url: "https://example.test/mcp", headers: [] }, 201);
+    }
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+  expect(await screen.findByRole("heading", { name: "新建 MCP" })).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("MCP 名称"), { target: { value: "grab_manager" } });
+  fireEvent.change(screen.getByLabelText("HTTP URL"), { target: { value: "https://example.test/mcp" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加 Header" }));
+  fireEvent.change(screen.getByLabelText("Header 名称 1"), { target: { value: "Authorization" } });
+  fireEvent.change(screen.getByLabelText("Header 值 1"), { target: { value: "Bearer secret-token" } });
+  fireEvent.click(screen.getByLabelText("Header 敏感值 1"));
+  fireEvent.click(screen.getByRole("button", { name: "创建 MCP" }));
+
+  await waitFor(() => expect(window.location.pathname).toBe(`/agents/${agent.id}/mcp`));
+});
+
+it("HTTP Header 可引用 Session 参数", async () => {
+  window.history.replaceState({}, "", `/agents/${agent.id}/mcp/new`);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
+      id: "parameter-1", agentId: agent.id, key: "tenant_token", label: "租户 Token",
+      description: null, required: true, secret: true, createdAt: now, updatedAt: now
+    }]);
+    if (url === `/api/agents/${agent.id}/mcp-servers` && init?.method === "POST") {
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        headers: [{ name: "X-Tenant-Token", source: "session_parameter", parameterKey: "tenant_token" }]
+      });
+      return response({ ...server, url: "https://example.test/mcp", headers: [] }, 201);
+    }
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+  fireEvent.change(await screen.findByLabelText("MCP 名称"), { target: { value: "tenant_mcp" } });
+  fireEvent.change(screen.getByLabelText("HTTP URL"), { target: { value: "https://example.test/mcp" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加 Header" }));
+  fireEvent.change(screen.getByLabelText("Header 名称 1"), { target: { value: "X-Tenant-Token" } });
+  fireEvent.change(screen.getByLabelText("Header 来源 1"), { target: { value: "session_parameter" } });
+  fireEvent.change(screen.getByLabelText("Header Session 参数 1"), { target: { value: "tenant_token" } });
+  fireEvent.click(screen.getByRole("button", { name: "创建 MCP" }));
+
+  await waitFor(() => expect(window.location.pathname).toBe(`/agents/${agent.id}/mcp`));
+});
+
+it("stdio Argument 和 Environment 支持 runtime 与 Session 参数", async () => {
+  window.history.replaceState({}, "", `/agents/${agent.id}/mcp/new`);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
+      id: "parameter-1", agentId: agent.id, key: "tenant", label: "租户",
+      description: null, required: true, secret: false, createdAt: now, updatedAt: now
+    }]);
+    if (url === `/api/agents/${agent.id}/mcp-servers` && init?.method === "POST") {
+      expect(JSON.parse(String(init.body))).toMatchObject({
+        transport: "stdio", command: "node",
+        arguments: [{ source: "runtime", runtimeKey: "workspace_path" }],
+        environment: [{ name: "TENANT", source: "session_parameter", parameterKey: "tenant" }]
+      });
+      return response({ ...server, transport: "stdio", command: "node", arguments: [], environment: [] }, 201);
+    }
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+  fireEvent.change(await screen.findByLabelText("MCP 名称"), { target: { value: "local_mcp" } });
+  fireEvent.change(screen.getByLabelText("Transport"), { target: { value: "stdio" } });
+  fireEvent.change(screen.getByLabelText("Command"), { target: { value: "node" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加 Argument" }));
+  fireEvent.change(screen.getByLabelText("Argument 来源 1"), { target: { value: "runtime" } });
+  fireEvent.change(screen.getByLabelText("Argument 运行参数 1"), { target: { value: "workspace_path" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加 Environment" }));
+  fireEvent.change(screen.getByLabelText("Environment 名称 1"), { target: { value: "TENANT" } });
+  fireEvent.change(screen.getByLabelText("Environment 来源 1"), { target: { value: "session_parameter" } });
+  fireEvent.change(screen.getByLabelText("Environment Session 参数 1"), { target: { value: "tenant" } });
+  fireEvent.click(screen.getByRole("button", { name: "创建 MCP" }));
+
+  await waitFor(() => expect(window.location.pathname).toBe(`/agents/${agent.id}/mcp`));
+});
+
+it("编辑时可保留未回显的敏感值", async () => {
+  window.history.replaceState({}, "", `/agents/${agent.id}/mcp/${server.id}`);
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}` && (init?.method ?? "GET") === "GET") {
+      return response({ ...server, url: "https://example.test/mcp", headers: [{
+        id: "89a3e131-449d-4dfa-b927-a019db9ca014", name: "Authorization", source: "fixed",
+        secret: true, configured: true
+      }] });
+    }
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}` && init?.method === "PATCH") {
+      const body = JSON.parse(String(init.body));
+      expect(body).toMatchObject({ headers: [{
+        id: "89a3e131-449d-4dfa-b927-a019db9ca014", name: "Authorization", source: "fixed", secret: true
+      }] });
+      expect(body.headers[0]).not.toHaveProperty("value");
+      return response({ ...server, url: "https://example.test/mcp", headers: [] });
+    }
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/sessions") return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+  expect(await screen.findByLabelText("Header 值 1")).toHaveValue("");
+  fireEvent.click(screen.getByRole("button", { name: "保存 MCP" }));
+  await waitFor(() => expect(window.location.pathname).toBe(`/agents/${agent.id}/mcp`));
+});
