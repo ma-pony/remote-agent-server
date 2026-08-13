@@ -6,6 +6,7 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
+import { IntegrationStore } from "../src/integrations/integration-store.js";
 import type { AgentRuntime, RuntimeTurnResult } from "../src/runtime/agent-runtime.js";
 import type { WorkspaceManager } from "../src/workspaces/workspace-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
@@ -39,12 +40,18 @@ const deferred = <T,>() => {
 
 const apps: Array<{ app: FastifyInstance; close: () => Promise<void> }> = [];
 
-const createTestApp = async (runtime: AgentRuntime = createFakeRuntime()): Promise<{
+const createTestApp = async (
+  runtime: AgentRuntime = createFakeRuntime(),
+  configureIntegrationStore?: (store: IntegrationStore) => void
+): Promise<{
   app: FastifyInstance;
   agentId: string;
   db: ReturnType<typeof createTestDatabase>["db"];
+  integrationStore: IntegrationStore;
 }> => {
   const { db, seed } = createTestDatabase();
+  const integrationStore = new IntegrationStore({ db });
+  configureIntegrationStore?.(integrationStore);
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-integration-api-"));
   const workspaceManager: WorkspaceManager = {
     check: async () => undefined,
@@ -70,7 +77,8 @@ const createTestApp = async (runtime: AgentRuntime = createFakeRuntime()): Promi
     },
     db,
     runtime,
-    workspaceManager
+    workspaceManager,
+    integrationStore
   });
   apps.push({
     app,
@@ -81,7 +89,7 @@ const createTestApp = async (runtime: AgentRuntime = createFakeRuntime()): Promi
     }
   });
   await app.ready();
-  return { app, agentId: seed.agent.id, db };
+  return { app, agentId: seed.agent.id, db, integrationStore };
 };
 
 afterEach(async () => {
@@ -461,6 +469,152 @@ describe("Integration endpoint API", () => {
     expect(invalidSubmit.json()).toEqual({
       error: { code: "invalid_request", message: "Invalid Integration Task input" }
     });
+  });
+
+  it("Task Event 历史复用 Run seq、支持 afterSeq 并隔离 Endpoint", async () => {
+    const runtime = createFakeRuntime({
+      events: [
+        { type: "message", stream: "output", text: "done" },
+        { type: "tool", content: { toolCallId: "tool-1", title: "Inspect", status: "completed" } }
+      ]
+    });
+    const { app, agentId, db } = await createTestApp(runtime);
+    const firstEndpointResponse = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId, "events-a")
+    });
+    const secondEndpointResponse = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId, "events-b")
+    });
+    const firstEndpoint = firstEndpointResponse.json() as { endpoint: { slug: string }; token: string };
+    const secondEndpoint = secondEndpointResponse.json() as { token: string };
+    const submitted = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${firstEndpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(firstEndpoint.token),
+      payload: { requestId: "event-request", message: "work", parameters: {} }
+    });
+    const task = submitted.json() as { taskId: string };
+    await vi.waitFor(() => expect(
+      db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(task.taskId)
+    ).toEqual({ status: "succeeded" }));
+
+    const events = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${task.taskId}/events?afterSeq=1`,
+      headers: endpointHeaders(firstEndpoint.token)
+    });
+    const crossEndpoint = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${task.taskId}/events`,
+      headers: endpointHeaders(secondEndpoint.token)
+    });
+    const invalidCursor = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${task.taskId}/events?afterSeq=-1`,
+      headers: endpointHeaders(firstEndpoint.token)
+    });
+
+    expect(events.statusCode).toBe(200);
+    expect((events.json() as Array<{ seq: number; type: string }>).map(({ seq, type }) => ({ seq, type })))
+      .toEqual([{ seq: 2, type: "tool" }, { seq: 3, type: "status" }]);
+    expect(crossEndpoint.statusCode).toBe(404);
+    expect(crossEndpoint.json()).toEqual({
+      error: { code: "task_not_found", message: "Integration Task not found" }
+    });
+    expect(invalidCursor.statusCode).toBe(400);
+    expect(invalidCursor.json()).toEqual({
+      error: { code: "invalid_request", message: "Invalid Event cursor" }
+    });
+  });
+
+  it("running Task 取消委托 Runtime，终态重复取消幂等", async () => {
+    const result = deferred<RuntimeTurnResult>();
+    const runtime = createFakeRuntime();
+    runtime.startTurn = () => ({
+      events: { async *[Symbol.asyncIterator]() {} },
+      result: result.promise,
+      cancel: async () => undefined,
+      closeEvents: async () => undefined
+    });
+    runtime.cancel = vi.fn(async () => result.resolve({ status: "cancelled" }));
+    const { app, agentId, db } = await createTestApp(runtime);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId, "cancel-endpoint")
+    });
+    const endpoint = created.json() as { endpoint: { slug: string }; token: string };
+    const submitted = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(endpoint.token),
+      payload: { requestId: "cancel-request", message: "long work", parameters: {} }
+    });
+    const task = submitted.json() as { taskId: string; sessionId: string };
+    await vi.waitFor(() => expect(
+      db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(task.taskId)
+    ).toEqual({ status: "running" }));
+
+    const cancelled = await app.inject({
+      method: "POST",
+      url: `/integration/v1/tasks/${task.taskId}/cancel`,
+      headers: endpointHeaders(endpoint.token)
+    });
+    await vi.waitFor(() => expect(
+      db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(task.taskId)
+    ).toEqual({ status: "cancelled" }));
+    const repeated = await app.inject({
+      method: "POST",
+      url: `/integration/v1/tasks/${task.taskId}/cancel`,
+      headers: endpointHeaders(endpoint.token)
+    });
+
+    expect(cancelled.statusCode).toBe(200);
+    expect(runtime.cancel).toHaveBeenCalledWith(task.sessionId);
+    expect(repeated.statusCode).toBe(200);
+    expect(repeated.json()).toMatchObject({ taskId: task.taskId, status: "cancelled" });
+  });
+
+  it("未关联 Run 的 queued Task 直接取消且不会调用 Runtime", async () => {
+    const runtime = createFakeRuntime();
+    runtime.cancel = vi.fn(runtime.cancel);
+    const { app, agentId, db } = await createTestApp(runtime, (store) => {
+      vi.spyOn(store, "listDispatchableTasks").mockReturnValue([]);
+    });
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId, "queued-cancel")
+    });
+    const endpoint = created.json() as { endpoint: { slug: string }; token: string };
+    const submitted = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(endpoint.token),
+      payload: { requestId: "queued-cancel-request", message: "cancel me", parameters: {} }
+    });
+    const task = submitted.json() as { taskId: string };
+
+    const cancelled = await app.inject({
+      method: "POST",
+      url: `/integration/v1/tasks/${task.taskId}/cancel`,
+      headers: endpointHeaders(endpoint.token)
+    });
+
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json()).toMatchObject({ taskId: task.taskId, status: "cancelled", runId: null });
+    expect(db.prepare("SELECT status, run_id FROM integration_tasks WHERE id = ?").get(task.taskId))
+      .toEqual({ status: "cancelled", run_id: null });
+    expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 0 });
+    expect(runtime.cancel).not.toHaveBeenCalled();
   });
 
   it("重复 slug 的创建和更新返回稳定冲突错误", async () => {

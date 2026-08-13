@@ -116,6 +116,7 @@ export class IntegrationTaskScheduler {
         }
       );
       this.clearTaskRetry(task.id);
+      this.dependencies.store.notifyTaskChanged(task.id);
       this.dependencies.runScheduler.enqueue(run.id);
     } catch (_error) {
       this.scheduleTaskRetry(task.id);

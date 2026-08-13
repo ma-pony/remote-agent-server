@@ -113,6 +113,8 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
   }
 
   afterCommit(run: Run): undefined {
+    const task = this.dependencies.store.getTaskByRun(run.id);
+    if (task !== undefined) this.dependencies.store.notifyTaskChanged(task.id);
     if (run.status === "succeeded" || run.status === "failed" || run.status === "cancelled") {
       this.notifyScheduler();
     }

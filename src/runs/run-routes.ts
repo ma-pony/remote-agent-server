@@ -11,6 +11,7 @@ import type { RunScheduler } from "./run-scheduler.js";
 export const SSE_HISTORY_BATCH_SIZE = 100;
 export const SSE_LIVE_BUFFER_LIMIT = 256;
 export const SSE_DRAIN_TIMEOUT_MS = 1_000;
+export const SSE_HEARTBEAT_INTERVAL_MS = 20_000;
 
 export interface SseWriter {
   readonly destroyed?: boolean;
@@ -45,6 +46,12 @@ const handleRunError = (reply: FastifyReply, error: unknown) => {
 const sseFrame = (event: Event): string =>
   `id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 
+export type RunEventStreamOptions = {
+  heartbeatMs?: number;
+  isTerminal?: () => boolean;
+  subscribeStateChange?: (listener: () => void) => () => void;
+};
+
 /**
  * Streams bounded history followed by live Events with backpressure and reconnect-safe cursors.
  */
@@ -52,13 +59,17 @@ export const streamRunEvents = async (
   eventStore: EventStore,
   runId: string,
   afterSeq: number,
-  writer: SseWriter
+  writer: SseWriter,
+  options: RunEventStreamOptions = {}
 ): Promise<void> => {
   let cursor = afterSeq;
   let closed = false;
   let unsubscribe: (() => void) | undefined;
   let wakeLive: (() => void) | undefined;
   let wakeDrain: (() => void) | undefined;
+  let unsubscribeState: (() => void) | undefined;
+  let heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  let heartbeatPending = false;
   const liveBuffer: Event[] = [];
 
   const finish = (endWriter: boolean): void => {
@@ -66,6 +77,10 @@ export const streamRunEvents = async (
     closed = true;
     unsubscribe?.();
     unsubscribe = undefined;
+    unsubscribeState?.();
+    unsubscribeState = undefined;
+    if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
     wakeLive?.();
     wakeDrain?.();
     if (endWriter && !writer.destroyed && !writer.writableEnded) {
@@ -80,6 +95,14 @@ export const streamRunEvents = async (
   const onError = (_error: Error): void => finish(false);
   writer.on("close", onClose);
   writer.on("error", onError);
+
+  if (options.heartbeatMs !== undefined) {
+    heartbeatTimer = setInterval(() => {
+      heartbeatPending = true;
+      wakeLive?.();
+    }, options.heartbeatMs);
+    heartbeatTimer.unref?.();
+  }
 
   const write = async (event: Event): Promise<void> => {
     if (closed || event.seq <= cursor) return;
@@ -139,6 +162,7 @@ export const streamRunEvents = async (
       liveBuffer.push(event);
       wakeLive?.();
     });
+    unsubscribeState = options.subscribeStateChange?.(() => wakeLive?.());
     if (closed) {
       unsubscribe();
       unsubscribe = undefined;
@@ -151,6 +175,19 @@ export const streamRunEvents = async (
       const event = liveBuffer.shift();
       if (event !== undefined) {
         await write(event);
+        continue;
+      }
+      if (options.isTerminal?.() === true) {
+        finish(true);
+        continue;
+      }
+      if (heartbeatPending) {
+        heartbeatPending = false;
+        try {
+          if (!writer.write(": heartbeat\n\n")) finish(true);
+        } catch (_error) {
+          finish(true);
+        }
         continue;
       }
       await new Promise<void>((resolve) => {
@@ -166,6 +203,10 @@ export const streamRunEvents = async (
   } finally {
     unsubscribe?.();
     unsubscribe = undefined;
+    unsubscribeState?.();
+    unsubscribeState = undefined;
+    if (heartbeatTimer !== undefined) clearInterval(heartbeatTimer);
+    heartbeatTimer = undefined;
     writer.off("close", onClose);
     writer.off("error", onError);
   }

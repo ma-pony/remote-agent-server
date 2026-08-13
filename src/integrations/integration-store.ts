@@ -255,6 +255,8 @@ const toRun = (row: LinkedRunRow): Run => ({
 
 /** Stores integration state; InTransaction methods join a caller-owned SQLite transaction. */
 export class IntegrationStore {
+  private readonly taskListeners = new Map<string, Set<() => unknown>>();
+
   constructor(private readonly dependencies: { db: Database.Database }) {}
 
   private get db(): Database.Database {
@@ -476,6 +478,30 @@ export class IntegrationStore {
     return toTask(this.taskRow(taskId)!);
   }
 
+  /** Notifies in-process Task observers after the owning transaction has committed. */
+  notifyTaskChanged(taskId: string): void {
+    for (const listener of [...(this.taskListeners.get(taskId) ?? [])]) {
+      try {
+        void Promise.resolve(listener()).catch(() => undefined);
+      } catch (_error) {
+        // A listener observes committed state and cannot affect persistence or other listeners.
+      }
+    }
+  }
+
+  subscribeTask(taskId: string, listener: () => unknown): () => void {
+    let listeners = this.taskListeners.get(taskId);
+    if (listeners === undefined) {
+      listeners = new Set();
+      this.taskListeners.set(taskId, listeners);
+    }
+    listeners.add(listener);
+    return () => {
+      listeners!.delete(listener);
+      if (listeners!.size === 0) this.taskListeners.delete(taskId);
+    };
+  }
+
   markTaskRunningInTransaction(runId: string, startedAt: string): IntegrationTask | undefined {
     const result = this.db.prepare(`
       UPDATE integration_tasks SET status = 'running', started_at = ?
@@ -495,7 +521,7 @@ export class IntegrationStore {
 
   /** Terminates a queued Task that cannot create a Run. */
   failTaskBeforeRun(id: string, failure: { code: string; message: string }): IntegrationTask | undefined {
-    return this.immediateTransaction(() => {
+    const failed = this.immediateTransaction(() => {
       const finishedAt = new Date().toISOString();
       const result = this.db.prepare(`
         UPDATE integration_tasks SET status = 'failed', error = ?, finished_at = ?
@@ -516,6 +542,30 @@ export class IntegrationStore {
       });
       return this.getTask(id);
     });
+    if (failed !== undefined) this.notifyTaskChanged(failed.id);
+    return failed;
+  }
+
+  /** Cancels only an unlinked queued Task and emits its Webhook event atomically. */
+  cancelUnlinkedQueuedTask(id: string, endpointId: string): IntegrationTask | undefined {
+    const cancelled = this.immediateTransaction(() => {
+      const finishedAt = new Date().toISOString();
+      const result = this.db.prepare(`
+        UPDATE integration_tasks
+        SET status = 'cancelled', finished_at = ?
+        WHERE id = ? AND endpoint_id = ? AND status = 'queued' AND run_id IS NULL
+      `).run(finishedAt, id, endpointId);
+      if (result.changes === 0) return undefined;
+      this.appendTaskEventInTransaction({
+        taskId: id,
+        eventType: "task.cancelled",
+        eventKey: `${id}:task.cancelled`,
+        payload: { status: "cancelled", finishedAt }
+      });
+      return this.getTaskForEndpoint(id, endpointId);
+    });
+    if (cancelled !== undefined) this.notifyTaskChanged(cancelled.id);
+    return cancelled;
   }
 
   /** Finds linked Runs whose current state has not yet been projected to their Task. */

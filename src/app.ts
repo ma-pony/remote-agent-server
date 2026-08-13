@@ -157,7 +157,14 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });
-  registerIntegrationRoutes(app, { manager: integrationEndpointManager, coordinator: integrationCoordinator });
+  registerIntegrationRoutes(app, {
+    manager: integrationEndpointManager,
+    coordinator: integrationCoordinator,
+    store: integrationStore,
+    eventStore,
+    executor,
+    scheduler: integrationTaskScheduler
+  });
 
   const webRoot = deps.webRoot ?? resolve(process.cwd(), "dist/web");
   const hasWebRoot = existsSync(webRoot);
