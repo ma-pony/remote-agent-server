@@ -60,6 +60,11 @@ export const registerAgentRoutes = (
 ): void => {
   app.get("/agents", () => agentManager.list());
 
+  app.get<{ Params: { id: string } }>("/agents/:id", (request, reply) => {
+    const agent = agentManager.get(request.params.id);
+    return agent === undefined ? notFound(reply) : agent;
+  });
+
   app.post("/agents", (request, reply) => {
     const parsed = createAgentSchema.safeParse(request.body);
     if (!parsed.success) return badRequest(reply, "Invalid Agent input");

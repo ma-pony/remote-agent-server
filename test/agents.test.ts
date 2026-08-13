@@ -72,6 +72,33 @@ afterEach(async () => {
 });
 
 describe("Agent API", () => {
+  it("按 ID 返回 Agent 详情，并对不存在的 Agent 返回 404", async () => {
+    const { app, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "Codex Detail", provider: "codex", projectEnvironmentId }
+    });
+    const agent = created.json() as { id: string };
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders()
+    });
+    const missing = await app.inject({
+      method: "GET",
+      url: "/api/agents/00000000-0000-4000-8000-000000000000",
+      headers: authHeaders()
+    });
+
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({ id: agent.id, name: "Codex Detail", provider: "codex" });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toEqual({ error: { code: "not_found", message: "Agent not found" } });
+  });
+
   it("只接受经过鉴权的明确 Provider Agent", async () => {
     const { app, dataDir, projectEnvironmentId } = await createTestApp();
 

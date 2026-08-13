@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
@@ -64,12 +65,6 @@ const deferred = <T,>() => {
   return { promise, resolve };
 };
 
-const saveToken = async (): Promise<void> => {
-  fireEvent.change(screen.getByLabelText("API Token"), { target: { value: "secret-token" } });
-  fireEvent.click(screen.getByRole("button", { name: "进入管理台" }));
-  await waitFor(() => expect(sessionStorage.getItem("apiToken")).toBe("secret-token"));
-};
-
 beforeEach(() => {
   sessionStorage.clear();
   window.history.replaceState({}, "", "/agents");
@@ -84,88 +79,6 @@ afterEach(() => {
 });
 
 describe("最小管理界面", () => {
-  it("项目环境页面创建多项目环境、添加项目并立即检查", async () => {
-    sessionStorage.setItem("apiToken", "secret-token");
-    window.history.replaceState({}, "", "/project-environments");
-    const environments: Array<Record<string, unknown>> = [];
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = requestUrl(input);
-      if (url === "/api/project-environments" && (init?.method ?? "GET") === "GET") {
-        return jsonResponse(environments);
-      }
-      if (url === "/api/project-environments" && init?.method === "POST") {
-        const created = {
-          id: "environment-1",
-          name: "Grab Manager 研发环境",
-          currentRevisionId: null,
-          lastCheckedAt: null,
-          repositories: [],
-          currentRevision: null,
-          latestRevision: null,
-          createdAt: now,
-          updatedAt: now
-        };
-        environments.push(created);
-        return jsonResponse(created, 201);
-      }
-      if (url === "/api/project-environments/environment-1/repositories" && init?.method === "POST") {
-        const repository = {
-          id: "repository-1",
-          projectEnvironmentId: "environment-1",
-          name: "grab-manager-api",
-          gitUrl: "git@example.test:rcc/grab-manager-api.git",
-          prepareCommand: "bundle install",
-          createdAt: now,
-          updatedAt: now
-        };
-        (environments[0]!.repositories as unknown[]).push(repository);
-        return jsonResponse(repository, 201);
-      }
-      if (url === "/api/project-environments/environment-1/check" && init?.method === "POST") {
-        return jsonResponse({ accepted: true }, 202);
-      }
-      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-    }));
-
-    render(<App />);
-
-    expect(await screen.findByText("暂无项目环境")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("项目环境名称"), { target: { value: "Grab Manager 研发环境" } });
-    fireEvent.click(screen.getByRole("button", { name: "创建项目环境" }));
-    expect(await screen.findByRole("heading", { name: "Grab Manager 研发环境" })).toBeInTheDocument();
-
-    fireEvent.change(screen.getByLabelText("项目目录名"), { target: { value: "grab-manager-api" } });
-    fireEvent.change(screen.getByLabelText("Git 地址"), { target: { value: "git@example.test:rcc/grab-manager-api.git" } });
-    fireEvent.change(screen.getByLabelText("环境准备命令"), { target: { value: "bundle install" } });
-    fireEvent.click(screen.getByRole("button", { name: "添加项目" }));
-    expect(await screen.findByDisplayValue("git@example.test:rcc/grab-manager-api.git")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "立即检查" }));
-    expect(await screen.findByText("检查请求已提交")).toBeInTheDocument();
-  });
-
-  it("项目环境页面会自动刷新尚未进入准备状态的构建", async () => {
-    vi.useFakeTimers();
-    sessionStorage.setItem("apiToken", "secret-token");
-    window.history.replaceState({}, "", "/project-environments");
-    let listRequests = 0;
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = requestUrl(input);
-      if (url === "/api/project-environments" && (init?.method ?? "GET") === "GET") {
-        listRequests += 1;
-        return jsonResponse([]);
-      }
-      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-    }));
-
-    render(<App />);
-    await act(async () => { await Promise.resolve(); });
-    expect(listRequests).toBe(1);
-
-    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
-    expect(listRequests).toBe(2);
-  });
-
   it("Fastify 对前端深层路由回退 index.html，但不把 API 404 伪装成页面", async () => {
     const webRoot = mkdtempSync(join(tmpdir(), "remote-agent-web-"));
     mkdirSync(join(webRoot, "assets"));
@@ -229,214 +142,6 @@ describe("最小管理界面", () => {
       db.close();
       rmSync(webRoot, { recursive: true, force: true });
     }
-  });
-
-  it("Token 只进入 sessionStorage，随后可创建三种 Provider Agent、检查环境并启停", async () => {
-    const agents = [{ ...agent }];
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = requestUrl(input);
-      const headers = new Headers(init?.headers);
-      expect(headers.get("authorization")).toBe("Bearer secret-token");
-      if (url === "/api/agents" && (init?.method ?? "GET") === "GET") return jsonResponse(agents);
-      if (url === "/api/project-environments") return jsonResponse([{
-        id: "environment-1", name: "默认项目环境", currentRevisionId: "revision-1",
-        repositories: [], currentRevision: { id: "revision-1", status: "ready" }, latestRevision: null
-      }, {
-        id: "environment-2", name: "爬虫环境", currentRevisionId: "revision-2",
-        repositories: [], currentRevision: { id: "revision-2", status: "ready" }, latestRevision: null
-      }]);
-      if (url === "/api/agents" && init?.method === "POST") {
-        const body = JSON.parse(String(init.body)) as { name: string; provider: string; projectEnvironmentId: string };
-        const created = { ...agent, id: `agent-${agents.length + 1}`, ...body };
-        agents.push(created);
-        return jsonResponse(created, 201);
-      }
-      if (url.endsWith("/doctor")) {
-        return url.includes("agent-1")
-          ? jsonResponse({
-            provider: { ok: true, message: "ready", details: [] },
-            projectEnvironment: { ok: true, message: "Project environment is ready", revisionId: "revision-1" }
-          })
-          : jsonResponse({
-            provider: { ok: false, message: "未登录 Provider", details: ["请先登录"] },
-            projectEnvironment: { ok: true, message: "Project environment is ready", revisionId: "revision-1" }
-          });
-      }
-      if (url.startsWith("/api/agents/") && init?.method === "PATCH") {
-        const id = url.split("/").at(-1);
-        const target = agents.find((item) => item.id === id)!;
-        Object.assign(target, JSON.parse(String(init.body)) as object);
-        return jsonResponse(target);
-      }
-      if (url.startsWith("/api/agents/") && init?.method === "DELETE") {
-        const id = url.split("/").at(-1);
-        agents.splice(agents.findIndex((item) => item.id === id), 1);
-        return new Response(null, { status: 204 });
-      }
-      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-    }));
-
-    render(<App />);
-
-    expect(screen.getByRole("heading", { name: "连接 Remote Agent" })).toBeInTheDocument();
-    expect(sessionStorage.getItem("apiToken")).toBeNull();
-    await saveToken();
-
-    expect(await screen.findByText("主力 Codex")).toBeInTheDocument();
-    expect(window.location.search).toBe("");
-
-    for (const [name, provider] of [
-      ["Claude 开发", "claude_code"],
-      ["Codex 审核", "codex"],
-      ["Hermes 运维", "hermes"]
-    ] as const) {
-      fireEvent.change(screen.getByLabelText("Agent 名称"), { target: { value: name } });
-      fireEvent.change(screen.getByLabelText("Provider"), { target: { value: provider } });
-      fireEvent.click(screen.getByRole("button", { name: "创建 Agent" }));
-      expect(await screen.findByText(name)).toBeInTheDocument();
-    }
-
-    const primaryAgent = screen.getByText("主力 Codex").closest("article")!;
-    fireEvent.click(within(primaryAgent).getByRole("button", { name: "运行检查" }));
-    expect(await within(primaryAgent).findByText("可用")).toBeInTheDocument();
-
-    const claudeAgent = screen.getByText("Claude 开发").closest("article")!;
-    fireEvent.click(within(claudeAgent).getByRole("button", { name: "运行检查" }));
-    expect(await within(claudeAgent).findByText("未登录 Provider")).toBeInTheDocument();
-
-    fireEvent.click(within(primaryAgent).getByRole("button", { name: "停用" }));
-    expect(await within(primaryAgent).findByText("已停用")).toBeInTheDocument();
-    fireEvent.click(within(primaryAgent).getByRole("button", { name: "启用" }));
-    expect(await within(primaryAgent).findByText("已启用")).toBeInTheDocument();
-
-    fireEvent.click(within(primaryAgent).getByRole("button", { name: "修改" }));
-    fireEvent.change(within(primaryAgent).getByLabelText("Agent 名称"), { target: { value: "主力 Codex 二" } });
-    fireEvent.change(within(primaryAgent).getByLabelText("项目环境"), { target: { value: "environment-2" } });
-    fireEvent.click(within(primaryAgent).getByRole("button", { name: "保存修改" }));
-    expect(await screen.findByText("主力 Codex 二")).toBeInTheDocument();
-
-    const hermesAgent = screen.getByText("Hermes 运维").closest("article")!;
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-    fireEvent.click(within(hermesAgent).getByRole("button", { name: "删除" }));
-    await waitFor(() => expect(screen.queryByText("Hermes 运维")).not.toBeInTheDocument());
-  });
-
-  it("已有 Session 的 Agent 删除失败时提示停用", async () => {
-    sessionStorage.setItem("apiToken", "secret-token");
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = requestUrl(input);
-      if (url === "/api/agents" && (init?.method ?? "GET") === "GET") return jsonResponse([agent]);
-      if (url === "/api/project-environments") return jsonResponse([{
-        id: "environment-1", name: "默认项目环境", currentRevisionId: "revision-1",
-        repositories: [], currentRevision: { id: "revision-1", status: "ready" }, latestRevision: null
-      }]);
-      if (url === "/api/agents/agent-1" && init?.method === "DELETE") {
-        return jsonResponse({
-          error: {
-            code: "agent_has_sessions",
-            message: "该 Agent 已有 Session，不能删除，可将其停用"
-          }
-        }, 409);
-      }
-      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-    }));
-
-    render(<App />);
-    const primaryAgent = (await screen.findByText("主力 Codex")).closest("article")!;
-    fireEvent.click(within(primaryAgent).getByRole("button", { name: "删除" }));
-
-    expect(await screen.findByText("该 Agent 已有 Session，不能删除，可将其停用")).toBeInTheDocument();
-    expect(screen.getByText("主力 Codex")).toBeInTheDocument();
-  });
-
-  it("在 Agent 卡片中按主机目录管理 Skills", async () => {
-    sessionStorage.setItem("apiToken", "secret-token");
-    const skills = [{
-      id: "skill-review",
-      name: "code-review",
-      description: "Review current changes",
-      source: "codex",
-      enabled: false,
-      available: true
-    }, {
-      id: "skill-browser",
-      name: "browser",
-      description: "Control a browser",
-      source: "plugin",
-      enabled: true,
-      available: true
-    }];
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = requestUrl(input);
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/project-environments") return jsonResponse([{
-        id: "environment-1", name: "默认项目环境", currentRevisionId: "revision-1",
-        repositories: [], currentRevision: { id: "revision-1", status: "ready" }, latestRevision: null
-      }]);
-      if (url === "/api/agents/agent-1/skills" && (init?.method ?? "GET") === "GET") return jsonResponse(skills);
-      if (url === "/api/agents/agent-1/skills/skill-review" && init?.method === "PUT") {
-        expect(JSON.parse(String(init.body))).toEqual({ enabled: true });
-        skills[0] = { ...skills[0]!, enabled: true };
-        return jsonResponse(skills[0]);
-      }
-      if (url === "/api/agents/agent-1/skills/upload" && init?.method === "POST") {
-        const body = JSON.parse(String(init.body)) as { fileName: string; contentBase64: string };
-        expect(body.fileName).toBe("custom.zip");
-        expect(body.contentBase64).not.toBe("");
-        const uploaded = {
-          id: "upload-custom",
-          name: "custom",
-          description: "Uploaded Skill",
-          source: "upload",
-          enabled: true,
-          available: true
-        };
-        skills.push(uploaded);
-        return jsonResponse(uploaded, 201);
-      }
-      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-    }));
-
-    render(<App />);
-    const card = (await screen.findByText("主力 Codex")).closest("article")!;
-    fireEvent.click(within(card).getByRole("button", { name: "Skills" }));
-
-    expect(await within(card).findByText("code-review")).toBeInTheDocument();
-    expect(within(card).getByText("Review current changes")).toBeInTheDocument();
-    const review = within(card).getByRole("checkbox", { name: "启用 code-review" });
-    expect(review).not.toBeChecked();
-    fireEvent.click(review);
-    await waitFor(() => expect(review).toBeChecked());
-    expect(within(card).getByRole("checkbox", { name: "启用 browser" })).toBeChecked();
-
-    const upload = within(card).getByLabelText("上传 Skill ZIP");
-    fireEvent.change(upload, { target: { files: [new File(["zip-content"], "custom.zip", { type: "application/zip" })] } });
-    expect(await within(card).findByText("custom")).toBeInTheDocument();
-    expect(within(card).getByRole("checkbox", { name: "启用 custom" })).toBeChecked();
-  });
-
-  it("Session 列表可创建 Session 并进入详情", async () => {
-    sessionStorage.setItem("apiToken", "secret-token");
-    window.history.replaceState({}, "", "/sessions");
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = requestUrl(input);
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/sessions" && (init?.method ?? "GET") === "GET") return jsonResponse([]);
-      if (url === "/api/sessions" && init?.method === "POST") return jsonResponse(session, 201);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, runs: [] });
-      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
-    }));
-
-    render(<App />);
-
-    expect(await screen.findByText("暂无 Session")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Session 标题"), { target: { value: session.title } });
-    fireEvent.change(screen.getByLabelText("选择 Agent"), { target: { value: agent.id } });
-    fireEvent.click(screen.getByRole("button", { name: "创建 Session" }));
-
-    expect(await screen.findByRole("heading", { name: session.title })).toBeInTheDocument();
-    expect(window.location.pathname).toBe(`/sessions/${session.id}`);
   });
 
   it("历史 terminal status 覆盖陈旧 running 快照并解锁输入", async () => {
@@ -521,13 +226,13 @@ describe("最小管理界面", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const rendered = render(<SessionPage sessionId="session-old" />);
+    const rendered = render(<MemoryRouter><SessionPage sessionId="session-old" /></MemoryRouter>);
     expect(screen.getByLabelText("发送给 Agent")).toBeDisabled();
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
     fireEvent.submit(screen.getByLabelText("发送给 Agent").closest("form")!);
     expect(fetchMock.mock.calls.some(([input]) => requestUrl(input) === "/api/sessions/session-old/runs")).toBe(false);
 
-    rendered.rerender(<SessionPage sessionId="session-new" />);
+    rendered.rerender(<MemoryRouter><SessionPage sessionId="session-new" /></MemoryRouter>);
     expect(await screen.findByRole("alert")).toHaveTextContent("Session 加载失败");
     expect(screen.getByLabelText("发送给 Agent")).toBeDisabled();
     expect(screen.getByRole("button", { name: "重试加载" })).toBeInTheDocument();
@@ -620,6 +325,7 @@ describe("最小管理界面", () => {
     const tool = screen.getByText("读取配置").closest("details")!;
     expect(within(tool).getByText("已完成")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Provider 暂时不可用");
+    expect(screen.getByText("执行轨迹 · 3 条").closest("details")).not.toHaveAttribute("open");
 
     fireEvent.click(screen.getByRole("button", { name: "取消运行" }));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(

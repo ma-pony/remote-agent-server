@@ -1,6 +1,15 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, ChevronDown, Send, Square, XCircle } from "lucide-react";
+import { Link } from "react-router";
 
 import { api, errorMessage, isRunStreamPermanentError, streamRunEvents, type Agent, type Run, type RunEvent, type RunStatus, type SessionDetail } from "../api.js";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Textarea } from "@/components/ui/textarea";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { PageHeader } from "@/components/page-header";
 
 type RunView = { run: Run; events: RunEvent[]; historyError: string | null };
 const activeStatuses = new Set<RunStatus>(["queued", "running"]);
@@ -232,29 +241,23 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   const composerDisabled = initialLoading || loadError !== "" || session === null || activeRunId !== null || submitting;
 
   return (
-    <div className="page-frame session-detail">
-      <header className="page-heading">
-        <div><p className="eyebrow">SESSION / {initialLoading ? "LOADING" : activeRunId !== null ? "RUNNING" : "IDLE"}</p><h1>{session?.title ?? "加载 Session…"}</h1></div>
-        <p>{agentName === "" ? "正在读取 Agent…" : `Agent · ${agentName}`}</p>
-      </header>
-      {loadError !== "" ? <div className="error-banner load-error" role="alert" aria-live="polite">
-        <span>{loadError}</span><button type="button" onClick={() => setReloadGeneration((current) => current + 1)}>重试加载</button>
-      </div> : <p className="error-banner" role={error === "" ? undefined : "alert"} aria-live="polite">{error}</p>}
-      {streamError !== "" ? <div className="error-banner load-error" role="alert" aria-live="polite">
-        <span>{streamError}</span>
-        {streamError.includes("自动重连已停止") ? <button type="button" onClick={() => setStreamReconnectGeneration((current) => current + 1)}>重新连接实时事件</button> : null}
-      </div> : null}
-      <section className="conversation" aria-label="运行历史" aria-live="polite">
-        {views.length === 0 && session !== null ? <div className="empty-state">还没有消息，输入任务开始第一轮。</div> : views.map((view) => <RunBlock key={view.run.id} view={view} />)}
+    <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
+      <Button asChild variant="ghost" className="mb-4"><Link to="/sessions"><ArrowLeft />返回 Session</Link></Button>
+      <PageHeader eyebrow={`SESSION / ${initialLoading ? "LOADING" : activeRunId !== null ? "RUNNING" : "IDLE"}`} title={session?.title ?? "加载 Session…"} description={agentName === "" ? "正在读取 Agent…" : `Agent · ${agentName}`} action={<Badge variant={activeRunId === null ? "secondary" : "default"}>{activeRunId === null ? "空闲" : "活动中"}</Badge>} />
+      <div className="flex flex-col gap-4">
+        {loadError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>Session 加载失败</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{loadError}</span><Button size="sm" variant="outline" type="button" onClick={() => setReloadGeneration((current) => current + 1)}>重试加载</Button></AlertDescription></Alert> : error !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>操作失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+        {streamError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>实时连接异常</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{streamError}</span>{streamError.includes("自动重连已停止") ? <Button size="sm" variant="outline" type="button" onClick={() => setStreamReconnectGeneration((current) => current + 1)}>重新连接实时事件</Button> : null}</AlertDescription></Alert> : null}
+      </div>
+      <section className="mt-6 flex flex-col gap-5" aria-label="运行历史" aria-live="polite">
+        {views.length === 0 && session !== null ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">还没有消息，输入任务开始第一轮。</CardContent></Card> : views.map((view) => <RunBlock key={view.run.id} view={view} />)}
       </section>
-      <form className="composer" onSubmit={send}>
-        <label htmlFor="run-input">发送给 Agent</label>
-        <textarea id="run-input" rows={3} value={input} onChange={(event) => setInput(event.target.value)} disabled={composerDisabled} placeholder={activeRunId === null ? "描述下一步任务…" : "当前 Run 结束后可继续输入"} />
-        <div className="composer-actions">
-          {activeRunId !== null ? <button type="button" className="danger-button" onClick={() => void cancel()}>取消运行</button> : null}
-          <button type="submit" className="primary-button" disabled={composerDisabled || input.trim() === ""}>{submitting ? "发送中…" : "发送"}</button>
+      <Card className="sticky bottom-4 mt-6 shadow-lg"><CardContent className="p-4"><form className="flex flex-col gap-3" onSubmit={send}>
+        <Field data-disabled={composerDisabled || undefined}><FieldLabel htmlFor="run-input">发送给 Agent</FieldLabel><Textarea id="run-input" rows={3} value={input} onChange={(event) => setInput(event.target.value)} disabled={composerDisabled} placeholder={activeRunId === null ? "描述下一步任务…" : "当前 Run 结束后可继续输入"} /></Field>
+        <div className="flex justify-end gap-2">
+          {activeRunId !== null ? <Button type="button" variant="destructive" onClick={() => void cancel()}><Square />取消运行</Button> : null}
+          <Button type="submit" disabled={composerDisabled || input.trim() === ""}><Send />{submitting ? "发送中…" : "发送"}</Button>
         </div>
-      </form>
+      </form></CardContent></Card>
     </div>
   );
 };
@@ -269,31 +272,34 @@ const RunBlock = ({ view }: { view: RunView }) => {
   }
   if (output === "" && view.run.result !== null) output = view.run.result;
 
-  return <article className="turn">
-    <div className="message user-message"><span className="message-label">你</span><p>{view.run.input}</p></div>
-    <div className="message agent-message">
-      <div className="message-meta"><span className="message-label">Agent</span><span className={`badge ${view.run.status}`}>{statusNames[view.run.status]}</span></div>
-      {output !== "" ? <p className="agent-output">{output}</p> : activeStatuses.has(view.run.status) ? <p className="muted">等待 Agent 输出…</p> : null}
-      <div className="event-stack">
-        {view.historyError !== null ? <div className="event-row history-error">{view.historyError}</div> : null}
-        {details.map((item) => <EventRow key={item.id} item={item} />)}
-        {view.run.error !== null && !details.some((item) => item.type === "error") ? <div className="event-row error-event" role="alert">{view.run.error}</div> : null}
-      </div>
-    </div>
+  return <article className="flex flex-col gap-3">
+    <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-foreground px-4 py-3 text-background"><span className="mb-1 block text-xs font-semibold uppercase tracking-wide opacity-70">你</span><p className="whitespace-pre-wrap">{view.run.input}</p></div>
+    <Card className="border-l-4 border-l-primary"><CardContent className="p-5">
+      <div className="mb-4 flex items-center justify-between"><span className="text-sm font-semibold">Agent</span><Badge variant={view.run.status === "failed" ? "destructive" : view.run.status === "succeeded" ? "default" : "secondary"}>{statusNames[view.run.status]}</Badge></div>
+      {output !== "" ? <p className="whitespace-pre-wrap leading-7">{output}</p> : activeStatuses.has(view.run.status) ? <p className="text-muted-foreground">等待 Agent 输出…</p> : null}
+      {(details.length > 0 || view.historyError !== null || (view.run.error !== null && !details.some((item) => item.type === "error"))) ? <details className="group mt-5 rounded-lg border bg-muted/30">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium"><span>执行轨迹 · {details.length} 条</span><ChevronDown className="size-4 transition-transform group-open:rotate-180" /></summary>
+        <div className="flex flex-col gap-2 border-t p-3">
+          {view.historyError !== null ? <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{view.historyError}</div> : null}
+          {details.map((item) => <EventRow key={item.id} item={item} />)}
+          {view.run.error !== null && !details.some((item) => item.type === "error") ? <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive" role="alert">{view.run.error}</div> : null}
+        </div>
+      </details> : null}
+    </CardContent></Card>
   </article>;
 };
 
 const EventRow = ({ item }: { item: RunEvent }) => {
   const content = eventContent(item);
-  if (item.type === "error") return <div className="event-row error-event" role="alert">{String(content.message ?? "运行失败")}</div>;
+  if (item.type === "error") return <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive" role="alert">{String(content.message ?? "运行失败")}</div>;
   if (item.type === "status") {
     if (typeof content.text !== "string") return null;
-    return <div className="event-row status-event"><span className="event-kind">状态</span>{content.text}</div>;
+    return <div className="rounded-md border bg-background p-3 text-sm"><span className="mr-2 font-medium text-muted-foreground">状态</span>{content.text}</div>;
   }
   if (item.type === "tool") {
     const status = String(content.status ?? "running");
     const label = status === "completed" ? "已完成" : status === "failed" ? "失败" : "运行中";
-    return <details className="event-row tool-event"><summary><span className="event-kind">工具</span><strong>{String(content.title ?? content.name ?? "工具调用")}</strong><span className="tool-status">{label}</span></summary><pre>{JSON.stringify(content, null, 2)}</pre></details>;
+    return <details className="rounded-md border bg-background"><summary className="flex cursor-pointer items-center gap-2 p-3 text-sm"><span className="text-muted-foreground">工具</span><strong>{String(content.title ?? content.name ?? "工具调用")}</strong><Badge className="ml-auto" variant="outline">{label}</Badge></summary><pre className="overflow-auto border-t p-3 text-xs">{JSON.stringify(content, null, 2)}</pre></details>;
   }
   return null;
 };

@@ -6,6 +6,7 @@
     "jsx": "react-jsx",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
     "types": ["vite/client"],
+    "paths": { "@/*": ["./src/web/*"] },
     "noEmit": true
   },
   "include": ["src/web/**/*.ts", "src/web/**/*.tsx"]
