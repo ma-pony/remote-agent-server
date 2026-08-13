@@ -34,6 +34,7 @@ export type EnvironmentRepository = {
   name: string;
   gitUrl: string;
   prepareCommand: string | null;
+  workspacePath: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -55,6 +56,13 @@ export type ProjectEnvironment = {
   name: string;
   currentRevisionId: string | null;
   lastCheckedAt: string | null;
+  workspacePath: string | null;
+  sync: {
+    status: "idle" | "queued" | "running";
+    automatic: true;
+    intervalMs: number;
+    nextScheduledAt: string;
+  };
   repositories: EnvironmentRepository[];
   currentRevision: ProjectEnvironmentRevision | null;
   latestRevision: ProjectEnvironmentRevision | null;
