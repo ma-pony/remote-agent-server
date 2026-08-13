@@ -10,6 +10,10 @@ import { AgentManager } from "./agents/agent-manager.js";
 import { requireApiToken } from "./auth.js";
 import type { AppConfig } from "./config.js";
 import { EventStore } from "./events/event-store.js";
+import { registerIntegrationAdminRoutes } from "./integrations/integration-admin-routes.js";
+import { IntegrationEndpointManager } from "./integrations/integration-endpoint-manager.js";
+import { registerIntegrationRoutes } from "./integrations/integration-routes.js";
+import { IntegrationStore } from "./integrations/integration-store.js";
 import { SdkMcpChecker, type McpChecker } from "./mcp/mcp-checker.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { registerMcpRoutes } from "./mcp/mcp-routes.js";
@@ -59,9 +63,10 @@ export type AppDependencies = {
 export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const app = Fastify({ forceCloseConnections: true });
   const skillManager = deps.skillManager ?? new SkillManager({ dataDir: deps.config.dataDir });
+  const secrets = SecretStore.open({ dataDir: deps.config.dataDir });
   const mcpManager = deps.mcpManager ?? new McpManager({
     db: deps.db,
-    secrets: SecretStore.open({ dataDir: deps.config.dataDir })
+    secrets
   });
   const mcpChecker = deps.mcpChecker ?? new SdkMcpChecker();
   const mcpPreparer = new RunMcpPreparer({ manager: mcpManager, checker: mcpChecker });
@@ -72,6 +77,11 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     dataDir: deps.config.dataDir,
     runtime,
     projectEnvironmentStore
+  });
+  const integrationEndpointManager = new IntegrationEndpointManager({
+    db: deps.db,
+    store: new IntegrationStore({ db: deps.db }),
+    secrets
   });
   const workspaceManager = deps.workspaceManager ?? createWorkspaceManager({
     workspaceTemplate: deps.config.workspaceTemplate,
@@ -114,16 +124,18 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager, skillManager);
     registerMcpRoutes(api, { mcpManager, mcpChecker });
+    registerIntegrationAdminRoutes(api, integrationEndpointManager);
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });
+  registerIntegrationRoutes(app, integrationEndpointManager);
 
   const webRoot = deps.webRoot ?? resolve(process.cwd(), "dist/web");
   if (existsSync(webRoot)) {
     app.register(fastifyStatic, { root: webRoot, wildcard: false });
     app.setNotFoundHandler((request, reply) => {
       const path = request.url.split("?", 1)[0] ?? request.url;
-      if (path === "/api" || path?.startsWith("/api/")) {
+      if (path === "/api" || path?.startsWith("/api/") || path === "/integration" || path?.startsWith("/integration/")) {
         return reply.code(404).send({ error: { code: "not_found", message: "API route not found" } });
       }
       const acceptsHtml = request.headers.accept?.includes("text/html") ?? false;
