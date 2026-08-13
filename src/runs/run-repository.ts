@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
 import type { Run, RunStatus } from "../domain.js";
+import { assertSynchronousTransactionHook } from "../transaction-hook.js";
 
 type RunRow = {
   id: string;
@@ -43,13 +44,15 @@ export type FinishRunInput = {
 };
 
 export type RunStateProjection = {
-  onStarted(run: Run): void;
-  onFinished(run: Run): void;
+  onStarted(run: Run): undefined;
+  onFinished(run: Run): undefined;
+  afterCommit(run: Run): undefined;
 };
 
 const noOpRunStateProjection: RunStateProjection = {
   onStarted: () => undefined,
-  onFinished: () => undefined
+  onFinished: () => undefined,
+  afterCommit: () => undefined
 };
 
 export type RunRepositoryDependencies = {
@@ -78,7 +81,7 @@ export class RunRepository {
   /**
    * Creates a queued Run and marks its Session active in one transaction.
    */
-  create(input: CreateRunInput, options?: { afterInsert?(run: Run): void }): Run {
+  create(input: CreateRunInput, options?: { afterInsert?(run: Run): undefined }): Run {
     const id = randomUUID();
     const createdAt = new Date().toISOString();
     const run: Run = {
@@ -102,7 +105,7 @@ export class RunRepository {
         this.db
           .prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
           .run(run.id, run.sessionId, run.status, run.input, run.createdAt);
-        options?.afterInsert?.(run);
+        assertSynchronousTransactionHook(options?.afterInsert?.(run));
         return run;
       });
     } catch (error) {
@@ -145,16 +148,18 @@ export class RunRepository {
    * Transitions a queued Run to running before an external execution starts.
    */
   markRunning(id: string): Run {
-    return this.inImmediateTransaction(() => {
+    const started = this.inImmediateTransaction(() => {
       const run = this.requireRun(id);
       if (run.status !== "queued") throw new RunRepositoryError("invalid_run_state");
 
       const startedAt = new Date().toISOString();
       this.db.prepare("UPDATE runs SET status = ?, started_at = ? WHERE id = ?").run("running", startedAt, id);
       const started = { ...run, status: "running" as const, startedAt };
-      this.projection.onStarted(started);
+      assertSynchronousTransactionHook(this.projection.onStarted(started));
       return started;
     });
+    this.projection.afterCommit(started);
+    return started;
   }
 
   /**
@@ -163,7 +168,7 @@ export class RunRepository {
   finish(id: string, input: FinishRunInput): Run {
     if (!isTerminalStatus(input.status)) throw new RunRepositoryError("invalid_finish_status");
 
-    return this.inImmediateTransaction(() => {
+    const finished = this.inImmediateTransaction(() => {
       const run = this.requireRun(id);
       if (run.status !== "running") throw new RunRepositoryError("invalid_run_state");
 
@@ -175,16 +180,18 @@ export class RunRepository {
         .run(input.status, result, error, finishedAt, id);
       this.db.prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?").run("idle", finishedAt, run.sessionId);
       const finished = { ...run, status: input.status, result, error, finishedAt };
-      this.projection.onFinished(finished);
+      assertSynchronousTransactionHook(this.projection.onFinished(finished));
       return finished;
     });
+    this.projection.afterCommit(finished);
+    return finished;
   }
 
   /**
    * Cancels a queued Run and releases its Session in one transaction.
    */
   cancelQueued(id: string): Run {
-    return this.inImmediateTransaction(() => {
+    const cancelled = this.inImmediateTransaction(() => {
       const run = this.requireRun(id);
       if (run.status !== "queued") throw new RunRepositoryError("invalid_run_state");
 
@@ -192,9 +199,11 @@ export class RunRepository {
       this.db.prepare("UPDATE runs SET status = ?, finished_at = ? WHERE id = ?").run("cancelled", finishedAt, id);
       this.db.prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?").run("idle", finishedAt, run.sessionId);
       const cancelled = { ...run, status: "cancelled" as const, finishedAt };
-      this.projection.onFinished(cancelled);
+      assertSynchronousTransactionHook(this.projection.onFinished(cancelled));
       return cancelled;
     });
+    this.projection.afterCommit(cancelled);
+    return cancelled;
   }
 
   /**

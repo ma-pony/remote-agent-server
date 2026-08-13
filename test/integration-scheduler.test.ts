@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
+import { openDatabase } from "../src/db.js";
+import type { Run } from "../src/domain.js";
 import { EventStore } from "../src/events/event-store.js";
 import { IntegrationProjection } from "../src/integrations/integration-projection.js";
 import { IntegrationTaskScheduler } from "../src/integrations/integration-scheduler.js";
@@ -18,8 +20,8 @@ import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const temporaryDirectories: string[] = [];
 
-const createHarness = () => {
-  const { db, seed } = createTestDatabase();
+const createHarness = (options: { databasePath?: string; retryDelayMs?: number } = {}) => {
+  const { db, seed } = createTestDatabase(options.databasePath);
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-integration-scheduler-"));
   temporaryDirectories.push(dataDir);
   const secrets = SecretStore.open({ dataDir });
@@ -76,7 +78,8 @@ const createHarness = () => {
     runScheduler,
     sessionManager,
     secrets,
-    projection
+    projection,
+    retryDelayMs: options.retryDelayMs
   });
   let nextTask = 0;
   const createTask = (options: {
@@ -212,7 +215,7 @@ describe("IntegrationTaskScheduler", () => {
     harness.db.close();
   });
 
-  it("损坏的参数快照直接失败 Task 并创建 system notice", () => {
+  it("损坏的参数快照使用稳定脱敏错误且不泄露原文", () => {
     const harness = createHarness();
     const subscription = harness.store.createSubscription({
       endpointId: harness.endpoint.id,
@@ -224,27 +227,122 @@ describe("IntegrationTaskScheduler", () => {
       encryptedSigningSecret: "secret",
       timeoutSeconds: 10
     });
-    const task = harness.createTask({ encryptedParameters: "invalid" });
+    const leakedSecret = "snapshot-secret-must-not-leak";
+    const task = harness.createTask({
+      encryptedParameters: harness.secrets.encrypt(`{\"token\":\"${leakedSecret}\"`)
+    });
 
     harness.scheduler.start();
 
     expect(harness.store.getTask(task.id)).toMatchObject({
       status: "failed",
       runId: null,
-      error: "secret_decryption_failed"
+      error: "invalid_parameter_snapshot"
     });
-    expect(harness.store.listDeliveries(subscription.id).map((delivery) => delivery.eventType)).toEqual([
+    const deliveries = harness.store.listDeliveries(subscription.id);
+    expect(deliveries.map((delivery) => delivery.eventType)).toEqual([
       "task.failed",
       "message.system.notice"
     ]);
+    expect(JSON.stringify(deliveries.map((delivery) => JSON.parse(delivery.payloadJson)))).not.toContain(leakedSecret);
+    expect(JSON.parse(deliveries[1]!.payloadJson)).toMatchObject({
+      data: {
+        code: "invalid_parameter_snapshot",
+        message: "Integration Task parameter snapshot is invalid"
+      }
+    });
     expect(harness.runScheduler.enqueue).not.toHaveBeenCalled();
     harness.scheduler.stop();
     harness.db.close();
   });
+
+  it("SQLite 写锁错误保持 Task queued，并用单个延迟 timer 重试且 stop 清理", async () => {
+    vi.useFakeTimers();
+    const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-integration-lock-"));
+    temporaryDirectories.push(dataDir);
+    const databasePath = join(dataDir, "database.sqlite3");
+    const harness = createHarness({ databasePath, retryDelayMs: 1_000 });
+    harness.db.pragma("busy_timeout = 0");
+    const task = harness.createTask();
+    const locker = openDatabase(databasePath);
+    locker.pragma("busy_timeout = 0");
+    locker.exec("BEGIN IMMEDIATE");
+    try {
+      expect(() => harness.scheduler.start()).not.toThrow();
+      expect(harness.store.getTask(task.id)).toMatchObject({ status: "queued", runId: null, error: null });
+      expect(harness.runScheduler.enqueue).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(1);
+
+      harness.scheduler.notify();
+      expect(vi.getTimerCount()).toBe(1);
+
+      locker.exec("ROLLBACK");
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(harness.store.getTask(task.id)?.runId).not.toBeNull();
+      expect(harness.runScheduler.enqueue).toHaveBeenCalledTimes(1);
+      harness.scheduler.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      if (locker.inTransaction) locker.exec("ROLLBACK");
+      locker.close();
+      harness.scheduler.stop();
+      harness.db.close();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("IntegrationProjection", () => {
-  it("同步投影 Run 状态、输出消息和明确 tool 状态，并在 COMMIT 后通知", async () => {
+  it("tool Delivery 仅包含公开白名单且不泄露 acpx 原始输入输出", () => {
+    const harness = createHarness();
+    const subscription = harness.store.createSubscription({
+      endpointId: harness.endpoint.id,
+      name: "callback",
+      url: "https://example.test/hooks",
+      enabled: true,
+      eventsJson: JSON.stringify(["tool.completed"]),
+      encryptedHeaders: null,
+      encryptedSigningSecret: "secret",
+      timeoutSeconds: 10
+    });
+    const task = harness.createTask();
+    const run = harness.runRepository.create(
+      { sessionId: task.sessionId, input: task.effectivePrompt },
+      { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
+    );
+    harness.runRepository.markRunning(run.id);
+    const leakedSecret = "provider-secret-must-not-leak";
+
+    harness.eventStore.append(run.id, "tool", {
+      text: `Read: ${leakedSecret}`,
+      tag: "tool_call_update",
+      toolCallId: "tool-1",
+      status: "completed",
+      title: "Read",
+      kind: "read",
+      locations: [{ path: "/workspace/README.md", line: 12, _meta: { token: leakedSecret } }],
+      rawInput: { token: leakedSecret },
+      rawOutput: leakedSecret,
+      content: [{ type: "content", text: leakedSecret }],
+      providerExtension: leakedSecret
+    });
+
+    const payload = JSON.parse(harness.store.listDeliveries(subscription.id)[0]!.payloadJson) as {
+      data: Record<string, unknown>;
+    };
+    expect(payload.data).toEqual({
+      toolCallId: "tool-1",
+      title: "Read",
+      kind: "read",
+      status: "completed",
+      locations: [{ path: "/workspace/README.md", line: 12 }]
+    });
+    expect(JSON.stringify(payload)).not.toContain(leakedSecret);
+    harness.db.close();
+  });
+
+  it("同步投影 Run 状态、输出消息和明确 tool 状态，并在 COMMIT 后仅通知一次", async () => {
     const harness = createHarness();
     const subscription = harness.store.createSubscription({
       endpointId: harness.endpoint.id,
@@ -266,7 +364,7 @@ describe("IntegrationProjection", () => {
     const task = harness.createTask();
     const run = harness.runRepository.create(
       { sessionId: task.sessionId, input: task.effectivePrompt },
-      { afterInsert: (created) => harness.store.linkTaskRunInTransaction(task.id, created.id) }
+      { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
     );
 
     harness.runRepository.markRunning(run.id);
@@ -280,7 +378,7 @@ describe("IntegrationProjection", () => {
     harness.eventStore.append(run.id, "tool", { toolCallId: "tool-3", status: "cancelled", title: "Cancelled" });
     harness.runRepository.finish(run.id, { status: "succeeded", result: "done" });
 
-    expect(harness.notify).not.toHaveBeenCalled();
+    expect(harness.notify).toHaveBeenCalledTimes(1);
     expect(harness.store.getTaskByRun(run.id)).toMatchObject({
       status: "succeeded",
       result: "done",
@@ -289,10 +387,12 @@ describe("IntegrationProjection", () => {
     const deliveries = harness.store.listDeliveries(subscription.id);
     expect(deliveries.map(({ eventType, sequence, eventKey }) => ({ eventType, sequence, eventKey }))).toEqual([
       { eventType: "task.started", sequence: 1, eventKey: `${task.id}:task.started` },
-      { eventType: "tool.started", sequence: 2, eventKey: `${task.id}:tool:tool-1:pending` },
+      { eventType: "tool.started", sequence: 2, eventKey: `${task.id}:tool:tool-1:started` },
       { eventType: "tool.completed", sequence: 3, eventKey: `${task.id}:tool:tool-1:completed` },
-      { eventType: "task.succeeded", sequence: 4, eventKey: `${task.id}:task.succeeded` },
-      { eventType: "message.agent.reply", sequence: 5, eventKey: `${task.id}:message.agent.reply` }
+      { eventType: "tool.started", sequence: 4, eventKey: `${task.id}:tool:tool-2:started` },
+      { eventType: "tool.started", sequence: 5, eventKey: `${task.id}:tool:tool-3:started` },
+      { eventType: "task.succeeded", sequence: 6, eventKey: `${task.id}:task.succeeded` },
+      { eventType: "message.agent.reply", sequence: 7, eventKey: `${task.id}:message.agent.reply` }
     ]);
     expect(JSON.parse(deliveries.at(-1)!.payloadJson)).toMatchObject({
       data: { message: "Hello world" }
@@ -302,12 +402,63 @@ describe("IntegrationProjection", () => {
     harness.db.close();
   });
 
+  it("普通 Run finish 和 cancel 在释放 Session 的 COMMIT 后也通知 Integration scheduler", () => {
+    const harness = createHarness();
+    const runningSession = harness.seed.session();
+    const running = harness.runRepository.create({ sessionId: runningSession.id, input: "ordinary running" });
+    harness.runRepository.markRunning(running.id);
+
+    harness.runRepository.finish(running.id, { status: "succeeded", result: "done" });
+
+    expect(harness.notify).toHaveBeenCalledTimes(1);
+
+    const queuedSession = harness.seed.session();
+    const queued = harness.runRepository.create({ sessionId: queuedSession.id, input: "ordinary queued" });
+    harness.runRepository.cancelQueued(queued.id);
+
+    expect(harness.notify).toHaveBeenCalledTimes(2);
+    harness.db.close();
+  });
+
+  it("terminal transaction 的 deferred FK 在 COMMIT 失败时不通知 scheduler", async () => {
+    const harness = createHarness();
+    harness.db.exec(`
+      CREATE TABLE deferred_projection_guard (
+        run_id TEXT NOT NULL REFERENCES runs(id) DEFERRABLE INITIALLY DEFERRED
+      )
+    `);
+    const projection = {
+      onStarted: (run: Run) => harness.projection.onStarted(run),
+      onFinished: (run: Run) => {
+        harness.projection.onFinished(run);
+        harness.db.prepare("INSERT INTO deferred_projection_guard (run_id) VALUES ('missing-run')").run();
+        return undefined;
+      },
+      afterCommit: (run: Run) => (harness.projection as unknown as { afterCommit(value: Run): undefined }).afterCommit(run)
+    };
+    const repository = new RunRepository({ db: harness.db, projection });
+    const task = harness.createTask();
+    const run = repository.create(
+      { sessionId: task.sessionId, input: task.effectivePrompt },
+      { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
+    );
+    repository.markRunning(run.id);
+
+    expect(() => repository.finish(run.id, { status: "succeeded", result: "done" })).toThrow();
+    await Promise.resolve();
+
+    expect(harness.notify).not.toHaveBeenCalled();
+    expect(repository.get(run.id)?.status).toBe("running");
+    expect(harness.store.getTask(task.id)?.status).toBe("running");
+    harness.db.close();
+  });
+
   it("重启 Run recovery 后补投影 linked Task 终态", async () => {
     const harness = createHarness();
     const task = harness.createTask();
     const run = harness.runRepository.create(
       { sessionId: task.sessionId, input: task.effectivePrompt },
-      { afterInsert: (created) => harness.store.linkTaskRunInTransaction(task.id, created.id) }
+      { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
     );
     harness.runRepository.markRunning(run.id);
     harness.runRepository.recoverAfterRestart();
@@ -324,14 +475,14 @@ describe("IntegrationProjection", () => {
     harness.db.close();
   });
 
-  it("重复 tool 状态保留源 Event，并由稳定 eventKey 去重 Delivery", () => {
+  it("按 normalized tool phase 投影 started/terminal，并在业务去重后生成连续 sequence", () => {
     const harness = createHarness();
     const subscription = harness.store.createSubscription({
       endpointId: harness.endpoint.id,
       name: "callback",
       url: "https://example.test/hooks",
       enabled: true,
-      eventsJson: JSON.stringify(["tool.completed"]),
+      eventsJson: JSON.stringify(["tool.started", "tool.completed", "tool.failed"]),
       encryptedHeaders: null,
       encryptedSigningSecret: "secret",
       timeoutSeconds: 10
@@ -339,20 +490,52 @@ describe("IntegrationProjection", () => {
     const task = harness.createTask();
     const run = harness.runRepository.create(
       { sessionId: task.sessionId, input: task.effectivePrompt },
-      { afterInsert: (created) => harness.store.linkTaskRunInTransaction(task.id, created.id) }
+      { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
     );
     harness.runRepository.markRunning(run.id);
 
     expect(() => {
       harness.eventStore.append(run.id, "tool", { toolCallId: "tool-1", status: "completed" });
       harness.eventStore.append(run.id, "tool", { toolCallId: "tool-1", status: "completed" });
+      harness.eventStore.append(run.id, "tool", { toolCallId: "tool-2", status: "failed" });
+      harness.eventStore.append(run.id, "tool", { toolCallId: "tool-2", status: "failed" });
+      harness.eventStore.append(run.id, "tool", { toolCallId: "tool-3", title: "No status yet" });
+      harness.eventStore.append(run.id, "tool", { toolCallId: "tool-3", status: "pending" });
+      harness.eventStore.append(run.id, "tool", { toolCallId: "tool-3", status: "in_progress" });
+      harness.eventStore.append(run.id, "tool", { toolCallId: "tool-4", status: "cancelled" });
+      harness.eventStore.append(run.id, "tool", { toolCallId: "tool-4", status: "provider_unknown" });
     }).not.toThrow();
 
-    expect(harness.eventStore.list(run.id, 0)).toHaveLength(2);
-    expect(harness.store.listDeliveries(subscription.id)).toMatchObject([{
-      eventKey: `${task.id}:tool:tool-1:completed`,
-      eventType: "tool.completed"
-    }]);
+    expect(harness.eventStore.list(run.id, 0)).toHaveLength(9);
+    expect(harness.store.listDeliveries(subscription.id).map(({ eventKey, eventType, sequence }) => ({
+      eventKey,
+      eventType,
+      sequence
+    }))).toEqual([
+      { eventKey: `${task.id}:tool:tool-1:started`, eventType: "tool.started", sequence: 2 },
+      { eventKey: `${task.id}:tool:tool-1:completed`, eventType: "tool.completed", sequence: 3 },
+      { eventKey: `${task.id}:tool:tool-2:started`, eventType: "tool.started", sequence: 4 },
+      { eventKey: `${task.id}:tool:tool-2:failed`, eventType: "tool.failed", sequence: 5 },
+      { eventKey: `${task.id}:tool:tool-3:started`, eventType: "tool.started", sequence: 6 },
+      { eventKey: `${task.id}:tool:tool-4:started`, eventType: "tool.started", sequence: 7 }
+    ]);
+    expect(harness.store.getTask(task.id)?.eventSequence).toBe(7);
+    harness.db.close();
+  });
+
+  it("没有 webhook subscription 时也按 source tool phase 去重 event sequence", () => {
+    const harness = createHarness();
+    const task = harness.createTask();
+    const run = harness.runRepository.create(
+      { sessionId: task.sessionId, input: task.effectivePrompt },
+      { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
+    );
+    harness.runRepository.markRunning(run.id);
+
+    harness.eventStore.append(run.id, "tool", { toolCallId: "tool-no-subscription", status: "pending" });
+    harness.eventStore.append(run.id, "tool", { toolCallId: "tool-no-subscription", status: "in_progress" });
+
+    expect(harness.store.getTask(task.id)?.eventSequence).toBe(2);
     harness.db.close();
   });
 });

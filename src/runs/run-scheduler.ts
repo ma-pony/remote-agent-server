@@ -4,9 +4,15 @@ import type { RunExecutor } from "./run-executor.js";
 import type { RunRepository } from "./run-repository.js";
 
 export type RunSchedulerDependencies = {
-  runRepository: Pick<RunRepository, "listQueued">;
+  runRepository: Pick<RunRepository, "get" | "listQueued">;
   executor: Pick<RunExecutor, "execute" | "cancel">;
   maxConcurrentRuns: number;
+  onExecutionError?: (error: unknown, runId: string) => void;
+  retryDelayMs?: number;
+};
+
+const defaultExecutionErrorReporter = (_error: unknown, runId: string): void => {
+  console.error(`Run execution failed (${runId})`);
 };
 
 /**
@@ -15,16 +21,27 @@ export type RunSchedulerDependencies = {
 export class RunScheduler {
   private readonly pending: string[] = [];
   private readonly active = new Set<string>();
-  private readonly runRepository: Pick<RunRepository, "listQueued">;
+  private readonly runRepository: Pick<RunRepository, "get" | "listQueued">;
   private readonly executor: Pick<RunExecutor, "execute" | "cancel">;
   private readonly maxConcurrentRuns: number;
+  private readonly onExecutionError: (error: unknown, runId: string) => void;
+  private readonly retryDelayMs: number;
+  private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private started = false;
   private loadedQueued = false;
 
-  constructor({ runRepository, executor, maxConcurrentRuns }: RunSchedulerDependencies) {
+  constructor({
+    runRepository,
+    executor,
+    maxConcurrentRuns,
+    onExecutionError = defaultExecutionErrorReporter,
+    retryDelayMs = 1_000
+  }: RunSchedulerDependencies) {
     this.runRepository = runRepository;
     this.executor = executor;
     this.maxConcurrentRuns = maxConcurrentRuns;
+    this.onExecutionError = onExecutionError;
+    this.retryDelayMs = retryDelayMs;
   }
 
   /**
@@ -54,6 +71,8 @@ export class RunScheduler {
   async stop(): Promise<void> {
     this.started = false;
     this.pending.splice(0);
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
+    this.retryTimers.clear();
     await Promise.all([...this.active].map(async (runId) => {
       await settleBestEffort(() => this.executor.cancel(runId));
     }));
@@ -71,11 +90,34 @@ export class RunScheduler {
 
       this.active.add(runId);
       void this.executor.execute(runId)
-        .catch(() => undefined)
+        .catch((error: unknown) => this.handleExecutionError(error, runId))
         .finally(() => {
           this.active.delete(runId);
           this.drain();
         });
     }
+  }
+
+  private handleExecutionError(error: unknown, runId: string): void {
+    try {
+      this.onExecutionError(error, runId);
+    } catch (_reportingError) {
+      defaultExecutionErrorReporter(undefined, runId);
+    }
+
+    let run: Run | undefined;
+    try {
+      run = this.runRepository.get(runId);
+    } catch (_inspectionError) {
+      return;
+    }
+    if (run?.status !== "queued" || !this.started || this.retryTimers.has(runId)) return;
+
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(runId);
+      if (this.started) this.enqueue(runId);
+    }, this.retryDelayMs);
+    timer.unref?.();
+    this.retryTimers.set(runId, timer);
   }
 }

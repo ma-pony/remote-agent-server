@@ -186,6 +186,25 @@ describe("EventStore", () => {
     expect(listener).not.toHaveBeenCalled();
     db.close();
   });
+
+  it("拒绝异步 Event 投影并回滚 Event 且不通知 listener", () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    seed.run(session.id, "queued");
+    const run = db.prepare("SELECT id FROM runs").get() as { id: string };
+    const listener = vi.fn();
+    const projection = {
+      onAppended: (() => Promise.resolve()) as unknown as () => undefined
+    };
+    const store = new EventStore({ db, projection });
+    store.subscribe(run.id, listener);
+
+    expect(() => store.append(run.id, "tool", { toolCallId: "tool-1" })).toThrow("async_transaction_hook");
+
+    expect(store.list(run.id, 0)).toEqual([]);
+    expect(listener).not.toHaveBeenCalled();
+    db.close();
+  });
 });
 
 describe("Event API", () => {

@@ -14,9 +14,13 @@ export type IntegrationTaskSchedulerDependencies = {
   sessionManager: Pick<SessionManager, "replaceMcpParametersInTransaction">;
   secrets: Pick<SecretStore, "decrypt">;
   projection: Pick<IntegrationProjection, "recover">;
+  retryDelayMs?: number;
 };
 
-const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
+const INVALID_PARAMETER_SNAPSHOT = {
+  code: "invalid_parameter_snapshot",
+  message: "Integration Task parameter snapshot is invalid"
+} as const;
 
 const parseParameters = (serialized: string): Record<string, string | null> => {
   const value = JSON.parse(serialized) as unknown;
@@ -36,6 +40,7 @@ export class IntegrationTaskScheduler {
   private started = false;
   private draining = false;
   private notifiedWhileDraining = false;
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly dependencies: IntegrationTaskSchedulerDependencies) {}
 
@@ -66,6 +71,8 @@ export class IntegrationTaskScheduler {
   stop(): void {
     this.started = false;
     this.notifiedWhileDraining = false;
+    if (this.retryTimer !== undefined) clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
   }
 
   recover(): void {
@@ -78,8 +85,8 @@ export class IntegrationTaskScheduler {
       parameters = task.encryptedParameters === null
         ? {}
         : parseParameters(this.dependencies.secrets.decrypt(task.encryptedParameters));
-    } catch (error) {
-      this.failBeforeRun(task, error);
+    } catch (_error) {
+      this.failBeforeRun(task);
       return;
     }
 
@@ -90,18 +97,35 @@ export class IntegrationTaskScheduler {
           afterInsert: (created) => {
             this.dependencies.sessionManager.replaceMcpParametersInTransaction(task.sessionId, parameters);
             this.dependencies.store.linkTaskRunInTransaction(task.id, created.id);
+            return undefined;
           }
         }
       );
       this.dependencies.runScheduler.enqueue(run.id);
     } catch (error) {
-      if (error instanceof RunRepositoryError && error.code === "session_busy") return;
-      this.failBeforeRun(task, error);
+      if (error instanceof RunRepositoryError && error.code === "session_busy") {
+        this.scheduleRetry();
+        return;
+      }
+      this.scheduleRetry();
     }
   }
 
-  private failBeforeRun(task: IntegrationTask, error: unknown): void {
-    const failed = this.dependencies.store.failTaskBeforeRun(task.id, errorMessage(error));
-    if (failed !== undefined) queueMicrotask(() => this.notify());
+  private failBeforeRun(task: IntegrationTask): void {
+    try {
+      const failed = this.dependencies.store.failTaskBeforeRun(task.id, INVALID_PARAMETER_SNAPSHOT);
+      if (failed !== undefined) this.notify();
+    } catch (_error) {
+      this.scheduleRetry();
+    }
+  }
+
+  private scheduleRetry(): void {
+    if (!this.started || this.retryTimer !== undefined) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      this.notify();
+    }, this.dependencies.retryDelayMs ?? 1_000);
+    this.retryTimer.unref?.();
   }
 }

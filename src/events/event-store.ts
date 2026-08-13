@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
 import type { Event, EventType } from "../domain.js";
+import { assertSynchronousTransactionHook } from "../transaction-hook.js";
 
 type EventRow = {
   id: string;
@@ -28,7 +29,7 @@ export type EventStoreDependencies = {
 };
 
 export type RunEventProjection = {
-  onAppended(event: Event): void;
+  onAppended(event: Event): undefined;
 };
 
 const noOpRunEventProjection: RunEventProjection = {
@@ -69,7 +70,7 @@ export class EventStore {
         .prepare("INSERT INTO events (id, run_id, seq, type, content_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .run(row.id, row.run_id, row.seq, row.type, row.content_json, row.created_at);
       event = toEvent(row);
-      this.projection.onAppended(event);
+      assertSynchronousTransactionHook(this.projection.onAppended(event));
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

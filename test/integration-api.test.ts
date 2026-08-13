@@ -277,6 +277,42 @@ describe("Integration endpoint API", () => {
     expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 2 });
   });
 
+  it("Conversation 建立后禁用 Agent，后续 Task 稳定失败且不启动新 Turn", async () => {
+    const runtime = createFakeRuntime();
+    runtime.startTurn = vi.fn(runtime.startTurn);
+    const { app, agentId, db } = await createTestApp(runtime);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId)
+    });
+    const endpoint = created.json() as { endpoint: { slug: string }; token: string };
+    const submit = (requestId: string) => app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(endpoint.token),
+      payload: { requestId, conversationKey: "ticket-disabled-agent", message: requestId, parameters: {} }
+    });
+
+    const first = await submit("request-before-disable");
+    const firstTask = first.json() as { taskId: string };
+    await vi.waitFor(() => expect(
+      db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(firstTask.taskId)
+    ).toEqual({ status: "succeeded" }));
+    db.prepare("UPDATE agents SET enabled = 0 WHERE id = ?").run(agentId);
+
+    const second = await submit("request-after-disable");
+    const secondTask = second.json() as { taskId: string };
+    await vi.waitFor(() => expect(
+      db.prepare("SELECT status, error FROM integration_tasks WHERE id = ?").get(secondTask.taskId)
+    ).toEqual({ status: "failed", error: "agent_disabled" }));
+
+    expect(first.statusCode).toBe(202);
+    expect(second.statusCode).toBe(202);
+    expect(runtime.startTurn).toHaveBeenCalledTimes(1);
+  });
+
   it("外部提交冲突返回 409，繁忙 Conversation 不能结束", async () => {
     const result = deferred<RuntimeTurnResult>();
     const runtime = createFakeRuntime();

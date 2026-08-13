@@ -108,12 +108,29 @@ describe("RunRepository", () => {
     db.close();
   });
 
+  it("拒绝异步 afterInsert hook 并回滚 Run 和 Session claim", () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    const repository = new RunRepository({ db });
+    const asyncHook = (() => Promise.reject(new Error("async hook rejected"))) as unknown as (run: Run) => undefined;
+
+    expect(() => repository.create(
+      { sessionId: session.id, input: "work" },
+      { afterInsert: asyncHook }
+    )).toThrow("async_transaction_hook");
+
+    expect(repository.listQueued()).toEqual([]);
+    expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id)).toEqual({ status: "idle" });
+    db.close();
+  });
+
   it("状态投影异常时回滚 Run 状态转换", () => {
     const { db, seed } = createTestDatabase();
     const session = seed.session();
     const projection = {
       onStarted: () => { throw new Error("projection failed"); },
-      onFinished: () => undefined
+      onFinished: () => undefined,
+      afterCommit: () => undefined
     };
     const repository = new RunRepository({ db, projection });
     const run = repository.create({ sessionId: session.id, input: "work" });
@@ -122,6 +139,23 @@ describe("RunRepository", () => {
 
     expect(repository.get(run.id)).toMatchObject({ status: "queued", startedAt: null });
     expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id)).toEqual({ status: "running" });
+    db.close();
+  });
+
+  it("拒绝异步 Run 状态投影并回滚状态转换", () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    const projection = {
+      onStarted: (() => Promise.resolve()) as unknown as (run: Run) => undefined,
+      onFinished: () => undefined,
+      afterCommit: () => undefined
+    };
+    const repository = new RunRepository({ db, projection });
+    const run = repository.create({ sessionId: session.id, input: "work" });
+
+    expect(() => repository.markRunning(run.id)).toThrow("async_transaction_hook");
+
+    expect(repository.get(run.id)).toMatchObject({ status: "queued", startedAt: null });
     db.close();
   });
 
@@ -229,6 +263,92 @@ describe("RunRepository", () => {
 });
 
 describe("RunScheduler", () => {
+  it("markRunning 投影失败且 Run 仍 queued 时有界延迟重试成功", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, seed } = createTestDatabase();
+      const session = seed.session();
+      const onStarted = vi.fn<() => undefined>()
+        .mockImplementationOnce(() => { throw new Error("projection failed once"); })
+        .mockReturnValue(undefined);
+      const repository = new RunRepository({
+        db,
+        projection: { onStarted, onFinished: () => undefined, afterCommit: () => undefined }
+      });
+      const run = repository.create({ sessionId: session.id, input: "retry projection" });
+      const execute = vi.fn(async (runId: string) => repository.markRunning(runId));
+      const onExecutionError = vi.fn();
+      const scheduler = new RunScheduler({
+        runRepository: repository,
+        executor: { execute, cancel: async () => ({}) as Run },
+        maxConcurrentRuns: 1,
+        retryDelayMs: 1_000,
+        onExecutionError
+      });
+
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(repository.get(run.id)?.status).toBe("queued");
+      expect(onExecutionError).toHaveBeenCalledWith(expect.any(Error), run.id);
+      expect(vi.getTimerCount()).toBe(1);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(repository.get(run.id)?.status).toBe("running");
+      await scheduler.stop();
+      expect(vi.getTimerCount()).toBe(0);
+      db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("terminal 投影持续失败且 Run 已 running 时报告错误但不重复 Turn", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, seed } = createTestDatabase();
+      const session = seed.session();
+      const repository = new RunRepository({
+        db,
+        projection: {
+          onStarted: () => undefined,
+          onFinished: () => { throw new Error("terminal projection failed"); },
+          afterCommit: () => undefined
+        }
+      });
+      const run = repository.create({ sessionId: session.id, input: "terminal projection" });
+      const execute = vi.fn(async (runId: string) => {
+        repository.markRunning(runId);
+        return repository.finish(runId, { status: "succeeded", result: "done" });
+      });
+      const onExecutionError = vi.fn();
+      const scheduler = new RunScheduler({
+        runRepository: repository,
+        executor: { execute, cancel: async () => ({}) as Run },
+        maxConcurrentRuns: 1,
+        retryDelayMs: 1_000,
+        onExecutionError
+      });
+
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(onExecutionError).toHaveBeenCalledWith(expect.objectContaining({
+        message: "terminal projection failed"
+      }), run.id);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(repository.get(run.id)?.status).toBe("running");
+      expect(vi.getTimerCount()).toBe(0);
+      await scheduler.stop();
+      db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("最多并行执行 MAX_CONCURRENT_RUNS 个不同 Run，并在 finally 后继续 drain", async () => {
     const queued = ["run-1", "run-2", "run-3"].map((id) => ({ id })) as Run[];
     const releases = new Map<string, () => void>();
@@ -243,7 +363,7 @@ describe("RunScheduler", () => {
       });
     }));
     const scheduler = new RunScheduler({
-      runRepository: { listQueued: () => queued },
+      runRepository: { get: (id) => queued.find((run) => run.id === id), listQueued: () => queued },
       executor: { execute, cancel: async () => ({}) as Run },
       maxConcurrentRuns: 2
     });
@@ -266,9 +386,13 @@ describe("RunScheduler", () => {
       .mockRejectedValueOnce(new Error("executor failed"))
       .mockResolvedValueOnce({ id: "run-2" } as Run);
     const scheduler = new RunScheduler({
-      runRepository: { listQueued: () => [{ id: "run-1" }, { id: "run-2" }] as Run[] },
+      runRepository: {
+        get: (id) => ({ id, status: "failed" }) as Run,
+        listQueued: () => [{ id: "run-1" }, { id: "run-2" }] as Run[]
+      },
       executor: { execute, cancel: async () => ({}) as Run },
-      maxConcurrentRuns: 1
+      maxConcurrentRuns: 1,
+      onExecutionError: vi.fn()
     });
 
     scheduler.start();
@@ -284,7 +408,10 @@ describe("RunScheduler", () => {
       const execute = vi.fn(() => new Promise<Run>(() => undefined));
       const cancel = vi.fn(() => new Promise<Run>(() => undefined));
       const scheduler = new RunScheduler({
-        runRepository: { listQueued: () => [{ id: "run-1" }] as Run[] },
+        runRepository: {
+          get: (id) => ({ id, status: "running" }) as Run,
+          listQueued: () => [{ id: "run-1" }] as Run[]
+        },
         executor: { execute, cancel },
         maxConcurrentRuns: 1
       });

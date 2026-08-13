@@ -76,6 +76,32 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("既有 Session 的 Agent 被禁用后稳定失败且不启动 Runtime", async () => {
+    const runtime = createFakeRuntime();
+    runtime.ensureSession = vi.fn(runtime.ensureSession);
+    runtime.startTurn = vi.fn(runtime.startTurn);
+    const prepare = vi.fn(() => "remember this");
+    const mcpPrepare = vi.fn(async () => []);
+    const setupResult = setup(runtime, prepare, mcpPrepare);
+    setupResult.db.prepare(`
+      UPDATE agents SET enabled = 0
+      WHERE id = (SELECT agent_id FROM sessions WHERE id = 'session-1')
+    `).run();
+
+    await setupResult.executor.execute(setupResult.run.id);
+
+    expect(mcpPrepare).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(runtime.ensureSession).not.toHaveBeenCalled();
+    expect(runtime.startTurn).not.toHaveBeenCalled();
+    expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+      status: "failed",
+      error: "agent_disabled"
+    });
+    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    setupResult.db.close();
+  });
+
   it("MCP 预检失败时不投影 Skill、不创建 Runtime Session 且安全失败 Run", async () => {
     const runtime = createFakeRuntime();
     runtime.ensureSession = vi.fn(runtime.ensureSession);

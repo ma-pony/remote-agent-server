@@ -200,6 +200,7 @@ export class SessionManager {
     if (session === undefined) throw new SessionManagerError("session_not_found");
     const agent = this.agentManager.get(session.agentId);
     if (agent === undefined) throw new SessionManagerError("agent_not_found");
+    if (!agent.enabled) throw new SessionManagerError("agent_disabled");
     return { agent, session };
   }
 

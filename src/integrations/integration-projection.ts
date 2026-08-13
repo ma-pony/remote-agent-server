@@ -22,8 +22,35 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
 const nonEmptyString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim() !== "" ? value : undefined;
 
-const toolEventType = (status: string): "tool.started" | "tool.completed" | "tool.failed" | undefined => {
-  if (status === "pending" || status === "in_progress") return "tool.started";
+const publicToolLocations = (value: unknown): Array<{ path: string; line?: number | null }> | undefined => {
+  if (!Array.isArray(value)) return undefined;
+  const locations = value.flatMap((item) => {
+    const location = record(item);
+    const path = nonEmptyString(location?.path);
+    if (path === undefined) return [];
+    const line = location?.line;
+    return [line === null || typeof line === "number" ? { path, line } : { path }];
+  });
+  return locations.length === 0 ? undefined : locations;
+};
+
+const publicToolPayload = (
+  content: Record<string, unknown>,
+  toolCallId: string,
+  status: string
+): Record<string, unknown> => {
+  const payload: Record<string, unknown> = { toolCallId };
+  const title = nonEmptyString(content.title);
+  const kind = nonEmptyString(content.kind);
+  const locations = publicToolLocations(content.locations);
+  if (title !== undefined) payload.title = title;
+  if (kind !== undefined) payload.kind = kind;
+  payload.status = status;
+  if (locations !== undefined) payload.locations = locations;
+  return payload;
+};
+
+const toolTerminalEventType = (status: string): "tool.completed" | "tool.failed" | undefined => {
   if (status === "completed") return "tool.completed";
   if (status === "failed") return "tool.failed";
   return undefined;
@@ -41,20 +68,21 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
     this.notifyScheduler = notify;
   }
 
-  onStarted(run: Run): void {
+  onStarted(run: Run): undefined {
     const task = this.dependencies.store.markTaskRunningInTransaction(run.id, run.startedAt!);
-    if (task === undefined) return;
+    if (task === undefined) return undefined;
     this.dependencies.store.appendTaskEventInTransaction({
       taskId: task.id,
       eventType: "task.started",
       eventKey: `${task.id}:task.started`,
       payload: { status: "running", startedAt: run.startedAt }
     });
+    return undefined;
   }
 
-  onFinished(run: Run): void {
+  onFinished(run: Run): undefined {
     const task = this.dependencies.store.finishTaskInTransaction(run);
-    if (task === undefined) return;
+    if (task === undefined) return undefined;
     this.dependencies.store.appendTaskEventInTransaction({
       taskId: task.id,
       eventType: `task.${run.status}`,
@@ -81,27 +109,55 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
       });
     }
 
-    queueMicrotask(() => this.notifyScheduler());
+    return undefined;
   }
 
-  onAppended(event: Event): void {
-    if (event.type !== "tool") return;
-    const task = this.dependencies.store.getTaskByRun(event.runId);
-    if (task === undefined) return;
-    const content = record(JSON.parse(event.contentJson));
-    if (content === undefined) return;
-    const toolCallId = nonEmptyString(content.toolCallId);
-    const status = nonEmptyString(content.status);
-    if (toolCallId === undefined || status === undefined) return;
-    const eventType = toolEventType(status);
-    if (eventType === undefined) return;
+  afterCommit(run: Run): undefined {
+    if (run.status === "succeeded" || run.status === "failed" || run.status === "cancelled") {
+      this.notifyScheduler();
+    }
+    return undefined;
+  }
 
+  onAppended(event: Event): undefined {
+    if (event.type !== "tool") return undefined;
+    const task = this.dependencies.store.getTaskByRun(event.runId);
+    if (task === undefined) return undefined;
+    const content = record(JSON.parse(event.contentJson));
+    if (content === undefined) return undefined;
+    const toolCallId = nonEmptyString(content.toolCallId);
+    if (toolCallId === undefined) return undefined;
+    const priorToolContents = this.dependencies.listEvents(event.runId).flatMap((candidate) => {
+      if (candidate.type !== "tool" || candidate.seq >= event.seq) return [];
+      const prior = record(JSON.parse(candidate.contentJson));
+      return nonEmptyString(prior?.toolCallId) === toolCallId && prior !== undefined ? [prior] : [];
+    });
+
+    if (priorToolContents.length === 0) {
+      this.dependencies.store.appendTaskEventInTransaction({
+        taskId: task.id,
+        eventType: "tool.started",
+        eventKey: `${task.id}:tool:${toolCallId}:started`,
+        payload: publicToolPayload(content, toolCallId, "started")
+      });
+    }
+
+    const status = nonEmptyString(content.status);
+    if (status === undefined) return undefined;
+    const terminalEventType = toolTerminalEventType(status);
+    if (terminalEventType === undefined) return undefined;
+    const terminalPhase = terminalEventType === "tool.completed" ? "completed" : "failed";
+    const terminalAlreadyProjected = priorToolContents.some((prior) =>
+      toolTerminalEventType(nonEmptyString(prior.status) ?? "") === terminalEventType
+    );
+    if (terminalAlreadyProjected) return undefined;
     this.dependencies.store.appendTaskEventInTransaction({
       taskId: task.id,
-      eventType,
-      eventKey: `${task.id}:tool:${toolCallId}:${status}`,
-      payload: { ...content, toolCallId, status }
+      eventType: terminalEventType,
+      eventKey: `${task.id}:tool:${toolCallId}:${terminalPhase}`,
+      payload: publicToolPayload(content, toolCallId, terminalPhase)
     });
+    return undefined;
   }
 
   /** Replays only missing linked Task projections after Run restart recovery. */
@@ -116,6 +172,7 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
         this.dependencies.db.exec("ROLLBACK");
         throw error;
       }
+      this.afterCommit(run);
     }
   }
 }

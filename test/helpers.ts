@@ -19,7 +19,7 @@ let nextId = 0;
 const id = (prefix: string): string => `${prefix}-${++nextId}`;
 const now = (): string => "2026-08-12T00:00:00.000Z";
 
-export const createTestDatabase = (): {
+export const createTestDatabase = (databasePath = ":memory:"): {
   db: Database.Database;
   seed: {
     projectEnvironment: { id: string; revisionId: string; workspacePath: string };
@@ -28,7 +28,7 @@ export const createTestDatabase = (): {
     run: (sessionId: string, status: "queued" | "running" | "succeeded" | "failed" | "cancelled") => void;
   };
 } => {
-  const db = openDatabase(":memory:");
+  const db = openDatabase(databasePath);
   migrate(db);
 
   const projectEnvironmentId = randomUUID();

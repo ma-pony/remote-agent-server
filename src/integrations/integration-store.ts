@@ -494,25 +494,25 @@ export class IntegrationStore {
   }
 
   /** Terminates a queued Task that cannot create a Run. */
-  failTaskBeforeRun(id: string, error: string): IntegrationTask | undefined {
+  failTaskBeforeRun(id: string, failure: { code: string; message: string }): IntegrationTask | undefined {
     return this.immediateTransaction(() => {
       const finishedAt = new Date().toISOString();
       const result = this.db.prepare(`
         UPDATE integration_tasks SET status = 'failed', error = ?, finished_at = ?
         WHERE id = ? AND status = 'queued' AND run_id IS NULL
-      `).run(error, finishedAt, id);
+      `).run(failure.code, finishedAt, id);
       if (result.changes === 0) return undefined;
       this.appendTaskEventInTransaction({
         taskId: id,
         eventType: "task.failed",
         eventKey: `${id}:task.failed`,
-        payload: { status: "failed", error }
+        payload: { status: "failed", error: failure.code }
       });
       this.appendTaskEventInTransaction({
         taskId: id,
         eventType: "message.system.notice",
         eventKey: `${id}:message.system.notice:dispatch_failed`,
-        payload: { message: error }
+        payload: { code: failure.code, message: failure.message }
       });
       return this.getTask(id);
     });
@@ -592,6 +592,15 @@ export class IntegrationStore {
   appendTaskEventInTransaction(input: AppendTaskEventInput): WebhookDelivery[] {
     const task = this.taskRow(input.taskId);
     if (task === undefined) return [];
+    if (input.eventKey !== undefined) {
+      const existing = this.db.prepare(`
+        SELECT * FROM webhook_deliveries
+        WHERE task_id = ? AND event_key = ?
+        ORDER BY sequence ASC, created_at ASC, id ASC
+      `).all(task.id, input.eventKey) as DeliveryRow[];
+      if (existing.length > 0) return existing.map(toDelivery);
+    }
+
     const sequence = task.event_sequence + 1;
     const eventId = randomUUID();
     const eventKey = input.eventKey ?? `${task.id}:${sequence}`;
