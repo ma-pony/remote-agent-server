@@ -98,19 +98,23 @@ export class IntegrationEndpointManager {
       throw new IntegrationEndpointManagerError("conversation_busy");
     }
 
-    const fixedValues = input.parameterMappings === undefined
+    const existingFixedValues = this.fixedValues(existing.id);
+    const resolvedMappings = input.parameterMappings?.map((mapping) => mapping.source === "request"
+      ? mapping
+      : { ...mapping, value: mapping.value ?? existingFixedValues[mapping.parameterKey] ?? "" });
+    const fixedValues = resolvedMappings === undefined
       ? this.fixedValues(existing.id)
-      : this.fixedValuesFromInput(input.parameterMappings);
-    const parameterMappings = input.parameterMappings === undefined
+      : this.fixedValuesFromInput(resolvedMappings);
+    const parameterMappings = resolvedMappings === undefined
       ? existing.parameterMappings
-      : this.publicMappings(input.parameterMappings);
+      : this.publicMappings(resolvedMappings);
     const record = this.toPersistenceInput({
       name: input.name ?? existing.name,
       slug: input.slug ?? existing.slug,
       agentId: nextAgentId,
       enabled: input.enabled ?? existing.enabled,
       promptPrefix: input.promptPrefix ?? existing.promptPrefix,
-      parameterMappings: input.parameterMappings ?? this.toInputMappings(existing.parameterMappings, fixedValues)
+      parameterMappings: resolvedMappings ?? this.toInputMappings(existing.parameterMappings, fixedValues)
     }, this.store.endpointTokenHash(id)!, parameterMappings, fixedValues);
     this.store.updateEndpoint(id, record);
     return this.get(id)!;

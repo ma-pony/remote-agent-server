@@ -4,11 +4,13 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import type { SecretStore } from "../mcp/secret-store.js";
+import type { RunExecutor } from "../runs/run-executor.js";
 import { isManagedWebhookHeader } from "./webhook-contract.js";
 import { IntegrationEndpointManager, IntegrationEndpointManagerError } from "./integration-endpoint-manager.js";
 import { webhookEventId, type IntegrationStore } from "./integration-store.js";
-import type { WebhookDelivery, WebhookSubscription } from "./integration-types.js";
+import type { IntegrationTask, WebhookDelivery, WebhookSubscription } from "./integration-types.js";
 import type { WebhookDispatcher } from "./webhook-dispatcher.js";
+import type { IntegrationTaskScheduler } from "./integration-scheduler.js";
 
 const webhookEvents = [
   "task.queued",
@@ -34,6 +36,11 @@ const fixedParameterMappingSchema = z.object({
   source: z.literal("fixed"),
   value: z.string()
 }).strict();
+const fixedParameterMappingUpdateSchema = z.object({
+  parameterKey: z.string().trim().min(1),
+  source: z.literal("fixed"),
+  value: z.string().optional()
+}).strict();
 const parameterMappings = z.array(z.discriminatedUnion("source", [
   requestParameterMappingSchema,
   fixedParameterMappingSchema
@@ -48,7 +55,17 @@ const createEndpointSchema = z.object({
   parameterMappings
 }).strict();
 
-const updateEndpointSchema = createEndpointSchema.partial().strict().refine(
+const updateEndpointSchema = z.object({
+  name: z.string().trim().min(1),
+  slug,
+  agentId: z.string().min(1),
+  enabled: z.boolean(),
+  promptPrefix: z.string(),
+  parameterMappings: z.array(z.discriminatedUnion("source", [
+    requestParameterMappingSchema,
+    fixedParameterMappingUpdateSchema
+  ]))
+}).partial().strict().refine(
   (input) => Object.keys(input).length > 0,
   { message: "At least one field must be provided" }
 );
@@ -157,6 +174,22 @@ const publicDelivery = (delivery: WebhookDelivery) => ({
   updatedAt: delivery.updatedAt
 });
 
+const publicTask = (task: IntegrationTask) => ({
+  id: task.id,
+  endpointId: task.endpointId,
+  conversationId: task.conversationId,
+  sessionId: task.sessionId,
+  runId: task.runId,
+  requestId: task.requestId,
+  message: task.message,
+  status: task.status,
+  result: task.result,
+  error: task.error,
+  createdAt: task.createdAt,
+  startedAt: task.startedAt,
+  finishedAt: task.finishedAt
+});
+
 /**
  * Registers authenticated management routes for Integration Endpoints.
  */
@@ -167,10 +200,21 @@ export const registerIntegrationAdminRoutes = (
     store: IntegrationStore;
     secrets: SecretStore;
     dispatcher: WebhookDispatcher;
+    executor: RunExecutor;
+    scheduler: IntegrationTaskScheduler;
   }
 ): void => {
-  const { manager, store, secrets, dispatcher } = dependencies;
-  app.get("/integration-endpoints", () => manager.list());
+  const { manager, store, secrets, dispatcher, executor, scheduler } = dependencies;
+  app.get("/integration-endpoints", () => manager.list().map((endpoint) => {
+    const conversations = store.listConversations(endpoint.id);
+    const tasks = store.listTasks(endpoint.id);
+    return {
+      ...endpoint,
+      activeConversationCount: conversations.filter(({ status }) => status === "active").length,
+      activeTaskCount: tasks.filter(({ status }) => status === "queued" || status === "running").length,
+      latestTask: tasks.length === 0 ? null : publicTask(tasks.at(-1)!)
+    };
+  }));
 
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id", (request, reply) => {
     const endpoint = manager.get(request.params.id);
@@ -213,6 +257,51 @@ export const registerIntegrationAdminRoutes = (
       return reply.code(204).send();
     } catch (error) {
       return handleManagerError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/integration-endpoints/:id/conversations", (request, reply) => {
+    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
+    return store.listConversations(request.params.id);
+  });
+
+  app.get<{ Params: { id: string } }>("/integration-endpoints/:id/tasks", (request, reply) => {
+    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
+    return store.listTasks(request.params.id).map(publicTask);
+  });
+
+  app.get<{ Params: { id: string } }>("/integration-tasks/:id", (request, reply) => {
+    const task = store.getTask(request.params.id);
+    if (task === undefined) {
+      return reply.code(404).send({ error: { code: "task_not_found", message: "Integration task not found" } });
+    }
+    return publicTask(task);
+  });
+
+  app.post<{ Params: { id: string } }>("/integration-tasks/:id/cancel", async (request, reply) => {
+    let task = store.getTask(request.params.id);
+    if (task === undefined) {
+      return reply.code(404).send({ error: { code: "task_not_found", message: "Integration task not found" } });
+    }
+    if (task.status === "succeeded" || task.status === "failed" || task.status === "cancelled") return publicTask(task);
+    if (task.status === "queued" && task.runId === null) {
+      const cancelled = store.cancelUnlinkedQueuedTask(task.id, task.endpointId);
+      if (cancelled !== undefined) {
+        scheduler.notify();
+        return publicTask(cancelled);
+      }
+      task = store.getTask(task.id)!;
+    }
+    if (task.runId === null) {
+      return reply.code(409).send({ error: { code: "task_cancel_failed", message: "Integration task cannot be cancelled" } });
+    }
+    try {
+      await executor.cancel(task.runId);
+      return publicTask(store.getTask(task.id)!);
+    } catch (_error) {
+      const current = store.getTask(task.id);
+      if (current !== undefined && ["succeeded", "failed", "cancelled"].includes(current.status)) return publicTask(current);
+      return reply.code(409).send({ error: { code: "task_cancel_failed", message: "Integration task cannot be cancelled" } });
     }
   });
 

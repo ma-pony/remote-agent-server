@@ -9,6 +9,9 @@ export type ParameterMapping =
 export type ParameterMappingInput =
   | { parameterKey: string; source: "request"; requestKey: string }
   | { parameterKey: string; source: "fixed"; value: string };
+export type ParameterMappingUpdateInput =
+  | { parameterKey: string; source: "request"; requestKey: string }
+  | { parameterKey: string; source: "fixed"; value?: string };
 
 export type IntegrationErrorCode =
   | "endpoint_not_found" | "endpoint_disabled" | "invalid_endpoint_token"
@@ -40,7 +43,9 @@ export type CreateIntegrationEndpointInput = {
   parameterMappings: ParameterMappingInput[];
 };
 
-export type UpdateIntegrationEndpointInput = Partial<CreateIntegrationEndpointInput>;
+export type UpdateIntegrationEndpointInput = Omit<Partial<CreateIntegrationEndpointInput>, "parameterMappings"> & {
+  parameterMappings?: ParameterMappingUpdateInput[];
+};
 export type ResolvedIntegrationParameters = Record<string, string | null>;
 
 export type IntegrationConversation = {

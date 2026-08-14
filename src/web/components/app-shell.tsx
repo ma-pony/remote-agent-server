@@ -1,4 +1,4 @@
-import { Bot, Boxes, LogOut, MessagesSquare } from "lucide-react";
+import { Bot, Boxes, Cable, LogOut, MessagesSquare } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router";
 
 import { Button } from "@/components/ui/button";
@@ -22,7 +22,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 const navigation = [
   { label: "Agent", path: "/agents", icon: Bot },
   { label: "项目环境", path: "/project-environments", icon: Boxes },
-  { label: "Session", path: "/sessions", icon: MessagesSquare }
+  { label: "Session", path: "/sessions", icon: MessagesSquare },
+  { label: "接入端点", path: "/integration-endpoints", icon: Cable }
 ] as const;
 
 export const AppShellLayout = ({ onDisconnect }: { onDisconnect(): void }) => {

@@ -153,6 +153,38 @@ describe("Integration endpoint API", () => {
     expect(deleted.statusCode).toBe(204);
   });
 
+  it("管理端修改映射时可保留未回显的固定敏感值", async () => {
+    const { app, agentId, db } = await createTestApp();
+    db.prepare(`
+      INSERT INTO agent_session_parameters
+        (id, agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES ('integration-secret-parameter', ?, 'callback_token', 'Callback Token', NULL, 0, 1, ?, ?)
+    `).run(agentId, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: {
+        ...validEndpointInput(agentId),
+        parameterMappings: [{ parameterKey: "callback_token", source: "fixed", value: "private-callback-token" }]
+      }
+    });
+    const endpointId = (created.json() as { endpoint: { id: string } }).endpoint.id;
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/api/integration-endpoints/${endpointId}`,
+      headers: authHeaders(),
+      payload: { parameterMappings: [{ parameterKey: "callback_token", source: "fixed" }] }
+    });
+
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      parameterMappings: [{ parameterKey: "callback_token", source: "fixed", configured: true }]
+    });
+    expect(JSON.stringify(updated.json())).not.toContain("private-callback-token");
+  });
+
   it("拒绝管理 Token 调用外部接口和端点 Token 跨 slug", async () => {
     const { app, agentId } = await createTestApp();
     const first = await app.inject({
@@ -283,6 +315,56 @@ describe("Integration endpoint API", () => {
     expect(firstTask.runId).toBeNull();
     expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 2 });
+  });
+
+  it("管理端浏览 Endpoint 汇总、Conversation、Task 和安全详情", async () => {
+    const { app, agentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId)
+    });
+    const endpoint = created.json() as { endpoint: { id: string; slug: string }; token: string };
+    const submitted = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(endpoint.token),
+      payload: {
+        requestId: "admin-browser-request",
+        conversationKey: "customer-42",
+        message: "Show this Task in the console",
+        parameters: {}
+      }
+    });
+    const taskId = (submitted.json() as { taskId: string }).taskId;
+
+    const summaries = await app.inject({ method: "GET", url: "/api/integration-endpoints", headers: authHeaders() });
+    const conversations = await app.inject({
+      method: "GET", url: `/api/integration-endpoints/${endpoint.endpoint.id}/conversations`, headers: authHeaders()
+    });
+    const tasks = await app.inject({
+      method: "GET", url: `/api/integration-endpoints/${endpoint.endpoint.id}/tasks`, headers: authHeaders()
+    });
+    const detail = await app.inject({
+      method: "GET", url: `/api/integration-tasks/${taskId}`, headers: authHeaders()
+    });
+
+    expect(summaries.statusCode).toBe(200);
+    expect(summaries.json()).toMatchObject([{
+      id: endpoint.endpoint.id,
+      activeConversationCount: 1,
+      activeTaskCount: expect.any(Number),
+      latestTask: { id: taskId, requestId: "admin-browser-request" }
+    }]);
+    expect(conversations.statusCode).toBe(200);
+    expect(conversations.json()).toMatchObject([{ conversationKey: "customer-42" }]);
+    expect(tasks.statusCode).toBe(200);
+    expect(tasks.json()).toMatchObject([{ id: taskId, requestId: "admin-browser-request" }]);
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({ id: taskId, message: "Show this Task in the console" });
+    expect(detail.json()).not.toHaveProperty("encryptedParameters");
+    expect(detail.json()).not.toHaveProperty("requestFingerprint");
   });
 
   it("Conversation 建立后禁用 Agent，后续 Task 稳定失败且不启动新 Turn", async () => {

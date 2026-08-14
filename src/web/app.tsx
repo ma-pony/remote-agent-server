@@ -18,6 +18,12 @@ import {
 import { SessionPage } from "./pages/session-page.js";
 import { SessionCreatePage, SessionListPage } from "./pages/session-pages.js";
 import { SessionSettingsPage } from "./pages/session-settings-page.js";
+import {
+  IntegrationConversationPage, IntegrationEndpointCreatePage, IntegrationEndpointDetailLayout,
+  IntegrationEndpointListPage, IntegrationEndpointMappingsPage, IntegrationEndpointOverviewPage,
+  IntegrationEndpointSettingsPage, IntegrationEndpointTasksPage, IntegrationEndpointWebhooksPage,
+  IntegrationTaskDetailPage
+} from "./pages/integration-pages.js";
 
 export const App = () => {
   const [token, setToken] = useState(() => sessionStorage.getItem("apiToken"));
@@ -54,6 +60,17 @@ export const App = () => {
       <Route path="/sessions/new" element={<SessionCreatePage />} />
       <Route path="/sessions/:id" element={<SessionRoute />} />
       <Route path="/sessions/:id/settings" element={<SessionSettingsPage />} />
+      <Route path="/integration-endpoints" element={<IntegrationEndpointListPage />} />
+      <Route path="/integration-endpoints/new" element={<IntegrationEndpointCreatePage />} />
+      <Route path="/integration-endpoints/:id" element={<IntegrationEndpointDetailLayout />}>
+        <Route index element={<IntegrationEndpointOverviewPage />} />
+        <Route path="mappings" element={<IntegrationEndpointMappingsPage />} />
+        <Route path="webhooks" element={<IntegrationEndpointWebhooksPage />} />
+        <Route path="conversations" element={<IntegrationConversationPage />} />
+        <Route path="tasks" element={<IntegrationEndpointTasksPage />} />
+        <Route path="settings" element={<IntegrationEndpointSettingsPage />} />
+      </Route>
+      <Route path="/integration-tasks/:id" element={<IntegrationTaskDetailPage />} />
       <Route path="*" element={<Navigate to="/agents" replace />} />
     </Route>
   </Routes></BrowserRouter>;

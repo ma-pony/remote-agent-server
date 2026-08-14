@@ -161,6 +161,111 @@ export type RunEvent = {
   createdAt: string;
 };
 
+export type IntegrationTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type IntegrationParameterMapping =
+  | { parameterKey: string; source: "request"; requestKey: string }
+  | { parameterKey: string; source: "fixed"; configured: boolean };
+export type IntegrationParameterMappingInput =
+  | { parameterKey: string; source: "request"; requestKey: string }
+  | { parameterKey: string; source: "fixed"; value: string };
+export type IntegrationParameterMappingUpdateInput =
+  | { parameterKey: string; source: "request"; requestKey: string }
+  | { parameterKey: string; source: "fixed"; value?: string };
+export type IntegrationTask = {
+  id: string;
+  endpointId: string;
+  conversationId: string | null;
+  sessionId: string;
+  runId: string | null;
+  requestId: string;
+  message: string;
+  status: IntegrationTaskStatus;
+  result: string | null;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+export type IntegrationEndpointSummary = {
+  id: string;
+  name: string;
+  slug: string;
+  agentId: string;
+  enabled: boolean;
+  activeConversationCount: number;
+  activeTaskCount: number;
+  latestTask: IntegrationTask | null;
+  createdAt: string;
+  updatedAt: string;
+};
+export type IntegrationEndpoint = Omit<IntegrationEndpointSummary,
+  "activeConversationCount" | "activeTaskCount" | "latestTask"> & {
+    promptPrefix: string;
+    parameterMappings: IntegrationParameterMapping[];
+  };
+export type IntegrationEndpointInput = {
+  name: string;
+  slug: string;
+  agentId: string;
+  enabled: boolean;
+  promptPrefix: string;
+  parameterMappings: IntegrationParameterMappingInput[];
+};
+export type IntegrationEndpointUpdateInput = Omit<Partial<IntegrationEndpointInput>, "parameterMappings"> & {
+  parameterMappings?: IntegrationParameterMappingUpdateInput[];
+};
+export type IntegrationConversation = {
+  id: string;
+  endpointId: string;
+  conversationKey: string;
+  sessionId: string;
+  status: "active" | "ended";
+  createdAt: string;
+  endedAt: string | null;
+};
+export type WebhookEventType =
+  | "task.queued" | "task.started" | "task.succeeded" | "task.failed" | "task.cancelled"
+  | "message.user.received" | "message.agent.reply" | "message.system.notice"
+  | "tool.started" | "tool.completed" | "tool.failed";
+export type IntegrationWebhook = {
+  id: string;
+  endpointId: string;
+  name: string;
+  url: string;
+  enabled: boolean;
+  events: WebhookEventType[];
+  headers: Array<{ name: string; configured: true }>;
+  signingSecretConfigured: true;
+  timeoutSeconds: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type IntegrationWebhookInput = {
+  name: string;
+  url: string;
+  enabled: boolean;
+  events: WebhookEventType[];
+  headers: Record<string, string>;
+  timeoutSeconds: number;
+};
+export type WebhookDelivery = {
+  id: string;
+  eventId: string;
+  sequence: number;
+  dispatchOrder: number;
+  subscriptionId: string;
+  taskId: string | null;
+  eventType: string;
+  status: "pending" | "delivering" | "succeeded" | "failed";
+  attemptCount: number;
+  nextAttemptAt: string;
+  lastStatusCode: number | null;
+  lastDurationMs: number | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ApiError = { error?: { code?: string; message?: string }; message?: string };
 
 export class RunStreamPermanentError extends Error {
@@ -224,4 +329,46 @@ export const errorMessage = (error: unknown): string => {
   if (typeof error !== "object" || error === null) return String(error);
   const value = error as ApiError;
   return value.error?.message ?? value.message ?? "请求失败，请稍后重试";
+};
+
+export const integrationApi = {
+  listEndpoints: (signal?: AbortSignal) => api<IntegrationEndpointSummary[]>("/integration-endpoints", { signal }),
+  getEndpoint: (id: string, signal?: AbortSignal) => api<IntegrationEndpoint>(`/integration-endpoints/${id}`, { signal }),
+  createEndpoint: (input: IntegrationEndpointInput) => api<{ endpoint: IntegrationEndpoint; token: string }>(
+    "/integration-endpoints", { method: "POST", body: JSON.stringify(input) }
+  ),
+  updateEndpoint: (id: string, input: IntegrationEndpointUpdateInput) => api<IntegrationEndpoint>(
+    `/integration-endpoints/${id}`, { method: "PATCH", body: JSON.stringify(input) }
+  ),
+  rotateEndpointToken: (id: string) => api<{ endpoint: IntegrationEndpoint; token: string }>(
+    `/integration-endpoints/${id}/rotate-token`, { method: "POST" }
+  ),
+  deleteEndpoint: (id: string) => api<void>(`/integration-endpoints/${id}`, { method: "DELETE" }),
+  listConversations: (id: string, signal?: AbortSignal) => api<IntegrationConversation[]>(
+    `/integration-endpoints/${id}/conversations`, { signal }
+  ),
+  listTasks: (id: string, signal?: AbortSignal) => api<IntegrationTask[]>(
+    `/integration-endpoints/${id}/tasks`, { signal }
+  ),
+  getTask: (id: string, signal?: AbortSignal) => api<IntegrationTask>(`/integration-tasks/${id}`, { signal }),
+  cancelTask: (id: string) => api<IntegrationTask>(`/integration-tasks/${id}/cancel`, { method: "POST" }),
+  listWebhooks: (id: string, signal?: AbortSignal) => api<IntegrationWebhook[]>(
+    `/integration-endpoints/${id}/webhooks`, { signal }
+  ),
+  createWebhook: (id: string, input: IntegrationWebhookInput) => api<{
+    webhook: IntegrationWebhook; signingSecret: string;
+  }>(`/integration-endpoints/${id}/webhooks`, { method: "POST", body: JSON.stringify(input) }),
+  updateWebhook: (endpointId: string, id: string, input: Partial<IntegrationWebhookInput>) => api<IntegrationWebhook>(
+    `/integration-endpoints/${endpointId}/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(input) }
+  ),
+  deleteWebhook: (endpointId: string, id: string) => api<void>(
+    `/integration-endpoints/${endpointId}/webhooks/${id}`, { method: "DELETE" }
+  ),
+  testWebhook: (endpointId: string, id: string) => api<WebhookDelivery>(
+    `/integration-endpoints/${endpointId}/webhooks/${id}/test`, { method: "POST" }
+  ),
+  listDeliveries: (endpointId: string, signal?: AbortSignal) => api<WebhookDelivery[]>(
+    `/integration-endpoints/${endpointId}/webhook-deliveries`, { signal }
+  ),
+  retryDelivery: (id: string) => api<WebhookDelivery>(`/webhook-deliveries/${id}/retry`, { method: "POST" })
 };
