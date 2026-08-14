@@ -44,7 +44,7 @@ type WebhookCreation = {
 };
 
 type RunEvent = { id: string; seq: number; type: string };
-type WebhookDelivery = {
+export type WebhookDelivery = {
   id: string;
   eventId: string;
   dispatchOrder: number;
@@ -62,7 +62,7 @@ type WebhookRequest = {
   signature: string;
 };
 
-type SmokeTrace = {
+export type SmokeTrace = {
   endpointId?: string;
   webhookId?: string;
   taskIds: string[];
@@ -350,13 +350,49 @@ const waitForReplyDeliveries = async (
     const replies = deliveries.filter((delivery) =>
       delivery.eventType === "message.agent.reply" && delivery.taskId !== null && taskIds.includes(delivery.taskId));
     if (replies.length === taskIds.length && replies.every((delivery) => delivery.status === "succeeded")) {
-      return replies.sort((left, right) => left.dispatchOrder - right.dispatchOrder);
+      return replies;
     }
     if (replies.some((delivery) => delivery.status === "failed")) {
       throw new Error(`Webhook delivery exhausted retries: ${replies.find((delivery) => delivery.status === "failed")!.id}`);
     }
     await sleep(Math.min(config.pollIntervalMs, remaining(deadline, "Webhook delivery")));
   }
+};
+
+/** Validates durable Delivery order and the order observed by the local receiver against Task submission order. */
+export const assertReplyDeliveryOrder = (
+  taskIds: string[],
+  deliveries: WebhookDelivery[],
+  receivedEventIds: string[]
+): WebhookDelivery[] => {
+  const ordered = taskIds.map((taskId) => {
+    const matches = deliveries.filter((delivery) =>
+      delivery.eventType === "message.agent.reply" && delivery.taskId === taskId);
+    if (matches.length !== 1) {
+      throw new Error(`Expected one Agent reply Delivery for Task ${taskId}, found ${matches.length}`);
+    }
+    return matches[0]!;
+  });
+  if (ordered.some((delivery, index) =>
+    index > 0 && delivery.dispatchOrder <= ordered[index - 1]!.dispatchOrder)) {
+    throw new Error("Agent reply Delivery dispatchOrder does not follow Task submission order");
+  }
+
+  const expectedEventIds = ordered.map((delivery) => delivery.eventId);
+  const observed = new Set<string>();
+  let previousIndex = -1;
+  for (const eventId of receivedEventIds) {
+    const index = expectedEventIds.indexOf(eventId);
+    if (index === -1 || index < previousIndex) {
+      throw new Error("Local receiver order does not match Agent reply Delivery order");
+    }
+    previousIndex = index;
+    observed.add(eventId);
+  }
+  if (expectedEventIds.some((eventId) => !observed.has(eventId))) {
+    throw new Error("Local receiver order is missing an Agent reply Delivery event");
+  }
+  return ordered;
 };
 
 const traceOutput = (outcome: "succeeded" | "failed", trace: SmokeTrace): void => {
@@ -367,6 +403,34 @@ const recordTaskIdentity = (trace: SmokeTrace, task: ExternalTask): void => {
   if (!trace.taskIds.includes(task.taskId)) trace.taskIds.push(task.taskId);
   if (!trace.sessionIds.includes(task.sessionId)) trace.sessionIds.push(task.sessionId);
   if (task.runId !== null && !trace.runIds.includes(task.runId)) trace.runIds.push(task.runId);
+};
+
+type ManagementTaskIdentity = { id: string; sessionId: string; runId: string | null };
+
+/** Best-effort refreshes durable IDs without including credentials or message contents in diagnostics. */
+export const refreshFailureTrace = async (management: JsonClient, trace: SmokeTrace): Promise<void> => {
+  for (const taskId of trace.taskIds) {
+    try {
+      const task = await management.request<ManagementTaskIdentity>(
+        `/api/integration-tasks/${encodeURIComponent(taskId)}`
+      );
+      if (!trace.sessionIds.includes(task.sessionId)) trace.sessionIds.push(task.sessionId);
+      if (task.runId !== null && !trace.runIds.includes(task.runId)) trace.runIds.push(task.runId);
+    } catch (_taskLookupError) {
+      // Continue collecting the remaining known IDs; the original smoke failure stays primary.
+    }
+  }
+  if (trace.endpointId === undefined) return;
+  try {
+    const deliveries = await management.request<WebhookDelivery[]>(
+      `/api/integration-endpoints/${encodeURIComponent(trace.endpointId)}/webhook-deliveries`
+    );
+    for (const delivery of deliveries) {
+      if (!trace.deliveryIds.includes(delivery.id)) trace.deliveryIds.push(delivery.id);
+    }
+  } catch (_deliveryLookupError) {
+    // IDs already collected above are still useful when management diagnostics also fail.
+  }
 };
 
 const requireSucceeded = (task: ExternalTask): void => {
@@ -459,12 +523,14 @@ export const runIntegrationSmoke = async (config: SmokeConfig): Promise<void> =>
     if (second.runId === first.runId) throw new Error("Second Task reused the first Run");
 
     const deliveries = await waitForReplyDeliveries(management, config, endpointCreation.endpoint.id, [first.taskId, second.taskId]);
-    trace.deliveryIds.push(...deliveries.map((delivery) => delivery.id));
-    if (deliveries[0]!.attemptCount < 2) throw new Error("First Agent reply Webhook was not retried after HTTP 500");
-    if (deliveries.some((delivery, index) => index > 0 && delivery.dispatchOrder <= deliveries[index - 1]!.dispatchOrder)) {
-      throw new Error("Webhook dispatchOrder is not strictly increasing");
-    }
     const replyRequests = receiver.requests.filter((request) => request.eventType === "message.agent.reply");
+    const orderedDeliveries = assertReplyDeliveryOrder(
+      [first.taskId, second.taskId],
+      deliveries,
+      replyRequests.map((request) => request.eventId)
+    );
+    trace.deliveryIds.push(...orderedDeliveries.map((delivery) => delivery.id));
+    if (orderedDeliveries[0]!.attemptCount < 2) throw new Error("First Agent reply Webhook was not retried after HTTP 500");
     if (replyRequests.length < 3 || replyRequests[0]!.eventId !== replyRequests[1]!.eventId) {
       throw new Error("Local receiver did not observe the first Agent reply failure and retry");
     }
@@ -497,29 +563,19 @@ export const runIntegrationSmoke = async (config: SmokeConfig): Promise<void> =>
     for (const delivery of finalDeliveries) {
       if (!trace.deliveryIds.includes(delivery.id)) trace.deliveryIds.push(delivery.id);
     }
-    if (finalDeliveries.some((delivery, index) =>
-      index > 0 && delivery.dispatchOrder <= finalDeliveries[index - 1]!.dispatchOrder)) {
-      throw new Error("Final Webhook dispatchOrder is not strictly increasing");
-    }
     const finalReplyRequests = receiver.requests.filter((request) => request.eventType === "message.agent.reply");
+    assertReplyDeliveryOrder(
+      [first.taskId, second.taskId, third.taskId],
+      finalDeliveries,
+      finalReplyRequests.map((request) => request.eventId)
+    );
     if (finalReplyRequests.some((request) => !verifyWebhookSignature(request, webhookCreation.signingSecret))) {
       throw new Error("Local receiver observed an invalid final Webhook signature");
     }
 
     traceOutput("succeeded", trace);
   } catch (error) {
-    if (trace.endpointId !== undefined) {
-      try {
-        const deliveries = await management.request<WebhookDelivery[]>(
-          `/api/integration-endpoints/${encodeURIComponent(trace.endpointId)}/webhook-deliveries`
-        );
-        for (const delivery of deliveries) {
-          if (!trace.deliveryIds.includes(delivery.id)) trace.deliveryIds.push(delivery.id);
-        }
-      } catch (_deliveryLookupError) {
-        // The original failure remains primary; IDs already collected above are still useful.
-      }
-    }
+    await refreshFailureTrace(management, trace);
     traceOutput("failed", trace);
     throw error;
   } finally {

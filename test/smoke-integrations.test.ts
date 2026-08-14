@@ -3,9 +3,11 @@ import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  assertReplyDeliveryOrder,
   assertIdempotentTask,
   createJsonClient,
   loadSmokeConfig,
+  refreshFailureTrace,
   submitTask,
   verifyWebhookSignature,
   type ExternalTask,
@@ -96,5 +98,80 @@ describe("integration smoke HTTP helpers", () => {
 
     expect(verifyWebhookSignature({ body, timestamp, signature }, secret)).toBe(true);
     expect(verifyWebhookSignature({ body: `${body} `, timestamp, signature }, secret)).toBe(false);
+  });
+
+  it("rejects reply deliveries that do not follow first, second and third Task order", () => {
+    const deliveries = [
+      {
+        id: "delivery-second", eventId: "event-second", dispatchOrder: 10, taskId: "task-second",
+        eventType: "message.agent.reply", status: "succeeded", attemptCount: 1
+      },
+      {
+        id: "delivery-third", eventId: "event-third", dispatchOrder: 20, taskId: "task-third",
+        eventType: "message.agent.reply", status: "succeeded", attemptCount: 1
+      },
+      {
+        id: "delivery-first", eventId: "event-first", dispatchOrder: 30, taskId: "task-first",
+        eventType: "message.agent.reply", status: "succeeded", attemptCount: 2
+      }
+    ] as const;
+
+    expect(() => assertReplyDeliveryOrder(
+      ["task-first", "task-second", "task-third"],
+      [...deliveries],
+      ["event-second", "event-third", "event-first"]
+    )).toThrow(/Task submission order/);
+  });
+
+  it("rejects receiver requests whose event IDs do not follow the Delivery order", () => {
+    const deliveries = [
+      {
+        id: "delivery-first", eventId: "event-first", dispatchOrder: 10, taskId: "task-first",
+        eventType: "message.agent.reply", status: "succeeded", attemptCount: 2
+      },
+      {
+        id: "delivery-second", eventId: "event-second", dispatchOrder: 20, taskId: "task-second",
+        eventType: "message.agent.reply", status: "succeeded", attemptCount: 1
+      },
+      {
+        id: "delivery-third", eventId: "event-third", dispatchOrder: 30, taskId: "task-third",
+        eventType: "message.agent.reply", status: "succeeded", attemptCount: 1
+      }
+    ] as const;
+
+    expect(() => assertReplyDeliveryOrder(
+      ["task-first", "task-second", "task-third"],
+      [...deliveries],
+      ["event-first", "event-second", "event-first", "event-third"]
+    )).toThrow(/receiver order/);
+  });
+
+  it("refreshes late Session, Run and Delivery IDs for known Tasks after a failure", async () => {
+    const trace = {
+      endpointId: "endpoint-1",
+      taskIds: ["task-1"],
+      sessionIds: ["session-1"],
+      runIds: [],
+      deliveryIds: []
+    };
+    const client: JsonClient = {
+      request: vi.fn(async (path: string) => {
+        if (path === "/api/integration-tasks/task-1") {
+          return {
+            id: "task-1", sessionId: "session-1", runId: "run-linked-after-submit"
+          };
+        }
+        return [{ id: "delivery-1" }];
+      }) as JsonClient["request"]
+    };
+
+    await refreshFailureTrace(client, trace);
+
+    expect(trace).toMatchObject({
+      taskIds: ["task-1"],
+      sessionIds: ["session-1"],
+      runIds: ["run-linked-after-submit"],
+      deliveryIds: ["delivery-1"]
+    });
   });
 });
