@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { EventStore } from "../src/events/event-store.js";
+import { isCurrentWebhookPayload } from "../src/integrations/webhook-contract.js";
 import { IntegrationEndpointManager } from "../src/integrations/integration-endpoint-manager.js";
 import { IntegrationProjection } from "../src/integrations/integration-projection.js";
 import { IntegrationStore } from "../src/integrations/integration-store.js";
@@ -67,24 +68,38 @@ const createHarness = (fetchImpl: typeof fetch = vi.fn(async () => new Response(
     timeoutSeconds: 10
   });
 
-  const createDelivery = (subscriptionId: string, sequence: number, eventType = "task.succeeded") => {
+  const createDelivery = (
+    subscriptionId: string,
+    sequence: number,
+    eventType = "task.succeeded",
+    occurredAt = new Date().toISOString()
+  ) => {
+    const eventId = `event-${subscriptionId}-${sequence}`;
     const payloadJson = JSON.stringify({
-      id: `event-${subscriptionId}-${sequence}`,
-      type: eventType,
+      eventId,
+      eventType,
       sequence,
-      taskId: null,
-      occurredAt: new Date().toISOString(),
-      data: { status: "succeeded" }
+      occurredAt,
+      endpoint: { id: endpoint.id, slug: endpoint.slug },
+      task: {
+        id: `task-${subscriptionId}-${sequence}`,
+        requestId: `request-${subscriptionId}-${sequence}`,
+        conversationKey: null,
+        sessionId: `session-${subscriptionId}-${sequence}`,
+        runId: null,
+        status: "succeeded"
+      }
     });
     return store.createDelivery({
-      eventId: `event-${subscriptionId}-${sequence}`,
+      eventId,
       eventKey: `${subscriptionId}:${sequence}:${eventType}`,
       sequence,
       subscriptionId,
       taskId: null,
       eventType,
       payloadJson,
-      nextAttemptAt: new Date().toISOString()
+      nextAttemptAt: occurredAt,
+      createdAt: occurredAt
     });
   };
 
@@ -109,6 +124,80 @@ afterEach(async () => {
 });
 
 describe("WebhookDispatcher", () => {
+  it("发送前再次过滤数据库直写的受管 Header", async () => {
+    const requests: Headers[] = [];
+    const harness = createHarness(vi.fn(async (_url, init) => {
+      requests.push(new Headers(init?.headers));
+      return new Response(null, { status: 204 });
+    }));
+    const subscription = harness.createSubscription("defense-headers", "real-signing-secret");
+    const injected = {
+      "X-Allowed": "kept",
+      Host: "attacker.test",
+      "Content-Length": "999",
+      "Transfer-Encoding": "chunked",
+      Connection: "keep-alive",
+      Forwarded: "host=attacker.test",
+      Via: "attacker-proxy",
+      "X-Forwarded-For": "127.0.0.1",
+      "X-Forwarded-Host": "attacker.test",
+      "X-Forwarded-Proto": "http",
+      "X-ForwardedCustom": "attacker.test",
+      "Proxy-Authorization": "secret-proxy-token",
+      ProxyCustom: "secret-proxy-token",
+      "X-Remote-Agent-Signature": "v1=forged"
+    };
+    harness.db.prepare("UPDATE webhook_subscriptions SET encrypted_headers = ? WHERE id = ?")
+      .run(harness.secrets.encrypt(JSON.stringify(injected)), subscription.id);
+    const delivery = harness.createDelivery(subscription.id, 1);
+
+    await harness.dispatcher.deliver(delivery.id);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.get("x-allowed")).toBe("kept");
+    for (const name of [
+      "host", "content-length", "transfer-encoding", "connection", "forwarded", "via",
+      "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto", "x-forwardedcustom",
+      "proxy-authorization", "proxycustom"
+    ]) expect(requests[0]!.has(name)).toBe(false);
+    expect(requests[0]!.get("x-remote-agent-signature")).toMatch(/^v1=[0-9a-f]{64}$/);
+    expect(requests[0]!.get("x-remote-agent-signature")).not.toBe("v1=forged");
+    harness.db.close();
+  });
+
+  it("拒绝投递数据库中的旧版或非公共 Payload", async () => {
+    const fetchImpl = vi.fn(async () => new Response(null, { status: 204 }));
+    const harness = createHarness(fetchImpl);
+    const subscription = harness.createSubscription("invalid-payload", "secret");
+    const delivery = harness.createDelivery(subscription.id, 1);
+    const pollutedDelivery = harness.createDelivery(subscription.id, 2);
+    harness.db.prepare("UPDATE webhook_deliveries SET payload_json = ? WHERE id = ?")
+      .run(JSON.stringify({
+        id: "legacy-event",
+        type: "task.succeeded",
+        data: { rawOutput: "must-never-leak" }
+      }), delivery.id);
+    const pollutedPayload = JSON.parse(pollutedDelivery.payloadJson) as Record<string, unknown>;
+    pollutedPayload.rawOutput = "must-never-leak";
+    harness.db.prepare("UPDATE webhook_deliveries SET payload_json = ? WHERE id = ?")
+      .run(JSON.stringify(pollutedPayload), pollutedDelivery.id);
+
+    await harness.dispatcher.deliver(delivery.id);
+    await harness.dispatcher.deliver(pollutedDelivery.id);
+
+    expect(fetchImpl).not.toHaveBeenCalled();
+    for (const invalid of [delivery, pollutedDelivery]) {
+      expect(harness.store.getDelivery(invalid.id)).toMatchObject({
+        status: "failed",
+        attemptCount: 1,
+        lastStatusCode: null,
+        lastError: "invalid_webhook_payload"
+      });
+      expect(harness.store.getDelivery(invalid.id)?.lastError).not.toContain("must-never-leak");
+    }
+    harness.db.close();
+  });
+
   it("不跟随 302/307 redirect，避免向跳转目标泄露自定义 Header", async () => {
     const redirectedHeaders: Array<string | undefined> = [];
     const secondUrl = await listenHttp((request, response) => {
@@ -212,6 +301,27 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
+  it("响应流 cancel 永不结束时仍在有界等待后完成投递", async () => {
+    vi.useFakeTimers();
+    const body = new ReadableStream<Uint8Array>({
+      cancel: () => new Promise<void>(() => undefined)
+    });
+    const harness = createHarness(vi.fn(async () => new Response(body, { status: 200 })));
+    const subscription = harness.createSubscription("cancel-timeout", "secret");
+    const delivery = harness.createDelivery(subscription.id, 1);
+    let settled = false;
+
+    const delivering = harness.dispatcher.deliver(delivery.id).then(() => { settled = true; });
+    await vi.advanceTimersByTimeAsync(999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await delivering;
+
+    expect(settled).toBe(true);
+    expect(harness.store.getDelivery(delivery.id)).toMatchObject({ status: "succeeded", lastStatusCode: 200 });
+    harness.db.close();
+  });
+
   it("同一 Subscription 严格串行且不同 Subscription 并行", async () => {
     const requests = new Map<string, ReturnType<typeof deferred<Response>>>();
     const started: string[] = [];
@@ -244,7 +354,7 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
-  it("按 Subscription 的真实插入顺序投递，旧 Task 重试会阻塞同订阅但不阻塞其他订阅", async () => {
+  it("按源时间跨 Task 排序，旧事件重试阻塞同订阅但不阻塞其他订阅", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
     const started: string[] = [];
@@ -255,20 +365,34 @@ describe("WebhookDispatcher", () => {
     const harness = createHarness(fetchImpl);
     const subscriptionA = harness.createSubscription("ordered-a", "secret-a");
     const subscriptionB = harness.createSubscription("ordered-b", "secret-b");
-    const oldTask = harness.createDelivery(subscriptionA.id, 2);
-    const newTask = harness.createDelivery(subscriptionA.id, 1);
-    const otherSubscription = harness.createDelivery(subscriptionB.id, 1);
+    const newTask = harness.createDelivery(
+      subscriptionA.id, 1, "task.succeeded", "2026-08-13T00:00:02.000Z"
+    );
+    const oldTask = harness.createDelivery(
+      subscriptionA.id, 2, "task.succeeded", "2026-08-13T00:00:01.000Z"
+    );
+    const otherSubscription = harness.createDelivery(
+      subscriptionB.id, 1, "task.succeeded", "2026-08-13T00:00:00.000Z"
+    );
     harness.db.prepare("UPDATE webhook_deliveries SET next_attempt_at = ? WHERE id = ?")
       .run("2026-08-13T00:00:10.000Z", oldTask.id);
 
+    expect(harness.store.listDueDeliveries("2026-08-13T00:00:00.000Z").map(({ id }) => id))
+      .toEqual([otherSubscription.id]);
+    expect(harness.store.nextPendingDeliveryAt()).toBe("2026-08-13T00:00:00.000Z");
+    expect(harness.store.claimDelivery(newTask.id, "2026-08-13T00:00:05.000Z")).toBeUndefined();
+
     harness.dispatcher.start();
     await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(harness.store.getDelivery(otherSubscription.id)?.status).toBe("succeeded"));
     expect(started).toEqual([otherSubscription.eventId]);
     expect(started).not.toContain(newTask.eventId);
+    expect(harness.store.nextPendingDeliveryAt()).toBe("2026-08-13T00:00:10.000Z");
 
     await vi.advanceTimersByTimeAsync(10_000);
     await vi.waitFor(() => expect(started).toContain(oldTask.eventId));
     await vi.waitFor(() => expect(started).toContain(newTask.eventId));
+    expect(harness.store.nextPendingDeliveryAt()).toBeUndefined();
     expect(started.indexOf(oldTask.eventId)).toBeLessThan(started.indexOf(newTask.eventId));
 
     await harness.dispatcher.stop();
@@ -481,6 +605,118 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
+  it("所有公共事件类型都使用 exact-key union 且 Delivery 保存源时间", () => {
+    const harness = createHarness();
+    const eventTypes = [
+      "task.started", "task.failed", "task.cancelled", "message.user.received",
+      "message.system.notice", "tool.started", "tool.failed"
+    ];
+    const subscription = harness.store.createSubscription({
+      endpointId: harness.endpoint.id,
+      name: "public-union",
+      url: "https://receiver.test/public-union",
+      enabled: true,
+      eventsJson: JSON.stringify(eventTypes),
+      encryptedHeaders: null,
+      encryptedSigningSecret: harness.secrets.encrypt("public-union-secret"),
+      timeoutSeconds: 10
+    });
+    const session = harness.seed.session();
+    const task = harness.store.createTask({
+      endpointId: harness.endpoint.id,
+      conversationId: null,
+      sessionId: session.id,
+      requestId: "public-union-request",
+      requestFingerprint: "public-union-fingerprint",
+      message: "internal-input",
+      effectivePrompt: "internal-prompt",
+      encryptedParameters: null
+    });
+    const rawSecret = "raw-contract-secret";
+    const cases = [
+      { eventType: "task.started", payload: { status: "running", rawError: rawSecret } },
+      { eventType: "task.failed", payload: { status: "failed", error: rawSecret } },
+      { eventType: "task.cancelled", payload: { status: "cancelled", rawError: rawSecret } },
+      { eventType: "message.user.received", payload: { message: "public user message", rawInput: rawSecret } },
+      {
+        eventType: "message.system.notice",
+        payload: { code: "public_notice", message: "Public notice", rawError: rawSecret }
+      },
+      {
+        eventType: "tool.started",
+        payload: {
+          toolCallId: "tool-started",
+          title: "Read",
+          kind: "read",
+          status: "started",
+          locations: [{ path: "/workspace/a.ts", line: 2, token: rawSecret }],
+          rawInput: rawSecret
+        }
+      },
+      {
+        eventType: "tool.failed",
+        payload: { toolCallId: "tool-failed", status: "failed", rawOutput: rawSecret }
+      }
+    ];
+    const sourceTimes = Object.fromEntries(cases.map((item, index) => {
+      const occurredAt = `2026-08-13T00:00:0${index + 1}.000Z`;
+      harness.store.appendTaskEventInTransaction({
+        taskId: task.id,
+        eventType: item.eventType,
+        eventKey: `${task.id}:${item.eventType}`,
+        occurredAt,
+        payload: item.payload
+      });
+      return [item.eventType, occurredAt];
+    }));
+
+    const deliveries = Object.fromEntries(harness.store.listDeliveries(subscription.id).map((delivery) => [
+      delivery.eventType,
+      { delivery, payload: JSON.parse(delivery.payloadJson) as Record<string, unknown> }
+    ]));
+    const baseKeys = ["endpoint", "eventId", "eventType", "occurredAt", "sequence", "task"];
+    for (const eventType of ["task.started", "task.failed", "task.cancelled"]) {
+      expect(Object.keys(deliveries[eventType]!.payload).sort()).toEqual(baseKeys);
+    }
+    expect(Object.keys(deliveries["message.user.received"]!.payload).sort())
+      .toEqual([...baseKeys, "message"].sort());
+    expect(Object.keys(deliveries["message.system.notice"]!.payload).sort())
+      .toEqual([...baseKeys, "notice"].sort());
+    for (const eventType of ["tool.started", "tool.failed"]) {
+      expect(Object.keys(deliveries[eventType]!.payload).sort()).toEqual([...baseKeys, "tool"].sort());
+    }
+    expect(deliveries["message.user.received"]!.payload.message).toEqual({
+      role: "user", content: "public user message", runStatus: "queued"
+    });
+    expect(deliveries["message.system.notice"]!.payload.notice).toEqual({
+      code: "public_notice", message: "Public notice"
+    });
+    expect(deliveries["tool.started"]!.payload.tool).toEqual({
+      toolCallId: "tool-started",
+      title: "Read",
+      kind: "read",
+      status: "started",
+      locations: [{ path: "/workspace/a.ts", line: 2 }]
+    });
+    expect(deliveries["tool.failed"]!.payload.tool).toEqual({
+      toolCallId: "tool-failed", status: "failed"
+    });
+    for (const eventType of eventTypes) {
+      expect(deliveries[eventType]!.delivery.createdAt).toBe(sourceTimes[eventType]);
+      expect(isCurrentWebhookPayload(deliveries[eventType]!.delivery.payloadJson, {
+        eventId: deliveries[eventType]!.delivery.eventId,
+        eventType,
+        sequence: deliveries[eventType]!.delivery.sequence,
+        endpointId: harness.endpoint.id
+      })).toBe(true);
+      expect(Object.keys(deliveries[eventType]!.payload.task as Record<string, unknown>).sort()).toEqual([
+        "conversationKey", "id", "requestId", "runId", "sessionId", "status"
+      ]);
+    }
+    expect(JSON.stringify(deliveries)).not.toContain(rawSecret);
+    harness.db.close();
+  });
+
   it("恢复 delivering 并从 Run/Event 补建缺失的确定性 Delivery", () => {
     const harness = createHarness();
     const subscription = harness.createSubscription("recover", "secret");
@@ -573,6 +809,80 @@ describe("WebhookDispatcher", () => {
         SELECT event_sequence, event_sequences_json FROM integration_tasks WHERE id = ?
       `).get(task.id)
     }).toEqual(snapshot);
+    harness.db.close();
+  });
+
+  it("恢复乱序写入后仍按源时间和 Task sequence 投递 tool、terminal、reply", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
+    const received: string[] = [];
+    const harness = createHarness(vi.fn(async (_url, init) => {
+      received.push(new Headers(init?.headers).get("x-remote-agent-event")!);
+      return new Response(null, { status: 204 });
+    }));
+    const subscription = harness.store.createSubscription({
+      endpointId: harness.endpoint.id,
+      name: "recovery-source-order",
+      url: "https://receiver.test/recovery-source-order",
+      enabled: true,
+      eventsJson: JSON.stringify(["tool.completed", "task.succeeded", "message.agent.reply"]),
+      encryptedHeaders: null,
+      encryptedSigningSecret: harness.secrets.encrypt("source-order-secret"),
+      timeoutSeconds: 10
+    });
+    let eventStore!: EventStore;
+    const projection = new IntegrationProjection({
+      db: harness.db,
+      store: harness.store,
+      listEvents: (runId) => eventStore.list(runId, 0)
+    });
+    const runRepository = new RunRepository({ db: harness.db, projection });
+    eventStore = new EventStore({ db: harness.db, projection });
+    const session = harness.seed.session();
+    const task = harness.store.createTask({
+      endpointId: harness.endpoint.id,
+      conversationId: null,
+      sessionId: session.id,
+      requestId: "recovery-source-order",
+      requestFingerprint: "recovery-source-order-fingerprint",
+      message: "source order",
+      effectivePrompt: "source order",
+      encryptedParameters: null
+    });
+    const run = runRepository.create(
+      { sessionId: session.id, input: "source order" },
+      { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
+    );
+    runRepository.markRunning(run.id);
+    vi.setSystemTime(new Date("2026-08-13T00:00:03.000Z"));
+    eventStore.append(run.id, "tool", { toolCallId: "tool-source-order", status: "completed", rawOutput: "hidden" });
+    vi.setSystemTime(new Date("2026-08-13T00:00:04.000Z"));
+    eventStore.append(run.id, "message", { stream: "output", text: "finished" });
+    vi.setSystemTime(new Date("2026-08-13T00:00:05.000Z"));
+    runRepository.finish(run.id, { status: "succeeded", result: "internal" });
+    harness.db.prepare(`
+      DELETE FROM webhook_deliveries
+      WHERE subscription_id = ? AND event_type IN ('tool.completed', 'task.succeeded', 'message.agent.reply')
+    `).run(subscription.id);
+
+    projection.recover();
+    const firstRecovery = harness.db.prepare(`
+      SELECT event_id, event_key, sequence, payload_json, created_at
+      FROM webhook_deliveries WHERE subscription_id = ? ORDER BY rowid
+    `).all(subscription.id);
+    expect(firstRecovery.map((row) => (row as { sequence: number }).sequence)).toEqual([4, 5, 3]);
+    projection.recover();
+    expect(harness.db.prepare(`
+      SELECT event_id, event_key, sequence, payload_json, created_at
+      FROM webhook_deliveries WHERE subscription_id = ? ORDER BY rowid
+    `).all(subscription.id)).toEqual(firstRecovery);
+
+    harness.dispatcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(received).toHaveLength(3));
+
+    expect(received).toEqual(["tool.completed", "task.succeeded", "message.agent.reply"]);
+    await harness.dispatcher.stop();
     harness.db.close();
   });
 

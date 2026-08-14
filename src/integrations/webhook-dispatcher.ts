@@ -4,6 +4,7 @@ import type { SecretStore } from "../mcp/secret-store.js";
 import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type { WebhookDelivery } from "./integration-types.js";
+import { isCurrentWebhookPayload, isManagedWebhookHeader } from "./webhook-contract.js";
 
 const RETRY_DELAYS_MS = [10_000, 60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
 const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -21,10 +22,12 @@ const customHeaders = (serialized: string | null, secrets: Pick<SecretStore, "de
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("invalid_webhook_headers");
   }
-  for (const headerValue of Object.values(value)) {
+  const headers: Record<string, string> = {};
+  for (const [name, headerValue] of Object.entries(value)) {
     if (typeof headerValue !== "string") throw new Error("invalid_webhook_headers");
+    if (!isManagedWebhookHeader(name)) headers[name] = headerValue;
   }
-  return value as Record<string, string>;
+  return headers;
 };
 
 const deliveryFailure = (error: unknown, timedOut: boolean): string => {
@@ -143,6 +146,21 @@ export class WebhookDispatcher {
     }
 
     const startedAt = Date.now();
+    if (!isCurrentWebhookPayload(claimed.payloadJson, {
+      eventId: claimed.eventId,
+      eventType: claimed.eventType,
+      sequence: claimed.sequence,
+      endpointId: subscription.endpointId
+    })) {
+      this.dependencies.store.markDeliveryFailed(claimed.id, {
+        terminal: true,
+        nextAttemptAt: new Date().toISOString(),
+        statusCode: null,
+        durationMs: Date.now() - startedAt,
+        error: "invalid_webhook_payload"
+      });
+      return;
+    }
     const timeoutSignal = AbortSignal.timeout(subscription.timeoutSeconds * 1_000);
     const signal = AbortSignal.any([stopController.signal, timeoutSignal]);
     let statusCode: number | null = null;

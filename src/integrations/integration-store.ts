@@ -160,6 +160,7 @@ export type CreateWebhookDeliveryInput = {
   eventType: string;
   payloadJson: string;
   nextAttemptAt: string;
+  createdAt: string;
 };
 
 export type AppendTaskEventInput = {
@@ -172,6 +173,27 @@ export type AppendTaskEventInput = {
 
 export const webhookEventId = (endpointId: string, eventKey: string): string =>
   `evt_${createHash("sha256").update(`${endpointId}:${eventKey}`, "utf8").digest("hex").slice(0, 32)}`;
+
+const publicToolPayload = (eventType: string, input: Record<string, unknown>): Record<string, unknown> => {
+  const payload: Record<string, unknown> = {
+    toolCallId: typeof input.toolCallId === "string" ? input.toolCallId : "",
+    status: eventType.slice("tool.".length)
+  };
+  if (typeof input.title === "string" && input.title !== "") payload.title = input.title;
+  if (typeof input.kind === "string" && input.kind !== "") payload.kind = input.kind;
+  if (Array.isArray(input.locations)) {
+    const locations = input.locations.flatMap((item) => {
+      if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
+      const location = item as Record<string, unknown>;
+      if (typeof location.path !== "string" || location.path === "") return [];
+      return [location.line === null || typeof location.line === "number"
+        ? { path: location.path, line: location.line }
+        : { path: location.path }];
+    });
+    if (locations.length > 0) payload.locations = locations;
+  }
+  return payload;
+};
 
 const toEndpoint = (row: EndpointRow): IntegrationEndpoint => ({
   id: row.id,
@@ -721,7 +743,9 @@ export class IntegrationStore {
 
   listDeliveries(subscriptionId: string): WebhookDelivery[] {
     return (this.db.prepare(`
-      SELECT * FROM webhook_deliveries WHERE subscription_id = ? ORDER BY rowid ASC
+      SELECT * FROM webhook_deliveries
+      WHERE subscription_id = ?
+      ORDER BY created_at ASC, sequence ASC, event_id ASC, rowid ASC
     `).all(subscriptionId) as DeliveryRow[]).map(toDelivery);
   }
 
@@ -807,7 +831,8 @@ export class IntegrationStore {
         taskId: task.id,
         eventType: input.eventType,
         payloadJson,
-        nextAttemptAt: occurredAt
+        nextAttemptAt: occurredAt,
+        createdAt: occurredAt
       })];
     });
     return deliveries;
@@ -830,7 +855,7 @@ export class IntegrationStore {
       ON CONFLICT(subscription_id, event_key) DO NOTHING
     `).run(
       id, input.eventId, input.eventKey, input.sequence, input.subscriptionId, input.taskId, input.eventType,
-      input.payloadJson, input.nextAttemptAt, now, now
+      input.payloadJson, input.nextAttemptAt, input.createdAt, now
     );
     const row = this.deliveryRow(id) ?? this.db.prepare(`
       SELECT * FROM webhook_deliveries WHERE subscription_id = ? AND event_key = ?
@@ -848,12 +873,14 @@ export class IntegrationStore {
         AND delivery.next_attempt_at <= ?
         AND subscription.enabled = 1
         AND delivery.rowid = (
-          SELECT MIN(earlier.rowid)
+          SELECT earlier.rowid
           FROM webhook_deliveries earlier
           WHERE earlier.subscription_id = delivery.subscription_id
             AND earlier.status IN ('pending', 'delivering')
+          ORDER BY earlier.created_at ASC, earlier.sequence ASC, earlier.event_id ASC, earlier.rowid ASC
+          LIMIT 1
         )
-      ORDER BY delivery.next_attempt_at ASC, delivery.rowid ASC
+      ORDER BY delivery.created_at ASC, delivery.sequence ASC, delivery.event_id ASC, delivery.rowid ASC
     `).all(now) as DeliveryRow[];
     return rows.map(toDelivery);
   }
@@ -866,10 +893,12 @@ export class IntegrationStore {
       WHERE delivery.status = 'pending'
         AND subscription.enabled = 1
         AND delivery.rowid = (
-          SELECT MIN(earlier.rowid)
+          SELECT earlier.rowid
           FROM webhook_deliveries earlier
           WHERE earlier.subscription_id = delivery.subscription_id
             AND earlier.status IN ('pending', 'delivering')
+          ORDER BY earlier.created_at ASC, earlier.sequence ASC, earlier.event_id ASC, earlier.rowid ASC
+          LIMIT 1
         )
     `).get() as { next_attempt_at: string | null };
     return row.next_attempt_at ?? undefined;
@@ -887,10 +916,12 @@ export class IntegrationStore {
           AND delivery.next_attempt_at <= ?
           AND subscription.enabled = 1
           AND delivery.rowid = (
-            SELECT MIN(earlier.rowid)
+            SELECT earlier.rowid
             FROM webhook_deliveries earlier
             WHERE earlier.subscription_id = delivery.subscription_id
               AND earlier.status IN ('pending', 'delivering')
+            ORDER BY earlier.created_at ASC, earlier.sequence ASC, earlier.event_id ASC, earlier.rowid ASC
+            LIMIT 1
           )
       `).get(id, now) as { id: string } | undefined;
       if (candidate === undefined) return undefined;
@@ -1061,7 +1092,7 @@ export class IntegrationStore {
         message: typeof input.payload.message === "string" ? input.payload.message : "System notice"
       };
     } else if (input.eventType.startsWith("tool.")) {
-      payload.tool = input.payload;
+      payload.tool = publicToolPayload(input.eventType, input.payload);
     }
     return JSON.stringify(payload);
   }

@@ -626,14 +626,29 @@ describe("Server startup and shutdown", () => {
           (id, endpoint_id, name, url, enabled, events_json, encrypted_signing_secret, timeout_seconds, created_at, updated_at)
         VALUES ('restart-webhook', 'endpoint-1', 'Restart webhook', 'https://receiver.test/restart', 1, '[]', ?, 10, ?, ?)
       `).run(secrets.encrypt("restart-signing-secret"), timestamp, timestamp);
+      const restartPayload = JSON.stringify({
+        eventId: "restart-event",
+        eventType: "task.started",
+        sequence: 1,
+        occurredAt: timestamp,
+        endpoint: { id: "endpoint-1", slug: "endpoint-1" },
+        task: {
+          id: "old-task",
+          requestId: "request-1",
+          conversationKey: null,
+          sessionId: "old-session",
+          runId: "old-run",
+          status: "running"
+        }
+      });
       db.prepare(`
         INSERT INTO webhook_deliveries
           (id, event_id, event_key, sequence, subscription_id, task_id, event_type, payload_json, status,
            attempt_count, next_attempt_at, created_at, updated_at)
         VALUES ('restart-delivery', 'restart-event', 'restart:event', 1, 'restart-webhook', 'old-task',
-                'task.started', '{"id":"restart-event","type":"task.started","data":{"status":"running"}}',
+                'task.started', ?,
                 'delivering', 1, ?, ?, ?)
-      `).run(timestamp, timestamp, timestamp);
+      `).run(restartPayload, timestamp, timestamp, timestamp);
     }
     db.prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
       .run("queued-run", "queued-session", "queued", "resume queued", timestamp);

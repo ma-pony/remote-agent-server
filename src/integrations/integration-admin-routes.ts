@@ -4,6 +4,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import type { SecretStore } from "../mcp/secret-store.js";
+import { isManagedWebhookHeader } from "./webhook-contract.js";
 import { IntegrationEndpointManager, IntegrationEndpointManagerError } from "./integration-endpoint-manager.js";
 import { webhookEventId, type IntegrationStore } from "./integration-store.js";
 import type { WebhookDelivery, WebhookSubscription } from "./integration-types.js";
@@ -22,30 +23,6 @@ const webhookEvents = [
   "tool.completed",
   "tool.failed"
 ] as const;
-const managedHeaders = new Set([
-  "content-type",
-  "x-remote-agent-event",
-  "x-remote-agent-event-id",
-  "x-remote-agent-timestamp",
-  "x-remote-agent-signature",
-  "host",
-  "content-length",
-  "transfer-encoding",
-  "connection",
-  "proxy-authorization",
-  "proxy-authenticate",
-  "upgrade",
-  "trailer",
-  "te",
-  "keep-alive",
-  "expect",
-  "forwarded",
-  "via",
-  "x-forwarded-for",
-  "x-forwarded-host",
-  "x-forwarded-proto"
-]);
-
 const slug = z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,63}$/);
 const requestParameterMappingSchema = z.object({
   parameterKey: z.string().trim().min(1),
@@ -81,7 +58,7 @@ const webhookHeaders = z.record(z.string(), z.string()).superRefine((headers, co
     if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name) || /[\r\n]/.test(value)) {
       context.addIssue({ code: "custom", message: "Invalid Webhook Header" });
     }
-    if (managedHeaders.has(name.toLowerCase())) {
+    if (isManagedWebhookHeader(name)) {
       context.addIssue({ code: "custom", message: "Managed Webhook Header cannot be overridden" });
     }
   }
@@ -330,7 +307,8 @@ export const registerIntegrationAdminRoutes = (
           task: null,
           notice: { code: "webhook_test", message: "Webhook test" }
         }),
-        nextAttemptAt: occurredAt
+        nextAttemptAt: occurredAt,
+        createdAt: occurredAt
       });
       return reply.code(202).send(publicDelivery(delivery));
     }
