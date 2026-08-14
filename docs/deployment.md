@@ -366,3 +366,139 @@ sudo -u remote-agent -H bash -lc '
 该脚本通过 HTTP API 按 Claude Code、Codex、Hermes 顺序执行：确保固定 smoke Agent 存在并通过应用 doctor、创建新 Session、发送“只回复当前工作目录的目录名”、等待成功、在同一 Session 发送“只回复你上一轮看到的目录名”、等待成功，并读取第二轮 Run 的事件历史。每一步都会打印 Provider、Agent ID、Session ID 和 Run ID。每次 HTTP 请求（包括 response body）都有 Abort deadline；Run 轮询的每次读取受该 Run 的剩余 `SMOKE_RUN_TIMEOUT_MS` 限制。任一 Provider 未安装/未登录、Session 续接失败、Run 失败、未知 Run 状态、超时或事件 `seq` 未从 1 严格连续递增，命令都会以非零退出。它不 mock Provider，也不会在 `pnpm test` 中联网。
 
 Smoke 只覆盖三个 Provider 的顺序双轮真实连通性。仍须在目标服务器验收：两个不同 Session 并发、断开并重新连接 SSE 后 `seq` 不缺失/不重复、Session 修改不污染项目环境或另一个 Session、浏览器任务只在该 Session 的 `browser/` 产生 Profile、服务重启把在途 Run 标为 `failed/server_restarted` 且不重放输入。
+
+## 7. 外部系统接入
+
+### 7.1 创建接入端点并保存 Token
+
+管理员在“外部接入”页面创建 Endpoint，选择一个已启用且项目环境可用的 Agent。Endpoint Token 只在创建或轮换成功后展示一次，服务端只保存哈希，离开提示页后不能找回。应立即把 Token 放进调用方的 Secret 管理系统；不要写入 Git、请求日志、Webhook Header 或 Remote Agent Server 的 `.env`。
+
+管理端使用全局 `API_TOKEN`，外部调用方只使用所属 Endpoint Token。两者权限不同，不能互换。下面用占位符演示调用；生产环境应从 Secret 管理系统注入变量：
+
+```bash
+REMOTE_AGENT_URL=https://agent.example.com
+ENDPOINT_SLUG=grab-manager-ticket
+ENDPOINT_TOKEN='<创建 Endpoint 时只展示一次的 Token>'
+
+curl --fail-with-body \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -X POST "$REMOTE_AGENT_URL/integration/v1/endpoints/$ENDPOINT_SLUG/tasks" \
+  --data '{
+    "requestId":"ticket-1332-event-1",
+    "conversationKey":"ticket-1332",
+    "message":"分析并处理这个工单",
+    "parameters":{}
+  }'
+```
+
+`requestId` 是调用方生成的幂等键。同一 Endpoint 下，用相同内容重试相同 `requestId` 会返回原 `taskId`、`sessionId` 和 `runId`，不会再次执行；相同 `requestId` 携带不同内容返回 `409 idempotency_conflict`。`conversationKey` 相同的多轮 Task 严格串行并复用同一个 Session；不需要续接时可以省略它。
+
+提交返回 `202` 不表示 Agent 已完成。调用方必须保存 `taskId`，并以查询接口作为最终状态依据：
+
+```bash
+TASK_ID='<提交返回的 taskId>'
+curl --fail-with-body \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  "$REMOTE_AGENT_URL/integration/v1/tasks/$TASK_ID"
+
+curl --fail-with-body \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  "$REMOTE_AGENT_URL/integration/v1/tasks/$TASK_ID/events?afterSeq=0"
+```
+
+Task 状态为 `queued`、`running`、`succeeded`、`failed` 或 `cancelled`。查询和 Event 历史是可靠性基础；SSE 和 Webhook 不替代查询。
+
+### 7.2 SSE 断线续读
+
+实时页面可连接：
+
+```text
+GET /integration/v1/tasks/:taskId/events/stream?afterSeq=<最后已处理的 seq>
+Authorization: Bearer <Endpoint Token>
+Accept: text/event-stream
+```
+
+每处理并持久化一个 Event，就保存它的 `seq`。连接断开后先请求 `/events?afterSeq=<seq>` 补齐，再用同一个 `afterSeq` 重新连接 SSE；接收方按 Event `id` 去重。服务每 20 秒发送一次 `: heartbeat`。代理 idle timeout 必须大于 20 秒，并关闭响应缓冲；以 Nginx 为例：
+
+```nginx
+location /integration/v1/ {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 60s;
+    proxy_send_timeout 60s;
+}
+```
+
+客户端、负载均衡器或代理仍可能主动断开长连接，因此调用方必须设置重连和查询兜底。SSE 断开只影响实时显示，不会取消或暂停 Task。
+
+### 7.3 Webhook 验签和重试
+
+Webhook 创建成功时，签名密钥与 Endpoint Token 一样只展示一次。每次请求包含：
+
+```text
+X-Remote-Agent-Event: message.agent.reply
+X-Remote-Agent-Event-Id: <稳定 eventId>
+X-Remote-Agent-Timestamp: <Unix 秒>
+X-Remote-Agent-Signature: v1=<hex HMAC-SHA256>
+```
+
+签名原文是 `timestamp + "." + 原始 HTTP Body 字节`，密钥是创建 Webhook 时得到的 signing secret。必须在 JSON 解析前读取原始 Body，并使用恒定时间比较；不要对 JSON 重新格式化后再验签。Node.js 最小示例：
+
+```js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const expected = createHmac("sha256", signingSecret)
+  .update(`${timestamp}.${rawBody}`)
+  .digest("hex");
+const actual = signature.startsWith("v1=") ? signature.slice(3) : "";
+const valid = actual.length === expected.length
+  && timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+```
+
+验签成功后用 `eventId` 幂等处理。服务采用至少一次投递：网络失败或非 2xx 会自动重试，所以同一事件可能收到多次。Webhook 投递失败不改变 Task 结果；调用方应在处理成功后返回 2xx，并在管理页面检查 Delivery 状态。
+
+Webhook 只发送明确的 Task 状态、用户消息、Agent 最终回复、系统通知和脱敏工具状态，不发送 Agent thought、原始工具输入输出、MCP 密钥或 Provider 私有数据。
+
+### 7.4 结束 Conversation 和常见错误
+
+确认该 Conversation 没有 `queued` 或 `running` Task 后，可以结束续接关系：
+
+```bash
+CONVERSATION_KEY=ticket-1332
+curl --fail-with-body \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  -X POST \
+  "$REMOTE_AGENT_URL/integration/v1/endpoints/$ENDPOINT_SLUG/conversations/$CONVERSATION_KEY/end"
+```
+
+历史 Session 和 Run 会保留。之后用相同 `conversationKey` 提交 Task 会创建新 Session。
+
+- `401 invalid_endpoint_token`：Token 缺失、错误或已经轮换。检查调用方使用的是该 Endpoint 的 Token，不是管理 `API_TOKEN`。
+- `409 idempotency_conflict`：同一 `requestId` 已用于不同请求。重试必须保持原请求不变；新业务请求应生成新的 `requestId`。
+- `409 conversation_busy`：Conversation 仍有排队或执行中的 Task，暂时不能结束；继续查询 Task 终态后再试。
+
+### 7.5 真实外部接入 smoke
+
+先在管理页面选择一个已启用、项目环境可用、Provider doctor 通过且没有未映射必填 Session 参数的 Agent，记录 Agent ID。然后在 **Remote Agent Server 同一台主机**运行：
+
+```bash
+cd /opt/remote-agent-server
+set -a; . ./.env; set +a
+export SMOKE_BASE_URL=http://127.0.0.1:3000
+export SMOKE_API_TOKEN="$API_TOKEN"
+export SMOKE_AGENT_ID='<待验收 Agent ID>'
+pnpm smoke:integrations
+```
+
+脚本会创建临时 Endpoint、一次性 Token、Webhook Subscription 和本机临时 HTTP receiver；不会向第三方发送数据。receiver 对第一条 `message.agent.reply` 返回 500、第二次返回 204，以验证自动重试和 HMAC。脚本还会验证：
+
+1. 第一轮 Task 成功，Event `seq` 连续，查询与 SSE 的 `afterSeq` 续读结果一致。
+2. 重复 `requestId` 返回相同 Task/Run，没有第二次执行。
+3. 同一 Conversation 第二轮复用 Session，但创建新的 Run。
+4. Agent reply Delivery 自动重试成功、签名有效且 `dispatchOrder` 单调。
+5. 结束 Conversation 后，相同 Key 的第三轮创建新 Session。
+
+每个 HTTP 请求和响应 Body 读取都有 Abort deadline。失败时命令非零退出并打印已经取得的 Endpoint、Task、Session、Run 和 Delivery ID，不打印 Token 或 signing secret。脚本默认不删除记录，便于在管理界面审计；确认无用后由管理员手动停用 Endpoint。可用 `SMOKE_TASK_TIMEOUT_MS`、`SMOKE_REQUEST_TIMEOUT_MS` 和 `SMOKE_POLL_INTERVAL_MS` 调整等待时间。
