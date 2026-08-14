@@ -25,6 +25,7 @@ type EndpointRow = {
   prompt_prefix: string;
   parameter_mappings_json: string;
   encrypted_fixed_values: string | null;
+  next_delivery_order: number;
   created_at: string;
   updated_at: string;
 };
@@ -55,6 +56,7 @@ type TaskRow = {
   error: string | null;
   event_sequence: number;
   event_sequences_json: string;
+  event_dispatch_orders_json: string;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -79,6 +81,7 @@ type DeliveryRow = {
   event_id: string;
   event_key: string;
   sequence: number;
+  dispatch_order: number;
   subscription_id: string;
   task_id: string | null;
   event_type: string;
@@ -160,8 +163,9 @@ export type CreateWebhookDeliveryInput = {
   eventType: string;
   payloadJson: string;
   nextAttemptAt: string;
-  createdAt: string;
 };
+
+type PersistedWebhookDeliveryInput = CreateWebhookDeliveryInput & { dispatchOrder: number };
 
 export type AppendTaskEventInput = {
   taskId: string;
@@ -256,6 +260,7 @@ const toDelivery = (row: DeliveryRow): WebhookDelivery => ({
   eventId: row.event_id,
   eventKey: row.event_key,
   sequence: row.sequence,
+  dispatchOrder: row.dispatch_order,
   subscriptionId: row.subscription_id,
   taskId: row.task_id,
   eventType: row.event_type,
@@ -745,7 +750,7 @@ export class IntegrationStore {
     return (this.db.prepare(`
       SELECT * FROM webhook_deliveries
       WHERE subscription_id = ?
-      ORDER BY created_at ASC, sequence ASC, event_id ASC, rowid ASC
+      ORDER BY dispatch_order ASC, rowid ASC
     `).all(subscriptionId) as DeliveryRow[]).map(toDelivery);
   }
 
@@ -792,6 +797,7 @@ export class IntegrationStore {
     const task = this.taskRow(input.taskId);
     if (task === undefined) return [];
     const eventSequences = JSON.parse(task.event_sequences_json) as Record<string, number>;
+    const eventDispatchOrders = JSON.parse(task.event_dispatch_orders_json) as Record<string, number>;
     const provisionalSequence = task.event_sequence + 1;
     const eventKey = input.eventKey ?? `${task.id}:${provisionalSequence}`;
     const existing = this.db.prepare(`
@@ -801,16 +807,26 @@ export class IntegrationStore {
       `).all(task.id, eventKey) as DeliveryRow[];
     const firstExisting = existing[0];
     const knownSequence = eventSequences[eventKey];
+    const knownDispatchOrder = eventDispatchOrders[eventKey];
     const sequence = firstExisting?.sequence ?? knownSequence ?? provisionalSequence;
+    const dispatchOrder = knownDispatchOrder ?? this.allocateEndpointDeliveryOrderInTransaction(task.endpoint_id);
     const eventId = firstExisting?.event_id ?? webhookEventId(task.endpoint_id, eventKey);
     const occurredAt = firstExisting === undefined
       ? input.occurredAt ?? new Date().toISOString()
       : (JSON.parse(firstExisting.payload_json) as { occurredAt: string }).occurredAt;
-    if (knownSequence === undefined) {
-      eventSequences[eventKey] = sequence;
+    if (knownSequence === undefined || knownDispatchOrder === undefined) {
+      if (knownSequence === undefined) eventSequences[eventKey] = sequence;
+      if (knownDispatchOrder === undefined) eventDispatchOrders[eventKey] = dispatchOrder;
       this.db.prepare(`
-        UPDATE integration_tasks SET event_sequence = ?, event_sequences_json = ? WHERE id = ?
-      `).run(sequence, JSON.stringify(eventSequences), task.id);
+        UPDATE integration_tasks
+        SET event_sequence = ?, event_sequences_json = ?, event_dispatch_orders_json = ?
+        WHERE id = ?
+      `).run(
+        knownSequence === undefined ? sequence : task.event_sequence,
+        JSON.stringify(eventSequences),
+        JSON.stringify(eventDispatchOrders),
+        task.id
+      );
     }
 
     const subscriptions = this.db.prepare(`
@@ -827,35 +843,40 @@ export class IntegrationStore {
         eventId,
         eventKey,
         sequence,
+        dispatchOrder,
         subscriptionId: row.id,
         taskId: task.id,
         eventType: input.eventType,
         payloadJson,
-        nextAttemptAt: occurredAt,
-        createdAt: occurredAt
+        nextAttemptAt: occurredAt
       })];
     });
     return deliveries;
   }
 
   createDelivery(input: CreateWebhookDeliveryInput): WebhookDelivery {
-    const delivery = this.immediateTransaction(() => this.createDeliveryInTransaction(input));
+    const delivery = this.immediateTransaction(() => {
+      const subscription = this.subscriptionRow(input.subscriptionId)!;
+      const dispatchOrder = this.allocateEndpointDeliveryOrderInTransaction(subscription.endpoint_id);
+      return this.createDeliveryInTransaction({ ...input, dispatchOrder });
+    });
     this.notifyDeliveriesChanged();
     return delivery;
   }
 
-  createDeliveryInTransaction(input: CreateWebhookDeliveryInput): WebhookDelivery {
+  createDeliveryInTransaction(input: PersistedWebhookDeliveryInput): WebhookDelivery {
     const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
     this.db.prepare(`
       INSERT INTO webhook_deliveries
-        (id, event_id, event_key, sequence, subscription_id, task_id, event_type, payload_json, status, attempt_count,
+        (id, event_id, event_key, sequence, dispatch_order, subscription_id, task_id, event_type, payload_json,
+         status, attempt_count,
          next_attempt_at, last_status_code, last_duration_ms, last_error, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, ?, ?)
       ON CONFLICT(subscription_id, event_key) DO NOTHING
     `).run(
-      id, input.eventId, input.eventKey, input.sequence, input.subscriptionId, input.taskId, input.eventType,
-      input.payloadJson, input.nextAttemptAt, input.createdAt, now
+      id, input.eventId, input.eventKey, input.sequence, input.dispatchOrder, input.subscriptionId, input.taskId,
+      input.eventType, input.payloadJson, input.nextAttemptAt, now, now
     );
     const row = this.deliveryRow(id) ?? this.db.prepare(`
       SELECT * FROM webhook_deliveries WHERE subscription_id = ? AND event_key = ?
@@ -877,10 +898,10 @@ export class IntegrationStore {
           FROM webhook_deliveries earlier
           WHERE earlier.subscription_id = delivery.subscription_id
             AND earlier.status IN ('pending', 'delivering')
-          ORDER BY earlier.created_at ASC, earlier.sequence ASC, earlier.event_id ASC, earlier.rowid ASC
+          ORDER BY earlier.dispatch_order ASC, earlier.rowid ASC
           LIMIT 1
         )
-      ORDER BY delivery.created_at ASC, delivery.sequence ASC, delivery.event_id ASC, delivery.rowid ASC
+      ORDER BY delivery.dispatch_order ASC, delivery.rowid ASC
     `).all(now) as DeliveryRow[];
     return rows.map(toDelivery);
   }
@@ -897,7 +918,7 @@ export class IntegrationStore {
           FROM webhook_deliveries earlier
           WHERE earlier.subscription_id = delivery.subscription_id
             AND earlier.status IN ('pending', 'delivering')
-          ORDER BY earlier.created_at ASC, earlier.sequence ASC, earlier.event_id ASC, earlier.rowid ASC
+          ORDER BY earlier.dispatch_order ASC, earlier.rowid ASC
           LIMIT 1
         )
     `).get() as { next_attempt_at: string | null };
@@ -920,7 +941,7 @@ export class IntegrationStore {
             FROM webhook_deliveries earlier
             WHERE earlier.subscription_id = delivery.subscription_id
               AND earlier.status IN ('pending', 'delivering')
-            ORDER BY earlier.created_at ASC, earlier.sequence ASC, earlier.event_id ASC, earlier.rowid ASC
+            ORDER BY earlier.dispatch_order ASC, earlier.rowid ASC
             LIMIT 1
           )
       `).get(id, now) as { id: string } | undefined;
@@ -1045,6 +1066,17 @@ export class IntegrationStore {
 
   private deliveryRow(id: string): DeliveryRow | undefined {
     return this.db.prepare("SELECT * FROM webhook_deliveries WHERE id = ?").get(id) as DeliveryRow | undefined;
+  }
+
+  private allocateEndpointDeliveryOrderInTransaction(endpointId: string): number {
+    const row = this.db.prepare(`
+      UPDATE integration_endpoints
+      SET next_delivery_order = next_delivery_order + 1
+      WHERE id = ?
+      RETURNING next_delivery_order
+    `).get(endpointId) as { next_delivery_order: number } | undefined;
+    if (row === undefined) throw new Error("integration_endpoint_not_found");
+    return row.next_delivery_order;
   }
 
   private publicTaskPayloadJson(

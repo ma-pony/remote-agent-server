@@ -82,12 +82,18 @@ describe("database migration", () => {
     db.close();
   });
 
-  it("Integration Task 持久化 eventKey 到 sequence 的确定性映射", () => {
+  it("Integration 持久化 eventKey 顺序映射和 Endpoint 投递计数器", () => {
     const { db } = createTestDatabase();
-    const columns = db.prepare("PRAGMA table_info(integration_tasks)").all()
+    const taskColumns = db.prepare("PRAGMA table_info(integration_tasks)").all()
+      .map((row) => (row as { name: string }).name);
+    const endpointColumns = db.prepare("PRAGMA table_info(integration_endpoints)").all()
+      .map((row) => (row as { name: string }).name);
+    const deliveryColumns = db.prepare("PRAGMA table_info(webhook_deliveries)").all()
       .map((row) => (row as { name: string }).name);
 
-    expect(columns).toContain("event_sequences_json");
+    expect(taskColumns).toEqual(expect.arrayContaining(["event_sequences_json", "event_dispatch_orders_json"]));
+    expect(endpointColumns).toContain("next_delivery_order");
+    expect(deliveryColumns).toContain("dispatch_order");
     db.close();
   });
 

@@ -143,6 +143,7 @@ const publicDelivery = (delivery: WebhookDelivery) => ({
   id: delivery.id,
   eventId: delivery.eventId,
   sequence: delivery.sequence,
+  dispatchOrder: delivery.dispatchOrder,
   subscriptionId: delivery.subscriptionId,
   taskId: delivery.taskId,
   eventType: delivery.eventType,
@@ -307,8 +308,7 @@ export const registerIntegrationAdminRoutes = (
           task: null,
           notice: { code: "webhook_test", message: "Webhook test" }
         }),
-        nextAttemptAt: occurredAt,
-        createdAt: occurredAt
+        nextAttemptAt: occurredAt
       });
       return reply.code(202).send(publicDelivery(delivery));
     }

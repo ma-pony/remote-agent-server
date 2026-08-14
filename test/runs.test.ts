@@ -610,8 +610,9 @@ describe("Server startup and shutdown", () => {
         .run("old-run", "old-session", "running", "do not replay", timestamp);
       db.prepare(`
         INSERT INTO integration_endpoints
-          (id, name, slug, agent_id, enabled, token_hash, prompt_prefix, parameter_mappings_json, created_at, updated_at)
-        VALUES ('endpoint-1', 'Endpoint', 'endpoint-1', 'agent-1', 1, 'token-hash', '', '[]', ?, ?)
+          (id, name, slug, agent_id, enabled, token_hash, prompt_prefix, parameter_mappings_json,
+           next_delivery_order, created_at, updated_at)
+        VALUES ('endpoint-1', 'Endpoint', 'endpoint-1', 'agent-1', 1, 'token-hash', '', '[]', 1, ?, ?)
       `).run(timestamp, timestamp);
       db.prepare(`
         INSERT INTO integration_tasks
@@ -643,9 +644,9 @@ describe("Server startup and shutdown", () => {
       });
       db.prepare(`
         INSERT INTO webhook_deliveries
-          (id, event_id, event_key, sequence, subscription_id, task_id, event_type, payload_json, status,
+          (id, event_id, event_key, sequence, dispatch_order, subscription_id, task_id, event_type, payload_json, status,
            attempt_count, next_attempt_at, created_at, updated_at)
-        VALUES ('restart-delivery', 'restart-event', 'restart:event', 1, 'restart-webhook', 'old-task',
+        VALUES ('restart-delivery', 'restart-event', 'restart:event', 1, 1, 'restart-webhook', 'old-task',
                 'task.started', ?,
                 'delivering', 1, ?, ?, ?)
       `).run(restartPayload, timestamp, timestamp, timestamp);

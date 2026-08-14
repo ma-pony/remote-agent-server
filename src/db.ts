@@ -163,6 +163,7 @@ export const migrate = (db: Database.Database): void => {
       prompt_prefix TEXT NOT NULL DEFAULT '',
       parameter_mappings_json TEXT NOT NULL DEFAULT '[]',
       encrypted_fixed_values TEXT,
+      next_delivery_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -196,6 +197,7 @@ export const migrate = (db: Database.Database): void => {
       error TEXT,
       event_sequence INTEGER NOT NULL DEFAULT 0,
       event_sequences_json TEXT NOT NULL DEFAULT '{}',
+      event_dispatch_orders_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
@@ -224,6 +226,7 @@ export const migrate = (db: Database.Database): void => {
       event_id TEXT NOT NULL,
       event_key TEXT NOT NULL,
       sequence INTEGER NOT NULL,
+      dispatch_order INTEGER NOT NULL,
       subscription_id TEXT NOT NULL REFERENCES webhook_subscriptions(id),
       task_id TEXT REFERENCES integration_tasks(id),
       event_type TEXT NOT NULL,
@@ -240,7 +243,7 @@ export const migrate = (db: Database.Database): void => {
     );
 
     CREATE INDEX IF NOT EXISTS webhook_deliveries_due
-    ON webhook_deliveries(status, next_attempt_at, created_at);
+    ON webhook_deliveries(status, next_attempt_at, dispatch_order);
   `);
 
   const hasColumn = (table: string, column: string): boolean =>
@@ -254,5 +257,14 @@ export const migrate = (db: Database.Database): void => {
   }
   if (!hasColumn("integration_tasks", "event_sequences_json")) {
     db.exec("ALTER TABLE integration_tasks ADD COLUMN event_sequences_json TEXT NOT NULL DEFAULT '{}'");
+  }
+  if (!hasColumn("integration_endpoints", "next_delivery_order")) {
+    db.exec("ALTER TABLE integration_endpoints ADD COLUMN next_delivery_order INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn("integration_tasks", "event_dispatch_orders_json")) {
+    db.exec("ALTER TABLE integration_tasks ADD COLUMN event_dispatch_orders_json TEXT NOT NULL DEFAULT '{}'");
+  }
+  if (!hasColumn("webhook_deliveries", "dispatch_order")) {
+    db.exec("ALTER TABLE webhook_deliveries ADD COLUMN dispatch_order INTEGER NOT NULL DEFAULT 0");
   }
 };

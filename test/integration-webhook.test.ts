@@ -13,7 +13,7 @@ import { EventStore } from "../src/events/event-store.js";
 import { isCurrentWebhookPayload } from "../src/integrations/webhook-contract.js";
 import { IntegrationEndpointManager } from "../src/integrations/integration-endpoint-manager.js";
 import { IntegrationProjection } from "../src/integrations/integration-projection.js";
-import { IntegrationStore } from "../src/integrations/integration-store.js";
+import { IntegrationStore, webhookEventId } from "../src/integrations/integration-store.js";
 import { WebhookDispatcher } from "../src/integrations/webhook-dispatcher.js";
 import { SecretStore } from "../src/mcp/secret-store.js";
 import { RunRepository } from "../src/runs/run-repository.js";
@@ -72,9 +72,9 @@ const createHarness = (fetchImpl: typeof fetch = vi.fn(async () => new Response(
     subscriptionId: string,
     sequence: number,
     eventType = "task.succeeded",
-    occurredAt = new Date().toISOString()
+    occurredAt = new Date().toISOString(),
+    eventId = `event-${subscriptionId}-${sequence}`
   ) => {
-    const eventId = `event-${subscriptionId}-${sequence}`;
     const payloadJson = JSON.stringify({
       eventId,
       eventType,
@@ -92,14 +92,13 @@ const createHarness = (fetchImpl: typeof fetch = vi.fn(async () => new Response(
     });
     return store.createDelivery({
       eventId,
-      eventKey: `${subscriptionId}:${sequence}:${eventType}`,
+      eventKey: `${subscriptionId}:${eventId}:${eventType}`,
       sequence,
       subscriptionId,
       taskId: null,
       eventType,
       payloadJson,
-      nextAttemptAt: occurredAt,
-      createdAt: occurredAt
+      nextAttemptAt: occurredAt
     });
   };
 
@@ -354,9 +353,44 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
-  it("按源时间跨 Task 排序，旧事件重试阻塞同订阅但不阻塞其他订阅", async () => {
+  it("同毫秒且 eventId 哈希逆序时仍按首次创建的因果顺序投递", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
+    const started: string[] = [];
+    const harness = createHarness(vi.fn(async (_url, init) => {
+      started.push(new Headers(init?.headers).get("x-remote-agent-event-id")!);
+      return new Response(null, { status: 204 });
+    }));
+    const subscription = harness.createSubscription("causal-tie", "secret");
+    const occurredAt = "2026-08-13T00:00:00.000Z";
+    const candidateA = webhookEventId(harness.endpoint.id, "causal-event-a");
+    const candidateB = webhookEventId(harness.endpoint.id, "causal-event-b");
+    const [firstEventId, secondEventId] = candidateA > candidateB
+      ? [candidateA, candidateB]
+      : [candidateB, candidateA];
+    const first = harness.createDelivery(subscription.id, 1, "task.succeeded", occurredAt, firstEventId);
+    const second = harness.createDelivery(subscription.id, 1, "task.succeeded", occurredAt, secondEventId);
+    expect(first.eventId > second.eventId).toBe(true);
+
+    harness.dispatcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.waitFor(() => expect(started).toHaveLength(2));
+
+    expect(started).toEqual([first.eventId, second.eventId]);
+    expect(harness.db.prepare(`
+      SELECT event_id, dispatch_order FROM webhook_deliveries
+      WHERE subscription_id = ? ORDER BY dispatch_order
+    `).all(subscription.id)).toEqual([
+      { event_id: first.eventId, dispatch_order: 1 },
+      { event_id: second.eventId, dispatch_order: 2 }
+    ]);
+    await harness.dispatcher.stop();
+    harness.db.close();
+  });
+
+  it("系统时钟回拨不改变因果顺序，旧 head 重试仍只阻塞同订阅", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T00:00:10.000Z"));
     const started: string[] = [];
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
       started.push(new Headers(init?.headers).get("x-remote-agent-event-id")!);
@@ -365,35 +399,36 @@ describe("WebhookDispatcher", () => {
     const harness = createHarness(fetchImpl);
     const subscriptionA = harness.createSubscription("ordered-a", "secret-a");
     const subscriptionB = harness.createSubscription("ordered-b", "secret-b");
-    const newTask = harness.createDelivery(
-      subscriptionA.id, 1, "task.succeeded", "2026-08-13T00:00:02.000Z"
+    const firstTask = harness.createDelivery(
+      subscriptionA.id, 2, "task.succeeded", "2026-08-13T00:00:10.000Z"
     );
-    const oldTask = harness.createDelivery(
-      subscriptionA.id, 2, "task.succeeded", "2026-08-13T00:00:01.000Z"
+    vi.setSystemTime(new Date("2026-08-13T00:00:05.000Z"));
+    const rollbackTask = harness.createDelivery(
+      subscriptionA.id, 1, "task.succeeded", "2026-08-13T00:00:05.000Z"
     );
     const otherSubscription = harness.createDelivery(
-      subscriptionB.id, 1, "task.succeeded", "2026-08-13T00:00:00.000Z"
+      subscriptionB.id, 1, "task.succeeded", "2026-08-13T00:00:05.000Z"
     );
     harness.db.prepare("UPDATE webhook_deliveries SET next_attempt_at = ? WHERE id = ?")
-      .run("2026-08-13T00:00:10.000Z", oldTask.id);
+      .run("2026-08-13T00:00:20.000Z", firstTask.id);
 
-    expect(harness.store.listDueDeliveries("2026-08-13T00:00:00.000Z").map(({ id }) => id))
+    expect(harness.store.listDueDeliveries("2026-08-13T00:00:05.000Z").map(({ id }) => id))
       .toEqual([otherSubscription.id]);
-    expect(harness.store.nextPendingDeliveryAt()).toBe("2026-08-13T00:00:00.000Z");
-    expect(harness.store.claimDelivery(newTask.id, "2026-08-13T00:00:05.000Z")).toBeUndefined();
+    expect(harness.store.nextPendingDeliveryAt()).toBe("2026-08-13T00:00:05.000Z");
+    expect(harness.store.claimDelivery(rollbackTask.id, "2026-08-13T00:00:15.000Z")).toBeUndefined();
 
     harness.dispatcher.start();
     await vi.advanceTimersByTimeAsync(0);
     await vi.waitFor(() => expect(harness.store.getDelivery(otherSubscription.id)?.status).toBe("succeeded"));
     expect(started).toEqual([otherSubscription.eventId]);
-    expect(started).not.toContain(newTask.eventId);
-    expect(harness.store.nextPendingDeliveryAt()).toBe("2026-08-13T00:00:10.000Z");
+    expect(started).not.toContain(rollbackTask.eventId);
+    expect(harness.store.nextPendingDeliveryAt()).toBe("2026-08-13T00:00:20.000Z");
 
-    await vi.advanceTimersByTimeAsync(10_000);
-    await vi.waitFor(() => expect(started).toContain(oldTask.eventId));
-    await vi.waitFor(() => expect(started).toContain(newTask.eventId));
+    await vi.advanceTimersByTimeAsync(15_000);
+    await vi.waitFor(() => expect(started).toContain(firstTask.eventId));
+    await vi.waitFor(() => expect(started).toContain(rollbackTask.eventId));
     expect(harness.store.nextPendingDeliveryAt()).toBeUndefined();
-    expect(started.indexOf(oldTask.eventId)).toBeLessThan(started.indexOf(newTask.eventId));
+    expect(started.indexOf(firstTask.eventId)).toBeLessThan(started.indexOf(rollbackTask.eventId));
 
     await harness.dispatcher.stop();
     harness.db.close();
@@ -605,7 +640,10 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
-  it("所有公共事件类型都使用 exact-key union 且 Delivery 保存源时间", () => {
+  it("所有公共事件 exact-key union 保留源 occurredAt 且 createdAt 使用写入审计时间", () => {
+    vi.useFakeTimers();
+    const auditTime = "2026-08-14T00:00:00.000Z";
+    vi.setSystemTime(new Date(auditTime));
     const harness = createHarness();
     const eventTypes = [
       "task.started", "task.failed", "task.cancelled", "message.user.received",
@@ -619,6 +657,16 @@ describe("WebhookDispatcher", () => {
       eventsJson: JSON.stringify(eventTypes),
       encryptedHeaders: null,
       encryptedSigningSecret: harness.secrets.encrypt("public-union-secret"),
+      timeoutSeconds: 10
+    });
+    const mirrorSubscription = harness.store.createSubscription({
+      endpointId: harness.endpoint.id,
+      name: "public-union-mirror",
+      url: "https://receiver.test/public-union-mirror",
+      enabled: true,
+      eventsJson: JSON.stringify(eventTypes),
+      encryptedHeaders: null,
+      encryptedSigningSecret: harness.secrets.encrypt("public-union-mirror-secret"),
       timeoutSeconds: 10
     });
     const session = harness.seed.session();
@@ -674,6 +722,12 @@ describe("WebhookDispatcher", () => {
       delivery.eventType,
       { delivery, payload: JSON.parse(delivery.payloadJson) as Record<string, unknown> }
     ]));
+    expect(harness.store.listDeliveries(subscription.id).map(({ dispatchOrder }) => dispatchOrder))
+      .toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(harness.store.listDeliveries(mirrorSubscription.id).map(({ dispatchOrder }) => dispatchOrder))
+      .toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(harness.db.prepare("SELECT next_delivery_order FROM integration_endpoints WHERE id = ?")
+      .get(harness.endpoint.id)).toEqual({ next_delivery_order: 7 });
     const baseKeys = ["endpoint", "eventId", "eventType", "occurredAt", "sequence", "task"];
     for (const eventType of ["task.started", "task.failed", "task.cancelled"]) {
       expect(Object.keys(deliveries[eventType]!.payload).sort()).toEqual(baseKeys);
@@ -702,7 +756,8 @@ describe("WebhookDispatcher", () => {
       toolCallId: "tool-failed", status: "failed"
     });
     for (const eventType of eventTypes) {
-      expect(deliveries[eventType]!.delivery.createdAt).toBe(sourceTimes[eventType]);
+      expect(deliveries[eventType]!.delivery.createdAt).toBe(auditTime);
+      expect(deliveries[eventType]!.payload.occurredAt).toBe(sourceTimes[eventType]);
       expect(isCurrentWebhookPayload(deliveries[eventType]!.delivery.payloadJson, {
         eventId: deliveries[eventType]!.delivery.eventId,
         eventType,
@@ -812,7 +867,7 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
-  it("恢复乱序写入后仍按源时间和 Task sequence 投递 tool、terminal、reply", async () => {
+  it("恢复乱序写入后复用全局因果顺序并以新的审计时间投递", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
     const received: string[] = [];
@@ -860,20 +915,46 @@ describe("WebhookDispatcher", () => {
     eventStore.append(run.id, "message", { stream: "output", text: "finished" });
     vi.setSystemTime(new Date("2026-08-13T00:00:05.000Z"));
     runRepository.finish(run.id, { status: "succeeded", result: "internal" });
+    const originalOrders = harness.db.prepare(`
+      SELECT event_type, dispatch_order FROM webhook_deliveries
+      WHERE subscription_id = ? ORDER BY dispatch_order
+    `).all(subscription.id);
+    const originalTaskOrderState = harness.db.prepare(`
+      SELECT event_dispatch_orders_json FROM integration_tasks WHERE id = ?
+    `).get(task.id);
+    const originalEndpointCounter = harness.db.prepare(`
+      SELECT next_delivery_order FROM integration_endpoints WHERE id = ?
+    `).get(harness.endpoint.id);
     harness.db.prepare(`
       DELETE FROM webhook_deliveries
       WHERE subscription_id = ? AND event_type IN ('tool.completed', 'task.succeeded', 'message.agent.reply')
     `).run(subscription.id);
 
+    vi.setSystemTime(new Date("2026-08-13T00:00:10.000Z"));
     projection.recover();
     const firstRecovery = harness.db.prepare(`
-      SELECT event_id, event_key, sequence, payload_json, created_at
+      SELECT event_id, event_key, sequence, dispatch_order, payload_json, created_at
       FROM webhook_deliveries WHERE subscription_id = ? ORDER BY rowid
     `).all(subscription.id);
     expect(firstRecovery.map((row) => (row as { sequence: number }).sequence)).toEqual([4, 5, 3]);
+    expect(firstRecovery.map((row) => (row as { dispatch_order: number }).dispatch_order)).toEqual([4, 5, 3]);
+    expect(firstRecovery.map((row) => (row as { created_at: string }).created_at))
+      .toEqual(Array(3).fill("2026-08-13T00:00:10.000Z"));
+    expect(firstRecovery.map((row) => JSON.parse((row as { payload_json: string }).payload_json).occurredAt))
+      .toEqual(["2026-08-13T00:00:05.000Z", "2026-08-13T00:00:05.000Z", "2026-08-13T00:00:03.000Z"]);
+    expect(harness.db.prepare(`
+      SELECT event_type, dispatch_order FROM webhook_deliveries
+      WHERE subscription_id = ? ORDER BY dispatch_order
+    `).all(subscription.id)).toEqual(originalOrders);
+    expect(harness.db.prepare(`
+      SELECT event_dispatch_orders_json FROM integration_tasks WHERE id = ?
+    `).get(task.id)).toEqual(originalTaskOrderState);
+    expect(harness.db.prepare(`
+      SELECT next_delivery_order FROM integration_endpoints WHERE id = ?
+    `).get(harness.endpoint.id)).toEqual(originalEndpointCounter);
     projection.recover();
     expect(harness.db.prepare(`
-      SELECT event_id, event_key, sequence, payload_json, created_at
+      SELECT event_id, event_key, sequence, dispatch_order, payload_json, created_at
       FROM webhook_deliveries WHERE subscription_id = ? ORDER BY rowid
     `).all(subscription.id)).toEqual(firstRecovery);
 
@@ -1071,6 +1152,47 @@ describe("Webhook management API", () => {
     const delivery = (deliveries.json() as Array<{ id: string; eventId: string; taskId: string | null }>)[0]!;
     expect(delivery.taskId).toBeNull();
     expect(JSON.stringify(deliveries.json())).not.toContain("payloadJson");
+
+    const auditStore = new IntegrationStore({ db });
+    const auditEventId = "audit-created-at-event";
+    const oldOccurredAt = "2020-01-01T00:00:00.000Z";
+    const beforeAuditInsert = Date.now();
+    const auditDelivery = auditStore.createDelivery({
+      eventId: auditEventId,
+      eventKey: "audit-created-at-event-key",
+      sequence: 1,
+      subscriptionId: createdBody.webhook.id,
+      taskId: null,
+      eventType: "task.succeeded",
+      payloadJson: JSON.stringify({
+        eventId: auditEventId,
+        eventType: "task.succeeded",
+        sequence: 1,
+        occurredAt: oldOccurredAt,
+        endpoint: { id: endpointId, slug: "webhook-api" },
+        task: {
+          id: "audit-task",
+          requestId: "audit-request",
+          conversationKey: null,
+          sessionId: "audit-session",
+          runId: null,
+          status: "succeeded"
+        }
+      }),
+      nextAttemptAt: new Date(Date.now() + 60_000).toISOString()
+    });
+    const afterAuditInsert = Date.now();
+    const deliveriesAfterAudit = await app.inject({
+      method: "GET",
+      url: `/api/integration-endpoints/${endpointId}/webhook-deliveries`,
+      headers: authHeaders
+    });
+    const publicAuditDelivery = (deliveriesAfterAudit.json() as Array<Record<string, unknown>>)
+      .find((item) => item.id === auditDelivery.id)!;
+    expect(Date.parse(publicAuditDelivery.createdAt as string)).toBeGreaterThanOrEqual(beforeAuditInsert);
+    expect(Date.parse(publicAuditDelivery.createdAt as string)).toBeLessThanOrEqual(afterAuditInsert);
+    expect(publicAuditDelivery.createdAt).not.toBe(oldOccurredAt);
+    expect(publicAuditDelivery.dispatchOrder).toEqual(expect.any(Number));
 
     db.prepare("UPDATE webhook_deliveries SET status = 'failed', attempt_count = 6 WHERE id = ?").run(delivery.id);
     const original = db.prepare("SELECT event_id, payload_json FROM webhook_deliveries WHERE id = ?").get(delivery.id);

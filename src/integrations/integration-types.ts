@@ -101,6 +101,7 @@ export type WebhookDelivery = {
   eventId: string;
   eventKey: string;
   sequence: number;
+  dispatchOrder: number;
   subscriptionId: string;
   taskId: string | null;
   eventType: string;
