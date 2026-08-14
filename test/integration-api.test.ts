@@ -367,6 +367,35 @@ describe("Integration endpoint API", () => {
     expect(detail.json()).not.toHaveProperty("requestFingerprint");
   });
 
+  it("Endpoint 列表使用 Store 聚合且不逐 Endpoint 加载 Conversation 和 Task 历史", async () => {
+    const { app, agentId, integrationStore } = await createTestApp();
+    await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId)
+    });
+    vi.spyOn(integrationStore, "listConversations").mockImplementation(() => {
+      throw new Error("Endpoint list must not load Conversation history");
+    });
+    vi.spyOn(integrationStore, "listTasks").mockImplementation(() => {
+      throw new Error("Endpoint list must not load Task history");
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/integration-endpoints",
+      headers: authHeaders()
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject([{
+      activeConversationCount: 0,
+      activeTaskCount: 0,
+      latestTask: null
+    }]);
+  });
+
   it("Conversation 建立后禁用 Agent，后续 Task 稳定失败且不启动新 Turn", async () => {
     const runtime = createFakeRuntime();
     runtime.startTurn = vi.fn(runtime.startTurn);

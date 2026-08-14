@@ -194,7 +194,7 @@ export type IntegrationEndpointSummary = {
   enabled: boolean;
   activeConversationCount: number;
   activeTaskCount: number;
-  latestTask: IntegrationTask | null;
+  latestTask: Pick<IntegrationTask, "id" | "requestId" | "status" | "createdAt"> | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -351,7 +351,9 @@ export const integrationApi = {
     `/integration-endpoints/${id}/tasks`, { signal }
   ),
   getTask: (id: string, signal?: AbortSignal) => api<IntegrationTask>(`/integration-tasks/${id}`, { signal }),
-  cancelTask: (id: string) => api<IntegrationTask>(`/integration-tasks/${id}/cancel`, { method: "POST" }),
+  cancelTask: (id: string, signal?: AbortSignal) => api<IntegrationTask>(
+    `/integration-tasks/${id}/cancel`, { method: "POST", signal }
+  ),
   listWebhooks: (id: string, signal?: AbortSignal) => api<IntegrationWebhook[]>(
     `/integration-endpoints/${id}/webhooks`, { signal }
   ),

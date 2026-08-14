@@ -290,4 +290,45 @@ describe("Integration endpoint domain", () => {
     expect(store.listTasks(endpoint.id)).toHaveLength(1);
     db.close();
   });
+
+  it("以一次 Store 聚合读取汇总且不返回 Endpoint 的完整 Task 历史", () => {
+    const { db, seed, manager, store } = createHarness();
+    const first = manager.create({ ...validEndpointInput(seed.agent.id), slug: "large-history-a" }).endpoint;
+    const second = manager.create({ ...validEndpointInput(seed.agent.id), slug: "large-history-b" }).endpoint;
+    const session = seed.session();
+
+    for (let index = 0; index < 500; index += 1) {
+      store.createTask({
+        id: `history-${String(index).padStart(4, "0")}`,
+        endpointId: first.id,
+        conversationId: null,
+        sessionId: session.id,
+        requestId: `request-${index}`,
+        requestFingerprint: createHash("sha256").update(`request-${index}`).digest("hex"),
+        message: `message-${index}`,
+        effectivePrompt: `message-${index}`,
+        encryptedParameters: null
+      });
+    }
+    db.prepare("UPDATE integration_tasks SET status = 'succeeded', finished_at = created_at WHERE endpoint_id = ?")
+      .run(first.id);
+    db.prepare("UPDATE integration_tasks SET status = 'running' WHERE id = 'history-0498'").run();
+    db.prepare("UPDATE integration_tasks SET status = 'queued' WHERE id = 'history-0499'").run();
+
+    const summaries = store.listEndpointManagementSummaries();
+
+    expect(summaries).toHaveLength(2);
+    expect(summaries.find((summary) => summary.endpointId === first.id)).toMatchObject({
+      activeConversationCount: 0,
+      activeTaskCount: 2,
+      latestTask: { id: "history-0499", requestId: "request-499", status: "queued" }
+    });
+    expect(summaries.find((summary) => summary.endpointId === second.id)).toEqual({
+      endpointId: second.id,
+      activeConversationCount: 0,
+      activeTaskCount: 0,
+      latestTask: null
+    });
+    db.close();
+  });
 });

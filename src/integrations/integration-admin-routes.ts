@@ -205,16 +205,18 @@ export const registerIntegrationAdminRoutes = (
   }
 ): void => {
   const { manager, store, secrets, dispatcher, executor, scheduler } = dependencies;
-  app.get("/integration-endpoints", () => manager.list().map((endpoint) => {
-    const conversations = store.listConversations(endpoint.id);
-    const tasks = store.listTasks(endpoint.id);
-    return {
-      ...endpoint,
-      activeConversationCount: conversations.filter(({ status }) => status === "active").length,
-      activeTaskCount: tasks.filter(({ status }) => status === "queued" || status === "running").length,
-      latestTask: tasks.length === 0 ? null : publicTask(tasks.at(-1)!)
-    };
-  }));
+  app.get("/integration-endpoints", () => {
+    const summaries = new Map(store.listEndpointManagementSummaries().map((summary) => [summary.endpointId, summary]));
+    return manager.list().map((endpoint) => {
+      const summary = summaries.get(endpoint.id);
+      return {
+        ...endpoint,
+        activeConversationCount: summary?.activeConversationCount ?? 0,
+        activeTaskCount: summary?.activeTaskCount ?? 0,
+        latestTask: summary?.latestTask ?? null
+      };
+    });
+  });
 
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id", (request, reply) => {
     const endpoint = manager.get(request.params.id);

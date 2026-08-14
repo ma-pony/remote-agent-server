@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft, Cable, Check, Clipboard, KeyRound, Plus, RefreshCw, RotateCcw, Settings2,
   Trash2, Webhook, XCircle
@@ -279,20 +279,42 @@ export const IntegrationEndpointWebhooksPage = () => {
   const [signingSecret, setSigningSecret] = useState("");
   const [busyId, setBusyId] = useState("");
   const [error, setError] = useState("");
-  const load = async (signal?: AbortSignal) => {
-    const [subscriptions, deliveryItems] = await Promise.all([
-      integrationApi.listWebhooks(endpoint.id, signal), integrationApi.listDeliveries(endpoint.id, signal)
-    ]);
-    setWebhooks(subscriptions); setDeliveries(deliveryItems);
-  };
+  const [refreshKey, setRefreshKey] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
-    void load(controller.signal).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
-    return () => controller.abort();
-  }, [endpoint.id]);
+    let disposed = false;
+    let timer: number | undefined;
+    let remainingPolls = 30;
+    const refresh = async () => {
+      try {
+        const [subscriptions, deliveryItems] = await Promise.all([
+          integrationApi.listWebhooks(endpoint.id, controller.signal),
+          integrationApi.listDeliveries(endpoint.id, controller.signal)
+        ]);
+        if (disposed || controller.signal.aborted) return;
+        setWebhooks(subscriptions);
+        setDeliveries(deliveryItems);
+        if (
+          remainingPolls > 0
+          && deliveryItems.some(({ status }) => status === "pending" || status === "delivering")
+        ) {
+          remainingPolls -= 1;
+          timer = window.setTimeout(() => { void refresh(); }, 1_000);
+        }
+      } catch (reason) {
+        if (!controller.signal.aborted) setError(errorMessage(reason));
+      }
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [endpoint.id, refreshKey]);
   const act = async (id: string, action: () => Promise<unknown>) => {
     setBusyId(id); setError("");
-    try { await action(); await load(); } catch (reason) { setError(errorMessage(reason)); } finally { setBusyId(""); }
+    try { await action(); setRefreshKey((value) => value + 1); } catch (reason) { setError(errorMessage(reason)); } finally { setBusyId(""); }
   };
   return <div className="flex flex-col gap-5"><ErrorAlert message={error} />{signingSecret === "" ? null : <OneTimeSecret title="请立即保存签名密钥，此后不会再次显示" value={signingSecret} onDismiss={() => setSigningSecret("")} />}<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">Webhook 订阅</h2><p className="text-sm text-muted-foreground">失败投递会自动重试；最终失败后可手动重发。</p></div><WebhookEditorDialog endpointId={endpoint.id} onError={setError} onCreated={(webhook, secret) => { setWebhooks((current) => [...(current ?? []), webhook]); setSigningSecret(secret); }} /></div>{webhooks === null ? <Skeleton className="h-40" /> : webhooks.length === 0 ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">尚未配置 Webhook。</CardContent></Card> : <div className="flex flex-col gap-4">{webhooks.map((webhook) => {
     const recent = deliveries.find((item) => item.subscriptionId === webhook.id);
@@ -358,22 +380,71 @@ export const IntegrationTaskDetailPage = () => {
   const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
+  const cancelController = useRef<AbortController | null>(null);
   useEffect(() => {
+    cancelController.current?.abort();
     const controller = new AbortController();
-    void integrationApi.getTask(id, controller.signal).then(async (item) => {
-      setTask(item);
-      const [endpointItem, conversations, deliveryItems, eventItems] = await Promise.all([
-        integrationApi.getEndpoint(item.endpointId, controller.signal),
-        integrationApi.listConversations(item.endpointId, controller.signal),
-        integrationApi.listDeliveries(item.endpointId, controller.signal),
-        item.runId === null ? Promise.resolve([]) : api<RunEvent[]>(`/runs/${item.runId}/events?afterSeq=0`, { signal: controller.signal })
-      ]);
-      setEndpoint(endpointItem); setConversation(conversations.find((value) => value.id === item.conversationId) ?? null);
-      setDeliveries(deliveryItems.filter((value) => value.taskId === item.id)); setEvents(eventItems);
-    }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
-    return () => controller.abort();
-  }, [id]);
-  const cancel = async () => { if (task === null) return; setBusy(true); setError(""); try { setTask(await integrationApi.cancelTask(task.id)); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); } };
+    let disposed = false;
+    let timer: number | undefined;
+    setTask(null);
+    setEndpoint(null);
+    setConversation(null);
+    setEvents([]);
+    setDeliveries([]);
+    setError("");
+    const refresh = async () => {
+      try {
+        const item = await integrationApi.getTask(id, controller.signal);
+        if (disposed || controller.signal.aborted) return;
+        const [endpointItem, conversations, deliveryItems, eventItems] = await Promise.all([
+          integrationApi.getEndpoint(item.endpointId, controller.signal),
+          integrationApi.listConversations(item.endpointId, controller.signal),
+          integrationApi.listDeliveries(item.endpointId, controller.signal),
+          item.runId === null
+            ? Promise.resolve([])
+            : api<RunEvent[]>(`/runs/${item.runId}/events?afterSeq=0`, { signal: controller.signal })
+        ]);
+        if (disposed || controller.signal.aborted) return;
+        setTask(item);
+        setEndpoint(endpointItem);
+        setConversation(conversations.find((value) => value.id === item.conversationId) ?? null);
+        setDeliveries(deliveryItems.filter((value) => value.taskId === item.id));
+        setEvents(eventItems);
+        if (item.status === "queued" || item.status === "running") {
+          timer = window.setTimeout(() => { void refresh(); }, 1_000);
+        }
+      } catch (reason) {
+        if (!controller.signal.aborted) setError(errorMessage(reason));
+      }
+    };
+    void refresh();
+    return () => {
+      disposed = true;
+      controller.abort();
+      cancelController.current?.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [id, refreshKey]);
+  const cancel = async () => {
+    if (task === null) return;
+    cancelController.current?.abort();
+    const controller = new AbortController();
+    cancelController.current = controller;
+    setBusy(true);
+    setError("");
+    try {
+      await integrationApi.cancelTask(task.id, controller.signal);
+      if (!controller.signal.aborted) setRefreshKey((value) => value + 1);
+    } catch (reason) {
+      if (!controller.signal.aborted) setError(errorMessage(reason));
+    } finally {
+      if (cancelController.current === controller) {
+        cancelController.current = null;
+        setBusy(false);
+      }
+    }
+  };
   if (task === null) return <div className="mx-auto max-w-6xl p-8"><ErrorAlert message={error} /><Skeleton className="h-12 w-80" /><Skeleton className="mt-8 h-80" /></div>;
   const terminal = task.status === "succeeded" || task.status === "failed" || task.status === "cancelled";
   return <div className="mx-auto w-full max-w-6xl p-4 sm:p-6 lg:p-8"><Button asChild variant="ghost" className="mb-4"><Link to={`/integration-endpoints/${task.endpointId}/tasks`}><ArrowLeft />返回 Task</Link></Button><PageHeader eyebrow="INTEGRATION TASK" title={task.requestId} description={endpoint === null ? task.endpointId : endpoint.name} action={<div className="flex items-center gap-2"><StatusBadge status={task.status} />{terminal ? null : <AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="destructive" disabled={busy}>取消 Task</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>取消这个 Task？</AlertDialogTitle><AlertDialogDescription>正在运行的 Agent Turn 会停止；同一 Conversation 后续 Task 仍会继续。</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>返回</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void cancel()}>确认取消</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>}</div>} /><ErrorAlert message={error} /><div className="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(18rem,1fr)]"><div className="flex flex-col gap-5"><Card><CardHeader><CardTitle>请求与回复</CardTitle></CardHeader><CardContent className="flex flex-col gap-5"><div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">用户消息</p><p className="mt-2 whitespace-pre-wrap rounded-lg border bg-muted/20 p-4 text-sm">{task.message}</p></div><div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Agent 最终回复</p><p className="mt-2 whitespace-pre-wrap rounded-lg border bg-background p-4 text-sm">{task.result ?? (task.status === "failed" ? task.error ?? "执行失败" : "尚未产生最终回复")}</p></div></CardContent></Card><Card><CardHeader><CardTitle>执行轨迹</CardTitle><CardDescription>完整对话仍在关联 Session 中查看。</CardDescription></CardHeader><CardContent>{events.length === 0 ? <p className="text-sm text-muted-foreground">尚无 Run Event。</p> : <div className="divide-y rounded-lg border">{events.map((event) => <div key={event.id} className="grid grid-cols-[3rem_5rem_1fr] gap-3 p-3 text-sm"><span className="font-mono text-xs text-muted-foreground">#{event.seq}</span><Badge variant="outline">{event.type}</Badge><span className="min-w-0 break-words">{eventSummary(event)}</span></div>)}</div>}</CardContent></Card><Card><CardHeader><CardTitle>Webhook Delivery</CardTitle></CardHeader><CardContent>{deliveries.length === 0 ? <p className="text-sm text-muted-foreground">没有关联投递。</p> : <div className="flex flex-col gap-2">{deliveries.map((delivery) => <div key={delivery.id} className="flex items-center justify-between rounded-lg border p-3"><span className="font-mono text-xs">{delivery.eventType}</span><DeliveryBadge status={delivery.status} /></div>)}</div>}</CardContent></Card></div><aside className="flex flex-col gap-4"><Card><CardHeader><CardTitle>关联资源</CardTitle></CardHeader><CardContent className="flex flex-col gap-4 text-sm"><div><p className="text-xs text-muted-foreground">Conversation</p><p className="mt-1 font-mono">{conversation?.conversationKey ?? "一次性 Task"}</p></div><div><p className="text-xs text-muted-foreground">Session</p><p className="mt-1 break-all font-mono text-xs">{task.sessionId}</p></div><div><p className="text-xs text-muted-foreground">Run</p><p className="mt-1 break-all font-mono text-xs">{task.runId ?? "尚未创建"}</p></div><Button asChild><Link to={`/sessions/${task.sessionId}`}>进入 Session</Link></Button></CardContent></Card><Card><CardHeader><CardTitle>时间</CardTitle></CardHeader><CardContent className="space-y-3 text-sm"><div><p className="text-xs text-muted-foreground">创建</p><p>{displayTime(task.createdAt)}</p></div><div><p className="text-xs text-muted-foreground">开始</p><p>{displayTime(task.startedAt)}</p></div><div><p className="text-xs text-muted-foreground">结束</p><p>{displayTime(task.finishedAt)}</p></div></CardContent></Card></aside></div></div>;

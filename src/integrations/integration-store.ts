@@ -108,6 +108,23 @@ type LinkedRunRow = {
   finished_at: string | null;
 };
 
+type EndpointManagementSummaryRow = {
+  endpoint_id: string;
+  active_conversation_count: number;
+  active_task_count: number;
+  latest_task_id: string | null;
+  latest_task_request_id: string | null;
+  latest_task_status: IntegrationTaskStatus | null;
+  latest_task_created_at: string | null;
+};
+
+export type EndpointManagementSummary = {
+  endpointId: string;
+  activeConversationCount: number;
+  activeTaskCount: number;
+  latestTask: Pick<IntegrationTask, "id" | "requestId" | "status" | "createdAt"> | null;
+};
+
 export type EndpointPersistenceInput = {
   id?: string;
   name: string;
@@ -300,6 +317,50 @@ export class IntegrationStore {
 
   listEndpoints(): IntegrationEndpoint[] {
     return (this.db.prepare("SELECT * FROM integration_endpoints ORDER BY created_at ASC, id ASC").all() as EndpointRow[]).map(toEndpoint);
+  }
+
+  /** Aggregates management counters and one latest Task per Endpoint without materializing history. */
+  listEndpointManagementSummaries(): EndpointManagementSummary[] {
+    const rows = this.db.prepare(`
+      WITH conversation_counts AS (
+        SELECT endpoint_id, COUNT(*) AS active_conversation_count
+        FROM integration_conversations
+        WHERE status = 'active'
+        GROUP BY endpoint_id
+      ), task_rows AS (
+        SELECT endpoint_id, id, request_id, status, created_at,
+          ROW_NUMBER() OVER (PARTITION BY endpoint_id ORDER BY created_at DESC, id DESC) AS latest_rank
+        FROM integration_tasks task
+      ), task_counts AS (
+        SELECT endpoint_id, COUNT(*) AS active_task_count
+        FROM integration_tasks
+        WHERE status IN ('queued', 'running')
+        GROUP BY endpoint_id
+      )
+      SELECT endpoint.id AS endpoint_id,
+        COALESCE(conversation_counts.active_conversation_count, 0) AS active_conversation_count,
+        COALESCE(task_counts.active_task_count, 0) AS active_task_count,
+        latest.id AS latest_task_id,
+        latest.request_id AS latest_task_request_id,
+        latest.status AS latest_task_status,
+        latest.created_at AS latest_task_created_at
+      FROM integration_endpoints endpoint
+      LEFT JOIN conversation_counts ON conversation_counts.endpoint_id = endpoint.id
+      LEFT JOIN task_counts ON task_counts.endpoint_id = endpoint.id
+      LEFT JOIN task_rows latest ON latest.endpoint_id = endpoint.id AND latest.latest_rank = 1
+      ORDER BY endpoint.created_at ASC, endpoint.id ASC
+    `).all() as EndpointManagementSummaryRow[];
+    return rows.map((row) => ({
+      endpointId: row.endpoint_id,
+      activeConversationCount: row.active_conversation_count,
+      activeTaskCount: row.active_task_count,
+      latestTask: row.latest_task_id === null ? null : {
+        id: row.latest_task_id,
+        requestId: row.latest_task_request_id!,
+        status: row.latest_task_status!,
+        createdAt: row.latest_task_created_at!
+      }
+    }));
   }
 
   getEndpoint(id: string): IntegrationEndpoint | undefined {
