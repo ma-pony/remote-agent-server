@@ -37,7 +37,7 @@ describe("RunMcpPreparer", () => {
     const check = vi.fn(async () => ({ status: "passed" as const, toolCount: 2, message: "2 tools available" }));
     const fixture = setup({ check });
     fixture.manager.createServer(fixture.agentId, {
-      name: "grab_manager",
+      name: "example_mcp",
       transport: "http",
       enabled: true,
       url: "https://example.test/mcp",
@@ -55,11 +55,11 @@ describe("RunMcpPreparer", () => {
 
     expect(check).toHaveBeenCalledWith({
       type: "http",
-      name: "grab_manager",
+      name: "example_mcp",
       url: "https://example.test/mcp",
       headers: [{ name: "Authorization", value: "Bearer runtime-secret" }]
     }, 7000);
-    expect(servers).toEqual([expect.objectContaining({ type: "http", name: "grab_manager" })]);
+    expect(servers).toEqual([expect.objectContaining({ type: "http", name: "example_mcp" })]);
     expect(fixture.manager.listServers(fixture.agentId)[0]).toMatchObject({
       lastCheckStatus: "passed", lastToolCount: 2
     });

@@ -78,7 +78,7 @@ describe("Agent MCP API", () => {
       url: `/api/agents/${agentId}/mcp-servers`,
       headers: authHeaders(),
       payload: {
-        name: "grab_manager",
+        name: "example_mcp",
         transport: "http",
         enabled: true,
         url: "https://example.test/mcp",
@@ -92,7 +92,7 @@ describe("Agent MCP API", () => {
     expect(created.statusCode).toBe(201);
     expect(JSON.stringify(created.json())).not.toContain("secret-token");
     expect(created.json()).toMatchObject({
-      name: "grab_manager",
+      name: "example_mcp",
       transport: "http",
       headers: [
         { name: "Authorization", source: "fixed", secret: true, configured: true },

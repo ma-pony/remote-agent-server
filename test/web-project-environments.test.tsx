@@ -12,13 +12,13 @@ const revision = {
   inputFingerprint: "input-v1", failureStage: null, error: null, createdAt: now, finishedAt: now
 };
 const environment = {
-  id: "environment-1", name: "Grab Manager", currentRevisionId: "revision-1", lastCheckedAt: now,
+  id: "environment-1", name: "示例平台", currentRevisionId: "revision-1", lastCheckedAt: now,
   workspacePath: revision.workspacePath,
   sync: { status: "idle" as const, automatic: true as const, intervalMs: 10_800_000, nextScheduledAt: "2026-08-13T03:00:00.000Z" },
   repositories: [{
-    id: "repository-1", projectEnvironmentId: "environment-1", name: "grab-manager-api",
-    gitUrl: "git@example.test:rcc/grab-manager-api.git", prepareCommand: "bundle install",
-    workspacePath: `${revision.workspacePath}/grab-manager-api`, createdAt: now, updatedAt: now
+    id: "repository-1", projectEnvironmentId: "environment-1", name: "example-service",
+    gitUrl: "git@example.test:rcc/example-service.git", prepareCommand: "bundle install",
+    workspacePath: `${revision.workspacePath}/example-service`, createdAt: now, updatedAt: now
   }],
   currentRevision: revision, latestRevision: revision, createdAt: now, updatedAt: now
 };
@@ -37,7 +37,7 @@ afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 
 it("项目环境列表与创建表单分离", async () => {
   render(<App />);
-  expect(await screen.findByRole("link", { name: "Grab Manager" })).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "示例平台" })).toBeInTheDocument();
   expect(screen.queryByLabelText("项目环境名称")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("link", { name: "新建项目环境" }));
   await waitFor(() => expect(window.location.pathname).toBe("/project-environments/new"));
@@ -76,7 +76,7 @@ it("项目列表展示实际路径并说明随环境整体同步", async () => {
 
   render(<App />);
 
-  expect(await screen.findByText(`${revision.workspacePath}/grab-manager-api`)).toBeInTheDocument();
+  expect(await screen.findByText(`${revision.workspacePath}/example-service`)).toBeInTheDocument();
   expect(screen.getByText("随项目环境整体同步")).toBeInTheDocument();
 });
 

@@ -145,8 +145,8 @@ Agent 绑定项目环境。创建 Session 时，服务固化 Agent 当时的环�
 
 ```text
 /srv/remote-agent/environments/<environment-id>/revisions/<revision-id>/workspace/
-  grab-manager-api/
-  grab-manager-web/
+  example-service/
+  example-web/
   bid-spiders/
 
 /srv/remote-agent/sessions/<session-id>/

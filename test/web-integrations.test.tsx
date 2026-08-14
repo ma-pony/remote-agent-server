@@ -13,7 +13,7 @@ const agent = {
   projectEnvironmentId: "environment-1", createdAt: now, updatedAt: now
 };
 const endpoint = {
-  id: "endpoint-1", name: "Grab Manager 工单", slug: "grab-manager-ticket", agentId: agent.id,
+  id: "endpoint-1", name: "示例工单", slug: "example-ticket", agentId: agent.id,
   enabled: true, promptPrefix: "处理工单：", parameterMappings: [{
     parameterKey: "ticket_id", source: "request", requestKey: "ticket_id"
   }], createdAt: now, updatedAt: now
@@ -113,7 +113,10 @@ it("创建 Endpoint、一次复制 Token、配置 Webhook 并查看 Task", async
   render(<App />);
   fireEvent.click(await screen.findByRole("link", { name: "新建接入端点" }));
   fireEvent.change(await screen.findByLabelText("端点名称"), { target: { value: endpoint.name } });
-  fireEvent.change(screen.getByLabelText("端点 slug"), { target: { value: endpoint.slug } });
+  const slugInput = screen.getByLabelText("端点 slug");
+  expect(slugInput).toHaveValue("");
+  expect(slugInput).not.toHaveAttribute("placeholder");
+  fireEvent.change(slugInput, { target: { value: endpoint.slug } });
   fireEvent.change(screen.getByLabelText("Agent"), { target: { value: agent.id } });
   fireEvent.change(await screen.findByLabelText("工单 ID 来源"), { target: { value: "request" } });
   fireEvent.change(screen.getByLabelText("工单 ID 请求参数名"), { target: { value: "ticket_id" } });

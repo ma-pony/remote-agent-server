@@ -15,9 +15,9 @@ Remote Agent Server 当前通过一个全局 `WORKSPACE_TEMPLATE` 为所有 Sess
 项目环境是一组可以共同用于 Agent 任务的 Git 项目及其已安装依赖和基础配置。一个项目环境可以包含多个项目，例如：
 
 ```text
-Grab Manager 研发环境
-├── grab-manager-api
-├── grab-manager-web
+示例研发环境
+├── example-service
+├── example-web
 └── bid-spiders
 ```
 

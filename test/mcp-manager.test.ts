@@ -66,7 +66,7 @@ describe("MCP secrets and resolution", () => {
     }, true));
 
     const created = manager.createServer(agentId, {
-      name: "grab-manager",
+      name: "example-mcp",
       transport: "http",
       enabled: true,
       url: "https://example.test/mcp",

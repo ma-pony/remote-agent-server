@@ -377,7 +377,7 @@ Smoke 只覆盖三个 Provider 的顺序双轮真实连通性。仍须在目标�
 
 ```bash
 REMOTE_AGENT_URL=https://agent.example.com
-ENDPOINT_SLUG=grab-manager-ticket
+ENDPOINT_SLUG=example-ticket
 ENDPOINT_TOKEN='<创建 Endpoint 时只展示一次的 Token>'
 
 curl --fail-with-body \

@@ -13,7 +13,7 @@ const agent = {
   projectEnvironmentId: "environment-1", createdAt: now, updatedAt: now
 };
 const server = {
-  id: "mcp-1", agentId: agent.id, name: "grab_manager", transport: "http", enabled: true,
+  id: "mcp-1", agentId: agent.id, name: "example_mcp", transport: "http", enabled: true,
   checkTimeoutSeconds: 30, lastCheckedAt: null, lastCheckStatus: null, lastCheckMessage: null,
   lastToolCount: null, createdAt: now, updatedAt: now
 };
@@ -56,7 +56,7 @@ it("Agent MCP 独立页面展示服务器、连接检查和 Session 参数", asy
   render(<App />);
 
   expect(await screen.findByText("MCP 服务器")).toBeInTheDocument();
-  expect(await screen.findByText("grab_manager")).toBeInTheDocument();
+  expect(await screen.findByText("example_mcp")).toBeInTheDocument();
   expect(screen.getByDisplayValue("租户")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
   expect(await screen.findByText("4 个工具可用")).toBeInTheDocument();
@@ -92,7 +92,7 @@ it("从独立页面创建带敏感 Header 的 HTTP MCP", async () => {
     if (url === `/api/agents/${agent.id}/mcp-servers` && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       expect(body).toMatchObject({
-        name: "grab_manager", transport: "http", url: "https://example.test/mcp",
+        name: "example_mcp", transport: "http", url: "https://example.test/mcp",
         headers: [{ name: "Authorization", source: "fixed", value: "Bearer secret-token", secret: true }]
       });
       return response({ ...server, url: "https://example.test/mcp", headers: [] }, 201);
@@ -104,7 +104,7 @@ it("从独立页面创建带敏感 Header 的 HTTP MCP", async () => {
 
   render(<App />);
   expect(await screen.findByRole("heading", { name: "新建 MCP" })).toBeInTheDocument();
-  fireEvent.change(screen.getByLabelText("MCP 名称"), { target: { value: "grab_manager" } });
+  fireEvent.change(screen.getByLabelText("MCP 名称"), { target: { value: "example_mcp" } });
   fireEvent.change(screen.getByLabelText("HTTP URL"), { target: { value: "https://example.test/mcp" } });
   fireEvent.click(screen.getByRole("button", { name: "添加 Header" }));
   fireEvent.change(screen.getByLabelText("Header 名称 1"), { target: { value: "Authorization" } });

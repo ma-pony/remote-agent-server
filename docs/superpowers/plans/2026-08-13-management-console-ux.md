@@ -212,9 +212,9 @@ git commit -m "feat: split agent management pages"
 ```tsx
 it("项目环境列表不渲染仓库输入框，项目页一次只编辑一个仓库", async () => {
   renderAt("/project-environments");
-  expect(await screen.findByText("Grab Manager 研发环境")).toBeInTheDocument();
+  expect(await screen.findByText("示例研发环境")).toBeInTheDocument();
   expect(screen.queryByLabelText("Git 地址")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("link", { name: "Grab Manager 研发环境" }));
+  fireEvent.click(screen.getByRole("link", { name: "示例研发环境" }));
   fireEvent.click(screen.getByRole("tab", { name: "项目" }));
   fireEvent.click(screen.getByRole("button", { name: "添加项目" }));
   expect(screen.getAllByLabelText("Git 地址")).toHaveLength(1);

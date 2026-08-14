@@ -181,7 +181,7 @@ MCP 解析或预检失败统一为：
 mcp_check_failed
 ```
 
-公开错误只包含 MCP 名称和固定消息，例如 `MCP grab-manager check failed`。Run 进入 failed，Session 回到 idle，模型 Turn 不启动。
+公开错误只包含 MCP 名称和固定消息，例如 `MCP example-mcp check failed`。Run 进入 failed，Session 回到 idle，模型 Turn 不启动。
 
 ## 8. API
 

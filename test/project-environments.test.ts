@@ -69,22 +69,22 @@ describe("ProjectEnvironmentStore", () => {
   it("保存项目环境及唯一安全项目目录", () => {
     const { db } = createTestDatabase();
     const store = new ProjectEnvironmentStore({ db });
-    const environment = store.create({ name: "Grab Manager 研发环境" });
+    const environment = store.create({ name: "示例研发环境" });
     const repository = store.addRepository(environment.id, {
-      name: "grab-manager-api",
-      gitUrl: "git@example.test:rcc/grab-manager-api.git",
+      name: "example-service",
+      gitUrl: "git@example.test:rcc/example-service.git",
       prepareCommand: "bundle install"
     });
 
     expect(store.get(environment.id)).toMatchObject({
       id: environment.id,
-      name: "Grab Manager 研发环境",
+      name: "示例研发环境",
       currentRevisionId: null,
       repositories: [repository]
     });
-    expect(() => store.create({ name: "Grab Manager 研发环境" })).toThrow(/UNIQUE/);
+    expect(() => store.create({ name: "示例研发环境" })).toThrow(/UNIQUE/);
     expect(() => store.addRepository(environment.id, {
-      name: "grab-manager-api",
+      name: "example-service",
       gitUrl: "git@example.test:rcc/duplicate.git",
       prepareCommand: null
     })).toThrow(/UNIQUE/);

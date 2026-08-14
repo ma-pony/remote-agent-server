@@ -22,8 +22,8 @@ const createHarness = () => {
 };
 
 const validEndpointInput = (agentId: string) => ({
-  name: "Grab Manager",
-  slug: "grab-manager-ticket",
+  name: "示例平台",
+  slug: "example-ticket",
   agentId,
   enabled: false,
   promptPrefix: "处理外部工单",

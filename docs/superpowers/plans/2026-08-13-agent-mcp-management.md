@@ -90,7 +90,7 @@ it("创建四张 MCP 表", () => {
 
 it("加密敏感值并解析当前 Session 的 MCP", () => {
   const server = manager.createServer(agentId, {
-    name: "grab-manager",
+    name: "example-mcp",
     transport: "http",
     enabled: true,
     url: "https://example.test/mcp",
@@ -398,7 +398,7 @@ it("MCP 失败时不 ensure Session 或启动 Turn", async () => {
   await executor.execute(runId);
   expect(runtime.ensureSession).not.toHaveBeenCalled();
   expect(runtime.startTurn).not.toHaveBeenCalled();
-  expect(getRun(runId)).toMatchObject({ status: "failed", error: "MCP grab-manager check failed" });
+  expect(getRun(runId)).toMatchObject({ status: "failed", error: "MCP example-mcp check failed" });
   expect(getSession(sessionId)?.status).toBe("idle");
 });
 
