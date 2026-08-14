@@ -221,6 +221,23 @@ export class RunRepository {
   recoverAfterRestart(): void {
     const now = new Date().toISOString();
     this.inImmediateTransaction(() => {
+      const interruptedRuns = this.db.prepare("SELECT id FROM runs WHERE status = 'running' ORDER BY created_at, id")
+        .all() as Array<{ id: string }>;
+      for (const run of interruptedRuns) {
+        const nextSeq = (this.db.prepare(
+          "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE run_id = ?"
+        ).get(run.id) as { seq: number }).seq;
+        this.db.prepare(`
+          INSERT INTO events (id, run_id, seq, type, content_json, created_at)
+          VALUES (?, ?, ?, 'error', ?, ?)
+        `).run(
+          randomUUID(),
+          run.id,
+          nextSeq,
+          JSON.stringify({ code: "server_restarted", message: "Run interrupted by server restart" }),
+          now
+        );
+      }
       this.db
         .prepare("UPDATE runs SET status = 'failed', error = 'server_restarted', finished_at = ? WHERE status = 'running'")
         .run(now);

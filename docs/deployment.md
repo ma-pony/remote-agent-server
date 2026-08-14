@@ -409,6 +409,8 @@ curl --fail-with-body \
 
 Task 状态为 `queued`、`running`、`succeeded`、`failed` 或 `cancelled`。查询和 Event 历史是可靠性基础；SSE 和 Webhook 不替代查询。
 
+外部 Event 查询和 SSE 只返回公开投影：Agent 输出消息可见，工具仅包含 ID、标题、kind 和状态等白名单元数据，不包含原始输入输出、Provider 私有字段或内部错误。完整执行轨迹仅在内部 Session 和管理界面查看。
+
 ### 7.2 SSE 断线续读
 
 实时页面可连接：
@@ -461,6 +463,8 @@ const valid = actual.length === expected.length
 验签成功后用 `eventId` 幂等处理。服务采用至少一次投递：网络失败或非 2xx 会自动重试，所以同一事件可能收到多次。Webhook 投递失败不改变 Task 结果；调用方应在处理成功后返回 2xx，并在管理页面检查 Delivery 状态。
 
 Webhook 只发送明确的 Task 状态、用户消息、Agent 最终回复、系统通知和脱敏工具状态，不发送 Agent thought、原始工具输入输出、MCP 密钥或 Provider 私有数据。
+
+Integration Task 因持久化基础设施错误在单进程内完成首次尝试加 3 次延迟重试后，会保持 `queued` 并输出一条 `integration_retry_exhausted taskId=<id>`。该报告不包含请求内容、Token 或原始异常；排除基础设施问题后重启服务会重新获得该 Task 的重试预算。
 
 ### 7.4 结束 Conversation 和常见错误
 

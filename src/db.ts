@@ -198,6 +198,9 @@ export const migrate = (db: Database.Database): void => {
       event_sequence INTEGER NOT NULL DEFAULT 0,
       event_sequences_json TEXT NOT NULL DEFAULT '{}',
       event_dispatch_orders_json TEXT NOT NULL DEFAULT '{}',
+      public_notice_code TEXT,
+      public_notice_message TEXT,
+      public_notice_event_seq INTEGER,
       created_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
@@ -266,5 +269,14 @@ export const migrate = (db: Database.Database): void => {
   }
   if (!hasColumn("webhook_deliveries", "dispatch_order")) {
     db.exec("ALTER TABLE webhook_deliveries ADD COLUMN dispatch_order INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!hasColumn("integration_tasks", "public_notice_code")) {
+    db.exec("ALTER TABLE integration_tasks ADD COLUMN public_notice_code TEXT");
+  }
+  if (!hasColumn("integration_tasks", "public_notice_message")) {
+    db.exec("ALTER TABLE integration_tasks ADD COLUMN public_notice_message TEXT");
+  }
+  if (!hasColumn("integration_tasks", "public_notice_event_seq")) {
+    db.exec("ALTER TABLE integration_tasks ADD COLUMN public_notice_event_seq INTEGER");
   }
 };

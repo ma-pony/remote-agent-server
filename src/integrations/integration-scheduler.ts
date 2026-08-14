@@ -6,6 +6,11 @@ import type { IntegrationProjection } from "./integration-projection.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type { IntegrationTask } from "./integration-types.js";
 
+export type IntegrationSchedulerFailure = {
+  taskId: string;
+  code: "integration_retry_exhausted";
+};
+
 export type IntegrationTaskSchedulerDependencies = {
   store: IntegrationStore;
   runRepository: Pick<RunRepository, "create">;
@@ -14,10 +19,16 @@ export type IntegrationTaskSchedulerDependencies = {
   secrets: Pick<SecretStore, "decrypt">;
   projection: Pick<IntegrationProjection, "recover">;
   retryDelayMs?: number;
-  onSchedulerError?: (failure: { taskId: string; code: "integration_retry_exhausted" }) => undefined;
+  onSchedulerError?: (failure: IntegrationSchedulerFailure) => undefined;
 };
 
 const MAX_AUTOMATIC_RETRIES = 3;
+
+/** Writes the production-safe scheduler exhaustion report. */
+export const reportIntegrationSchedulerError = (failure: IntegrationSchedulerFailure): undefined => {
+  console.error(`${failure.code} taskId=${failure.taskId}`);
+  return undefined;
+};
 
 const INVALID_PARAMETER_SNAPSHOT = {
   code: "invalid_parameter_snapshot",
@@ -180,9 +191,9 @@ export class IntegrationTaskScheduler {
     this.drainRetryAttempts = 0;
   }
 
-  private reportSchedulerError(failure: { taskId: string; code: "integration_retry_exhausted" }): void {
+  private reportSchedulerError(failure: IntegrationSchedulerFailure): void {
     try {
-      const result = this.dependencies.onSchedulerError?.(failure) as unknown;
+      const result = (this.dependencies.onSchedulerError ?? reportIntegrationSchedulerError)(failure) as unknown;
       if (result !== null && (typeof result === "object" || typeof result === "function")
         && typeof (result as { then?: unknown }).then === "function") {
         void Promise.resolve(result).catch(() => undefined);

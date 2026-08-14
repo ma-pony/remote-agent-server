@@ -426,10 +426,23 @@ describe("Integration endpoint API", () => {
     await vi.waitFor(() => expect(
       db.prepare("SELECT status, error FROM integration_tasks WHERE id = ?").get(secondTask.taskId)
     ).toEqual({ status: "failed", error: "agent_disabled" }));
+    const publicEvents = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${secondTask.taskId}/events`,
+      headers: endpointHeaders(endpoint.token)
+    });
+    const notices = (publicEvents.json() as Array<{ type: string; contentJson: string }>).filter(
+      (event) => event.type === "message.system.notice"
+    );
 
     expect(first.statusCode).toBe(202);
     expect(second.statusCode).toBe(202);
     expect(runtime.startTurn).toHaveBeenCalledTimes(1);
+    expect(notices).toHaveLength(1);
+    expect(JSON.parse(notices[0]!.contentJson)).toEqual({
+      code: "agent_disabled",
+      message: "Agent is disabled"
+    });
   });
 
   it("外部提交冲突返回 409，繁忙 Conversation 不能结束", async () => {
@@ -642,6 +655,81 @@ describe("Integration endpoint API", () => {
     expect(invalidCursor.json()).toEqual({
       error: { code: "invalid_request", message: "Invalid Event cursor" }
     });
+  });
+
+  it("外部 Task Event 只返回公开投影且保留 Agent 消息和 afterSeq", async () => {
+    const leakedSecret = "run-event-secret-must-not-leak";
+    const runtime = createFakeRuntime({
+      events: [
+        { type: "message", stream: "output", text: "safe agent reply" },
+        {
+          type: "tool",
+          content: {
+            toolCallId: "tool-secret-boundary",
+            title: "Inspect repository",
+            status: "completed",
+            rawInput: { token: leakedSecret },
+            rawOutput: { result: leakedSecret },
+            content: { nested: leakedSecret },
+            providerPrivate: { deeply: { nested: leakedSecret } }
+          }
+        },
+        { type: "status", text: leakedSecret },
+        { type: "error", code: "provider_warning", message: leakedSecret }
+      ]
+    });
+    const { app, agentId, db } = await createTestApp(runtime);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId, "public-events")
+    });
+    const endpoint = created.json() as { endpoint: { slug: string }; token: string };
+    const submitted = await app.inject({
+      method: "POST",
+      url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
+      headers: endpointHeaders(endpoint.token),
+      payload: { requestId: "public-event-request", message: "work", parameters: {} }
+    });
+    const taskId = (submitted.json() as { taskId: string }).taskId;
+    await vi.waitFor(() => expect(
+      db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(taskId)
+    ).toEqual({ status: "succeeded" }));
+
+    const all = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${taskId}/events`,
+      headers: endpointHeaders(endpoint.token)
+    });
+    const afterMessage = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${taskId}/events?afterSeq=1`,
+      headers: endpointHeaders(endpoint.token)
+    });
+    const events = all.json() as Array<{ seq: number; type: string; contentJson: string }>;
+
+    expect(all.statusCode).toBe(200);
+    expect(events.map(({ seq, type }) => ({ seq, type }))).toEqual([
+      { seq: 1, type: "message" },
+      { seq: 2, type: "tool" },
+      { seq: 3, type: "status" },
+      { seq: 4, type: "error" },
+      { seq: 5, type: "status" }
+    ]);
+    expect(JSON.parse(events[0]!.contentJson)).toEqual({ stream: "output", text: "safe agent reply" });
+    expect(JSON.parse(events[1]!.contentJson)).toEqual({
+      toolCallId: "tool-secret-boundary",
+      title: "Inspect repository",
+      status: "completed"
+    });
+    expect(JSON.parse(events[2]!.contentJson)).toEqual({});
+    expect(JSON.parse(events[3]!.contentJson)).toEqual({ code: "agent_run_error" });
+    expect(JSON.stringify(events)).not.toContain(leakedSecret);
+    expect(JSON.stringify(events)).not.toContain("rawInput");
+    expect(JSON.stringify(events)).not.toContain("rawOutput");
+    expect(JSON.stringify(events)).not.toContain('"content"');
+    expect((afterMessage.json() as Array<{ seq: number }>).map(({ seq }) => seq)).toEqual([2, 3, 4, 5]);
   });
 
   it("running Task 取消委托 Runtime，终态幂等并继续调度同 Conversation 下一 Task", async () => {

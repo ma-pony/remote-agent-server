@@ -9,6 +9,7 @@ import { openDatabase } from "../src/db.js";
 import type { Run } from "../src/domain.js";
 import { EventStore } from "../src/events/event-store.js";
 import { IntegrationProjection } from "../src/integrations/integration-projection.js";
+import { listIntegrationTaskEvents } from "../src/integrations/integration-routes.js";
 import { IntegrationTaskScheduler } from "../src/integrations/integration-scheduler.js";
 import { IntegrationStore } from "../src/integrations/integration-store.js";
 import { McpManager } from "../src/mcp/mcp-manager.js";
@@ -367,6 +368,58 @@ describe("IntegrationTaskScheduler", () => {
       vi.useRealTimers();
     }
   });
+
+  it("生产默认在单进程耗尽时只输出一条脱敏报告，重启后重新计数", async () => {
+    vi.useFakeTimers();
+    const report = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-integration-default-report-"));
+    temporaryDirectories.push(dataDir);
+    const databasePath = join(dataDir, "database.sqlite3");
+    const harness = createHarness({ databasePath, retryDelayMs: 1_000 });
+    harness.db.pragma("busy_timeout = 0");
+    const task = harness.createTask();
+    harness.db.prepare("UPDATE integration_tasks SET message = ?, effective_prompt = ? WHERE id = ?")
+      .run("private-input-must-not-leak", "private-token-must-not-leak", task.id);
+    const locker = openDatabase(databasePath);
+    locker.pragma("busy_timeout = 0");
+    locker.exec("BEGIN IMMEDIATE");
+    let restarted: IntegrationTaskScheduler | undefined;
+    try {
+      harness.scheduler.start();
+      await vi.advanceTimersByTimeAsync(3_000);
+      harness.scheduler.notify();
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(report).toHaveBeenCalledTimes(1);
+      expect(report).toHaveBeenLastCalledWith(`integration_retry_exhausted taskId=${task.id}`);
+      expect(JSON.stringify(report.mock.calls)).not.toContain("private-input-must-not-leak");
+      expect(JSON.stringify(report.mock.calls)).not.toContain("private-token-must-not-leak");
+
+      harness.scheduler.stop();
+      restarted = new IntegrationTaskScheduler({
+        store: harness.store,
+        runRepository: harness.runRepository,
+        runScheduler: harness.runScheduler,
+        sessionManager: harness.sessionManager,
+        secrets: harness.secrets,
+        projection: harness.projection,
+        retryDelayMs: 1_000
+      });
+      restarted.start();
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(report).toHaveBeenCalledTimes(2);
+      expect(report).toHaveBeenLastCalledWith(`integration_retry_exhausted taskId=${task.id}`);
+    } finally {
+      restarted?.stop();
+      harness.scheduler.stop();
+      if (locker.inTransaction) locker.exec("ROLLBACK");
+      locker.close();
+      harness.db.close();
+      report.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("IntegrationProjection", () => {
@@ -548,6 +601,105 @@ describe("IntegrationProjection", () => {
     });
     await Promise.resolve();
     expect(harness.notify).toHaveBeenCalledTimes(1);
+    harness.db.close();
+  });
+
+  it("可分类的 Run 失败持久化脱敏 notice，按订阅过滤并在重复 recovery 时幂等", () => {
+    const harness = createHarness();
+    const noticeSubscription = harness.store.createSubscription({
+      endpointId: harness.endpoint.id,
+      name: "notices",
+      url: "https://example.test/notices",
+      enabled: true,
+      eventsJson: JSON.stringify(["message.system.notice"]),
+      encryptedHeaders: null,
+      encryptedSigningSecret: "secret",
+      timeoutSeconds: 10
+    });
+    const taskOnlySubscription = harness.store.createSubscription({
+      endpointId: harness.endpoint.id,
+      name: "tasks-only",
+      url: "https://example.test/tasks",
+      enabled: true,
+      eventsJson: JSON.stringify(["task.failed"]),
+      encryptedHeaders: null,
+      encryptedSigningSecret: "secret",
+      timeoutSeconds: 10
+    });
+    const finishFailedTask = (
+      task: ReturnType<typeof harness.createTask>,
+      error: string,
+      publicNoticeCode?: string
+    ) => {
+      const run = harness.runRepository.create(
+        { sessionId: task.sessionId, input: task.effectivePrompt },
+        { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
+      );
+      harness.runRepository.markRunning(run.id);
+      if (publicNoticeCode !== undefined) {
+        harness.eventStore.append(run.id, "status", { status: "failed", publicNoticeCode });
+      }
+      harness.eventStore.append(run.id, "error", { message: error });
+      harness.runRepository.finish(run.id, { status: "failed", error });
+    };
+
+    const agentTask = harness.createTask();
+    finishFailedTask(agentTask, "agent_disabled");
+    const mcpSecret = "mcp-private-error-must-not-leak";
+    const mcpTask = harness.createTask();
+    finishFailedTask(mcpTask, mcpSecret, "mcp_preflight_failed");
+    const restartedTask = harness.createTask();
+    const restartedRun = harness.runRepository.create(
+      { sessionId: restartedTask.sessionId, input: restartedTask.effectivePrompt },
+      { afterInsert: (created) => {
+        harness.store.linkTaskRunInTransaction(restartedTask.id, created.id);
+        return undefined;
+      } }
+    );
+    harness.runRepository.markRunning(restartedRun.id);
+    harness.runRepository.recoverAfterRestart();
+
+    harness.projection.recover();
+    const firstRecovery = harness.store.listDeliveries(noticeSubscription.id).map((delivery) => ({
+      id: delivery.id,
+      eventKey: delivery.eventKey,
+      sequence: delivery.sequence,
+      dispatchOrder: delivery.dispatchOrder
+    }));
+    harness.projection.recover();
+
+    const notices = harness.store.listDeliveries(noticeSubscription.id).map((delivery) => ({
+      eventKey: delivery.eventKey,
+      sequence: delivery.sequence,
+      payload: JSON.parse(delivery.payloadJson) as Record<string, unknown>
+    }));
+    expect(notices).toHaveLength(3);
+    expect(notices.map(({ payload }) => payload.notice)).toEqual([
+      { code: "agent_disabled", message: "Agent is disabled" },
+      { code: "mcp_preflight_failed", message: "MCP preflight failed" },
+      { code: "server_restarted", message: "Agent Run was interrupted by a server restart" }
+    ]);
+    expect(new Set(notices.map(({ eventKey }) => eventKey)).size).toBe(3);
+    expect(notices.every(({ sequence }) => sequence === 3)).toBe(true);
+    expect(harness.store.listDeliveries(noticeSubscription.id).map((delivery) => ({
+      id: delivery.id,
+      eventKey: delivery.eventKey,
+      sequence: delivery.sequence,
+      dispatchOrder: delivery.dispatchOrder
+    }))).toEqual(firstRecovery);
+    expect(JSON.stringify(notices)).not.toContain(mcpSecret);
+    expect(harness.store.listDeliveries(taskOnlySubscription.id).map(({ eventType }) => eventType))
+      .toEqual(["task.failed", "task.failed", "task.failed"]);
+    for (const task of [agentTask, mcpTask, restartedTask]) {
+      const publicNotices = listIntegrationTaskEvents(
+        harness.store,
+        harness.eventStore,
+        task.id,
+        harness.endpoint.id,
+        0
+      ).filter(({ type }) => type === "message.system.notice");
+      expect(publicNotices).toHaveLength(1);
+    }
     harness.db.close();
   });
 

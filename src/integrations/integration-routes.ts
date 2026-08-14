@@ -1,7 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
-import type { Event } from "../domain.js";
 import type { EventStore } from "../events/event-store.js";
 import { McpManagerError } from "../mcp/mcp-manager.js";
 import type { RunExecutor } from "../runs/run-executor.js";
@@ -19,6 +18,10 @@ import { IntegrationEndpointManager, IntegrationEndpointManagerError } from "./i
 import type { IntegrationTaskScheduler } from "./integration-scheduler.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type { IntegrationTask } from "./integration-types.js";
+import {
+  toPublicIntegrationEvent,
+  type PublicIntegrationEvent
+} from "./public-integration-event.js";
 
 const submitTaskSchema = z.object({
   requestId: z.string().refine((value) => value.trim() !== ""),
@@ -93,9 +96,11 @@ export const listIntegrationTaskEvents = (
   taskId: string,
   endpointId: string,
   afterSeq: number
-): Event[] => {
+): PublicIntegrationEvent[] => {
   const task = store.getTaskForEndpoint(taskId, endpointId);
-  return task?.runId === null || task === undefined ? [] : eventStore.list(task.runId, afterSeq);
+  return task?.runId === null || task === undefined
+    ? []
+    : eventStore.list(task.runId, afterSeq).map((event) => toPublicIntegrationEvent(event, task));
 };
 
 const waitForLinkedRun = async (
@@ -168,6 +173,7 @@ export const streamIntegrationTaskEvents = async (input: {
     input.store.getTaskForEndpoint(input.taskId, input.endpointId);
   await streamRunEvents(input.eventStore, task.runId, input.afterSeq, input.writer, {
     heartbeatMs: SSE_HEARTBEAT_INTERVAL_MS,
+    projectEvent: (event) => toPublicIntegrationEvent(event, currentTask()),
     isTerminal: () => isTerminalTask(currentTask()),
     terminalFrame: () => {
       const current = currentTask();
@@ -242,7 +248,9 @@ export const registerIntegrationRoutes = (
       if (task === undefined) return sendError(reply, 404, "task_not_found", "Integration Task not found");
       const parsed = eventQuerySchema.safeParse(request.query);
       if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Event cursor");
-      return task.runId === null ? [] : eventStore.list(task.runId, parsed.data.afterSeq);
+      return task.runId === null
+        ? []
+        : eventStore.list(task.runId, parsed.data.afterSeq).map((event) => toPublicIntegrationEvent(event, task));
     }
   );
 

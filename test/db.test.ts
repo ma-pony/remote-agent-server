@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { loadConfig } from "../src/config.js";
+import { migrate, openDatabase } from "../src/db.js";
 import { createTestDatabase } from "./helpers.js";
 
 const validEnv = {
@@ -91,9 +92,53 @@ describe("database migration", () => {
     const deliveryColumns = db.prepare("PRAGMA table_info(webhook_deliveries)").all()
       .map((row) => (row as { name: string }).name);
 
-    expect(taskColumns).toEqual(expect.arrayContaining(["event_sequences_json", "event_dispatch_orders_json"]));
+    expect(taskColumns).toEqual(expect.arrayContaining([
+      "event_sequences_json",
+      "event_dispatch_orders_json",
+      "public_notice_code",
+      "public_notice_message",
+      "public_notice_event_seq"
+    ]));
     expect(endpointColumns).toContain("next_delivery_order");
     expect(deliveryColumns).toContain("dispatch_order");
+    db.close();
+  });
+
+  it("已有 Integration Task 表迁移时原地增加公开 notice 来源列", () => {
+    const db = openDatabase(":memory:");
+    db.exec(`
+      CREATE TABLE integration_tasks (
+        id TEXT PRIMARY KEY,
+        endpoint_id TEXT NOT NULL,
+        conversation_id TEXT,
+        session_id TEXT NOT NULL,
+        run_id TEXT UNIQUE,
+        request_id TEXT NOT NULL,
+        request_fingerprint TEXT NOT NULL,
+        message TEXT NOT NULL,
+        effective_prompt TEXT NOT NULL,
+        encrypted_parameters TEXT,
+        status TEXT NOT NULL,
+        result TEXT,
+        error TEXT,
+        event_sequence INTEGER NOT NULL DEFAULT 0,
+        event_sequences_json TEXT NOT NULL DEFAULT '{}',
+        event_dispatch_orders_json TEXT NOT NULL DEFAULT '{}',
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+      )
+    `);
+
+    migrate(db);
+
+    const columns = db.prepare("PRAGMA table_info(integration_tasks)").all()
+      .map((row) => (row as { name: string }).name);
+    expect(columns).toEqual(expect.arrayContaining([
+      "public_notice_code",
+      "public_notice_message",
+      "public_notice_event_seq"
+    ]));
     db.close();
   });
 

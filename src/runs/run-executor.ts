@@ -6,7 +6,7 @@ import type { RunMcpPreparer } from "../mcp/run-mcp-preparer.js";
 import type { AgentRuntime, RuntimeEvent, RuntimeTurn, RuntimeTurnResult } from "../runtime/agent-runtime.js";
 import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { SkillProjector } from "../runtime/skill-projector.js";
-import type { SessionManager } from "../sessions/session-manager.js";
+import { SessionManagerError, type SessionManager } from "../sessions/session-manager.js";
 import { RunRepositoryError, type RunRepository } from "./run-repository.js";
 
 export type RunExecutorDependencies = {
@@ -70,18 +70,25 @@ export class RunExecutor {
     const run = this.runRepository.markRunning(runId);
     let liveTurn: RuntimeTurn | undefined;
     let liveIterator: AsyncIterator<RuntimeEvent> | undefined;
+    let publicNoticeCode: "mcp_preflight_failed" | undefined;
 
     try {
       const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
       const browserProfilePath = join(dirname(session.workspacePath), "browser");
-      const mcpPreparation = this.mcpPreparer.prepare({
-        agentId: agent.id,
-        sessionId: session.id,
-        runId: run.id,
-        workspacePath: session.workspacePath,
-        browserProfilePath
-      });
-      const mcpServers = mcpPreparation instanceof Promise ? await mcpPreparation : mcpPreparation;
+      let mcpServers: Awaited<ReturnType<RunMcpPreparer["prepare"]>>;
+      try {
+        const mcpPreparation = this.mcpPreparer.prepare({
+          agentId: agent.id,
+          sessionId: session.id,
+          runId: run.id,
+          workspacePath: session.workspacePath,
+          browserProfilePath
+        });
+        mcpServers = mcpPreparation instanceof Promise ? await mcpPreparation : mcpPreparation;
+      } catch (error) {
+        publicNoticeCode = "mcp_preflight_failed";
+        throw error;
+      }
       const memory = this.skillProjector.prepare(agent, session);
       const runtimeSession = await this.runtime.ensureSession({
         sessionId: session.id,
@@ -147,6 +154,11 @@ export class RunExecutor {
     } catch (error) {
       await this.cleanupFailedTurn(liveTurn, liveIterator);
       const message = errorMessage(error);
+      const stableNoticeCode = publicNoticeCode
+        ?? (error instanceof SessionManagerError && error.code === "agent_disabled" ? "agent_disabled" : undefined);
+      if (stableNoticeCode !== undefined) {
+        this.appendBestEffort(run.id, "status", { status: "failed", publicNoticeCode: stableNoticeCode });
+      }
       this.appendBestEffort(run.id, "error", { message });
       return this.finishRun(run.id, { status: "failed", error: message });
     } finally {

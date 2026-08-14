@@ -159,6 +159,42 @@ describe("Integration Task events", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("外部 SSE 与查询使用同一公开投影且不传输工具原始内容", async () => {
+    const context = setup();
+    const runId = linkRun(context);
+    const secret = "sse-tool-secret-must-not-leak";
+    context.eventStore.append(runId, "message", { stream: "output", text: "safe reply" });
+    context.eventStore.append(runId, "tool", {
+      toolCallId: "tool-sse",
+      status: "completed",
+      rawInput: { token: secret },
+      rawOutput: { value: secret },
+      content: { nested: secret }
+    });
+    const writer = new FakeSseWriter();
+    finishTask(context, "succeeded");
+
+    await streamIntegrationTaskEvents({
+      store: context.store,
+      eventStore: context.eventStore,
+      taskId: context.task.id,
+      endpointId: context.endpoint.id,
+      afterSeq: 0,
+      writer
+    });
+
+    const events = parsedEvents(writer);
+    expect(events.map(({ seq, type }) => ({ seq, type }))).toEqual([
+      { seq: 1, type: "message" },
+      { seq: 2, type: "tool" }
+    ]);
+    expect(JSON.parse(events[1]!.contentJson)).toEqual({ toolCallId: "tool-sse", status: "completed" });
+    expect(JSON.stringify(events)).not.toContain(secret);
+    expect(JSON.stringify(events)).not.toContain("rawInput");
+    expect(JSON.stringify(events)).not.toContain("rawOutput");
+    expect(JSON.stringify(events)).not.toContain('"content"');
+  });
+
   it("queued 取消原子写终态并只在提交后通知", () => {
     const context = setup();
     const observed = vi.fn(() => {

@@ -73,6 +73,9 @@ export type IntegrationTask = {
   result: string | null;
   error: string | null;
   eventSequence: number;
+  publicNoticeCode: string | null;
+  publicNoticeMessage: string | null;
+  publicNoticeEventSeq: number | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

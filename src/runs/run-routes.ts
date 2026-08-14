@@ -34,6 +34,8 @@ const eventQuerySchema = z.object({
 const sendError = (reply: FastifyReply, statusCode: number, code: string, message: string) =>
   reply.code(statusCode).send({ error: { code, message } });
 
+type StreamEvent = Omit<Event, "type"> & { type: string };
+
 const handleRunError = (reply: FastifyReply, error: unknown) => {
   if (!(error instanceof RunRepositoryError)) throw error;
   if (error.code === "run_not_found") return sendError(reply, 404, "not_found", "Run not found");
@@ -43,7 +45,7 @@ const handleRunError = (reply: FastifyReply, error: unknown) => {
   return sendError(reply, 409, error.code, "Run state changed");
 };
 
-const sseFrame = (event: Event): string =>
+const sseFrame = (event: StreamEvent): string =>
   `id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 
 export type RunEventStreamOptions = {
@@ -51,6 +53,7 @@ export type RunEventStreamOptions = {
   isTerminal?: () => boolean;
   terminalFrame?: () => string | undefined;
   subscribeStateChange?: (listener: () => void) => () => void;
+  projectEvent?: (event: Event) => StreamEvent;
 };
 
 const endWriter = (writer: SseWriter): void => {
@@ -146,7 +149,8 @@ export const streamRunEvents = async (
 
   const write = async (event: Event): Promise<void> => {
     if (closed || event.seq <= cursor) return;
-    const written = await writeChunkWithDrain(writer, sseFrame(event));
+    const publicEvent = options.projectEvent?.(event) ?? event;
+    const written = await writeChunkWithDrain(writer, sseFrame(publicEvent));
     if (!written) {
       finish(true);
       return;

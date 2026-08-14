@@ -57,6 +57,9 @@ type TaskRow = {
   event_sequence: number;
   event_sequences_json: string;
   event_dispatch_orders_json: string;
+  public_notice_code: string | null;
+  public_notice_message: string | null;
+  public_notice_event_seq: number | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -253,6 +256,9 @@ const toTask = (row: TaskRow): IntegrationTask => ({
   result: row.result,
   error: row.error,
   eventSequence: row.event_sequence,
+  publicNoticeCode: row.public_notice_code,
+  publicNoticeMessage: row.public_notice_message,
+  publicNoticeEventSeq: row.public_notice_event_seq,
   createdAt: row.created_at,
   startedAt: row.started_at,
   finishedAt: row.finished_at
@@ -622,12 +628,25 @@ export class IntegrationStore {
     return result.changes === 0 ? undefined : this.getTaskByRun(runId);
   }
 
-  finishTaskInTransaction(run: Run): IntegrationTask | undefined {
+  finishTaskInTransaction(
+    run: Run,
+    notice?: { code: string; message: string; eventSeq: number | null }
+  ): IntegrationTask | undefined {
     const result = this.db.prepare(`
       UPDATE integration_tasks
-      SET status = ?, result = ?, error = ?, finished_at = ?
+      SET status = ?, result = ?, error = ?, finished_at = ?,
+          public_notice_code = ?, public_notice_message = ?, public_notice_event_seq = ?
       WHERE run_id = ? AND status IN ('queued', 'running')
-    `).run(run.status, run.result, run.error, run.finishedAt, run.id);
+    `).run(
+      run.status,
+      run.result,
+      run.error,
+      run.finishedAt,
+      notice?.code ?? null,
+      notice?.message ?? null,
+      notice?.eventSeq ?? null,
+      run.id
+    );
     return result.changes === 0 ? undefined : this.getTaskByRun(run.id);
   }
 

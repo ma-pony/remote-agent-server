@@ -15,7 +15,10 @@ import { IntegrationCoordinator } from "./integrations/integration-coordinator.j
 import { IntegrationEndpointManager } from "./integrations/integration-endpoint-manager.js";
 import { IntegrationProjection } from "./integrations/integration-projection.js";
 import { registerIntegrationRoutes } from "./integrations/integration-routes.js";
-import { IntegrationTaskScheduler } from "./integrations/integration-scheduler.js";
+import {
+  IntegrationTaskScheduler,
+  reportIntegrationSchedulerError
+} from "./integrations/integration-scheduler.js";
 import { IntegrationStore } from "./integrations/integration-store.js";
 import { WebhookDispatcher } from "./integrations/webhook-dispatcher.js";
 import { SdkMcpChecker, type McpChecker } from "./mcp/mcp-checker.js";
@@ -143,7 +146,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     runScheduler: scheduler,
     sessionManager,
     secrets,
-    projection: integrationProjection
+    projection: integrationProjection,
+    onSchedulerError: reportIntegrationSchedulerError
   });
   integrationProjection.setNotify(() => integrationTaskScheduler.notify());
   const integrationCoordinator = new IntegrationCoordinator({

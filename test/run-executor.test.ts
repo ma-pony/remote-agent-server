@@ -123,6 +123,8 @@ describe("RunExecutor", () => {
       status: "failed",
       error: "agent_disabled"
     });
+    expect(setupResult.eventStore.list(setupResult.run.id, 0).map((event) => JSON.parse(event.contentJson)))
+      .toContainEqual({ status: "failed", publicNoticeCode: "agent_disabled" });
     expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
     setupResult.db.close();
   });
@@ -150,6 +152,8 @@ describe("RunExecutor", () => {
     expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
       status: "failed", error: "MCP private_mcp check failed"
     });
+    expect(setupResult.eventStore.list(setupResult.run.id, 0).map((event) => JSON.parse(event.contentJson)))
+      .toContainEqual({ status: "failed", publicNoticeCode: "mcp_preflight_failed" });
     setupResult.db.close();
   });
 

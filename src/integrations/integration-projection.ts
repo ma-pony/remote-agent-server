@@ -57,6 +57,17 @@ const toolTerminalEventType = (status: string): "tool.completed" | "tool.failed"
   return undefined;
 };
 
+const PUBLIC_FAILURE_NOTICES = {
+  agent_disabled: { code: "agent_disabled", message: "Agent is disabled" },
+  mcp_preflight_failed: { code: "mcp_preflight_failed", message: "MCP preflight failed" },
+  server_restarted: {
+    code: "server_restarted",
+    message: "Agent Run was interrupted by a server restart"
+  }
+} as const;
+
+type PublicFailureNoticeCode = keyof typeof PUBLIC_FAILURE_NOTICES;
+
 /** Projects generic Run state and Events into external Integration Task state. */
 export class IntegrationProjection implements RunStateProjection, RunEventProjection {
   private notifyScheduler: () => void;
@@ -83,7 +94,7 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
   }
 
   onFinished(run: Run): undefined {
-    const task = this.dependencies.store.finishTaskInTransaction(run);
+    const task = this.dependencies.store.finishTaskInTransaction(run, this.publicFailureNotice(run));
     if (task === undefined) return undefined;
     this.appendFinishedEvents(run, task);
     return undefined;
@@ -91,8 +102,42 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
 
   private appendFinishedEvents(run: Run, task: IntegrationTask): void {
     this.appendTerminalEvent(run, task);
+    this.appendSystemNotice(run, task);
     const output = this.agentOutput(run.id);
     if (output !== "") this.appendAgentReply(run, task, output);
+  }
+
+  private publicFailureNotice(run: Run): { code: string; message: string; eventSeq: number | null } | undefined {
+    if (run.status !== "failed") return undefined;
+    const events = this.dependencies.listEvents(run.id);
+    const marker = events.flatMap((event) => {
+      if (event.type !== "status") return [];
+      const content = record(JSON.parse(event.contentJson));
+      const code = nonEmptyString(content?.publicNoticeCode);
+      return code === undefined ? [] : [code];
+    }).at(-1);
+    const code = run.error === "agent_disabled"
+      ? "agent_disabled"
+      : run.error === "server_restarted"
+        ? "server_restarted"
+        : marker === "mcp_preflight_failed"
+          ? "mcp_preflight_failed"
+          : undefined;
+    if (code === undefined) return undefined;
+    const notice = PUBLIC_FAILURE_NOTICES[code as PublicFailureNoticeCode];
+    const eventSeq = events.filter((event) => event.type === "error").at(-1)?.seq ?? null;
+    return { ...notice, eventSeq };
+  }
+
+  private appendSystemNotice(run: Run, task: IntegrationTask): void {
+    if (task.publicNoticeCode === null || task.publicNoticeMessage === null) return;
+    this.dependencies.store.appendTaskEventInTransaction({
+      taskId: task.id,
+      eventType: "message.system.notice",
+      eventKey: `${task.id}:message.system.notice:${task.publicNoticeCode}`,
+      occurredAt: run.finishedAt!,
+      payload: { code: task.publicNoticeCode, message: task.publicNoticeMessage }
+    });
   }
 
   private appendTerminalEvent(run: Run, task: IntegrationTask): void {
@@ -227,6 +272,16 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
           const replyEventKey = `${task.id}:message.agent.reply`;
           if (this.dependencies.store.needsTaskEventDelivery(task.id, `task.${run.status}`, [taskEventKey])) {
             this.appendTerminalEvent(run, task);
+          }
+          if (task.publicNoticeCode !== null && task.publicNoticeMessage !== null) {
+            const noticeEventKey = `${task.id}:message.system.notice:${task.publicNoticeCode}`;
+            if (this.dependencies.store.needsTaskEventDelivery(
+              task.id,
+              "message.system.notice",
+              [noticeEventKey]
+            )) {
+              this.appendSystemNotice(run, task);
+            }
           }
           const output = this.agentOutput(run.id);
           if (output !== ""
