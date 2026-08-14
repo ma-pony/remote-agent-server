@@ -9,6 +9,7 @@ import { buildApp } from "../src/app.js";
 import { migrate, openDatabase } from "../src/db.js";
 import type { Run } from "../src/domain.js";
 import { startServer, type RunningServer } from "../src/main.js";
+import { SecretStore } from "../src/mcp/secret-store.js";
 import type { AgentRuntime, RuntimeTurnResult } from "../src/runtime/agent-runtime.js";
 import { BEST_EFFORT_TIMEOUT_MS } from "../src/runtime/bounded-operation.js";
 import { RunScheduler } from "../src/runs/run-scheduler.js";
@@ -619,6 +620,20 @@ describe("Server startup and shutdown", () => {
         VALUES ('old-task', 'endpoint-1', NULL, 'old-session', 'old-run', 'request-1', 'fingerprint-1',
                 'old message', 'do not replay', 'running', ?)
       `).run(timestamp);
+      const secrets = SecretStore.open({ dataDir: join(root, "data") });
+      db.prepare(`
+        INSERT INTO webhook_subscriptions
+          (id, endpoint_id, name, url, enabled, events_json, encrypted_signing_secret, timeout_seconds, created_at, updated_at)
+        VALUES ('restart-webhook', 'endpoint-1', 'Restart webhook', 'https://receiver.test/restart', 1, '[]', ?, 10, ?, ?)
+      `).run(secrets.encrypt("restart-signing-secret"), timestamp, timestamp);
+      db.prepare(`
+        INSERT INTO webhook_deliveries
+          (id, event_id, event_key, sequence, subscription_id, task_id, event_type, payload_json, status,
+           attempt_count, next_attempt_at, created_at, updated_at)
+        VALUES ('restart-delivery', 'restart-event', 'restart:event', 1, 'restart-webhook', 'old-task',
+                'task.started', '{"id":"restart-event","type":"task.started","data":{"status":"running"}}',
+                'delivering', 1, ?, ?, ?)
+      `).run(timestamp, timestamp, timestamp);
     }
     db.prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
       .run("queued-run", "queued-session", "queued", "resume queued", timestamp);
@@ -682,12 +697,20 @@ describe("Server startup and shutdown", () => {
       await app.ready();
     };
 
-    const server = await startServer({ ...options, platform: "linux" });
+    const webhookFetch = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    const server = await startServer({ ...options, platform: "linux", webhookFetch });
     await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+    await vi.waitFor(() => {
+      const observer = openDatabase(databasePath);
+      const delivery = observer.prepare("SELECT status FROM webhook_deliveries WHERE id = 'restart-delivery'").get();
+      observer.close();
+      expect(delivery).toEqual({ status: "succeeded" });
+    });
 
     expect(order).toEqual(["check", "runtime", "listen"]);
     expect(commandRunner.run).toHaveBeenCalledWith("btrfs", ["subvolume", "show", join(root, "template")]);
     expect(runtime.startTurn).toHaveBeenCalledTimes(1);
+    expect(webhookFetch).toHaveBeenCalledTimes(1);
     expect(runtime.startTurn).toHaveBeenCalledWith({
       sessionId: "queued-session",
       requestId: "queued-run",

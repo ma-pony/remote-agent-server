@@ -17,6 +17,7 @@ import { IntegrationProjection } from "./integrations/integration-projection.js"
 import { registerIntegrationRoutes } from "./integrations/integration-routes.js";
 import { IntegrationTaskScheduler } from "./integrations/integration-scheduler.js";
 import { IntegrationStore } from "./integrations/integration-store.js";
+import { WebhookDispatcher } from "./integrations/webhook-dispatcher.js";
 import { SdkMcpChecker, type McpChecker } from "./mcp/mcp-checker.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { registerMcpRoutes } from "./mcp/mcp-routes.js";
@@ -59,6 +60,8 @@ export type AppDependencies = {
   mcpChecker?: McpChecker;
   integrationStore?: IntegrationStore;
   integrationProjection?: IntegrationProjection;
+  webhookDispatcher?: WebhookDispatcher;
+  webhookFetch?: typeof fetch;
   webRoot?: string;
 };
 
@@ -88,6 +91,11 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     db: deps.db,
     store: integrationStore,
     secrets
+  });
+  const webhookDispatcher = deps.webhookDispatcher ?? new WebhookDispatcher({
+    store: integrationStore,
+    secrets,
+    fetch: deps.webhookFetch
   });
   const workspaceManager = deps.workspaceManager ?? createWorkspaceManager({
     workspaceTemplate: deps.config.workspaceTemplate,
@@ -144,7 +152,10 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     endpointManager: integrationEndpointManager,
     sessionManager,
     secrets,
-    notifyTaskQueued: () => integrationTaskScheduler.notify()
+    notifyTaskQueued: () => {
+      integrationTaskScheduler.notify();
+      integrationStore.notifyDeliveriesChanged();
+    }
   });
 
   app.get("/api/health", () => ({ ok: true }));
@@ -153,7 +164,12 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager, skillManager);
     registerMcpRoutes(api, { mcpManager, mcpChecker });
-    registerIntegrationAdminRoutes(api, integrationEndpointManager);
+    registerIntegrationAdminRoutes(api, {
+      manager: integrationEndpointManager,
+      store: integrationStore,
+      secrets,
+      dispatcher: webhookDispatcher
+    });
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });
@@ -193,6 +209,11 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     const failures: unknown[] = [];
     integrationTaskScheduler.stop();
     try {
+      await webhookDispatcher.stop();
+    } catch (error) {
+      failures.push(error);
+    }
+    try {
       await scheduler.stop();
     } catch (error) {
       failures.push(error);
@@ -215,6 +236,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   });
   scheduler.start();
   integrationTaskScheduler.start();
+  webhookDispatcher.start();
   projectEnvironmentScheduler.start();
 
   return app;

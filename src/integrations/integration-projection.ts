@@ -4,6 +4,7 @@ import type { Event, Run } from "../domain.js";
 import type { RunEventProjection } from "../events/event-store.js";
 import type { RunStateProjection } from "../runs/run-repository.js";
 import type { IntegrationStore } from "./integration-store.js";
+import type { IntegrationTask } from "./integration-types.js";
 
 export type { RunEventProjection, RunStateProjection };
 
@@ -83,14 +84,17 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
   onFinished(run: Run): undefined {
     const task = this.dependencies.store.finishTaskInTransaction(run);
     if (task === undefined) return undefined;
+    this.appendFinishedEvents(run, task);
+    return undefined;
+  }
+
+  private appendFinishedEvents(run: Run, task: IntegrationTask): void {
     this.dependencies.store.appendTaskEventInTransaction({
       taskId: task.id,
       eventType: `task.${run.status}`,
       eventKey: `${task.id}:task.${run.status}`,
       payload: {
         status: run.status,
-        result: run.result,
-        error: run.error,
         finishedAt: run.finishedAt
       }
     });
@@ -108,20 +112,33 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
         payload: { message: output }
       });
     }
-
-    return undefined;
   }
 
   afterCommit(run: Run): undefined {
     const task = this.dependencies.store.getTaskByRun(run.id);
-    if (task !== undefined) this.dependencies.store.notifyTaskChanged(task.id);
+    if (task !== undefined) {
+      this.dependencies.store.notifyTaskChanged(task.id);
+      this.dependencies.store.notifyDeliveriesChanged();
+    }
     if (run.status === "succeeded" || run.status === "failed" || run.status === "cancelled") {
       this.notifyScheduler();
     }
     return undefined;
   }
 
+  afterAppendCommit(event: Event): undefined {
+    if (this.dependencies.store.getTaskByRun(event.runId) !== undefined) {
+      this.dependencies.store.notifyDeliveriesChanged();
+    }
+    return undefined;
+  }
+
   onAppended(event: Event): undefined {
+    this.projectToolEvent(event, false);
+    return undefined;
+  }
+
+  private projectToolEvent(event: Event, recovering: boolean): void {
     if (event.type !== "tool") return undefined;
     const task = this.dependencies.store.getTaskByRun(event.runId);
     if (task === undefined) return undefined;
@@ -136,12 +153,8 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
     });
 
     if (priorToolContents.length === 0) {
-      this.dependencies.store.appendTaskEventInTransaction({
-        taskId: task.id,
-        eventType: "tool.started",
-        eventKey: `${task.id}:tool:${toolCallId}:started`,
-        payload: publicToolPayload(content, toolCallId, "started")
-      });
+      this.appendToolEvent(event, task, "tool.started", `${task.id}:tool:${toolCallId}:started`,
+        publicToolPayload(content, toolCallId, "started"), recovering);
     }
 
     const status = nonEmptyString(content.status);
@@ -153,28 +166,76 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
       toolTerminalEventType(nonEmptyString(prior.status) ?? "") === terminalEventType
     );
     if (terminalAlreadyProjected) return undefined;
-    this.dependencies.store.appendTaskEventInTransaction({
-      taskId: task.id,
-      eventType: terminalEventType,
-      eventKey: `${task.id}:tool:${toolCallId}:${terminalPhase}`,
-      payload: publicToolPayload(content, toolCallId, terminalPhase)
-    });
-    return undefined;
+    this.appendToolEvent(event, task, terminalEventType, `${task.id}:tool:${toolCallId}:${terminalPhase}`,
+      publicToolPayload(content, toolCallId, terminalPhase), recovering);
   }
 
-  /** Replays only missing linked Task projections after Run restart recovery. */
+  private appendToolEvent(
+    event: Event,
+    task: IntegrationTask,
+    eventType: "tool.started" | "tool.completed" | "tool.failed",
+    businessEventKey: string,
+    payload: Record<string, unknown>,
+    recovering: boolean
+  ): void {
+    if (!recovering) {
+      this.dependencies.store.appendTaskEventInTransaction({
+        taskId: task.id,
+        eventType,
+        eventKey: businessEventKey,
+        payload
+      });
+      return;
+    }
+    const recoveryEventKey = `${event.runId}:${event.seq}:${eventType}`;
+    if (!this.dependencies.store.needsTaskEventDelivery(
+      task.id,
+      eventType,
+      [businessEventKey, recoveryEventKey]
+    )) return;
+    const eventKey = this.dependencies.store.hasTaskDeliveryEventKey(task.id, businessEventKey)
+      ? businessEventKey
+      : recoveryEventKey;
+    this.dependencies.store.appendTaskEventInTransaction({
+      taskId: task.id,
+      eventType,
+      eventKey,
+      eventId: event.id,
+      occurredAt: event.createdAt,
+      payload
+    });
+  }
+
+  /** Reconciles linked Task state and only the missing deterministic Webhook projections. */
   recover(): void {
-    for (const run of this.dependencies.store.listRunsNeedingProjection()) {
+    for (const run of this.dependencies.store.listLinkedRuns()) {
       this.dependencies.db.exec("BEGIN IMMEDIATE");
       try {
-        if (run.status === "running") this.onStarted(run);
-        else this.onFinished(run);
+        const taskBefore = this.dependencies.store.getTaskByRun(run.id);
+        if (run.status === "running" && taskBefore?.status === "queued") this.onStarted(run);
+        if ((run.status === "succeeded" || run.status === "failed" || run.status === "cancelled")
+          && (taskBefore?.status === "queued" || taskBefore?.status === "running")) {
+          this.onFinished(run);
+        }
+        const task = this.dependencies.store.getTaskByRun(run.id);
+        if (task !== undefined && (run.status === "succeeded" || run.status === "failed" || run.status === "cancelled")) {
+          const taskEventKey = `${task.id}:task.${run.status}`;
+          const replyEventKey = `${task.id}:message.agent.reply`;
+          if (this.dependencies.store.needsTaskEventDelivery(task.id, `task.${run.status}`, [taskEventKey])
+            || this.dependencies.store.needsTaskEventDelivery(task.id, "message.agent.reply", [replyEventKey])) {
+            this.appendFinishedEvents(run, task);
+          }
+        }
+        for (const event of this.dependencies.listEvents(run.id)) this.projectToolEvent(event, true);
         this.dependencies.db.exec("COMMIT");
       } catch (error) {
         this.dependencies.db.exec("ROLLBACK");
         throw error;
       }
-      this.afterCommit(run);
+      const task = this.dependencies.store.getTaskByRun(run.id);
+      if (task !== undefined) this.dependencies.store.notifyTaskChanged(task.id);
     }
+    this.dependencies.store.notifyDeliveriesChanged();
+    this.notifyScheduler();
   }
 }

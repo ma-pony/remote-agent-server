@@ -30,6 +30,7 @@ export type EventStoreDependencies = {
 
 export type RunEventProjection = {
   onAppended(event: Event): undefined;
+  afterAppendCommit?(event: Event): undefined;
 };
 
 const noOpRunEventProjection: RunEventProjection = {
@@ -83,6 +84,11 @@ export class EventStore {
       } catch (_error) {
         // A subscriber cannot roll back an already-committed Event or affect other subscribers.
       }
+    }
+    try {
+      assertSynchronousTransactionHook(this.projection.afterAppendCommit?.(event!));
+    } catch (_error) {
+      // Post-commit projection notification is best effort; the Event is already durable.
     }
     return event!;
   }

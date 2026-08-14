@@ -147,6 +147,8 @@ export type CreateWebhookSubscriptionInput = {
   timeoutSeconds: number;
 };
 
+export type UpdateWebhookSubscriptionInput = Omit<CreateWebhookSubscriptionInput, "id" | "endpointId">;
+
 export type CreateWebhookDeliveryInput = {
   id?: string;
   eventId: string;
@@ -163,6 +165,8 @@ export type AppendTaskEventInput = {
   taskId: string;
   eventType: string;
   eventKey?: string;
+  eventId?: string;
+  occurredAt?: string;
   payload: Record<string, unknown>;
 };
 
@@ -256,6 +260,7 @@ const toRun = (row: LinkedRunRow): Run => ({
 /** Stores integration state; InTransaction methods join a caller-owned SQLite transaction. */
 export class IntegrationStore {
   private readonly taskListeners = new Map<string, Set<() => unknown>>();
+  private readonly deliveryListeners = new Set<() => unknown>();
 
   constructor(private readonly dependencies: { db: Database.Database }) {}
 
@@ -489,6 +494,22 @@ export class IntegrationStore {
     }
   }
 
+  /** Notifies delivery observers only after the owning transaction has committed. */
+  notifyDeliveriesChanged(): void {
+    for (const listener of [...this.deliveryListeners]) {
+      try {
+        void Promise.resolve(listener()).catch(() => undefined);
+      } catch (_error) {
+        // Delivery observers cannot affect persisted business state or other observers.
+      }
+    }
+  }
+
+  subscribeDeliveries(listener: () => unknown): () => void {
+    this.deliveryListeners.add(listener);
+    return () => this.deliveryListeners.delete(listener);
+  }
+
   subscribeTask(taskId: string, listener: () => unknown): () => void {
     let listeners = this.taskListeners.get(taskId);
     if (listeners === undefined) {
@@ -542,7 +563,10 @@ export class IntegrationStore {
       });
       return this.getTask(id);
     });
-    if (failed !== undefined) this.notifyTaskChanged(failed.id);
+    if (failed !== undefined) {
+      this.notifyTaskChanged(failed.id);
+      this.notifyDeliveriesChanged();
+    }
     return failed;
   }
 
@@ -564,7 +588,10 @@ export class IntegrationStore {
       });
       return this.getTaskForEndpoint(id, endpointId);
     });
-    if (cancelled !== undefined) this.notifyTaskChanged(cancelled.id);
+    if (cancelled !== undefined) {
+      this.notifyTaskChanged(cancelled.id);
+      this.notifyDeliveriesChanged();
+    }
     return cancelled;
   }
 
@@ -576,6 +603,17 @@ export class IntegrationStore {
       JOIN integration_tasks task ON task.run_id = run.id
       WHERE (run.status = 'running' AND task.status = 'queued')
          OR (run.status IN ('succeeded', 'failed', 'cancelled') AND task.status IN ('queued', 'running'))
+      ORDER BY run.created_at ASC, run.id ASC
+    `).all() as LinkedRunRow[];
+    return rows.map(toRun);
+  }
+
+  /** Lists every linked Run so deterministic Webhook projections can be reconciled after restart. */
+  listLinkedRuns(): Run[] {
+    const rows = this.db.prepare(`
+      SELECT run.*
+      FROM runs run
+      JOIN integration_tasks task ON task.run_id = run.id
       ORDER BY run.created_at ASC, run.id ASC
     `).all() as LinkedRunRow[];
     return rows.map(toRun);
@@ -614,6 +652,18 @@ export class IntegrationStore {
     `).all(endpointId) as SubscriptionRow[]).map(toSubscription);
   }
 
+  getSubscription(id: string): WebhookSubscription | undefined {
+    const row = this.subscriptionRow(id);
+    return row === undefined ? undefined : toSubscription(row);
+  }
+
+  getSubscriptionForEndpoint(id: string, endpointId: string): WebhookSubscription | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM webhook_subscriptions WHERE id = ? AND endpoint_id = ?
+    `).get(id, endpointId) as SubscriptionRow | undefined;
+    return row === undefined ? undefined : toSubscription(row);
+  }
+
   createSubscription(input: CreateWebhookSubscriptionInput): WebhookSubscription {
     return this.immediateTransaction(() => this.createSubscriptionInTransaction(input));
   }
@@ -632,37 +682,115 @@ export class IntegrationStore {
     return toSubscription(this.subscriptionRow(id)!);
   }
 
+  updateSubscription(id: string, input: UpdateWebhookSubscriptionInput): WebhookSubscription | undefined {
+    const subscription = this.immediateTransaction(() => {
+      const result = this.db.prepare(`
+        UPDATE webhook_subscriptions SET
+          name = ?, url = ?, enabled = ?, events_json = ?, encrypted_headers = ?,
+          encrypted_signing_secret = ?, timeout_seconds = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        input.name,
+        input.url,
+        input.enabled ? 1 : 0,
+        input.eventsJson,
+        input.encryptedHeaders,
+        input.encryptedSigningSecret,
+        input.timeoutSeconds,
+        new Date().toISOString(),
+        id
+      );
+      return result.changes === 0 ? undefined : toSubscription(this.subscriptionRow(id)!);
+    });
+    if (subscription?.enabled === true) this.notifyDeliveriesChanged();
+    return subscription;
+  }
+
+  deleteSubscription(id: string): boolean {
+    return this.immediateTransaction(() => {
+      this.db.prepare("DELETE FROM webhook_deliveries WHERE subscription_id = ?").run(id);
+      return this.db.prepare("DELETE FROM webhook_subscriptions WHERE id = ?").run(id).changes === 1;
+    });
+  }
+
   listDeliveries(subscriptionId: string): WebhookDelivery[] {
     return (this.db.prepare(`
       SELECT * FROM webhook_deliveries WHERE subscription_id = ? ORDER BY sequence ASC, created_at ASC, id ASC
     `).all(subscriptionId) as DeliveryRow[]).map(toDelivery);
   }
 
+  listDeliveriesForEndpoint(endpointId: string): WebhookDelivery[] {
+    return (this.db.prepare(`
+      SELECT delivery.*
+      FROM webhook_deliveries delivery
+      JOIN webhook_subscriptions subscription ON subscription.id = delivery.subscription_id
+      WHERE subscription.endpoint_id = ?
+      ORDER BY delivery.created_at DESC, delivery.id DESC
+    `).all(endpointId) as DeliveryRow[]).map(toDelivery);
+  }
+
+  getDelivery(id: string): WebhookDelivery | undefined {
+    const row = this.deliveryRow(id);
+    return row === undefined ? undefined : toDelivery(row);
+  }
+
+  findDeliveryByEventKey(subscriptionId: string, eventKey: string): WebhookDelivery | undefined {
+    const row = this.db.prepare(`
+      SELECT * FROM webhook_deliveries WHERE subscription_id = ? AND event_key = ?
+    `).get(subscriptionId, eventKey) as DeliveryRow | undefined;
+    return row === undefined ? undefined : toDelivery(row);
+  }
+
+  hasTaskDeliveryEventKey(taskId: string, eventKey: string): boolean {
+    return this.db.prepare(`
+      SELECT 1 FROM webhook_deliveries WHERE task_id = ? AND event_key = ? LIMIT 1
+    `).get(taskId, eventKey) !== undefined;
+  }
+
+  /** Checks whether an enabled subscriber is missing all equivalent keys for one Task event. */
+  needsTaskEventDelivery(taskId: string, eventType: string, eventKeys: string[]): boolean {
+    const task = this.taskRow(taskId);
+    if (task === undefined) return false;
+    const subscriptions = this.db.prepare(`
+      SELECT * FROM webhook_subscriptions WHERE endpoint_id = ? AND enabled = 1
+    `).all(task.endpoint_id) as SubscriptionRow[];
+    return subscriptions.some((subscription) => {
+      const events = JSON.parse(subscription.events_json) as string[];
+      if (!events.includes(eventType)) return false;
+      return eventKeys.every((eventKey) => this.db.prepare(`
+        SELECT 1 FROM webhook_deliveries WHERE subscription_id = ? AND event_key = ? LIMIT 1
+      `).get(subscription.id, eventKey) === undefined);
+    });
+  }
+
   /** Appends one Task event and its subscribed Deliveries inside the caller's transaction. */
   appendTaskEventInTransaction(input: AppendTaskEventInput): WebhookDelivery[] {
     const task = this.taskRow(input.taskId);
     if (task === undefined) return [];
-    if (input.eventKey !== undefined) {
-      const existing = this.db.prepare(`
+    const existing = input.eventKey === undefined
+      ? []
+      : this.db.prepare(`
         SELECT * FROM webhook_deliveries
         WHERE task_id = ? AND event_key = ?
         ORDER BY sequence ASC, created_at ASC, id ASC
       `).all(task.id, input.eventKey) as DeliveryRow[];
-      if (existing.length > 0) return existing.map(toDelivery);
-    }
-
-    const sequence = task.event_sequence + 1;
-    const eventId = randomUUID();
+    const firstExisting = existing[0];
+    const sequence = firstExisting?.sequence ?? task.event_sequence + 1;
+    const eventId = firstExisting?.event_id ?? input.eventId ?? randomUUID();
     const eventKey = input.eventKey ?? `${task.id}:${sequence}`;
-    const occurredAt = new Date().toISOString();
-    this.db.prepare("UPDATE integration_tasks SET event_sequence = ? WHERE id = ?").run(sequence, task.id);
+    const occurredAt = firstExisting === undefined
+      ? input.occurredAt ?? new Date().toISOString()
+      : (JSON.parse(firstExisting.payload_json) as { occurredAt: string }).occurredAt;
+    if (firstExisting === undefined) {
+      this.db.prepare("UPDATE integration_tasks SET event_sequence = ? WHERE id = ?").run(sequence, task.id);
+    }
 
     const subscriptions = this.db.prepare(`
       SELECT * FROM webhook_subscriptions
       WHERE endpoint_id = ? AND enabled = 1
       ORDER BY created_at ASC, id ASC
     `).all(task.endpoint_id) as SubscriptionRow[];
-    const payloadJson = JSON.stringify({
+    const payloadJson = firstExisting?.payload_json ?? JSON.stringify({
       id: eventId,
       type: input.eventType,
       sequence,
@@ -670,7 +798,7 @@ export class IntegrationStore {
       occurredAt,
       data: input.payload
     });
-    return subscriptions.flatMap((row) => {
+    const deliveries = subscriptions.flatMap((row) => {
       const events = JSON.parse(row.events_json) as string[];
       if (!events.includes(input.eventType)) return [];
       return [this.createDeliveryInTransaction({
@@ -684,10 +812,13 @@ export class IntegrationStore {
         nextAttemptAt: occurredAt
       })];
     });
+    return deliveries;
   }
 
   createDelivery(input: CreateWebhookDeliveryInput): WebhookDelivery {
-    return this.immediateTransaction(() => this.createDeliveryInTransaction(input));
+    const delivery = this.immediateTransaction(() => this.createDeliveryInTransaction(input));
+    this.notifyDeliveriesChanged();
+    return delivery;
   }
 
   createDeliveryInTransaction(input: CreateWebhookDeliveryInput): WebhookDelivery {
@@ -707,6 +838,159 @@ export class IntegrationStore {
       SELECT * FROM webhook_deliveries WHERE subscription_id = ? AND event_key = ?
     `).get(input.subscriptionId, input.eventKey) as DeliveryRow | undefined;
     return toDelivery(row!);
+  }
+
+  /** Returns one due head Delivery for each enabled Subscription. */
+  listDueDeliveries(now: string): WebhookDelivery[] {
+    const rows = this.db.prepare(`
+      SELECT delivery.*
+      FROM webhook_deliveries delivery
+      JOIN webhook_subscriptions subscription ON subscription.id = delivery.subscription_id
+      WHERE delivery.status = 'pending'
+        AND delivery.next_attempt_at <= ?
+        AND subscription.enabled = 1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM webhook_deliveries earlier
+          WHERE earlier.subscription_id = delivery.subscription_id
+            AND earlier.status IN ('pending', 'delivering')
+            AND (
+              earlier.sequence < delivery.sequence
+              OR (earlier.sequence = delivery.sequence AND earlier.created_at < delivery.created_at)
+              OR (earlier.sequence = delivery.sequence AND earlier.created_at = delivery.created_at AND earlier.id < delivery.id)
+            )
+        )
+      ORDER BY delivery.next_attempt_at ASC, delivery.created_at ASC, delivery.id ASC
+    `).all(now) as DeliveryRow[];
+    return rows.map(toDelivery);
+  }
+
+  nextPendingDeliveryAt(): string | undefined {
+    const row = this.db.prepare(`
+      SELECT MIN(delivery.next_attempt_at) AS next_attempt_at
+      FROM webhook_deliveries delivery
+      JOIN webhook_subscriptions subscription ON subscription.id = delivery.subscription_id
+      WHERE delivery.status = 'pending'
+        AND subscription.enabled = 1
+        AND NOT EXISTS (
+          SELECT 1
+          FROM webhook_deliveries earlier
+          WHERE earlier.subscription_id = delivery.subscription_id
+            AND earlier.status IN ('pending', 'delivering')
+            AND (
+              earlier.sequence < delivery.sequence
+              OR (earlier.sequence = delivery.sequence AND earlier.created_at < delivery.created_at)
+              OR (earlier.sequence = delivery.sequence AND earlier.created_at = delivery.created_at AND earlier.id < delivery.id)
+            )
+        )
+    `).get() as { next_attempt_at: string | null };
+    return row.next_attempt_at ?? undefined;
+  }
+
+  /** Atomically claims a due head Delivery and increments its persisted attempt count. */
+  claimDelivery(id: string, now = new Date().toISOString()): WebhookDelivery | undefined {
+    return this.immediateTransaction(() => {
+      const candidate = this.db.prepare(`
+        SELECT delivery.id
+        FROM webhook_deliveries delivery
+        JOIN webhook_subscriptions subscription ON subscription.id = delivery.subscription_id
+        WHERE delivery.id = ?
+          AND delivery.status = 'pending'
+          AND delivery.next_attempt_at <= ?
+          AND subscription.enabled = 1
+          AND NOT EXISTS (
+            SELECT 1
+            FROM webhook_deliveries earlier
+            WHERE earlier.subscription_id = delivery.subscription_id
+              AND earlier.status IN ('pending', 'delivering')
+              AND (
+                earlier.sequence < delivery.sequence
+                OR (earlier.sequence = delivery.sequence AND earlier.created_at < delivery.created_at)
+                OR (earlier.sequence = delivery.sequence AND earlier.created_at = delivery.created_at AND earlier.id < delivery.id)
+              )
+          )
+      `).get(id, now) as { id: string } | undefined;
+      if (candidate === undefined) return undefined;
+      const result = this.db.prepare(`
+        UPDATE webhook_deliveries
+        SET status = 'delivering', attempt_count = attempt_count + 1, updated_at = ?
+        WHERE id = ? AND status = 'pending'
+      `).run(now, id);
+      return result.changes === 0 ? undefined : toDelivery(this.deliveryRow(id)!);
+    });
+  }
+
+  markDeliverySucceeded(id: string, input: { statusCode: number; durationMs: number }): WebhookDelivery | undefined {
+    return this.immediateTransaction(() => {
+      const result = this.db.prepare(`
+        UPDATE webhook_deliveries
+        SET status = 'succeeded', last_status_code = ?, last_duration_ms = ?, last_error = NULL, updated_at = ?
+        WHERE id = ? AND status = 'delivering'
+      `).run(input.statusCode, input.durationMs, new Date().toISOString(), id);
+      return result.changes === 0 ? undefined : toDelivery(this.deliveryRow(id)!);
+    });
+  }
+
+  markDeliveryFailed(id: string, input: {
+    terminal: boolean;
+    nextAttemptAt: string;
+    statusCode: number | null;
+    durationMs: number;
+    error: string;
+  }): WebhookDelivery | undefined {
+    return this.immediateTransaction(() => {
+      const result = this.db.prepare(`
+        UPDATE webhook_deliveries
+        SET status = ?, next_attempt_at = ?, last_status_code = ?, last_duration_ms = ?, last_error = ?, updated_at = ?
+        WHERE id = ? AND status = 'delivering'
+      `).run(
+        input.terminal ? "failed" : "pending",
+        input.nextAttemptAt,
+        input.statusCode,
+        input.durationMs,
+        input.error,
+        new Date().toISOString(),
+        id
+      );
+      return result.changes === 0 ? undefined : toDelivery(this.deliveryRow(id)!);
+    });
+  }
+
+  releaseDelivery(id: string, nextAttemptAt = new Date().toISOString()): WebhookDelivery | undefined {
+    return this.immediateTransaction(() => {
+      const result = this.db.prepare(`
+        UPDATE webhook_deliveries SET status = 'pending', next_attempt_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'delivering'
+      `).run(nextAttemptAt, new Date().toISOString(), id);
+      return result.changes === 0 ? undefined : toDelivery(this.deliveryRow(id)!);
+    });
+  }
+
+  retryDelivery(id: string): WebhookDelivery | undefined {
+    const delivery = this.immediateTransaction(() => {
+      const now = new Date().toISOString();
+      const result = this.db.prepare(`
+        UPDATE webhook_deliveries
+        SET status = 'pending', attempt_count = 0, next_attempt_at = ?, last_status_code = NULL,
+            last_duration_ms = NULL, last_error = NULL, updated_at = ?
+        WHERE id = ? AND status = 'failed'
+      `).run(now, now, id);
+      return result.changes === 0 ? undefined : toDelivery(this.deliveryRow(id)!);
+    });
+    if (delivery !== undefined) this.notifyDeliveriesChanged();
+    return delivery;
+  }
+
+  recoverDeliveries(): number {
+    const changes = this.immediateTransaction(() => {
+      const now = new Date().toISOString();
+      return this.db.prepare(`
+        UPDATE webhook_deliveries SET status = 'pending', next_attempt_at = ?, updated_at = ?
+        WHERE status = 'delivering'
+      `).run(now, now).changes;
+    });
+    if (changes > 0) this.notifyDeliveriesChanged();
+    return changes;
   }
 
   endpointHasHistory(id: string): boolean {

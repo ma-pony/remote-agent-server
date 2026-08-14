@@ -1,7 +1,34 @@
+import { randomBytes, randomUUID } from "node:crypto";
+
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
+import type { SecretStore } from "../mcp/secret-store.js";
 import { IntegrationEndpointManager, IntegrationEndpointManagerError } from "./integration-endpoint-manager.js";
+import type { IntegrationStore } from "./integration-store.js";
+import type { WebhookDelivery, WebhookSubscription } from "./integration-types.js";
+import type { WebhookDispatcher } from "./webhook-dispatcher.js";
+
+const webhookEvents = [
+  "task.queued",
+  "task.started",
+  "task.succeeded",
+  "task.failed",
+  "task.cancelled",
+  "message.user.received",
+  "message.agent.reply",
+  "message.system.notice",
+  "tool.started",
+  "tool.completed",
+  "tool.failed"
+] as const;
+const managedHeaders = new Set([
+  "content-type",
+  "x-remote-agent-event",
+  "x-remote-agent-event-id",
+  "x-remote-agent-timestamp",
+  "x-remote-agent-signature"
+]);
 
 const slug = z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,63}$/);
 const requestParameterMappingSchema = z.object({
@@ -33,6 +60,32 @@ const updateEndpointSchema = createEndpointSchema.partial().strict().refine(
   { message: "At least one field must be provided" }
 );
 const rotateTokenSchema = z.object({}).strict().optional();
+const webhookHeaders = z.record(z.string(), z.string()).superRefine((headers, context) => {
+  for (const [name, value] of Object.entries(headers)) {
+    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name) || /[\r\n]/.test(value)) {
+      context.addIssue({ code: "custom", message: "Invalid Webhook Header" });
+    }
+    if (managedHeaders.has(name.toLowerCase())) {
+      context.addIssue({ code: "custom", message: "Managed Webhook Header cannot be overridden" });
+    }
+  }
+});
+const webhookUrl = z.string().url().refine((value) => {
+  const protocol = new URL(value).protocol;
+  return protocol === "http:" || protocol === "https:";
+}, { message: "Webhook URL must use HTTP or HTTPS" });
+const webhookSchema = z.object({
+  name: z.string().trim().min(1),
+  url: webhookUrl,
+  enabled: z.boolean(),
+  events: z.array(z.enum(webhookEvents)).min(1),
+  headers: webhookHeaders,
+  timeoutSeconds: z.number().int().min(1).max(60)
+}).strict();
+const updateWebhookSchema = webhookSchema.partial().strict().refine(
+  (input) => Object.keys(input).length > 0,
+  { message: "At least one field must be provided" }
+);
 
 const invalidRequest = (reply: FastifyReply, message: string) =>
   reply.code(400).send({ error: { code: "invalid_request", message } });
@@ -66,10 +119,61 @@ const handleManagerError = (reply: FastifyReply, error: unknown) => {
   });
 };
 
+const webhookNotFound = (reply: FastifyReply) =>
+  reply.code(404).send({ error: { code: "webhook_not_found", message: "Webhook subscription not found" } });
+
+const deliveryNotFound = (reply: FastifyReply) =>
+  reply.code(404).send({ error: { code: "delivery_not_found", message: "Webhook delivery not found" } });
+
+const parseHeaders = (subscription: WebhookSubscription, secrets: Pick<SecretStore, "decrypt">): Record<string, string> =>
+  subscription.encryptedHeaders === null
+    ? {}
+    : JSON.parse(secrets.decrypt(subscription.encryptedHeaders)) as Record<string, string>;
+
+const publicWebhook = (subscription: WebhookSubscription, secrets: Pick<SecretStore, "decrypt">) => ({
+  id: subscription.id,
+  endpointId: subscription.endpointId,
+  name: subscription.name,
+  url: subscription.url,
+  enabled: subscription.enabled,
+  events: JSON.parse(subscription.eventsJson) as string[],
+  headers: Object.keys(parseHeaders(subscription, secrets)).map((name) => ({ name, configured: true })),
+  signingSecretConfigured: true,
+  timeoutSeconds: subscription.timeoutSeconds,
+  createdAt: subscription.createdAt,
+  updatedAt: subscription.updatedAt
+});
+
+const publicDelivery = (delivery: WebhookDelivery) => ({
+  id: delivery.id,
+  eventId: delivery.eventId,
+  sequence: delivery.sequence,
+  subscriptionId: delivery.subscriptionId,
+  taskId: delivery.taskId,
+  eventType: delivery.eventType,
+  status: delivery.status,
+  attemptCount: delivery.attemptCount,
+  nextAttemptAt: delivery.nextAttemptAt,
+  lastStatusCode: delivery.lastStatusCode,
+  lastDurationMs: delivery.lastDurationMs,
+  lastError: delivery.lastError,
+  createdAt: delivery.createdAt,
+  updatedAt: delivery.updatedAt
+});
+
 /**
  * Registers authenticated management routes for Integration Endpoints.
  */
-export const registerIntegrationAdminRoutes = (app: FastifyInstance, manager: IntegrationEndpointManager): void => {
+export const registerIntegrationAdminRoutes = (
+  app: FastifyInstance,
+  dependencies: {
+    manager: IntegrationEndpointManager;
+    store: IntegrationStore;
+    secrets: SecretStore;
+    dispatcher: WebhookDispatcher;
+  }
+): void => {
+  const { manager, store, secrets, dispatcher } = dependencies;
   app.get("/integration-endpoints", () => manager.list());
 
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id", (request, reply) => {
@@ -114,5 +218,116 @@ export const registerIntegrationAdminRoutes = (app: FastifyInstance, manager: In
     } catch (error) {
       return handleManagerError(reply, error);
     }
+  });
+
+  app.get<{ Params: { id: string } }>("/integration-endpoints/:id/webhooks", (request, reply) => {
+    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
+    return store.listSubscriptions(request.params.id).map((subscription) => publicWebhook(subscription, secrets));
+  });
+
+  app.post<{ Params: { id: string } }>("/integration-endpoints/:id/webhooks", (request, reply) => {
+    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
+    const parsed = webhookSchema.safeParse(request.body);
+    if (!parsed.success) return invalidRequest(reply, "Invalid Webhook input");
+    const signingSecret = `whsec_${randomBytes(32).toString("base64url")}`;
+    const subscription = store.createSubscription({
+      endpointId: request.params.id,
+      name: parsed.data.name,
+      url: parsed.data.url,
+      enabled: parsed.data.enabled,
+      eventsJson: JSON.stringify(parsed.data.events),
+      encryptedHeaders: Object.keys(parsed.data.headers).length === 0
+        ? null
+        : secrets.encrypt(JSON.stringify(parsed.data.headers)),
+      encryptedSigningSecret: secrets.encrypt(signingSecret),
+      timeoutSeconds: parsed.data.timeoutSeconds
+    });
+    return reply.code(201).send({ webhook: publicWebhook(subscription, secrets), signingSecret });
+  });
+
+  app.patch<{ Params: { id: string; webhookId: string } }>(
+    "/integration-endpoints/:id/webhooks/:webhookId",
+    (request, reply) => {
+      if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
+      const existing = store.getSubscriptionForEndpoint(request.params.webhookId, request.params.id);
+      if (existing === undefined) return webhookNotFound(reply);
+      const parsed = updateWebhookSchema.safeParse(request.body);
+      if (!parsed.success) return invalidRequest(reply, "Invalid Webhook update");
+      const currentHeaders = parseHeaders(existing, secrets);
+      const headers = parsed.data.headers ?? currentHeaders;
+      const updated = store.updateSubscription(existing.id, {
+        name: parsed.data.name ?? existing.name,
+        url: parsed.data.url ?? existing.url,
+        enabled: parsed.data.enabled ?? existing.enabled,
+        eventsJson: JSON.stringify(parsed.data.events ?? JSON.parse(existing.eventsJson) as string[]),
+        encryptedHeaders: Object.keys(headers).length === 0 ? null : secrets.encrypt(JSON.stringify(headers)),
+        encryptedSigningSecret: existing.encryptedSigningSecret,
+        timeoutSeconds: parsed.data.timeoutSeconds ?? existing.timeoutSeconds
+      })!;
+      dispatcher.notify();
+      return publicWebhook(updated, secrets);
+    }
+  );
+
+  app.delete<{ Params: { id: string; webhookId: string } }>(
+    "/integration-endpoints/:id/webhooks/:webhookId",
+    (request, reply) => {
+      if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
+      const existing = store.getSubscriptionForEndpoint(request.params.webhookId, request.params.id);
+      if (existing === undefined) return webhookNotFound(reply);
+      store.deleteSubscription(existing.id);
+      return reply.code(204).send();
+    }
+  );
+
+  app.post<{ Params: { id: string; webhookId: string } }>(
+    "/integration-endpoints/:id/webhooks/:webhookId/test",
+    (request, reply) => {
+      if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
+      const subscription = store.getSubscriptionForEndpoint(request.params.webhookId, request.params.id);
+      if (subscription === undefined) return webhookNotFound(reply);
+      if (!subscription.enabled) {
+        return reply.code(409).send({
+          error: { code: "webhook_disabled", message: "Enable the Webhook before testing it" }
+        });
+      }
+      const eventId = randomUUID();
+      const occurredAt = new Date().toISOString();
+      const delivery = store.createDelivery({
+        eventId,
+        eventKey: `webhook.test:${eventId}`,
+        sequence: 0,
+        subscriptionId: subscription.id,
+        taskId: null,
+        eventType: "webhook.test",
+        payloadJson: JSON.stringify({
+          id: eventId,
+          type: "webhook.test",
+          sequence: 0,
+          taskId: null,
+          occurredAt,
+          data: { webhookId: subscription.id }
+        }),
+        nextAttemptAt: occurredAt
+      });
+      return reply.code(202).send(publicDelivery(delivery));
+    }
+  );
+
+  app.get<{ Params: { id: string } }>("/integration-endpoints/:id/webhook-deliveries", (request, reply) => {
+    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
+    return store.listDeliveriesForEndpoint(request.params.id).map(publicDelivery);
+  });
+
+  app.post<{ Params: { id: string } }>("/webhook-deliveries/:id/retry", (request, reply) => {
+    const existing = store.getDelivery(request.params.id);
+    if (existing === undefined) return deliveryNotFound(reply);
+    if (existing.status !== "failed") {
+      return reply.code(409).send({
+        error: { code: "delivery_not_failed", message: "Only failed Webhook deliveries can be retried" }
+      });
+    }
+    const delivery = store.retryDelivery(existing.id)!;
+    return reply.code(202).send(publicDelivery(delivery));
   });
 };

@@ -11,6 +11,7 @@ import { migrate, openDatabase } from "./db.js";
 import { EventStore } from "./events/event-store.js";
 import { IntegrationProjection } from "./integrations/integration-projection.js";
 import { IntegrationStore } from "./integrations/integration-store.js";
+import { WebhookDispatcher } from "./integrations/webhook-dispatcher.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { SecretStore } from "./mcp/secret-store.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
@@ -31,6 +32,7 @@ export type StartServerOptions = {
   listen?: (app: FastifyInstance, config: AppConfig) => Promise<unknown>;
   installSignalHandlers?: boolean;
   exitProcess?: (code: number) => void;
+  webhookFetch?: typeof fetch;
 };
 
 export type RunningServer = {
@@ -85,6 +87,7 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     });
 
     const integrationStore = new IntegrationStore({ db });
+    const secrets = SecretStore.open({ dataDir: config.dataDir });
     let eventStore!: EventStore;
     const integrationProjection = new IntegrationProjection({
       db,
@@ -95,9 +98,14 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     eventStore = new EventStore({ db, projection: integrationProjection });
     runRepository.recoverAfterRestart();
     integrationProjection.recover();
-    // Task 6 WebhookDispatcher recovery belongs here, before the HTTP app is created.
+    const webhookDispatcher = new WebhookDispatcher({
+      store: integrationStore,
+      secrets,
+      fetch: options.webhookFetch
+    });
+    webhookDispatcher.recover();
     const runtime = options.runtime ?? new AcpxAgentRuntime(config);
-    const mcpManager = new McpManager({ db, secrets: SecretStore.open({ dataDir: config.dataDir }) });
+    const mcpManager = new McpManager({ db, secrets });
     app = buildApp({
       config,
       db,
@@ -108,7 +116,8 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       projectEnvironmentStore,
       mcpManager,
       integrationStore,
-      integrationProjection
+      integrationProjection,
+      webhookDispatcher
     });
 
     let closing: Promise<void> | undefined;
