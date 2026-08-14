@@ -82,6 +82,15 @@ describe("database migration", () => {
     db.close();
   });
 
+  it("Integration Task 持久化 eventKey 到 sequence 的确定性映射", () => {
+    const { db } = createTestDatabase();
+    const columns = db.prepare("PRAGMA table_info(integration_tasks)").all()
+      .map((row) => (row as { name: string }).name);
+
+    expect(columns).toContain("event_sequences_json");
+    db.close();
+  });
+
   it("拒绝同一 Session 的第二个活动 Run", () => {
     const { db, seed } = createTestDatabase();
     const session = seed.session();

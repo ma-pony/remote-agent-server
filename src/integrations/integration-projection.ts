@@ -76,6 +76,7 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
       taskId: task.id,
       eventType: "task.started",
       eventKey: `${task.id}:task.started`,
+      occurredAt: run.startedAt!,
       payload: { status: "running", startedAt: run.startedAt }
     });
     return undefined;
@@ -89,29 +90,40 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
   }
 
   private appendFinishedEvents(run: Run, task: IntegrationTask): void {
+    this.appendTerminalEvent(run, task);
+    const output = this.agentOutput(run.id);
+    if (output !== "") this.appendAgentReply(run, task, output);
+  }
+
+  private appendTerminalEvent(run: Run, task: IntegrationTask): void {
     this.dependencies.store.appendTaskEventInTransaction({
       taskId: task.id,
       eventType: `task.${run.status}`,
       eventKey: `${task.id}:task.${run.status}`,
+      occurredAt: run.finishedAt!,
       payload: {
         status: run.status,
         finishedAt: run.finishedAt
       }
     });
+  }
 
-    const output = this.dependencies.listEvents(run.id).flatMap((event) => {
+  private agentOutput(runId: string): string {
+    return this.dependencies.listEvents(runId).flatMap((event) => {
       if (event.type !== "message") return [];
       const content = record(JSON.parse(event.contentJson));
       return content?.stream === "output" && typeof content.text === "string" ? [content.text] : [];
     }).join("");
-    if (output !== "") {
-      this.dependencies.store.appendTaskEventInTransaction({
-        taskId: task.id,
-        eventType: "message.agent.reply",
-        eventKey: `${task.id}:message.agent.reply`,
-        payload: { message: output }
-      });
-    }
+  }
+
+  private appendAgentReply(run: Run, task: IntegrationTask, output: string): void {
+    this.dependencies.store.appendTaskEventInTransaction({
+      taskId: task.id,
+      eventType: "message.agent.reply",
+      eventKey: `${task.id}:message.agent.reply`,
+      occurredAt: run.finishedAt!,
+      payload: { message: output }
+    });
   }
 
   afterCommit(run: Run): undefined {
@@ -183,24 +195,16 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
         taskId: task.id,
         eventType,
         eventKey: businessEventKey,
+        occurredAt: event.createdAt,
         payload
       });
       return;
     }
-    const recoveryEventKey = `${event.runId}:${event.seq}:${eventType}`;
-    if (!this.dependencies.store.needsTaskEventDelivery(
-      task.id,
-      eventType,
-      [businessEventKey, recoveryEventKey]
-    )) return;
-    const eventKey = this.dependencies.store.hasTaskDeliveryEventKey(task.id, businessEventKey)
-      ? businessEventKey
-      : recoveryEventKey;
+    if (!this.dependencies.store.needsTaskEventDelivery(task.id, eventType, [businessEventKey])) return;
     this.dependencies.store.appendTaskEventInTransaction({
       taskId: task.id,
       eventType,
-      eventKey,
-      eventId: event.id,
+      eventKey: businessEventKey,
       occurredAt: event.createdAt,
       payload
     });
@@ -221,9 +225,13 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
         if (task !== undefined && (run.status === "succeeded" || run.status === "failed" || run.status === "cancelled")) {
           const taskEventKey = `${task.id}:task.${run.status}`;
           const replyEventKey = `${task.id}:message.agent.reply`;
-          if (this.dependencies.store.needsTaskEventDelivery(task.id, `task.${run.status}`, [taskEventKey])
-            || this.dependencies.store.needsTaskEventDelivery(task.id, "message.agent.reply", [replyEventKey])) {
-            this.appendFinishedEvents(run, task);
+          if (this.dependencies.store.needsTaskEventDelivery(task.id, `task.${run.status}`, [taskEventKey])) {
+            this.appendTerminalEvent(run, task);
+          }
+          const output = this.agentOutput(run.id);
+          if (output !== ""
+            && this.dependencies.store.needsTaskEventDelivery(task.id, "message.agent.reply", [replyEventKey])) {
+            this.appendAgentReply(run, task, output);
           }
         }
         for (const event of this.dependencies.listEvents(run.id)) this.projectToolEvent(event, true);

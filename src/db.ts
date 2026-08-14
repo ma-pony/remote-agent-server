@@ -195,6 +195,7 @@ export const migrate = (db: Database.Database): void => {
       result TEXT,
       error TEXT,
       event_sequence INTEGER NOT NULL DEFAULT 0,
+      event_sequences_json TEXT NOT NULL DEFAULT '{}',
       created_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
@@ -250,5 +251,8 @@ export const migrate = (db: Database.Database): void => {
   }
   if (!hasColumn("sessions", "project_environment_revision_id")) {
     db.exec("ALTER TABLE sessions ADD COLUMN project_environment_revision_id TEXT REFERENCES project_environment_revisions(id)");
+  }
+  if (!hasColumn("integration_tasks", "event_sequences_json")) {
+    db.exec("ALTER TABLE integration_tasks ADD COLUMN event_sequences_json TEXT NOT NULL DEFAULT '{}'");
   }
 };

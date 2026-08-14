@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 
 import type { SecretStore } from "../mcp/secret-store.js";
+import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type { WebhookDelivery } from "./integration-types.js";
 
@@ -161,9 +162,11 @@ export class WebhookDispatcher {
         method: "POST",
         headers,
         body: claimed.payloadJson,
+        redirect: "manual",
         signal
       });
       statusCode = response.status;
+      if (response.body !== null) await settleBestEffort(() => response.body!.cancel());
       if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`);
       this.dependencies.store.markDeliverySucceeded(claimed.id, {
         statusCode: response.status,

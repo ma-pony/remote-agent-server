@@ -251,7 +251,7 @@ describe("IntegrationTaskScheduler", () => {
     ]);
     expect(JSON.stringify(deliveries.map((delivery) => JSON.parse(delivery.payloadJson)))).not.toContain(leakedSecret);
     expect(JSON.parse(deliveries[1]!.payloadJson)).toMatchObject({
-      data: {
+      notice: {
         code: "invalid_parameter_snapshot",
         message: "Integration Task parameter snapshot is invalid"
       }
@@ -405,9 +405,9 @@ describe("IntegrationProjection", () => {
     });
 
     const payload = JSON.parse(harness.store.listDeliveries(subscription.id)[0]!.payloadJson) as {
-      data: Record<string, unknown>;
+      tool: Record<string, unknown>;
     };
-    expect(payload.data).toEqual({
+    expect(payload.tool).toEqual({
       toolCallId: "tool-1",
       title: "Read",
       kind: "read",
@@ -471,7 +471,7 @@ describe("IntegrationProjection", () => {
       { eventType: "message.agent.reply", sequence: 7, eventKey: `${task.id}:message.agent.reply` }
     ]);
     expect(JSON.parse(deliveries.at(-1)!.payloadJson)).toMatchObject({
-      data: { message: "Hello world" }
+      message: { role: "agent", content: "Hello world", runStatus: "succeeded" }
     });
     await Promise.resolve();
     expect(harness.notify).toHaveBeenCalledTimes(1);

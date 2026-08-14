@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import type { SecretStore } from "../mcp/secret-store.js";
 import { IntegrationEndpointManager, IntegrationEndpointManagerError } from "./integration-endpoint-manager.js";
-import type { IntegrationStore } from "./integration-store.js";
+import { webhookEventId, type IntegrationStore } from "./integration-store.js";
 import type { WebhookDelivery, WebhookSubscription } from "./integration-types.js";
 import type { WebhookDispatcher } from "./webhook-dispatcher.js";
 
@@ -27,7 +27,23 @@ const managedHeaders = new Set([
   "x-remote-agent-event",
   "x-remote-agent-event-id",
   "x-remote-agent-timestamp",
-  "x-remote-agent-signature"
+  "x-remote-agent-signature",
+  "host",
+  "content-length",
+  "transfer-encoding",
+  "connection",
+  "proxy-authorization",
+  "proxy-authenticate",
+  "upgrade",
+  "trailer",
+  "te",
+  "keep-alive",
+  "expect",
+  "forwarded",
+  "via",
+  "x-forwarded-for",
+  "x-forwarded-host",
+  "x-forwarded-proto"
 ]);
 
 const slug = z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,63}$/);
@@ -71,9 +87,11 @@ const webhookHeaders = z.record(z.string(), z.string()).superRefine((headers, co
   }
 });
 const webhookUrl = z.string().url().refine((value) => {
-  const protocol = new URL(value).protocol;
-  return protocol === "http:" || protocol === "https:";
-}, { message: "Webhook URL must use HTTP or HTTPS" });
+  const url = new URL(value);
+  return (url.protocol === "http:" || url.protocol === "https:")
+    && url.username === ""
+    && url.password === "";
+}, { message: "Webhook URL must use HTTP or HTTPS without embedded credentials" });
 const webhookSchema = z.object({
   name: z.string().trim().min(1),
   url: webhookUrl,
@@ -293,20 +311,24 @@ export const registerIntegrationAdminRoutes = (
       }
       const eventId = randomUUID();
       const occurredAt = new Date().toISOString();
+      const eventKey = `webhook.test:${eventId}`;
+      const publicEventId = webhookEventId(request.params.id, eventKey);
+      const endpoint = manager.get(request.params.id)!;
       const delivery = store.createDelivery({
-        eventId,
-        eventKey: `webhook.test:${eventId}`,
+        eventId: publicEventId,
+        eventKey,
         sequence: 0,
         subscriptionId: subscription.id,
         taskId: null,
         eventType: "webhook.test",
         payloadJson: JSON.stringify({
-          id: eventId,
-          type: "webhook.test",
+          eventId: publicEventId,
+          eventType: "webhook.test",
           sequence: 0,
-          taskId: null,
           occurredAt,
-          data: { webhookId: subscription.id }
+          endpoint: { id: endpoint.id, slug: endpoint.slug },
+          task: null,
+          notice: { code: "webhook_test", message: "Webhook test" }
         }),
         nextAttemptAt: occurredAt
       });

@@ -273,6 +273,22 @@ describe("IntegrationCoordinator", () => {
       { eventType: "message.user.received", sequence: 2 }
     ]);
     expect(store.getTask(task.id)?.eventSequence).toBe(2);
+    const queuedPayload = JSON.parse(deliveries[0]!.payloadJson) as Record<string, unknown>;
+    const messagePayload = JSON.parse(deliveries[1]!.payloadJson) as Record<string, unknown>;
+    expect(queuedPayload).toMatchObject({
+      eventType: "task.queued",
+      occurredAt: task.createdAt,
+      endpoint: { id: endpoint.id, slug: endpoint.slug },
+      task: { id: task.id, requestId: task.requestId, status: "queued" }
+    });
+    expect(Object.keys(queuedPayload).sort()).toEqual([
+      "endpoint", "eventId", "eventType", "occurredAt", "sequence", "task"
+    ]);
+    expect(messagePayload).toMatchObject({
+      eventType: "message.user.received",
+      occurredAt: task.createdAt,
+      message: { role: "user", content: "处理", runStatus: "queued" }
+    });
     db.close();
   });
 

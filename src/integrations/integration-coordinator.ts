@@ -109,12 +109,14 @@ export class IntegrationCoordinator {
             taskId: createdTask.id,
             eventType: "task.queued",
             eventKey: `${createdTask.id}:task.queued`,
+            occurredAt: createdTask.createdAt,
             payload: { status: "queued" }
           });
           this.dependencies.store.appendTaskEventInTransaction({
             taskId: createdTask.id,
             eventType: "message.user.received",
             eventKey: `${createdTask.id}:message.user.received`,
+            occurredAt: createdTask.createdAt,
             payload: { message: input.message }
           });
           return this.dependencies.store.getTask(createdTask.id)!;

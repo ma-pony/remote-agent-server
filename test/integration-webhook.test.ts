@@ -1,5 +1,7 @@
 import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -21,11 +23,20 @@ const apiToken = "webhook-admin-token";
 const authHeaders = { authorization: `Bearer ${apiToken}` };
 const temporaryDirectories: string[] = [];
 const apps: Array<{ app: FastifyInstance; db: ReturnType<typeof createTestDatabase>["db"]; root: string }> = [];
+const httpServers: Server[] = [];
 
 const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
+};
+
+const listenHttp = async (handler: Parameters<typeof createServer>[0]): Promise<string> => {
+  const server = createServer(handler);
+  httpServers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
+  return `http://127.0.0.1:${address.port}`;
 };
 
 const createHarness = (fetchImpl: typeof fetch = vi.fn(async () => new Response(null, { status: 204 }))) => {
@@ -81,6 +92,10 @@ const createHarness = (fetchImpl: typeof fetch = vi.fn(async () => new Response(
 };
 
 afterEach(async () => {
+  await Promise.all(httpServers.splice(0).map(async (server) => new Promise<void>((resolve) => {
+    server.closeAllConnections();
+    server.close(() => resolve());
+  })));
   await Promise.all(apps.splice(0).map(async ({ app, db, root }) => {
     await app.close();
     db.close();
@@ -94,6 +109,41 @@ afterEach(async () => {
 });
 
 describe("WebhookDispatcher", () => {
+  it("不跟随 302/307 redirect，避免向跳转目标泄露自定义 Header", async () => {
+    const redirectedHeaders: Array<string | undefined> = [];
+    const secondUrl = await listenHttp((request, response) => {
+      redirectedHeaders.push(request.headers["x-api-key"]);
+      response.writeHead(204).end();
+    });
+    const firstUrl = await listenHttp((request, response) => {
+      response.writeHead(request.url === "/temporary" ? 307 : 302, { location: `${secondUrl}/received` }).end();
+    });
+    const harness = createHarness(globalThis.fetch);
+    const createRedirectDelivery = (path: string) => {
+      const subscription = harness.store.createSubscription({
+        endpointId: harness.endpoint.id,
+        name: path,
+        url: `${firstUrl}/${path}`,
+        enabled: true,
+        eventsJson: JSON.stringify(["task.succeeded"]),
+        encryptedHeaders: harness.secrets.encrypt(JSON.stringify({ "X-Api-Key": "must-not-leak" })),
+        encryptedSigningSecret: harness.secrets.encrypt("redirect-secret"),
+        timeoutSeconds: 10
+      });
+      return harness.createDelivery(subscription.id, 1);
+    };
+    const temporary = createRedirectDelivery("temporary");
+    const found = createRedirectDelivery("found");
+
+    await harness.dispatcher.deliver(temporary.id);
+    await harness.dispatcher.deliver(found.id);
+
+    expect(redirectedHeaders).toEqual([]);
+    expect(harness.store.getDelivery(temporary.id)).toMatchObject({ status: "pending", lastStatusCode: 307 });
+    expect(harness.store.getDelivery(found.id)).toMatchObject({ status: "pending", lastStatusCode: 302 });
+    harness.db.close();
+  });
+
   it("按原始 JSON Body 生成 HMAC-SHA256 签名且不读取响应 Body", async () => {
     const requests: Array<{ body: string; headers: Headers }> = [];
     const response = new Response("sensitive response body", { status: 200 });
@@ -124,6 +174,44 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
+  it("收到状态码后 best-effort cancel 响应流且不保存 Body", async () => {
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("sensitive-infinite-body"));
+      },
+      cancel
+    });
+    const harness = createHarness(vi.fn(async () => new Response(body, { status: 200 })));
+    const subscription = harness.createSubscription("stream", "secret");
+    const delivery = harness.createDelivery(subscription.id, 1);
+
+    await harness.dispatcher.deliver(delivery.id);
+
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(harness.store.getDelivery(delivery.id)).toMatchObject({ status: "succeeded", lastStatusCode: 200 });
+    expect(JSON.stringify(harness.store.getDelivery(delivery.id))).not.toContain("sensitive-infinite-body");
+    harness.db.close();
+  });
+
+  it("响应流 cancel 失败不改变已取得的 2xx 判定", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      cancel: () => Promise.reject(new Error("sensitive cancel failure"))
+    });
+    const harness = createHarness(vi.fn(async () => new Response(body, { status: 202 })));
+    const subscription = harness.createSubscription("cancel-failure", "secret");
+    const delivery = harness.createDelivery(subscription.id, 1);
+
+    await harness.dispatcher.deliver(delivery.id);
+
+    expect(harness.store.getDelivery(delivery.id)).toMatchObject({
+      status: "succeeded",
+      lastStatusCode: 202,
+      lastError: null
+    });
+    harness.db.close();
+  });
+
   it("同一 Subscription 严格串行且不同 Subscription 并行", async () => {
     const requests = new Map<string, ReturnType<typeof deferred<Response>>>();
     const started: string[] = [];
@@ -151,6 +239,37 @@ describe("WebhookDispatcher", () => {
     await vi.waitFor(() => expect(started).toContain(a2.eventId));
     requests.get(a2.eventId)!.resolve(new Response(null, { status: 204 }));
     await vi.waitFor(() => expect(harness.store.getDelivery(a2.id)?.status).toBe("succeeded"));
+
+    await harness.dispatcher.stop();
+    harness.db.close();
+  });
+
+  it("按 Subscription 的真实插入顺序投递，旧 Task 重试会阻塞同订阅但不阻塞其他订阅", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
+    const started: string[] = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
+      started.push(new Headers(init?.headers).get("x-remote-agent-event-id")!);
+      return new Response(null, { status: 204 });
+    });
+    const harness = createHarness(fetchImpl);
+    const subscriptionA = harness.createSubscription("ordered-a", "secret-a");
+    const subscriptionB = harness.createSubscription("ordered-b", "secret-b");
+    const oldTask = harness.createDelivery(subscriptionA.id, 2);
+    const newTask = harness.createDelivery(subscriptionA.id, 1);
+    const otherSubscription = harness.createDelivery(subscriptionB.id, 1);
+    harness.db.prepare("UPDATE webhook_deliveries SET next_attempt_at = ? WHERE id = ?")
+      .run("2026-08-13T00:00:10.000Z", oldTask.id);
+
+    harness.dispatcher.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(started).toEqual([otherSubscription.eventId]);
+    expect(started).not.toContain(newTask.eventId);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.waitFor(() => expect(started).toContain(oldTask.eventId));
+    await vi.waitFor(() => expect(started).toContain(newTask.eventId));
+    expect(started.indexOf(oldTask.eventId)).toBeLessThan(started.indexOf(newTask.eventId));
 
     await harness.dispatcher.stop();
     harness.db.close();
@@ -265,6 +384,103 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
+  it("公共 Payload 使用固定契约且每类事件只附加一个白名单对象", () => {
+    const harness = createHarness();
+    const subscription = harness.store.createSubscription({
+      endpointId: harness.endpoint.id,
+      name: "public-payload",
+      url: "https://receiver.test/public",
+      enabled: true,
+      eventsJson: JSON.stringify(["tool.completed", "task.succeeded", "message.agent.reply"]),
+      encryptedHeaders: null,
+      encryptedSigningSecret: harness.secrets.encrypt("payload-secret"),
+      timeoutSeconds: 10
+    });
+    let eventStore!: EventStore;
+    const projection = new IntegrationProjection({
+      db: harness.db,
+      store: harness.store,
+      listEvents: (runId) => eventStore.list(runId, 0)
+    });
+    const runRepository = new RunRepository({ db: harness.db, projection });
+    eventStore = new EventStore({ db: harness.db, projection });
+    const session = harness.seed.session();
+    const conversation = harness.store.createConversation({
+      endpointId: harness.endpoint.id,
+      conversationKey: "ticket-1332",
+      sessionId: session.id
+    });
+    const task = harness.store.createTask({
+      endpointId: harness.endpoint.id,
+      conversationId: conversation.id,
+      sessionId: session.id,
+      requestId: "payload-request",
+      requestFingerprint: "payload-fingerprint",
+      message: "secret-user-input",
+      effectivePrompt: "secret-effective-prompt",
+      encryptedParameters: harness.secrets.encrypt(JSON.stringify({ api_token: "secret-mcp-token" }))
+    });
+    const run = runRepository.create(
+      { sessionId: session.id, input: task.effectivePrompt },
+      { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
+    );
+    runRepository.markRunning(run.id);
+    const toolEvent = eventStore.append(run.id, "tool", {
+      toolCallId: "tool-public",
+      status: "completed",
+      title: "Read",
+      kind: "read",
+      locations: [{ path: "/workspace/README.md", line: 3, token: "location-secret" }],
+      rawInput: "raw-input-secret",
+      rawOutput: "raw-output-secret",
+      content: "provider-content-secret"
+    });
+    eventStore.append(run.id, "message", { stream: "output", text: "Agent final answer" });
+    const finished = runRepository.finish(run.id, { status: "succeeded", result: "internal-result" });
+
+    const payloads = Object.fromEntries(harness.store.listDeliveries(subscription.id).map((delivery) => [
+      delivery.eventType,
+      JSON.parse(delivery.payloadJson) as Record<string, unknown>
+    ]));
+    const baseKeys = ["endpoint", "eventId", "eventType", "occurredAt", "sequence", "task"];
+    expect(Object.keys(payloads["task.succeeded"]!).sort()).toEqual(baseKeys);
+    expect(Object.keys(payloads["message.agent.reply"]!).sort()).toEqual([...baseKeys, "message"].sort());
+    expect(Object.keys(payloads["tool.completed"]!).sort()).toEqual([...baseKeys, "tool"].sort());
+    expect(payloads["task.succeeded"]).toMatchObject({
+      eventType: "task.succeeded",
+      occurredAt: finished.finishedAt,
+      endpoint: { id: harness.endpoint.id, slug: harness.endpoint.slug },
+      task: {
+        id: task.id,
+        requestId: task.requestId,
+        conversationKey: "ticket-1332",
+        sessionId: session.id,
+        runId: run.id,
+        status: "succeeded"
+      }
+    });
+    expect(payloads["message.agent.reply"]!.message).toEqual({
+      role: "agent",
+      content: "Agent final answer",
+      runStatus: "succeeded"
+    });
+    expect(payloads["tool.completed"]!.tool).toEqual({
+      toolCallId: "tool-public",
+      title: "Read",
+      kind: "read",
+      status: "completed",
+      locations: [{ path: "/workspace/README.md", line: 3 }]
+    });
+    expect(payloads["tool.completed"]!.occurredAt).toBe(toolEvent.createdAt);
+    expect(payloads["message.agent.reply"]!.occurredAt).toBe(finished.finishedAt);
+    const serialized = JSON.stringify(payloads);
+    for (const secret of [
+      "secret-user-input", "secret-effective-prompt", "secret-mcp-token", "location-secret",
+      "raw-input-secret", "raw-output-secret", "provider-content-secret", "internal-result"
+    ]) expect(serialized).not.toContain(secret);
+    harness.db.close();
+  });
+
   it("恢复 delivering 并从 Run/Event 补建缺失的确定性 Delivery", () => {
     const harness = createHarness();
     const subscription = harness.createSubscription("recover", "secret");
@@ -300,6 +516,14 @@ describe("WebhookDispatcher", () => {
       rawOutput: "must-not-leak"
     });
     runRepository.finish(run.id, { status: "succeeded", result: "done" });
+    const originalProjected = Object.fromEntries(harness.store.listDeliveries(subscription.id)
+      .filter(({ eventType }) => ["task.succeeded", "message.agent.reply", "tool.completed"].includes(eventType))
+      .map((delivery) => [delivery.eventType, {
+        eventId: delivery.eventId,
+        eventKey: delivery.eventKey,
+        sequence: delivery.sequence,
+        payloadJson: delivery.payloadJson
+      }]));
     harness.db.prepare(`
       DELETE FROM webhook_deliveries
       WHERE subscription_id = ? AND event_type IN ('task.succeeded', 'message.agent.reply', 'tool.completed')
@@ -316,11 +540,91 @@ describe("WebhookDispatcher", () => {
     expect(harness.store.findDeliveryByEventKey(subscription.id, `${task.id}:message.agent.reply`)).toBeDefined();
     expect(harness.store.findDeliveryByEventKey(
       subscription.id,
-      `${run.id}:${toolEvent.seq}:tool.completed`
+      `${task.id}:tool:tool-recover:completed`
     )).toBeDefined();
+    const recoveredProjected = Object.fromEntries(harness.store.listDeliveries(subscription.id)
+      .filter(({ eventType }) => ["task.succeeded", "message.agent.reply", "tool.completed"].includes(eventType))
+      .map((delivery) => [delivery.eventType, {
+        eventId: delivery.eventId,
+        eventKey: delivery.eventKey,
+        sequence: delivery.sequence,
+        payloadJson: delivery.payloadJson
+      }]));
+    expect(recoveredProjected).toEqual(originalProjected);
     expect(harness.store.listDeliveries(subscription.id).find(({ eventType }) => eventType === "task.started"))
       .toMatchObject({ status: "pending" });
     expect(JSON.stringify(harness.store.listDeliveries(subscription.id))).not.toContain("must-not-leak");
+    const snapshot = {
+      deliveries: harness.db.prepare(`
+        SELECT event_id, event_key, sequence, payload_json, status, attempt_count, next_attempt_at
+        FROM webhook_deliveries WHERE subscription_id = ? ORDER BY rowid
+      `).all(subscription.id),
+      task: harness.db.prepare(`
+        SELECT event_sequence, event_sequences_json FROM integration_tasks WHERE id = ?
+      `).get(task.id)
+    };
+    projection.recover();
+    expect({
+      deliveries: harness.db.prepare(`
+        SELECT event_id, event_key, sequence, payload_json, status, attempt_count, next_attempt_at
+        FROM webhook_deliveries WHERE subscription_id = ? ORDER BY rowid
+      `).all(subscription.id),
+      task: harness.db.prepare(`
+        SELECT event_sequence, event_sequences_json FROM integration_tasks WHERE id = ?
+      `).get(task.id)
+    }).toEqual(snapshot);
+    harness.db.close();
+  });
+
+  it("terminal Run 没有 output 时重复恢复不会创建 reply 或推进 sequence", () => {
+    const harness = createHarness();
+    const subscription = harness.store.createSubscription({
+      endpointId: harness.endpoint.id,
+      name: "no-output",
+      url: "https://receiver.test/no-output",
+      enabled: true,
+      eventsJson: JSON.stringify(["task.succeeded", "message.agent.reply"]),
+      encryptedHeaders: null,
+      encryptedSigningSecret: harness.secrets.encrypt("no-output-secret"),
+      timeoutSeconds: 10
+    });
+    let eventStore!: EventStore;
+    const projection = new IntegrationProjection({
+      db: harness.db,
+      store: harness.store,
+      listEvents: (runId) => eventStore.list(runId, 0)
+    });
+    const runRepository = new RunRepository({ db: harness.db, projection });
+    eventStore = new EventStore({ db: harness.db, projection });
+    const session = harness.seed.session();
+    const task = harness.store.createTask({
+      endpointId: harness.endpoint.id,
+      conversationId: null,
+      sessionId: session.id,
+      requestId: "no-output-request",
+      requestFingerprint: "no-output-fingerprint",
+      message: "no output",
+      effectivePrompt: "no output",
+      encryptedParameters: null
+    });
+    const run = runRepository.create(
+      { sessionId: session.id, input: "no output" },
+      { afterInsert: (created) => { harness.store.linkTaskRunInTransaction(task.id, created.id); return undefined; } }
+    );
+    runRepository.markRunning(run.id);
+    runRepository.finish(run.id, { status: "succeeded", result: "" });
+    const before = harness.db.prepare(`
+      SELECT event_sequence, event_sequences_json FROM integration_tasks WHERE id = ?
+    `).get(task.id);
+
+    projection.recover();
+    projection.recover();
+
+    expect(harness.store.listDeliveries(subscription.id).some(({ eventType }) => eventType === "message.agent.reply"))
+      .toBe(false);
+    expect(harness.db.prepare(`
+      SELECT event_sequence, event_sequences_json FROM integration_tasks WHERE id = ?
+    `).get(task.id)).toEqual(before);
     harness.db.close();
   });
 });
@@ -437,6 +741,18 @@ describe("Webhook management API", () => {
     expect(tested.statusCode).toBe(202);
     await vi.waitFor(() => expect(requests).toHaveLength(1));
     expect(requests[0]!.headers.get("x-remote-agent-event")).toBe("webhook.test");
+    const testPayload = JSON.parse(requests[0]!.body) as Record<string, unknown>;
+    expect(Object.keys(testPayload).sort()).toEqual([
+      "endpoint", "eventId", "eventType", "notice", "occurredAt", "sequence", "task"
+    ]);
+    expect(testPayload).toMatchObject({
+      eventType: "webhook.test",
+      endpoint: { id: endpointId, slug: "webhook-api" },
+      task: null,
+      notice: { code: "webhook_test", message: "Webhook test" }
+    });
+    expect(JSON.stringify(testPayload)).not.toContain(createdBody.signingSecret);
+    expect(JSON.stringify(testPayload)).not.toContain("callback-secret");
     const deliveries = await app.inject({
       method: "GET",
       url: `/api/integration-endpoints/${endpointId}/webhook-deliveries`,
@@ -500,8 +816,20 @@ describe("Webhook management API", () => {
     await app.ready();
     const invalidBodies = [
       { name: "x", url: "file:///tmp/hook", enabled: true, events: ["task.succeeded"], headers: {}, timeoutSeconds: 10 },
+      { name: "x", url: "https://user:password@receiver.test", enabled: true, events: ["task.succeeded"], headers: {}, timeoutSeconds: 10 },
       { name: "x", url: "https://receiver.test", enabled: true, events: ["task.succeeded"], headers: {}, timeoutSeconds: 61 },
-      { name: "x", url: "https://receiver.test", enabled: true, events: ["unknown.event"], headers: {}, timeoutSeconds: 10 }
+      { name: "x", url: "https://receiver.test", enabled: true, events: ["unknown.event"], headers: {}, timeoutSeconds: 10 },
+      ...[
+        "Host", "Content-Length", "Transfer-Encoding", "Connection", "Proxy-Authorization",
+        "Expect", "Forwarded", "Via", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"
+      ].map((name) => ({
+        name: "x",
+        url: "https://receiver.test",
+        enabled: true,
+        events: ["task.succeeded"],
+        headers: { [name]: "forged" },
+        timeoutSeconds: 10
+      }))
     ];
     for (const payload of invalidBodies) {
       const response = await app.inject({
