@@ -2,56 +2,64 @@
 
 [简体中文](README.md)
 
-Remote Agent Server is a self-hosted control plane for running coding agents on a dedicated machine. It manages agents, reusable project environments, isolated session workspaces, multi-turn runs, Skills, MCP servers, and authenticated integrations through one web interface and HTTP API.
+Remote Agent Server is a self-hosted runtime for command-line agents such as Claude Code and Codex. It provides one web interface and HTTP API for preparing projects, isolating workspaces, continuing multi-turn conversations, recording executions, and accepting asynchronous work from other systems.
 
-The execution layer uses [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol). The current provider adapters support Claude Code, Codex, and Hermes. Sessions keep their provider session ID, so later runs can continue the same conversation while each run remains independently recorded.
+The execution layer uses [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol). The current provider adapters support Claude Code, Codex, and Hermes.
 
-## What it provides
+## Features
 
-- **Provider-neutral agents:** configure a provider, instructions, project environment, Skills, and MCP servers once.
-- **Reusable project environments:** prepare one or more Git repositories and their dependencies before a session starts.
-- **Isolated workspaces:** create fast copy-on-write session workspaces with APFS clones on macOS or Btrfs snapshots on Linux.
-- **Multi-turn sessions:** send multiple runs to one session and resume the underlying ACP session where supported.
-- **Observable runs:** persist messages, tool activity, status changes, errors, and final results in SQLite.
-- **MCP management:** configure HTTP and stdio MCP servers with fixed, session, or runtime values, then inspect their tools from the UI.
-- **Skill management:** discover host Skills, upload Skill archives, and explicitly enable the Skills copied into each agent home.
-- **External integrations:** accept asynchronous tasks over HTTP and expose polling, SSE, cancellation, conversation reuse, and signed Webhooks.
-- **Headed browser support:** run providers in a normal desktop session instead of a container-only environment.
+- **Agent management:** configure providers, instructions, project environments, Skills, and MCP in one place.
+- **Reusable project environments:** prepare one or more Git repositories and their dependencies before sessions start.
+- **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
+- **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
+- **Recorded executions:** persist user messages, agent output, tool activity, statuses, errors, and results in SQLite.
+- **Skill management:** discover host Skills, upload Skill ZIP files, and choose which Skills each agent receives.
+- **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values and inspect exposed tools.
+- **External integrations:** submit asynchronous HTTP tasks with idempotency, polling, SSE, cancellation, conversations, and signed Webhooks.
+- **Headed browser support:** run agents in a real desktop session without requiring containers.
 
-## Core model
+## How a request runs
 
-| Concept | Purpose |
-| --- | --- |
-| Project environment | A versioned, reusable set of Git repositories and prepared dependencies. |
-| Agent | Provider configuration, instructions, project environment, Skills, and MCP configuration. |
-| Session | An isolated workspace and a continuing provider conversation. |
-| Run | One user input and its recorded execution inside a session. |
-| Integration endpoint | An authenticated external entry point mapped to an agent and optional session parameters. |
-
-An external request follows this path:
+From the web interface:
 
 ```text
-HTTP request -> Integration task -> Session -> Run -> acpx/ACP -> Provider
-                                      |
-                                      +-> SQLite events -> query / SSE / Webhook
+Project environment -> Agent -> Session -> Run -> acpx/ACP -> Provider
+                               |
+                               +-> messages, tool activity, status, result
 ```
 
-SSE is optional. A caller can submit a task, store the returned `taskId`, and poll the task and event endpoints. Webhooks are available when the caller wants push delivery.
+From another system:
+
+```text
+External system -> Integration endpoint -> Task -> Session -> Run -> Agent
+                         |                            |
+                         |                            +-> workspace / Skills / MCP
+                         |
+                         +-> status query / event query / SSE / Webhook
+```
+
+| Object | Purpose |
+| --- | --- |
+| Project environment | A versioned, prepared set of one or more Git repositories. |
+| Agent | A provider, project environment, instructions, Skills, and MCP configuration. |
+| Session | An isolated workspace and a continuing agent conversation. |
+| Run | One input and its recorded execution inside a session. |
+| Integration endpoint | An authenticated external entry point bound to one agent. |
+| Conversation | A multi-turn external conversation that reuses one session. |
+| Task | One asynchronous external request that eventually maps to a run. |
 
 ## Requirements
 
-- macOS with APFS, or Linux with a Btrfs filesystem available to the service user
-- Node.js 22 (`.nvmrc` pins the tested version)
+- Node.js 22 (the tested version is pinned in `.nvmrc`)
 - pnpm 10 through Corepack
 - Git
 - At least one installed and authenticated provider CLI
-- A real desktop/X display when an agent needs headed browser automation
+- APFS on macOS, or Btrfs that the service user can operate on Linux
+- A real desktop/X display for headed browser automation
 
-Remote Agent Server deliberately has no ordinary directory-copy fallback. The project environment and session roots must satisfy the APFS or Btrfs checks at startup.
+Project environments and session workspaces use APFS clones or Btrfs snapshots. There is no ordinary directory-copy fallback. Prepare the filesystem with the [deployment guide](docs/deployment.md) on a new host.
 
-The commands below assume those storage directories are already prepared. Follow the [deployment guide](docs/deployment.md) first if this is a new macOS or Linux host.
-
-## Quick start
+## Install and start
 
 ```bash
 git clone https://github.com/ma-pony/remote-agent-server.git
@@ -67,7 +75,7 @@ chmod 0600 .env
 openssl rand -hex 32
 ```
 
-Put the generated value in `API_TOKEN`, set absolute storage paths for the current machine, and then start the service:
+Put the generated value in `.env` as `API_TOKEN`, then replace the storage paths with absolute paths for the host. The application does not load `.env` itself, so source it before starting:
 
 ```bash
 set -a
@@ -76,49 +84,19 @@ set +a
 pnpm start
 ```
 
-Check the service:
+Check the server:
 
 ```bash
 curl --fail http://127.0.0.1:3000/api/health
 ```
 
-Open `http://127.0.0.1:3000`. The web UI asks for `API_TOKEN` and keeps it only in the current browser session.
+Open `http://127.0.0.1:3000` and enter `API_TOKEN`. The web interface keeps it only in the current browser session.
 
-The application does not load `.env` by itself. Source it before `pnpm start`, or provide the same variables through the process manager.
+## Complete one agent run
 
-## Configuration
+### 1. Prepare a provider
 
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `API_TOKEN` | Yes | None | Management UI and `/api` Bearer token. |
-| `HOST` | No | `0.0.0.0` | Listen address. Use `127.0.0.1` behind a local reverse proxy. |
-| `PORT` | No | `3000` | HTTP port. |
-| `DATA_DIR` | No | `/srv/remote-agent/data` | Runtime data and encryption key directory. |
-| `DATABASE_PATH` | No | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite database path. |
-| `PROJECT_ENVIRONMENTS_ROOT` | No | `/srv/remote-agent/environments` | Immutable project environment revisions. |
-| `SESSIONS_ROOT` | No | `/srv/remote-agent/sessions` | Isolated session workspaces. |
-| `MAX_CONCURRENT_RUNS` | No | `4` | Maximum concurrently executing runs. |
-| `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | No | `3` | Remote repository check interval. |
-| `PROJECT_PREPARE_TIMEOUT_MINUTES` | No | `30` | Timeout for a repository preparation command. |
-| `DISPLAY` / `XAUTHORITY` | Browser only | None | Desktop/X display used by headed browsers. |
-
-On first startup, the service creates `DATA_DIR/secret.key` with mode `0600`. This AES-256-GCM key encrypts MCP secrets, integration fixed values, Webhook credentials, and sensitive session parameters. Back up the key with the SQLite database. Existing encrypted values cannot be recovered if the key is lost.
-
-## First-run workflow
-
-1. Create a **project environment**.
-2. Add one or more Git repositories and an optional preparation command for each repository.
-3. Run **Sync now** and wait for a ready revision.
-4. Create an **agent**, choose its provider and project environment, and enter its instructions.
-5. Enable or upload the Skills the agent needs.
-6. Add HTTP or stdio MCP servers and run their connection check.
-7. Create a **session** and send the first message.
-
-Project environment synchronization builds a new revision and publishes it only after every repository is ready. Existing sessions keep their current revision; new sessions clone the latest ready revision with APFS or Btrfs copy-on-write support.
-
-## Providers and PATH
-
-Install and authenticate provider CLIs as the same operating-system user that runs the service. For example:
+Install and authenticate the provider CLI as the same operating-system user that runs the server:
 
 ```bash
 claude login
@@ -127,122 +105,381 @@ claude --version
 codex --version
 ```
 
-At startup, the service reads the login shell PATH and merges it with the current Node directory and process PATH. This lets LaunchAgent and systemd deployments find tools installed by Homebrew, NVM, pnpm, or a user-local package manager without duplicating the whole PATH in application configuration.
+At startup, the server reads the login-shell PATH and merges it with the current Node directory and process PATH. Each agent has its own provider home. Required native login state is reused, but host Skills are not inherited automatically.
 
-Provider homes are isolated per agent. Required native login state is reused selectively; host Skills are not implicitly injected into an agent.
+### 2. Create a project environment
 
-## Skills
+Open **Project environments → New project environment**:
 
-The Skill catalog discovers compatible `SKILL.md` directories from Codex, shared agent, Claude, and plugin locations. A ZIP archive can also be uploaded from the agent page. Enabling a Skill copies it into the managed agent home; disabling it removes only the managed copy.
+1. Add one or more Git repositories the agent may need.
+2. Add an optional preparation command per repository, such as `pnpm install`, `bundle install`, or `uv sync`.
+3. Select **Sync now**.
+4. Wait for the current revision to become **Ready**.
 
-Changes take effect on the next run. The runtime refreshes the provider handle while retaining the ACP session ID when a continuing session is available.
+A sync builds a new revision in persistent storage and publishes it only after every repository and preparation command succeeds. The server checks remotes every three hours, and an operator can sync at any time. Existing sessions keep their revision; new sessions use the latest ready revision.
 
-## MCP servers
+### 3. Create an agent
 
-Each agent can have multiple MCP servers:
+Open **Agents → New agent**:
 
-- **HTTP**: URL and Headers
-- **stdio**: command, Arguments, and Environment
+1. Select a provider such as Claude Code or Codex.
+2. Select the ready project environment.
+3. Enter the agent role, coding rules, and delivery requirements.
+4. Save it and run **Doctor** to verify the provider and project environment.
 
-Each configurable value can come from:
+The agent page also provides:
 
-- a fixed value stored by the server;
-- a declared session parameter supplied when the session is created; or
-- a runtime value such as `agent_id`, `session_id`, `run_id`, `workspace_path`, or `browser_profile_path`.
+- **Skills:** discover host Skills, upload a ZIP archive, and enable only the Skills this agent should receive.
+- **MCP:** add HTTP or stdio servers, check connectivity, and inspect their tools.
 
-Sensitive fixed and session values are encrypted and are never returned in plaintext by management APIs. Use **Check connection** to validate the resolved configuration. After a successful check, click the tool count to inspect all tools currently advertised by that MCP server.
+Skill changes apply on the next run. MCP values may come from saved values, declared session parameters, or runtime values such as `agent_id`, `session_id`, `run_id`, `workspace_path`, and `browser_profile_path`. Secrets are encrypted and are never returned in plaintext by management APIs.
 
-## Management API
+### 4. Create a session and send a message
 
-All management endpoints except `/api/health` require the server API token:
+Open **Sessions → New session**, select the agent, and enter required MCP session parameters. The server creates an isolated workspace from the current project-environment revision.
+
+Sending a message creates and queues a run. The page shows agent output, tool activity, status changes, errors, and the final result.
+
+Sending another message in the same session creates a new run and resumes the ACP session where supported. Each run keeps its own input, events, and result.
+
+## Integrating another system
+
+The external API is asynchronous. Submission returns `202 Accepted` without waiting for the agent and does not require a permanent SSE connection.
+
+The complete flow is:
+
+1. An administrator creates an integration endpoint and stores its one-time token.
+2. The external system submits a task and stores the returned `taskId`.
+3. It queries the task until the task reaches a terminal status.
+4. It reads the agent reply from events or a `message.agent.reply` Webhook.
+5. It reuses a `conversationKey` for later turns and ends the conversation when continuity is no longer needed.
+
+The examples below use `http://127.0.0.1:3000`.
+
+### 1. Create an integration endpoint
+
+Management operations use the server `API_TOKEN`:
 
 ```bash
-curl http://127.0.0.1:3000/api/agents \
-  -H "Authorization: Bearer $API_TOKEN"
+export REMOTE_AGENT_URL=http://127.0.0.1:3000
+export API_TOKEN='<API_TOKEN from the server .env>'
+export AGENT_ID='<ID of an agent that passes Doctor>'
+
+curl --fail-with-body \
+  -X POST "$REMOTE_AGENT_URL/api/integration-endpoints" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data "{
+    \"name\": \"Ticket processing\",
+    \"slug\": \"ticket-agent\",
+    \"agentId\": \"$AGENT_ID\",
+    \"enabled\": true,
+    \"promptPrefix\": \"Follow the project rules when handling this request.\",
+    \"parameterMappings\": []
+  }"
 ```
 
-The web UI uses the same `/api` endpoints for agents, project environments, sessions, runs, MCP configuration, and integration administration.
+The response contains the endpoint and a token shown only once:
 
-## External integration API
+```json
+{
+  "endpoint": {
+    "id": "6c80c07b-...",
+    "name": "Ticket processing",
+    "slug": "ticket-agent",
+    "agentId": "0abc8611-...",
+    "enabled": true,
+    "promptPrefix": "Follow the project rules when handling this request.",
+    "parameterMappings": []
+  },
+  "token": "ras_..."
+}
+```
 
-Create an integration endpoint in the web UI, select its agent, map any required session parameters, and copy the one-time endpoint token. External calls use this endpoint token, not the management `API_TOKEN`.
-
-An endpoint token cannot call management APIs, but it can send instructions to an agent running with approved tools. It is therefore a credential for a trusted calling system, not an isolation boundary for untrusted tenants. Provider login state and every file readable by the service user remain inside the agent's trust boundary. Provider and project-preparation processes do not inherit the management or smoke-test tokens.
-
-Submit an asynchronous task:
+Store the token in the caller secret manager immediately:
 
 ```bash
-curl -X POST http://127.0.0.1:3000/integration/v1/endpoints/example/tasks \
+export ENDPOINT_TOKEN='<ras_... returned when the endpoint was created>'
+```
+
+The server stores only the token hash, so the token cannot be recovered later. External systems use the endpoint token, never the management `API_TOKEN`.
+
+`promptPrefix` is prepended to every external message as ordinary prompt text. It is not an ACP-native system prompt. If the agent declares required session parameters, map each one to a request value or fixed value:
+
+```json
+[
+  { "parameterKey": "ticket_id", "source": "request", "requestKey": "ticketId" },
+  { "parameterKey": "region", "source": "fixed", "value": "sg" }
+]
+```
+
+### 2. Submit an asynchronous task
+
+```bash
+curl --fail-with-body \
+  -X POST "$REMOTE_AGENT_URL/integration/v1/endpoints/ticket-agent/tasks" \
   -H "Authorization: Bearer $ENDPOINT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "requestId": "request-001",
-    "conversationKey": "issue-42",
-    "message": "Inspect the repository and report the failing check.",
+  -H 'Content-Type: application/json' \
+  --data '{
+    "requestId": "ticket-1332-event-1",
+    "conversationKey": "ticket-1332",
+    "message": "Find the failure, fix the code, and return the verification result.",
     "parameters": {}
   }'
 ```
 
-`requestId` is the idempotency key. Reusing it with the same input returns the same task. `conversationKey` is optional; repeated tasks with the same key continue the same session until the conversation is ended.
+The response status is `202`:
 
-Query task state and events:
-
-```bash
-curl http://127.0.0.1:3000/integration/v1/tasks/$TASK_ID \
-  -H "Authorization: Bearer $ENDPOINT_TOKEN"
-
-curl "http://127.0.0.1:3000/integration/v1/tasks/$TASK_ID/events?afterSeq=0" \
-  -H "Authorization: Bearer $ENDPOINT_TOKEN"
+```json
+{
+  "taskId": "77d45cc5-...",
+  "requestId": "ticket-1332-event-1",
+  "conversationKey": "ticket-1332",
+  "sessionId": "83b0df95-...",
+  "runId": null,
+  "status": "queued"
+}
 ```
 
-Optional SSE stream:
+`runId` may be `null` immediately after submission. It appears in later queries after the scheduler creates the run.
+
+- `requestId` is the caller-generated idempotency key. Retrying identical input returns the original task. Reusing it with different input returns `409 idempotency_conflict`.
+- `conversationKey` is optional. Later tasks with the same key run serially and reuse the same session.
+- `message` is the instruction sent to the agent for this task.
+- `parameters` may contain only request parameters declared by the endpoint mapping.
+
+### 3. Query the task until completion
 
 ```bash
-curl -N "http://127.0.0.1:3000/integration/v1/tasks/$TASK_ID/events/stream?afterSeq=0" \
-  -H "Authorization: Bearer $ENDPOINT_TOKEN"
+export TASK_ID='<taskId from the submission response>'
+
+curl --fail-with-body \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  "$REMOTE_AGENT_URL/integration/v1/tasks/$TASK_ID"
 ```
 
-The stream sends heartbeats and supports reconnection with `afterSeq`. Disconnecting does not cancel the task. For long-running production integrations, use task polling as the recovery path even when SSE is enabled.
+Possible statuses are `queued`, `running`, `succeeded`, `failed`, and `cancelled`. A terminal response looks like this:
 
-## Webhooks
+```json
+{
+  "taskId": "77d45cc5-...",
+  "requestId": "ticket-1332-event-1",
+  "conversationKey": "ticket-1332",
+  "sessionId": "83b0df95-...",
+  "runId": "aa526e5b-...",
+  "status": "succeeded"
+}
+```
 
-An integration endpoint can subscribe an HTTP(S) URL to task, message, system notice, and tool events. Deliveries are persisted and retried by the service. Requests include:
+The task status endpoint does not include agent response text. Read that text from events or a `message.agent.reply` Webhook.
 
-- `X-Remote-Agent-Event`
-- `X-Remote-Agent-Event-Id`
-- `X-Remote-Agent-Timestamp`
-- `X-Remote-Agent-Signature: v1=<hex digest>`
+### 4. Read the reply and public events
 
-Verify the signature as HMAC-SHA256 over:
+```bash
+curl --fail-with-body \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  "$REMOTE_AGENT_URL/integration/v1/tasks/$TASK_ID/events?afterSeq=0"
+```
+
+Example message event:
+
+```json
+{
+  "id": "7f444964-...",
+  "runId": "aa526e5b-...",
+  "seq": 3,
+  "type": "message",
+  "contentJson": "{\"stream\":\"output\",\"text\":\"The issue is fixed.\"}",
+  "createdAt": "2026-08-18T10:20:30.000Z"
+}
+```
+
+`contentJson` is a JSON string. Agent output can be split across several `message/output` events. Sort by `seq` and concatenate their `text` values:
+
+```bash
+curl --silent \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  "$REMOTE_AGENT_URL/integration/v1/tasks/$TASK_ID/events?afterSeq=0" \
+| jq -r '.[]
+    | select(.type == "message")
+    | .contentJson | fromjson
+    | select(.stream == "output")
+    | .text' \
+| tr -d '\n'
+```
+
+External events are a public projection. Message output is visible. Tool events contain only allowlisted fields such as `toolCallId`, `kind`, and `status`. Agent thought, raw tool input/output, MCP secrets, and private provider fields are omitted. The management session page contains the complete internal trace.
+
+### 5. Choose polling, SSE, or Webhooks
+
+| Method | Use case | Recommendation |
+| --- | --- | --- |
+| Task and event queries | Backend systems and reliable state sync | Default. Store `taskId` and the last processed `seq`. |
+| SSE | Browsers and live execution views | Use as a live channel and recover gaps with event queries. |
+| Webhook | Server-to-server push | Verify signatures, deduplicate by event ID, and keep polling as recovery. |
+
+Connect to SSE:
+
+```bash
+curl -N \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  "$REMOTE_AGENT_URL/integration/v1/tasks/$TASK_ID/events/stream?afterSeq=0"
+```
+
+The server sends a heartbeat every 20 seconds. Persist `seq` after each event and pass the last value as `afterSeq` when reconnecting. Disconnecting SSE does not cancel the task.
+
+### 6. Receive agent replies through a Webhook
+
+Administrators create Webhook subscriptions. This example subscribes to agent replies and unsuccessful task outcomes:
+
+```bash
+export ENDPOINT_ID='<endpoint.id from endpoint creation>'
+
+curl --fail-with-body \
+  -X POST "$REMOTE_AGENT_URL/api/integration-endpoints/$ENDPOINT_ID/webhooks" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{
+    "name": "Agent replies",
+    "url": "https://caller.example.com/webhooks/remote-agent",
+    "enabled": true,
+    "events": ["message.agent.reply", "task.failed", "task.cancelled"],
+    "headers": {},
+    "timeoutSeconds": 10
+  }'
+```
+
+The `signingSecret` in the creation response is also shown only once. A `message.agent.reply` payload looks like this:
+
+```json
+{
+  "eventId": "evt_...",
+  "eventType": "message.agent.reply",
+  "sequence": 5,
+  "occurredAt": "2026-08-18T10:20:30.000Z",
+  "endpoint": { "id": "6c80c07b-...", "slug": "ticket-agent" },
+  "task": {
+    "id": "77d45cc5-...",
+    "requestId": "ticket-1332-event-1",
+    "conversationKey": "ticket-1332",
+    "sessionId": "83b0df95-...",
+    "runId": "aa526e5b-...",
+    "status": "succeeded"
+  },
+  "message": {
+    "role": "agent",
+    "content": "The issue is fixed and verified.",
+    "runStatus": "succeeded"
+  }
+}
+```
+
+Each request contains:
 
 ```text
-<timestamp>.<unmodified request body>
+X-Remote-Agent-Event: message.agent.reply
+X-Remote-Agent-Event-Id: <eventId>
+X-Remote-Agent-Timestamp: <Unix seconds>
+X-Remote-Agent-Signature: v1=<hex HMAC-SHA256 digest>
 ```
 
-The Webhook signing secret is shown once when the subscription is created or rotated. Configure a reasonable receiver timeout and process duplicate event IDs idempotently.
+The signed text is `<timestamp>.<unchanged HTTP body>`. Node.js verification:
 
-## Development and verification
+```js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const expected = createHmac("sha256", signingSecret)
+  .update(`${timestamp}.${rawBody}`)
+  .digest("hex");
+const actual = signature.startsWith("v1=") ? signature.slice(3) : "";
+const valid = actual.length === expected.length
+  && timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+```
+
+The server retries network errors and non-2xx responses. Receivers must deduplicate by `eventId`. A delivery failure does not change the task result.
+
+Supported subscription events:
+
+- `task.queued`, `task.started`, `task.succeeded`, `task.failed`, `task.cancelled`
+- `message.user.received`, `message.agent.reply`, `message.system.notice`
+- `tool.started`, `tool.completed`, `tool.failed`
+
+### 7. Continue or end a conversation
+
+Use a new `requestId` and the same `conversationKey` for the next turn:
+
+```json
+{
+  "requestId": "ticket-1332-event-2",
+  "conversationKey": "ticket-1332",
+  "message": "Continue with the second issue found in the previous turn.",
+  "parameters": {}
+}
+```
+
+The new task creates a new run while reusing the previous session and provider conversation. Once no task is `queued` or `running`, end the conversation:
+
+```bash
+curl --fail-with-body \
+  -X POST \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  "$REMOTE_AGENT_URL/integration/v1/endpoints/ticket-agent/conversations/ticket-1332/end"
+```
+
+Historical sessions and runs remain available. Submitting `ticket-1332` again creates a new session.
+
+Cancel an unfinished task:
+
+```bash
+curl --fail-with-body \
+  -X POST \
+  -H "Authorization: Bearer $ENDPOINT_TOKEN" \
+  "$REMOTE_AGENT_URL/integration/v1/tasks/$TASK_ID/cancel"
+```
+
+## Configuration
+
+| Variable | Required | Default | Description |
+| --- | --- | --- | --- |
+| `API_TOKEN` | Yes | None | Bearer token for the management UI and `/api` routes. |
+| `HOST` | No | `0.0.0.0` | Listen address. Prefer `127.0.0.1` behind a reverse proxy. |
+| `PORT` | No | `3000` | HTTP port. |
+| `DATA_DIR` | No | `/srv/remote-agent/data` | Runtime data and encryption-key directory. |
+| `DATABASE_PATH` | No | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite database path. |
+| `PROJECT_ENVIRONMENTS_ROOT` | No | `/srv/remote-agent/environments` | Project-environment revision directory. |
+| `SESSIONS_ROOT` | No | `/srv/remote-agent/sessions` | Session workspace directory. |
+| `MAX_CONCURRENT_RUNS` | No | `4` | Maximum concurrently executing runs. |
+| `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | No | `3` | Remote repository check interval. |
+| `PROJECT_PREPARE_TIMEOUT_MINUTES` | No | `30` | Per-repository preparation timeout. |
+| `DISPLAY` / `XAUTHORITY` | Browser use | None | Desktop/X display for headed browsers. |
+
+On first startup, the server creates `DATA_DIR/secret.key` with mode `0600`. The AES-256-GCM master key encrypts MCP secrets, endpoint fixed values, Webhook credentials, and sensitive session parameters. Back it up together with the SQLite database.
+
+## Security boundary
+
+- Run the service as a dedicated unprivileged user.
+- Expose it only on a trusted network or behind a TLS reverse proxy.
+- Store and authorize the management `API_TOKEN` separately from endpoint tokens.
+- An endpoint token can instruct its bound agent. Issue it only to trusted systems.
+- Agents can run commands, modify session workspaces, call MCP tools, and control browsers. Treat repositories, Skills, MCP servers, and input messages as trusted execution inputs.
+- Never commit `.env`, `secret.key`, SQLite data, provider login state, or session workspaces.
+
+## Development and acceptance
 
 ```bash
 pnpm test
 pnpm typecheck
 pnpm build
 
-# Requires configured real providers
+# Requires real providers
 pnpm smoke:providers
 
-# Requires a running service, management token, and ready agent
+# Requires a running server, management token, and ready agent
 pnpm smoke:integrations
 ```
 
+`smoke:integrations` exercises endpoint creation, asynchronous tasks, idempotent retry, event queries, SSE resume, multiple turns in one conversation, a new session after ending the conversation, Webhook signatures, and automatic delivery retry.
+
 ## Deployment
 
-See [docs/deployment.md](docs/deployment.md) for APFS/LaunchAgent and Btrfs/systemd setup, headed browser requirements, backup guidance, and real-provider acceptance checks.
-
-Recommended production boundaries:
-
-- run the service as an unprivileged dedicated user;
-- expose it only on a trusted network or behind TLS;
-- do not run the Node process as root or grant broad filesystem capabilities;
-- keep `.env`, `secret.key`, the SQLite database, provider login state, and session workspaces out of Git;
-- treat agent commands, repository code, MCP tools, and browser access as trusted execution inputs.
+The [deployment guide](docs/deployment.md) covers macOS APFS/LaunchAgent, Linux Btrfs/systemd, headed browsers, PATH, provider authentication, backup and restore, and real acceptance checks.
