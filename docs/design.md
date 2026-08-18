@@ -147,7 +147,7 @@ Agent 绑定项目环境。创建 Session 时，服务固化 Agent 当时的环�
 /srv/remote-agent/environments/<environment-id>/revisions/<revision-id>/workspace/
   example-service/
   example-web/
-  bid-spiders/
+  example-crawler/
 
 /srv/remote-agent/sessions/<session-id>/
   workspace/     # 从不可变项目环境版本创建的独立副本

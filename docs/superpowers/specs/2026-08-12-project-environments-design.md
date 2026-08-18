@@ -18,7 +18,7 @@ Remote Agent Server 当前通过一个全局 `WORKSPACE_TEMPLATE` 为所有 Sess
 示例研发环境
 ├── example-service
 ├── example-web
-└── bid-spiders
+└── example-crawler
 ```
 
 项目环境由系统长期维护，不直接供 Agent 修改。

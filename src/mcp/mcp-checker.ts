@@ -5,7 +5,10 @@ import type { McpCheckResult, RuntimeMcpServer } from "./mcp-types.js";
 
 type ProbeClient = {
   connect(transport: unknown, options: { timeout: number }): Promise<void>;
-  listTools(params: undefined, options: { timeout: number; cacheMode: "bypass" }): Promise<{ tools: unknown[] }>;
+  listTools(
+    params: undefined,
+    options: { timeout: number; cacheMode: "bypass" }
+  ): Promise<{ tools: Array<{ name: string; description?: string }> }>;
   close(): Promise<void>;
 };
 
@@ -61,7 +64,15 @@ export class SdkMcpChecker implements McpChecker {
       const transport = this.dependencies.createTransport(server);
       await client.connect(transport, { timeout: timeoutMs });
       const { tools } = await client.listTools(undefined, { timeout: timeoutMs, cacheMode: "bypass" });
-      return { status: "passed", toolCount: tools.length, message: `${tools.length} tools available` };
+      return {
+        status: "passed",
+        toolCount: tools.length,
+        message: `${tools.length} tools available`,
+        tools: tools.map((tool) => ({
+          name: tool.name,
+          description: tool.description?.trim() ? tool.description : null
+        }))
+      };
     } catch (_error) {
       return { status: "failed", code: "mcp_check_failed", message: `MCP ${server.name} check failed` };
     } finally {

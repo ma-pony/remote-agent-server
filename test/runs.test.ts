@@ -287,7 +287,7 @@ describe("RunRepository", () => {
 });
 
 describe("RunScheduler", () => {
-  it("每个 queued Run 最多自动重试 3 次，exhausted 后同实例跳过而新实例恢复", async () => {
+  it("每个 queued Run 最多自动重试 3 次，exhausted 后写入失败终态", async () => {
     vi.useFakeTimers();
     try {
       const { db, seed } = createTestDatabase();
@@ -315,7 +315,7 @@ describe("RunScheduler", () => {
       await vi.advanceTimersByTimeAsync(3_000);
 
       expect(execute).toHaveBeenCalledTimes(4);
-      expect(repository.get(run.id)?.status).toBe("queued");
+      expect(repository.get(run.id)).toMatchObject({ status: "failed", error: "run_retry_exhausted" });
       expect(vi.getTimerCount()).toBe(0);
       expect(onExecutionError).toHaveBeenCalledWith(expect.objectContaining({
         code: "run_retry_exhausted"
@@ -325,20 +325,6 @@ describe("RunScheduler", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       expect(execute).toHaveBeenCalledTimes(4);
       await scheduler.stop();
-
-      const restartedExecute = vi.fn(async (runId: string) => repository.markRunning(runId));
-      const restarted = new RunScheduler({
-        runRepository: repository,
-        executor: { execute: restartedExecute, cancel: async () => ({}) as Run },
-        maxConcurrentRuns: 1,
-        retryDelayMs: 1_000,
-        onExecutionError: vi.fn()
-      });
-      restarted.start();
-      await vi.advanceTimersByTimeAsync(0);
-
-      expect(restartedExecute).toHaveBeenCalledTimes(1);
-      await restarted.stop();
       expect(vi.getTimerCount()).toBe(0);
       db.close();
     } finally {
@@ -446,7 +432,11 @@ describe("RunScheduler", () => {
       });
     }));
     const scheduler = new RunScheduler({
-      runRepository: { get: (id) => queued.find((run) => run.id === id), listQueued: () => queued },
+      runRepository: {
+        get: (id) => queued.find((run) => run.id === id),
+        listQueued: () => queued,
+        failQueued: () => ({}) as Run
+      },
       executor: { execute, cancel: async () => ({}) as Run },
       maxConcurrentRuns: 2
     });

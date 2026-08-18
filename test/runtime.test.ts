@@ -62,6 +62,7 @@ const sessionInput = (root: string, overrides: Partial<RuntimeSessionInput> = {}
   workspacePath: join(root, "session's workspace"),
   browserProfilePath: join(root, "browser's profile"),
   providerSessionId: null,
+  instructions: "只根据当前代码和测试给出结论。",
   memory: "Always inspect the current code.",
   mcpServers: [],
   ...overrides
@@ -255,7 +256,9 @@ describe("AcpxAgentRuntime", () => {
       expect(command).not.toContain("CODEX_HOME=");
       expect(command).not.toContain("CLAUDE_CONFIG_DIR=");
     } else if (provider === "codex") {
-      expect(command).toContain(`CODEX_HOME='${join(config.dataDir, "agents", AGENT_ID, "provider-home", "codex")}'`);
+      expect(command).toContain(`CODEX_HOME='${join(
+        config.dataDir, "agents", AGENT_ID, "provider-home", "codex", "sessions", SESSION_ID
+      )}'`);
       expect(command).not.toContain("HERMES_HOME=");
       expect(command).not.toContain("CLAUDE_CONFIG_DIR=");
     } else {
@@ -298,9 +301,11 @@ describe("AcpxAgentRuntime", () => {
 
     const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
     options.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`);
-    const agentHome = join(config.dataDir, "agents", AGENT_ID, "provider-home", "codex");
-    expect(readlinkSync(join(agentHome, "auth.json"))).toBe(join(hostCodexHome, "auth.json"));
-    const isolatedConfig = readFileSync(join(agentHome, "config.toml"), "utf8");
+    const sessionHome = join(
+      config.dataDir, "agents", AGENT_ID, "provider-home", "codex", "sessions", SESSION_ID
+    );
+    expect(readlinkSync(join(sessionHome, "auth.json"))).toBe(join(hostCodexHome, "auth.json"));
+    const isolatedConfig = readFileSync(join(sessionHome, "config.toml"), "utf8");
     expect(isolatedConfig).toContain(`path = ${JSON.stringify(join(hostSkill, "SKILL.md"))}`);
     expect(isolatedConfig).toContain("enabled = false");
     expect(isolatedConfig).not.toContain("[plugins]");
@@ -336,7 +341,7 @@ describe("AcpxAgentRuntime", () => {
     const acp = runtimeStub({ handle: { agentSessionId: undefined, backendSessionId: "backend-session-1" } });
     acpxMocks.createAcpRuntime.mockReturnValue(acp);
     const runtime = new AcpxAgentRuntime(config);
-    const input = sessionInput(root);
+    const input = sessionInput(root, { provider: "claude_code" });
 
     await expect(runtime.ensureSession(input)).resolves.toEqual({ providerSessionId: "backend-session-1" });
 
@@ -349,7 +354,7 @@ describe("AcpxAgentRuntime", () => {
     });
     expect(acp.ensureSession).toHaveBeenCalledWith({
       sessionKey: `remote-agent:${SESSION_ID}`,
-      agent: `remote:codex:${AGENT_ID}:${SESSION_ID}`,
+      agent: `remote:claude_code:${AGENT_ID}:${SESSION_ID}`,
       mode: "persistent",
       cwd: input.workspacePath,
       sessionOptions: {
@@ -362,6 +367,40 @@ describe("AcpxAgentRuntime", () => {
       .sessionOptions.systemPrompt.append;
     expect(append).toContain(input.workspacePath);
     expect(append).toContain(input.browserProfilePath);
+    expect(append).toContain(input.instructions);
+  });
+
+  it("Codex 为每个 Session 使用独立 Home 并写入 developer instructions", async () => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(config);
+    const input = sessionInput(root, { provider: "codex", instructions: "保持输出简洁。" });
+
+    await runtime.ensureSession(input);
+
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    const command = options.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`);
+    const sessionHome = join(
+      config.dataDir, "agents", AGENT_ID, "provider-home", "codex", "sessions", SESSION_ID
+    );
+    expect(command).toContain(`CODEX_HOME='${sessionHome}'`);
+    expect(readFileSync(join(sessionHome, "config.toml"), "utf8")).toContain(
+      'developer_instructions = "保持输出简洁。"'
+    );
+  });
+
+  it("Hermes 不把智能体指令伪装成 ACP system prompt", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+
+    await runtime.ensureSession(sessionInput(root, { provider: "hermes", instructions: "不应发送" }));
+
+    const ensureInput = acp.ensureSession.mock.calls[0]?.[0] as { sessionOptions?: unknown };
+    expect(ensureInput).not.toHaveProperty("sessionOptions");
   });
 
   it("恢复时传入 Provider Session ID 且不重新注入 prompt", async () => {
@@ -452,7 +491,7 @@ describe("AcpxAgentRuntime", () => {
     const acp = runtimeStub();
     acpxMocks.createAcpRuntime.mockReturnValue(acp);
     const runtime = new AcpxAgentRuntime(makeConfig(root));
-    const input = sessionInput(root);
+    const input = sessionInput(root, { provider: "claude_code" });
 
     const first = await runtime.ensureSession(input);
     const second = await runtime.ensureSession(input);

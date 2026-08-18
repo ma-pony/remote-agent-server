@@ -22,7 +22,8 @@ const createTestApp = async () => {
   const check = vi.fn(async () => ({
     status: "passed" as const,
     toolCount: 2,
-    message: "2 tools available"
+    message: "2 tools available",
+    tools: [{ name: "ticket_get", description: "读取工单" }, { name: "ticket_pause", description: null }]
   }));
   const app = buildApp({
     config: {
@@ -175,7 +176,10 @@ describe("Agent MCP API", () => {
       headers: authHeaders()
     });
     expect(checked.statusCode).toBe(200);
-    expect(checked.json()).toEqual({ status: "passed", toolCount: 2, message: "2 tools available" });
+    expect(checked.json()).toEqual({
+      status: "passed", toolCount: 2, message: "2 tools available",
+      tools: [{ name: "ticket_get", description: "读取工单" }, { name: "ticket_pause", description: null }]
+    });
     expect(check).toHaveBeenCalledOnce();
     expect(check.mock.calls[0]?.[1]).toBe(3000);
 
@@ -229,7 +233,9 @@ describe("SdkMcpChecker", () => {
     { type: "stdio", name: "stdio", command: "/usr/bin/true", args: [], env: [] }
   ] satisfies RuntimeMcpServer[])("检查 $type MCP 并始终关闭 Client", async (server) => {
     const connect = vi.fn(async () => undefined);
-    const listTools = vi.fn(async () => ({ tools: [{ name: "a" }, { name: "b" }] }));
+    const listTools = vi.fn(async () => ({
+      tools: [{ name: "a", description: "Tool A" }, { name: "b" }]
+    }));
     const close = vi.fn(async () => undefined);
     const createTransport = vi.fn(() => ({ marker: server.type }));
     const checker = new SdkMcpChecker({
@@ -238,7 +244,8 @@ describe("SdkMcpChecker", () => {
     });
 
     await expect(checker.check(server, 3000)).resolves.toEqual({
-      status: "passed", toolCount: 2, message: "2 tools available"
+      status: "passed", toolCount: 2, message: "2 tools available",
+      tools: [{ name: "a", description: "Tool A" }, { name: "b", description: null }]
     });
     expect(connect).toHaveBeenCalledOnce();
     expect(listTools).toHaveBeenCalledOnce();

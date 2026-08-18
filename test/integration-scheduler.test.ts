@@ -342,7 +342,7 @@ describe("IntegrationTaskScheduler", () => {
 
       expect(createRun).toHaveBeenCalledTimes(4);
       expect(harness.store.getTask(exhaustedTask.id)).toMatchObject({ status: "queued", runId: null });
-      expect(vi.getTimerCount()).toBe(0);
+      expect(vi.getTimerCount()).toBe(1);
       expect(onSchedulerError).toHaveBeenCalledTimes(1);
       expect(onSchedulerError).toHaveBeenCalledWith({
         taskId: exhaustedTask.id,
@@ -355,7 +355,9 @@ describe("IntegrationTaskScheduler", () => {
       await vi.advanceTimersByTimeAsync(5_000);
 
       expect(createRun).toHaveBeenCalledTimes(5);
-      expect(harness.store.getTask(exhaustedTask.id)).toMatchObject({ status: "queued", runId: null });
+      expect(harness.store.getTask(exhaustedTask.id)).toMatchObject({
+        status: "failed", runId: null, error: "integration_dispatch_failed"
+      });
       expect(harness.store.getTask(nextTask.id)?.runId).not.toBeNull();
       expect(onSchedulerError).toHaveBeenCalledTimes(1);
       harness.scheduler.stop();
@@ -462,10 +464,8 @@ describe("IntegrationProjection", () => {
     };
     expect(payload.tool).toEqual({
       toolCallId: "tool-1",
-      title: "Read",
       kind: "read",
-      status: "completed",
-      locations: [{ path: "/workspace/README.md", line: 12 }]
+      status: "completed"
     });
     expect(JSON.stringify(payload)).not.toContain(leakedSecret);
     harness.db.close();

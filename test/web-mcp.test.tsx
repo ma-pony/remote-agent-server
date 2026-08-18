@@ -80,7 +80,35 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
   render(<App />);
   fireEvent.change(await screen.findByLabelText("检查使用的 Session"), { target: { value: session.id } });
   fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
-  expect(await screen.findByText("2 个工具可用")).toBeInTheDocument();
+  expect(await screen.findByText("2 个工具可用", {}, { timeout: 3_000 })).toBeInTheDocument();
+});
+
+it("点击工具数量后实时检查并展示全部工具", async () => {
+  const checkedServer = { ...server, lastCheckStatus: "passed", lastToolCount: 2 };
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([checkedServer]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+      return response({
+        status: "passed", toolCount: 2, message: "2 tools available",
+        tools: [{ name: "ticket_get", description: "读取工单详情" }, { name: "ticket_pause", description: null }]
+      });
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "查看 2 个工具" }));
+  expect(await screen.findByRole("heading", { name: "example_mcp 的工具" })).toBeInTheDocument();
+  expect(screen.getByText("ticket_get")).toBeInTheDocument();
+  expect(screen.getByText("读取工单详情")).toBeInTheDocument();
+  expect(screen.getByText("ticket_pause")).toBeInTheDocument();
+  expect(screen.getByText("暂无说明")).toBeInTheDocument();
 });
 
 it("从独立页面创建带敏感 Header 的 HTTP MCP", async () => {

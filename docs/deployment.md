@@ -83,6 +83,11 @@ curl --fail http://127.0.0.1:3000/api/health
 
 ### 4. 使用 LaunchAgent 随登录启动
 
+服务入口会自动读取运行用户的登录 Shell PATH，并按“当前 Node 目录 → 登录 Shell PATH →
+LaunchAgent 原始 PATH”的顺序合并去重。因此 LaunchAgent 不需要手工复制 NVM、Homebrew、pnpm
+目录，也不会因为 macOS 默认只有 `/usr/bin:/bin:/usr/sbin:/sbin` 而在执行 Run 时才发现
+`npx` 不存在。服务 Node 仍由 `pnpm start` 实际选中的 Node 决定；构建和启动必须使用同一主版本。
+
 先确保日志目录存在：
 
 ```bash
@@ -217,7 +222,9 @@ sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && pnpm build'
 sudo -u remote-agent btrfs subvolume show /srv/remote-agent/template/workspace
 ```
 
-不要假设 systemd 能加载 login shell 的 PATH。先在**同一个服务用户**下记录 login shell 首次命中的实际绝对路径；任何一个命令找不到都先修复安装，不要写 unit：
+服务入口也会尝试读取 `remote-agent` 用户的登录 Shell PATH，作为 launchd/systemd 最小环境的兜底。
+生产 systemd 仍应在安装时固化并验证 PATH，避免服务用户的 Shell 配置变动后改变 Provider 命令版本。
+先在**同一个服务用户**下记录 login shell 首次命中的实际绝对路径；任何一个命令找不到都先修复安装，不要写 unit：
 
 ```bash
 REMOTE_AGENT_LOGIN_PATH="$(sudo -u remote-agent -H bash -lc 'printf %s "$PATH"')"
@@ -373,7 +380,7 @@ Smoke 只覆盖三个 Provider 的顺序双轮真实连通性。仍须在目标�
 
 管理员在“外部接入”页面创建 Endpoint，选择一个已启用且项目环境可用的 Agent。Endpoint Token 只在创建或轮换成功后展示一次，服务端只保存哈希，离开提示页后不能找回。应立即把 Token 放进调用方的 Secret 管理系统；不要写入 Git、请求日志、Webhook Header 或 Remote Agent Server 的 `.env`。
 
-管理端使用全局 `API_TOKEN`，外部调用方只使用所属 Endpoint Token。两者权限不同，不能互换。下面用占位符演示调用；生产环境应从 Secret 管理系统注入变量：
+管理端使用全局 `API_TOKEN`，外部调用方只使用所属 Endpoint Token。两者不能互换，Provider 进程和项目准备命令也不会继承这两个服务管理/验收 Token。Endpoint Token 虽然不能调用管理 API，但可以向 `approve-all` Agent 发送指令；它只适合受信任系统，不是不受信任租户的安全隔离。Provider 登录状态和服务用户可读取的文件仍属于 Agent 的信任边界。下面用占位符演示调用；生产环境应从 Secret 管理系统注入变量：
 
 ```bash
 REMOTE_AGENT_URL=https://agent.example.com

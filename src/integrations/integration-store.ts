@@ -203,19 +203,7 @@ const publicToolPayload = (eventType: string, input: Record<string, unknown>): R
     toolCallId: typeof input.toolCallId === "string" ? input.toolCallId : "",
     status: eventType.slice("tool.".length)
   };
-  if (typeof input.title === "string" && input.title !== "") payload.title = input.title;
   if (typeof input.kind === "string" && input.kind !== "") payload.kind = input.kind;
-  if (Array.isArray(input.locations)) {
-    const locations = input.locations.flatMap((item) => {
-      if (typeof item !== "object" || item === null || Array.isArray(item)) return [];
-      const location = item as Record<string, unknown>;
-      if (typeof location.path !== "string" || location.path === "") return [];
-      return [location.line === null || typeof location.line === "number"
-        ? { path: location.path, line: location.line }
-        : { path: location.path }];
-    });
-    if (locations.length > 0) payload.locations = locations;
-  }
   return payload;
 };
 

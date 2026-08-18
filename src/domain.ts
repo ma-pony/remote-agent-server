@@ -48,6 +48,7 @@ export type Agent = {
   name: string;
   provider: AgentProvider;
   enabled: boolean;
+  instructions: string;
   projectEnvironmentId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -61,6 +62,7 @@ export type Session = {
   providerSessionId: string | null;
   workspacePath: string;
   projectEnvironmentRevisionId: string | null;
+  instructionsSnapshot: string;
   createdAt: string;
   updatedAt: string;
 };

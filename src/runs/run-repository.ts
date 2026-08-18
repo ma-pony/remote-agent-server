@@ -215,6 +215,25 @@ export class RunRepository {
     return cancelled;
   }
 
+  /** Fails a queued Run after the scheduler has exhausted its recovery attempts. */
+  failQueued(id: string, error: string): Run {
+    const failed = this.inImmediateTransaction(() => {
+      const run = this.requireRun(id);
+      if (run.status !== "queued") throw new RunRepositoryError("invalid_run_state");
+
+      const finishedAt = new Date().toISOString();
+      this.db.prepare("UPDATE runs SET status = ?, error = ?, finished_at = ? WHERE id = ?")
+        .run("failed", error, finishedAt, id);
+      this.db.prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?")
+        .run("idle", finishedAt, run.sessionId);
+      const failed = { ...run, status: "failed" as const, error, finishedAt };
+      assertSynchronousTransactionHook(this.projection.onFinished(failed));
+      return failed;
+    });
+    this.runAfterCommit(failed, "finished");
+    return failed;
+  }
+
   /**
    * Fails Runs interrupted by a process restart while leaving queued Runs intact.
    */

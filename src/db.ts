@@ -55,6 +55,7 @@ export const migrate = (db: Database.Database): void => {
       name TEXT NOT NULL,
       provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'hermes')),
       enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+      instructions TEXT NOT NULL DEFAULT '',
       project_environment_id TEXT REFERENCES project_environments(id),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -114,6 +115,7 @@ export const migrate = (db: Database.Database): void => {
       provider_session_id TEXT,
       workspace_path TEXT NOT NULL UNIQUE,
       project_environment_revision_id TEXT REFERENCES project_environment_revisions(id),
+      instructions_snapshot TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -255,8 +257,14 @@ export const migrate = (db: Database.Database): void => {
   if (!hasColumn("agents", "project_environment_id")) {
     db.exec("ALTER TABLE agents ADD COLUMN project_environment_id TEXT REFERENCES project_environments(id)");
   }
+  if (!hasColumn("agents", "instructions")) {
+    db.exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''");
+  }
   if (!hasColumn("sessions", "project_environment_revision_id")) {
     db.exec("ALTER TABLE sessions ADD COLUMN project_environment_revision_id TEXT REFERENCES project_environment_revisions(id)");
+  }
+  if (!hasColumn("sessions", "instructions_snapshot")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN instructions_snapshot TEXT NOT NULL DEFAULT ''");
   }
   if (!hasColumn("integration_tasks", "event_sequences_json")) {
     db.exec("ALTER TABLE integration_tasks ADD COLUMN event_sequences_json TEXT NOT NULL DEFAULT '{}'");

@@ -174,7 +174,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
       secrets,
       dispatcher: webhookDispatcher,
       executor,
-      scheduler: integrationTaskScheduler
+      scheduler: integrationTaskScheduler,
+      coordinator: integrationCoordinator
     });
     registerSessionRoutes(api, sessionManager, runRepository);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });

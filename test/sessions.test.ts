@@ -104,6 +104,37 @@ afterEach(async () => {
 });
 
 describe("Session API", () => {
+  it("创建 Session 时保存 Agent 指令快照，之后修改 Agent 不影响已有 Session", async () => {
+    const { app, db } = await createTestApp();
+    const agent = await createAgent(app);
+    const configured = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: { instructions: "创建时的智能体指令" }
+    });
+    expect(configured.statusCode).toBe(200);
+
+    const session = await createSession(app, agent.id);
+    const changed = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: { instructions: "后来修改的智能体指令" }
+    });
+    expect(changed.statusCode).toBe(200);
+
+    expect(db.prepare("SELECT instructions_snapshot FROM sessions WHERE id = ?").get(session.id)).toEqual({
+      instructions_snapshot: "创建时的智能体指令"
+    });
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/sessions/${session.id}`,
+      headers: authHeaders()
+    });
+    expect(detail.json()).toMatchObject({ instructionsSnapshot: "创建时的智能体指令" });
+  });
+
   it("创建 Session 时校验并加密保存必填 MCP 参数", async () => {
     const { app, db } = await createTestApp();
     const agent = await createAgent(app);
@@ -407,6 +438,7 @@ describe("Session API", () => {
       providerSessionId: "provider-session-1",
       workspacePath: session.workspacePath,
       browserProfilePath: join(dirname(session.workspacePath), "browser"),
+      instructions: "",
       memory: "remember reset",
       mcpServers: []
     });

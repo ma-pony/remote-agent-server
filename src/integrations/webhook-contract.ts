@@ -77,23 +77,13 @@ const validNotice = (value: unknown): boolean => {
     && typeof notice.message === "string";
 };
 
-const validLocations = (value: unknown): boolean => Array.isArray(value) && value.every((item) => {
-  const location = record(item);
-  return location !== undefined
-    && hasExactKeys(location, ["path"], ["line"])
-    && nonEmptyString(location.path)
-    && (location.line === undefined || location.line === null || typeof location.line === "number");
-});
-
 const validTool = (value: unknown, status: string): boolean => {
   const tool = record(value);
   return tool !== undefined
-    && hasExactKeys(tool, ["toolCallId", "status"], ["title", "kind", "locations"])
+    && hasExactKeys(tool, ["toolCallId", "status"], ["kind"])
     && nonEmptyString(tool.toolCallId)
     && tool.status === status
-    && (tool.title === undefined || typeof tool.title === "string")
-    && (tool.kind === undefined || typeof tool.kind === "string")
-    && (tool.locations === undefined || validLocations(tool.locations));
+    && (tool.kind === undefined || typeof tool.kind === "string");
 };
 
 export const isManagedWebhookHeader = (name: string): boolean => {

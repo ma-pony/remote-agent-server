@@ -587,9 +587,9 @@ describe("WebhookDispatcher", () => {
     const toolEvent = eventStore.append(run.id, "tool", {
       toolCallId: "tool-public",
       status: "completed",
-      title: "Read",
+      title: "Read provider-title-secret",
       kind: "read",
-      locations: [{ path: "/workspace/README.md", line: 3, token: "location-secret" }],
+      locations: [{ path: "/workspace/provider-path-secret.md", line: 3, token: "location-secret" }],
       rawInput: "raw-input-secret",
       rawOutput: "raw-output-secret",
       content: "provider-content-secret"
@@ -625,17 +625,16 @@ describe("WebhookDispatcher", () => {
     });
     expect(payloads["tool.completed"]!.tool).toEqual({
       toolCallId: "tool-public",
-      title: "Read",
       kind: "read",
-      status: "completed",
-      locations: [{ path: "/workspace/README.md", line: 3 }]
+      status: "completed"
     });
     expect(payloads["tool.completed"]!.occurredAt).toBe(toolEvent.createdAt);
     expect(payloads["message.agent.reply"]!.occurredAt).toBe(finished.finishedAt);
     const serialized = JSON.stringify(payloads);
     for (const secret of [
       "secret-user-input", "secret-effective-prompt", "secret-mcp-token", "location-secret",
-      "raw-input-secret", "raw-output-secret", "provider-content-secret", "internal-result"
+      "raw-input-secret", "raw-output-secret", "provider-content-secret", "internal-result",
+      "provider-title-secret", "provider-path-secret"
     ]) expect(serialized).not.toContain(secret);
     harness.db.close();
   });
@@ -694,10 +693,10 @@ describe("WebhookDispatcher", () => {
         eventType: "tool.started",
         payload: {
           toolCallId: "tool-started",
-          title: "Read",
+          title: `Read ${rawSecret}`,
           kind: "read",
           status: "started",
-          locations: [{ path: "/workspace/a.ts", line: 2, token: rawSecret }],
+          locations: [{ path: `/workspace/${rawSecret}.ts`, line: 2, token: rawSecret }],
           rawInput: rawSecret
         }
       },
@@ -747,10 +746,8 @@ describe("WebhookDispatcher", () => {
     });
     expect(deliveries["tool.started"]!.payload.tool).toEqual({
       toolCallId: "tool-started",
-      title: "Read",
       kind: "read",
-      status: "started",
-      locations: [{ path: "/workspace/a.ts", line: 2 }]
+      status: "started"
     });
     expect(deliveries["tool.failed"]!.payload.tool).toEqual({
       toolCallId: "tool-failed", status: "failed"
@@ -1091,7 +1088,7 @@ describe("Webhook management API", () => {
       url: `/api/integration-endpoints/${endpointId}/webhooks`,
       headers: authHeaders,
       payload: {
-        name: "Grab callback",
+        name: "Example callback",
         url: "https://receiver.test/hook",
         enabled: true,
         events: ["task.succeeded", "message.agent.reply"],

@@ -13,6 +13,7 @@ type AgentRow = {
   name: string;
   provider: Provider;
   enabled: number;
+  instructions: string;
   project_environment_id: string | null;
   created_at: string;
   updated_at: string;
@@ -22,12 +23,14 @@ export type CreateAgentInput = {
   name: string;
   provider: Provider;
   projectEnvironmentId: string;
+  instructions?: string;
 };
 
 export type UpdateAgentInput = {
   name?: string;
   enabled?: boolean;
   projectEnvironmentId?: string;
+  instructions?: string;
 };
 
 export type AgentManagerDependencies = {
@@ -42,6 +45,7 @@ const toAgent = (row: AgentRow): Agent => ({
   name: row.name,
   provider: row.provider,
   enabled: row.enabled === 1,
+  instructions: row.instructions,
   projectEnvironmentId: row.project_environment_id,
   createdAt: row.created_at,
   updatedAt: row.updated_at
@@ -64,6 +68,8 @@ export class AgentManager {
   }
 
   create(input: CreateAgentInput): Agent {
+    const instructions = input.instructions ?? "";
+    this.requireSupportedInstructions(input.provider, instructions);
     this.requireReadyEnvironment(input.projectEnvironmentId);
     const id = randomUUID();
     const createdAt = new Date().toISOString();
@@ -76,15 +82,16 @@ export class AgentManager {
     writeFileSync(join(agentDir, "MEMORY.md"), "", { flag: "a" });
     this.db
       .prepare(
-        "INSERT INTO agents (id, name, provider, enabled, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO agents (id, name, provider, enabled, instructions, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
       )
-      .run(id, input.name, input.provider, 1, input.projectEnvironmentId, createdAt, createdAt);
+      .run(id, input.name, input.provider, 1, instructions, input.projectEnvironmentId, createdAt, createdAt);
 
     return {
       id,
       name: input.name,
       provider: input.provider,
       enabled: true,
+      instructions,
       projectEnvironmentId: input.projectEnvironmentId,
       createdAt,
       updatedAt: createdAt
@@ -107,15 +114,17 @@ export class AgentManager {
 
     const name = input.name ?? agent.name;
     const enabled = input.enabled ?? agent.enabled;
+    const instructions = input.instructions ?? agent.instructions;
+    this.requireSupportedInstructions(agent.provider, instructions);
     const projectEnvironmentId = input.projectEnvironmentId ?? agent.projectEnvironmentId;
     if (projectEnvironmentId === null) throw new AgentManagerError("project_environment_unavailable");
     this.requireReadyEnvironment(projectEnvironmentId);
     const updatedAt = new Date().toISOString();
     this.db
-      .prepare("UPDATE agents SET name = ?, enabled = ?, project_environment_id = ?, updated_at = ? WHERE id = ?")
-      .run(name, enabled ? 1 : 0, projectEnvironmentId, updatedAt, id);
+      .prepare("UPDATE agents SET name = ?, enabled = ?, instructions = ?, project_environment_id = ?, updated_at = ? WHERE id = ?")
+      .run(name, enabled ? 1 : 0, instructions, projectEnvironmentId, updatedAt, id);
 
-    return { ...agent, name, enabled, projectEnvironmentId, updatedAt };
+    return { ...agent, name, enabled, instructions, projectEnvironmentId, updatedAt };
   }
 
   delete(id: string): "deleted" | "not_found" {
@@ -153,10 +162,16 @@ export class AgentManager {
       throw new AgentManagerError("project_environment_unavailable");
     }
   }
+
+  private requireSupportedInstructions(provider: Provider, instructions: string): void {
+    if (provider === "hermes" && instructions.trim() !== "") {
+      throw new AgentManagerError("agent_instructions_unsupported");
+    }
+  }
 }
 
 export class AgentManagerError extends Error {
-  constructor(readonly code: "project_environment_unavailable" | "agent_has_sessions" | "agent_has_integration_endpoints") {
+  constructor(readonly code: "project_environment_unavailable" | "agent_has_sessions" | "agent_has_integration_endpoints" | "agent_instructions_unsupported") {
     super(code);
   }
 }

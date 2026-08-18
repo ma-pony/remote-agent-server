@@ -21,6 +21,7 @@ type SessionRow = {
   provider_session_id: string | null;
   workspace_path: string;
   project_environment_revision_id: string | null;
+  instructions_snapshot: string;
   created_at: string;
   updated_at: string;
 };
@@ -33,6 +34,7 @@ const toSession = (row: SessionRow): Session => ({
   providerSessionId: row.provider_session_id,
   workspacePath: row.workspace_path,
   projectEnvironmentRevisionId: row.project_environment_revision_id,
+  instructionsSnapshot: row.instructions_snapshot,
   createdAt: row.created_at,
   updatedAt: row.updated_at
 });
@@ -122,9 +124,9 @@ export class SessionManager {
       this.inImmediateTransaction(() => {
         this.db
           .prepare(
-            "INSERT INTO sessions (id, agent_id, title, status, provider_session_id, workspace_path, project_environment_revision_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO sessions (id, agent_id, title, status, provider_session_id, workspace_path, project_environment_revision_id, instructions_snapshot, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
           )
-          .run(id, agent.id, input.title, "idle", null, workspace.workspacePath, revision.id, createdAt, createdAt);
+          .run(id, agent.id, input.title, "idle", null, workspace.workspacePath, revision.id, agent.instructions, createdAt, createdAt);
         this.mcpManager.insertSessionValuesInTransaction(id, mcpValues);
       });
     } catch (_error) {
@@ -144,6 +146,7 @@ export class SessionManager {
       providerSessionId: null,
       workspacePath: workspace.workspacePath,
       projectEnvironmentRevisionId: revision.id,
+      instructionsSnapshot: agent.instructions,
       createdAt,
       updatedAt: createdAt
     });
@@ -237,6 +240,7 @@ export class SessionManager {
         workspacePath: session.workspacePath,
         browserProfilePath: join(dirname(session.workspacePath), "browser"),
         providerSessionId: session.providerSessionId,
+        instructions: session.instructionsSnapshot,
         memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8"),
         mcpServers: []
       });
@@ -273,6 +277,7 @@ export class SessionManager {
       workspacePath: session.workspacePath,
       browserProfilePath: join(dirname(session.workspacePath), "browser"),
       providerSessionId: session.providerSessionId,
+      instructions: session.instructionsSnapshot,
       memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8"),
       mcpServers: []
     };

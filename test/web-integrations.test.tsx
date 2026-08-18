@@ -113,35 +113,35 @@ it("创建 Endpoint、一次复制 Token、配置 Webhook 并查看 Task", async
   render(<App />);
   fireEvent.click(await screen.findByRole("link", { name: "新建接入端点" }));
   fireEvent.change(await screen.findByLabelText("端点名称"), { target: { value: endpoint.name } });
-  const slugInput = screen.getByLabelText("端点 slug");
+  const slugInput = screen.getByLabelText("路径标识");
   expect(slugInput).toHaveValue("");
   expect(slugInput).not.toHaveAttribute("placeholder");
   fireEvent.change(slugInput, { target: { value: endpoint.slug } });
-  fireEvent.change(screen.getByLabelText("Agent"), { target: { value: agent.id } });
+  fireEvent.change(screen.getByLabelText("智能体"), { target: { value: agent.id } });
   fireEvent.change(await screen.findByLabelText("工单 ID 来源"), { target: { value: "request" } });
   fireEvent.change(screen.getByLabelText("工单 ID 请求参数名"), { target: { value: "ticket_id" } });
   fireEvent.click(screen.getByRole("button", { name: "创建接入端点" }));
 
-  expect(await screen.findByText("请立即保存，此 Token 不会再次显示")).toBeVisible();
+  expect(await screen.findByText("请立即保存，此访问令牌不会再次显示")).toBeVisible();
   expect(screen.getByText("ras_one_time_token")).toBeVisible();
   expect(sessionStorage.getItem("integrationEndpointToken")).toBeNull();
 
-  fireEvent.click(screen.getByRole("tab", { name: "Webhook" }));
+  fireEvent.click(screen.getByRole("tab", { name: "事件回调" }));
   await waitFor(() => expect(window.location.pathname).toBe(`/integration-endpoints/${endpoint.id}/webhooks`));
-  fireEvent.click(await screen.findByRole("button", { name: "新建 Webhook" }));
+  fireEvent.click(await screen.findByRole("button", { name: "新建事件回调" }));
   const dialog = await screen.findByRole("dialog");
-  fireEvent.change(within(dialog).getByLabelText("Webhook 名称"), { target: { value: "工单回调" } });
-  fireEvent.change(within(dialog).getByLabelText("Webhook URL"), { target: { value: "https://receiver.example.com/webhook" } });
+  fireEvent.change(within(dialog).getByLabelText("回调名称"), { target: { value: "工单回调" } });
+  fireEvent.change(within(dialog).getByLabelText("回调地址"), { target: { value: "https://receiver.example.com/webhook" } });
   fireEvent.click(within(dialog).getByLabelText("task.succeeded"));
   fireEvent.click(within(dialog).getByLabelText("message.agent.reply"));
-  fireEvent.click(within(dialog).getByRole("button", { name: "创建 Webhook" }));
+  fireEvent.click(within(dialog).getByRole("button", { name: "创建事件回调" }));
 
   expect(await screen.findByText("请立即保存签名密钥，此后不会再次显示")).toBeVisible();
   expect(screen.getByText("等待首次投递")).toBeVisible();
 
-  fireEvent.click(screen.getByRole("tab", { name: "Task" }));
+  fireEvent.click(screen.getByRole("tab", { name: "任务" }));
   fireEvent.click(await screen.findByRole("link", { name: "ticket-event-123" }));
-  expect(await screen.findByRole("link", { name: "进入 Session" })).toHaveAttribute("href", "/sessions/session-1");
+  expect(await screen.findByRole("link", { name: "进入智能体会话" })).toHaveAttribute("href", "/sessions/session-1");
   expect(screen.getByText("问题已经修复，测试通过。")).toBeVisible();
   expect(screen.queryByText("ras_one_time_token")).not.toBeInTheDocument();
   expect(screen.queryByText("whsec_one_time_secret")).not.toBeInTheDocument();
@@ -162,10 +162,76 @@ it("详情页分区管理，并用确认对话框删除有历史的端点", asyn
 
   render(<App />);
   expect(await screen.findByRole("tab", { name: "设置" })).toBeInTheDocument();
-  expect(screen.queryByLabelText("Webhook URL")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("回调地址")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "删除接入端点" }));
   fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
-  expect(await screen.findByText("已有 Conversation 或 Task，请停用")).toBeVisible();
+  expect(await screen.findByText("已有业务对话或任务，请停用")).toBeVisible();
+});
+
+it("调用说明展示动态参数和安全示例，并可发送真实测试任务", async () => {
+  const documentedEndpoint = {
+    ...endpoint,
+    parameterMappings: [
+      { parameterKey: "project_code", source: "request", requestKey: "project" },
+      { parameterKey: "private_token", source: "fixed", configured: true }
+    ]
+  };
+  const parameters = [
+    {
+      id: "parameter-project", agentId: agent.id, key: "project_code", label: "项目编号",
+      description: "外部系统中的项目编号", required: true, secret: false, createdAt: now, updatedAt: now
+    },
+    {
+      id: "parameter-token", agentId: agent.id, key: "private_token", label: "内部访问令牌",
+      description: "由管理员预先配置", required: true, secret: true, createdAt: now, updatedAt: now
+    }
+  ];
+  const testTask = {
+    ...task,
+    id: "task-test", requestId: "test-generated", conversationId: "conversation-test",
+    sessionId: "session-test", runId: null, message: "检查项目当前状态", status: "queued",
+    result: null, startedAt: null, finishedAt: null
+  };
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/usage`);
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    const method = init?.method ?? "GET";
+    if (url === `/api/integration-endpoints/${endpoint.id}` && method === "GET") return jsonResponse(documentedEndpoint);
+    if (url === "/api/agents" && method === "GET") return jsonResponse([agent]);
+    if (url === `/api/agents/${agent.id}/session-parameters` && method === "GET") return jsonResponse(parameters);
+    if (url === `/api/integration-endpoints/${endpoint.id}/test-tasks` && method === "POST") {
+      expect(JSON.parse(String(init?.body))).toEqual({
+        conversationKey: "project-42",
+        message: "检查项目当前状态",
+        parameters: { project: "P-42" }
+      });
+      return jsonResponse(testTask, 202);
+    }
+    if (url === `/api/integration-tasks/${testTask.id}` && method === "GET") return jsonResponse(testTask);
+    if (url === `/api/integration-endpoints/${endpoint.id}/conversations` && method === "GET") return jsonResponse([]);
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries` && method === "GET") return jsonResponse([]);
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  }));
+
+  render(<App />);
+
+  expect(await screen.findByRole("tab", { name: "调用说明" })).toBeVisible();
+  expect(screen.getByRole("tab", { name: "业务对话" })).toBeVisible();
+  expect(screen.getByRole("tab", { name: "任务" })).toBeVisible();
+  expect(screen.getByRole("tab", { name: "事件回调" })).toBeVisible();
+  expect((await screen.findAllByText("外部系统中的项目编号")).length).toBeGreaterThan(0);
+  expect(screen.getByText("内部访问令牌")).toBeVisible();
+  expect(screen.getByText("由系统配置，请求中不要传入")).toBeVisible();
+  expect(screen.getAllByText(/Authorization: Bearer <接入端点访问令牌>/).length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/POST \/integration\/v1\/endpoints\/example-ticket\/tasks/).length).toBeGreaterThan(0);
+  expect(document.body.textContent).not.toContain("private-callback-token");
+
+  fireEvent.change(screen.getByLabelText("测试消息"), { target: { value: "检查项目当前状态" } });
+  fireEvent.change(screen.getByLabelText("对话标识（可选）"), { target: { value: "project-42" } });
+  fireEvent.change(screen.getByLabelText("项目编号"), { target: { value: "P-42" } });
+  fireEvent.click(screen.getByRole("button", { name: "发送测试任务" }));
+
+  await waitFor(() => expect(window.location.pathname).toBe(`/integration-tasks/${testTask.id}`));
 });
 
 it("Webhook 测试投递异步完成后自动展示最终状态", async () => {
@@ -229,7 +295,7 @@ it("离开 Webhook 页面会清理待投递短轮询", async () => {
   fireEvent.click(screen.getByRole("button", { name: "发送测试" }));
   await act(flushPromises);
   const readsBeforeNavigation = deliveryReads;
-  fireEvent.click(screen.getByRole("tab", { name: "Task" }));
+  fireEvent.click(screen.getByRole("tab", { name: "任务" }));
   await act(flushPromises);
   await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
 
@@ -304,7 +370,7 @@ it("取消 Task 后仍刷新到确定终态", async () => {
 
   render(<App />);
   await act(flushPromises);
-  fireEvent.click(screen.getByRole("button", { name: "取消 Task" }));
+  fireEvent.click(screen.getByRole("button", { name: "取消任务" }));
   fireEvent.click(screen.getByRole("button", { name: "确认取消" }));
   await act(flushPromises);
 

@@ -242,6 +242,57 @@ describe("Agent API", () => {
     expect(providerChange.statusCode).toBe(400);
   });
 
+  it("创建和修改支持的 Agent 指令，并拒绝 Hermes 的无效指令", async () => {
+    const { app, db, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: {
+        name: "Codex Reviewer",
+        provider: "codex",
+        projectEnvironmentId,
+        instructions: "只报告有证据的问题。"
+      }
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({ instructions: "只报告有证据的问题。" });
+    const { id } = created.json() as { id: string };
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${id}`,
+      headers: authHeaders(),
+      payload: { instructions: "先验证，再给出结论。" }
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({ instructions: "先验证，再给出结论。" });
+    expect(db.prepare("SELECT instructions FROM agents WHERE id = ?").get(id)).toEqual({
+      instructions: "先验证，再给出结论。"
+    });
+
+    const hermes = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: {
+        name: "Hermes",
+        provider: "hermes",
+        projectEnvironmentId,
+        instructions: "该内容不会被 Hermes ACP 执行"
+      }
+    });
+    expect(hermes.statusCode).toBe(400);
+    expect(hermes.json()).toEqual({
+      error: {
+        code: "agent_instructions_unsupported",
+        message: "Hermes 当前不支持智能体指令"
+      }
+    });
+    expect(db.prepare("SELECT count(*) AS count FROM agents WHERE provider = 'hermes'").get()).toEqual({ count: 0 });
+  });
+
   it("只删除没有 Session 的 Agent，并清理其专属目录", async () => {
     const { app, dataDir, projectEnvironmentId } = await createTestApp();
     const created = await app.inject({

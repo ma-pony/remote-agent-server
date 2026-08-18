@@ -50,6 +50,7 @@ type RuntimeTarget = {
   agentId: string;
   sessionId: string;
   browserProfilePath: string;
+  instructions: string;
 };
 
 export class AgentRuntimeError extends Error {
@@ -113,7 +114,8 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       }
       environment.push(`HERMES_HOME=${shellQuote(home)}`);
     } else if (target.provider === "codex") {
-      const home = join(providerHome, "codex");
+      const agentHome = join(providerHome, "codex");
+      const home = join(agentHome, "sessions", target.sessionId);
       mkdirSync(home, { recursive: true });
       const hostAuth = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json");
       const agentAuth = join(home, "auth.json");
@@ -123,7 +125,11 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
         `path = ${JSON.stringify(path)}`,
         "enabled = false"
       ].join("\n")).join("\n\n");
-      writeFileSync(join(home, "config.toml"), disabledSkills === "" ? "" : `${disabledSkills}\n`, { mode: 0o600 });
+      const configSections = [
+        target.instructions.trim() === "" ? "" : `developer_instructions = ${JSON.stringify(target.instructions)}`,
+        disabledSkills
+      ].filter((section) => section !== "");
+      writeFileSync(join(home, "config.toml"), configSections.length === 0 ? "" : `${configSections.join("\n\n")}\n`, { mode: 0o600 });
       environment.push(`CODEX_HOME=${shellQuote(home)}`);
     } else {
       const home = join(providerHome, "claude");
@@ -155,6 +161,7 @@ type ManagedSession = {
   agentId: string;
   workspacePath: string;
   browserProfilePath: string;
+  instructions: string;
   target: string;
 };
 
@@ -226,6 +233,7 @@ const systemPrompt = (input: RuntimeSessionInput): string => {
     `Workspace root: ${input.workspacePath}`,
     `Browser profile: ${input.browserProfilePath}`
   ];
+  if (input.instructions.trim() !== "") sections.unshift(`Agent instructions:\n${input.instructions}`);
   if (input.memory.trim() !== "") sections.push(`Memory:\n${input.memory}`);
   return sections.join("\n\n");
 };
@@ -269,7 +277,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
       provider: input.provider,
       agentId: input.agentId,
       sessionId: input.sessionId,
-      browserProfilePath: input.browserProfilePath
+      browserProfilePath: input.browserProfilePath,
+      instructions: input.instructions
     });
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
     const handle = await runtime.ensureSession({
@@ -277,9 +286,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
       agent,
       mode: "persistent",
       cwd: input.workspacePath,
-      ...(input.providerSessionId === null
+      ...(input.providerSessionId === null && input.provider === "claude_code"
         ? { sessionOptions: { systemPrompt: { append: systemPrompt(input) } } }
-        : { resumeSessionId: input.providerSessionId })
+        : input.providerSessionId === null ? {} : { resumeSessionId: input.providerSessionId })
     });
     const providerSessionId = handle.agentSessionId ?? handle.backendSessionId ?? null;
 
@@ -297,6 +306,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
           agentId: input.agentId,
           workspacePath: input.workspacePath,
           browserProfilePath: input.browserProfilePath,
+          instructions: input.instructions,
           target: agent
         });
         this.recordShutdownFailure("late_handle_close", input.sessionId, outcome.reason);
@@ -333,6 +343,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       agentId: input.agentId,
       workspacePath: input.workspacePath,
       browserProfilePath: input.browserProfilePath,
+      instructions: input.instructions,
       target: agent
     });
     return { providerSessionId };
@@ -425,7 +436,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
       provider,
       agentId,
       sessionId,
-      browserProfilePath: join(this.config.dataDir, "agents", agentId, "doctor-browser")
+      browserProfilePath: join(this.config.dataDir, "agents", agentId, "doctor-browser"),
+      instructions: ""
     });
     const runtime = this.createRuntime(registry, probeAgent);
     try {
@@ -529,6 +541,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       && session.agentId === input.agentId
       && session.workspacePath === input.workspacePath
       && session.browserProfilePath === input.browserProfilePath
+      && session.instructions === input.instructions
       && (input.providerSessionId === null || session.providerSessionId === input.providerSessionId);
   }
 

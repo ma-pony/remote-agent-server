@@ -23,31 +23,14 @@ const record = (value: unknown): Record<string, unknown> | undefined =>
 const nonEmptyString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim() !== "" ? value : undefined;
 
-const publicToolLocations = (value: unknown): Array<{ path: string; line?: number | null }> | undefined => {
-  if (!Array.isArray(value)) return undefined;
-  const locations = value.flatMap((item) => {
-    const location = record(item);
-    const path = nonEmptyString(location?.path);
-    if (path === undefined) return [];
-    const line = location?.line;
-    return [line === null || typeof line === "number" ? { path, line } : { path }];
-  });
-  return locations.length === 0 ? undefined : locations;
-};
-
 const publicToolPayload = (
   content: Record<string, unknown>,
   toolCallId: string,
   status: string
 ): Record<string, unknown> => {
   const payload: Record<string, unknown> = { toolCallId };
-  const title = nonEmptyString(content.title);
-  const kind = nonEmptyString(content.kind);
-  const locations = publicToolLocations(content.locations);
-  if (title !== undefined) payload.title = title;
-  if (kind !== undefined) payload.kind = kind;
+  if (typeof content.kind === "string" && content.kind.trim() !== "") payload.kind = content.kind;
   payload.status = status;
-  if (locations !== undefined) payload.locations = locations;
   return payload;
 };
 

@@ -15,7 +15,7 @@ const stringValue = (value: unknown): string | undefined =>
 
 const publicToolContent = (content: Record<string, unknown>): Record<string, unknown> => {
   const projected: Record<string, unknown> = {};
-  for (const key of ["toolCallId", "title", "kind", "status"] as const) {
+  for (const key of ["toolCallId", "kind", "status"] as const) {
     const value = stringValue(content[key]);
     if (value !== undefined) projected[key] = value;
   }

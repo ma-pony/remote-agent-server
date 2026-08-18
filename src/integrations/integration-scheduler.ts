@@ -34,6 +34,10 @@ const INVALID_PARAMETER_SNAPSHOT = {
   code: "invalid_parameter_snapshot",
   message: "Integration Task parameter snapshot is invalid"
 } as const;
+const DISPATCH_RETRY_EXHAUSTED = {
+  code: "integration_dispatch_failed",
+  message: "Integration Task could not be dispatched"
+} as const;
 
 const parseParameters = (serialized: string): Record<string, string | null> => {
   const value = JSON.parse(serialized) as unknown;
@@ -152,6 +156,7 @@ export class IntegrationTaskScheduler {
     if (attempts >= MAX_AUTOMATIC_RETRIES) {
       this.exhaustedTasks.add(taskId);
       this.reportSchedulerError({ taskId, code: "integration_retry_exhausted" });
+      this.finalizeExhaustedTask(taskId);
       return;
     }
 
@@ -162,6 +167,25 @@ export class IntegrationTaskScheduler {
       const task = this.dependencies.store.getTask(taskId);
       if (task?.status === "queued" && task.runId === null) this.dispatch(task);
       else this.clearTaskRetry(taskId);
+    }, this.dependencies.retryDelayMs ?? 1_000);
+    timer.unref?.();
+    this.retryTimers.set(taskId, timer);
+  }
+
+  private finalizeExhaustedTask(taskId: string): void {
+    try {
+      const failed = this.dependencies.store.failTaskBeforeRun(taskId, DISPATCH_RETRY_EXHAUSTED);
+      if (failed !== undefined || this.dependencies.store.getTask(taskId)?.status !== "queued") {
+        this.clearTaskRetry(taskId);
+        return;
+      }
+    } catch (_error) {
+      // Retry the terminal write after transient database contention clears.
+    }
+    if (!this.started || this.retryTimers.has(taskId)) return;
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(taskId);
+      if (this.started) this.finalizeExhaustedTask(taskId);
     }, this.dependencies.retryDelayMs ?? 1_000);
     timer.unref?.();
     this.retryTimers.set(taskId, timer);

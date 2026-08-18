@@ -5,7 +5,10 @@ import { z } from "zod";
 
 import type { SecretStore } from "../mcp/secret-store.js";
 import type { RunExecutor } from "../runs/run-executor.js";
+import { SessionManagerError } from "../sessions/session-manager.js";
+import { WorkspaceCreateError } from "../workspaces/workspace-manager.js";
 import { isManagedWebhookHeader } from "./webhook-contract.js";
+import { IntegrationCoordinator, IntegrationCoordinatorError } from "./integration-coordinator.js";
 import { IntegrationEndpointManager, IntegrationEndpointManagerError } from "./integration-endpoint-manager.js";
 import { webhookEventId, type IntegrationStore } from "./integration-store.js";
 import type { IntegrationTask, WebhookDelivery, WebhookSubscription } from "./integration-types.js";
@@ -70,6 +73,11 @@ const updateEndpointSchema = z.object({
   { message: "At least one field must be provided" }
 );
 const rotateTokenSchema = z.object({}).strict().optional();
+const testTaskSchema = z.object({
+  conversationKey: z.string().trim().min(1).optional(),
+  message: z.string().trim().min(1),
+  parameters: z.record(z.string(), z.string()).default({})
+}).strict();
 const webhookHeaders = z.record(z.string(), z.string()).superRefine((headers, context) => {
   for (const [name, value] of Object.entries(headers)) {
     if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name) || /[\r\n]/.test(value)) {
@@ -137,6 +145,29 @@ const webhookNotFound = (reply: FastifyReply) =>
 const deliveryNotFound = (reply: FastifyReply) =>
   reply.code(404).send({ error: { code: "delivery_not_found", message: "Webhook delivery not found" } });
 
+const handleTestTaskError = (reply: FastifyReply, error: unknown) => {
+  if (error instanceof IntegrationCoordinatorError && error.code === "endpoint_disabled") {
+    return reply.code(409).send({ error: { code: error.code, message: "请先启用接入端点再发送测试任务" } });
+  }
+  if (error instanceof IntegrationEndpointManagerError) {
+    const messages: Partial<Record<typeof error.code, string>> = {
+      missing_request_parameter: "缺少必填的动态参数",
+      unknown_request_parameter: "包含未声明的动态参数",
+      invalid_parameter_mapping: "接入端点的参数映射无效"
+    };
+    const message = messages[error.code];
+    if (message !== undefined) return reply.code(400).send({ error: { code: error.code, message } });
+    return handleManagerError(reply, error);
+  }
+  if (error instanceof WorkspaceCreateError) {
+    return reply.code(500).send({ error: { code: error.code, message: "创建测试任务工作空间失败" } });
+  }
+  if (error instanceof SessionManagerError) {
+    return reply.code(400).send({ error: { code: error.code, message: "创建测试任务会话失败" } });
+  }
+  throw error;
+};
+
 const parseHeaders = (subscription: WebhookSubscription, secrets: Pick<SecretStore, "decrypt">): Record<string, string> =>
   subscription.encryptedHeaders === null
     ? {}
@@ -202,9 +233,10 @@ export const registerIntegrationAdminRoutes = (
     dispatcher: WebhookDispatcher;
     executor: RunExecutor;
     scheduler: IntegrationTaskScheduler;
+    coordinator: IntegrationCoordinator;
   }
 ): void => {
-  const { manager, store, secrets, dispatcher, executor, scheduler } = dependencies;
+  const { manager, store, secrets, dispatcher, executor, scheduler, coordinator } = dependencies;
   app.get("/integration-endpoints", () => {
     const summaries = new Map(store.listEndpointManagementSummaries().map((summary) => [summary.endpointId, summary]));
     return manager.list().map((endpoint) => {
@@ -270,6 +302,24 @@ export const registerIntegrationAdminRoutes = (
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id/tasks", (request, reply) => {
     if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
     return store.listTasks(request.params.id).map(publicTask);
+  });
+
+  app.post<{ Params: { id: string } }>("/integration-endpoints/:id/test-tasks", async (request, reply) => {
+    const endpoint = manager.get(request.params.id);
+    if (endpoint === undefined) return endpointNotFound(reply);
+    const parsed = testTaskSchema.safeParse(request.body);
+    if (!parsed.success) return invalidRequest(reply, "测试任务参数无效");
+    try {
+      const task = await coordinator.submit(endpoint, {
+        requestId: `test-${randomUUID()}`,
+        conversationKey: parsed.data.conversationKey,
+        message: parsed.data.message,
+        parameters: parsed.data.parameters
+      });
+      return reply.code(202).send(publicTask(task));
+    } catch (error) {
+      return handleTestTaskError(reply, error);
+    }
   });
 
   app.get<{ Params: { id: string } }>("/integration-tasks/:id", (request, reply) => {

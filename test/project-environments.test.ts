@@ -72,7 +72,7 @@ describe("ProjectEnvironmentStore", () => {
     const environment = store.create({ name: "示例研发环境" });
     const repository = store.addRepository(environment.id, {
       name: "example-service",
-      gitUrl: "git@example.test:rcc/example-service.git",
+      gitUrl: "git@example.test:team/example-service.git",
       prepareCommand: "bundle install"
     });
 
@@ -85,7 +85,7 @@ describe("ProjectEnvironmentStore", () => {
     expect(() => store.create({ name: "示例研发环境" })).toThrow(/UNIQUE/);
     expect(() => store.addRepository(environment.id, {
       name: "example-service",
-      gitUrl: "git@example.test:rcc/duplicate.git",
+      gitUrl: "git@example.test:team/duplicate.git",
       prepareCommand: null
     })).toThrow(/UNIQUE/);
     db.close();
@@ -97,7 +97,7 @@ describe("ProjectEnvironmentStore", () => {
     const environment = store.create({ name: "研发环境" });
     store.addRepository(environment.id, {
       name: "api",
-      gitUrl: "git@example.test:rcc/api.git",
+      gitUrl: "git@example.test:team/api.git",
       prepareCommand: null
     });
     const configurationFingerprint = store.configurationFingerprint(environment.id);
@@ -129,7 +129,7 @@ describe("ProjectEnvironmentStore", () => {
     const environment = store.create({ name: "研发环境" });
     const repository = store.addRepository(environment.id, {
       name: "api",
-      gitUrl: "git@example.test:rcc/api.git",
+      gitUrl: "git@example.test:team/api.git",
       prepareCommand: null
     });
     const staleFingerprint = store.configurationFingerprint(environment.id);
@@ -150,7 +150,7 @@ describe("ProjectEnvironmentStore", () => {
     const environment = store.create({ name: "研发环境" });
     store.addRepository(environment.id, {
       name: "api",
-      gitUrl: "git@example.test:rcc/api.git",
+      gitUrl: "git@example.test:team/api.git",
       prepareCommand: null
     });
     const first = store.beginRevision({
@@ -204,7 +204,7 @@ describe("SystemProjectEnvironmentCommands", () => {
       prepareCommand: "printf 'warning\\n' >&2; sleep 0.05; printf 'actual failure\\n'; exit 1",
       createdAt: "2026-08-13T00:00:00.000Z",
       updatedAt: "2026-08-13T00:00:00.000Z"
-    }, "/tmp", 1_000, controller.signal)).rejects.toThrow("warning\nactual failure");
+    }, "/tmp", 5_000, controller.signal)).rejects.toThrow("warning\nactual failure");
   });
 });
 

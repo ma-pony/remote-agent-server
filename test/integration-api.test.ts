@@ -367,6 +367,108 @@ describe("Integration endpoint API", () => {
     expect(detail.json()).not.toHaveProperty("requestFingerprint");
   });
 
+  it("管理端测试调用复用端点参数映射并创建真实 Task", async () => {
+    const { app, agentId, db } = await createTestApp();
+    db.prepare(`
+      INSERT INTO agent_session_parameters
+        (id, agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES ('integration-test-parameter', ?, 'project_code', '项目编号', '外部系统中的项目编号', 1, 0, ?, ?)
+    `).run(agentId, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: {
+        ...validEndpointInput(agentId),
+        parameterMappings: [{ parameterKey: "project_code", source: "request", requestKey: "project" }]
+      }
+    });
+    const endpointId = (created.json() as { endpoint: { id: string } }).endpoint.id;
+
+    const tested = await app.inject({
+      method: "POST",
+      url: `/api/integration-endpoints/${endpointId}/test-tasks`,
+      headers: authHeaders(),
+      payload: {
+        conversationKey: "project-42",
+        message: "检查项目当前状态",
+        parameters: { project: "P-42" }
+      }
+    });
+
+    expect(tested.statusCode).toBe(202);
+    expect(tested.json()).toMatchObject({
+      endpointId,
+      conversationId: expect.any(String),
+      sessionId: expect.any(String),
+      requestId: expect.stringMatching(/^test-/),
+      message: "检查项目当前状态",
+      status: "queued"
+    });
+    expect(tested.json()).not.toHaveProperty("encryptedParameters");
+    expect(db.prepare(`
+      SELECT count(*) AS count
+      FROM integration_tasks
+      WHERE endpoint_id = ? AND message = ? AND encrypted_parameters IS NOT NULL
+    `).get(endpointId, "检查项目当前状态")).toEqual({ count: 1 });
+  });
+
+  it("管理端测试调用拒绝未启用的接入端点", async () => {
+    const { app, agentId, db } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: { ...validEndpointInput(agentId), enabled: false }
+    });
+    const endpointId = (created.json() as { endpoint: { id: string } }).endpoint.id;
+
+    const tested = await app.inject({
+      method: "POST",
+      url: `/api/integration-endpoints/${endpointId}/test-tasks`,
+      headers: authHeaders(),
+      payload: { message: "检查项目当前状态", parameters: {} }
+    });
+
+    expect(tested.statusCode).toBe(409);
+    expect(tested.json()).toEqual({
+      error: { code: "endpoint_disabled", message: "请先启用接入端点再发送测试任务" }
+    });
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 0 });
+  });
+
+  it("管理端测试调用用中文指出缺少的动态参数", async () => {
+    const { app, agentId, db } = await createTestApp();
+    db.prepare(`
+      INSERT INTO agent_session_parameters
+        (id, agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES ('integration-required-parameter', ?, 'project_code', '项目编号', NULL, 1, 0, ?, ?)
+    `).run(agentId, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: {
+        ...validEndpointInput(agentId),
+        parameterMappings: [{ parameterKey: "project_code", source: "request", requestKey: "project" }]
+      }
+    });
+    const endpointId = (created.json() as { endpoint: { id: string } }).endpoint.id;
+
+    const tested = await app.inject({
+      method: "POST",
+      url: `/api/integration-endpoints/${endpointId}/test-tasks`,
+      headers: authHeaders(),
+      payload: { message: "检查项目当前状态", parameters: {} }
+    });
+
+    expect(tested.statusCode).toBe(400);
+    expect(tested.json()).toEqual({
+      error: { code: "missing_request_parameter", message: "缺少必填的动态参数" }
+    });
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 0 });
+  });
+
   it("Endpoint 列表使用 Store 聚合且不逐 Endpoint 加载 Conversation 和 Task 历史", async () => {
     const { app, agentId, integrationStore } = await createTestApp();
     await app.inject({
@@ -666,7 +768,8 @@ describe("Integration endpoint API", () => {
           type: "tool",
           content: {
             toolCallId: "tool-secret-boundary",
-            title: "Inspect repository",
+            title: `Inspect ${leakedSecret}`,
+            locations: [{ path: `/workspace/${leakedSecret}.txt`, line: 9 }],
             status: "completed",
             rawInput: { token: leakedSecret },
             rawOutput: { result: leakedSecret },
@@ -720,7 +823,6 @@ describe("Integration endpoint API", () => {
     expect(JSON.parse(events[0]!.contentJson)).toEqual({ stream: "output", text: "safe agent reply" });
     expect(JSON.parse(events[1]!.contentJson)).toEqual({
       toolCallId: "tool-secret-boundary",
-      title: "Inspect repository",
       status: "completed"
     });
     expect(JSON.parse(events[2]!.contentJson)).toEqual({});

@@ -8,6 +8,7 @@ export type Agent = {
   name: string;
   provider: Provider;
   enabled: boolean;
+  instructions: string;
   projectEnvironmentId: string | null;
   createdAt: string;
   updatedAt: string;
@@ -78,6 +79,7 @@ export type Session = {
   providerSessionId: string | null;
   workspacePath: string;
   projectEnvironmentRevisionId: string | null;
+  instructionsSnapshot: string;
   createdAt: string;
   updatedAt: string;
   mcpParametersValid?: boolean;
@@ -350,6 +352,13 @@ export const integrationApi = {
   listTasks: (id: string, signal?: AbortSignal) => api<IntegrationTask[]>(
     `/integration-endpoints/${id}/tasks`, { signal }
   ),
+  createTestTask: (id: string, input: {
+    conversationKey?: string;
+    message: string;
+    parameters: Record<string, string>;
+  }) => api<IntegrationTask>(`/integration-endpoints/${id}/test-tasks`, {
+    method: "POST", body: JSON.stringify(input)
+  }),
   getTask: (id: string, signal?: AbortSignal) => api<IntegrationTask>(`/integration-tasks/${id}`, { signal }),
   cancelTask: (id: string, signal?: AbortSignal) => api<IntegrationTask>(
     `/integration-tasks/${id}/cancel`, { method: "POST", signal }

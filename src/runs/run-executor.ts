@@ -97,6 +97,7 @@ export class RunExecutor {
         workspacePath: session.workspacePath,
         browserProfilePath,
         providerSessionId: session.providerSessionId,
+        instructions: session.instructionsSnapshot,
         memory,
         mcpServers
       });

@@ -15,6 +15,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
 import { PageHeader } from "@/components/page-header";
 import {
   api, errorMessage, type Agent, type AgentDoctorResult, type AgentSkill,
@@ -69,8 +70,8 @@ export const AgentListPage = () => {
   const visible = (agents ?? []).filter((agent) => agent.name.toLowerCase().includes(query.trim().toLowerCase()));
 
   return <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8">
-    <PageHeader eyebrow="EXECUTION PROFILES" title="Agent" description="选择一个 Agent 查看运行状态、管理 Skills 或修改配置。"
-      action={<Button asChild><Link to="/agents/new"><Plus />新建 Agent</Link></Button>} />
+    <PageHeader eyebrow="EXECUTION PROFILES" title="智能体" description="选择一个智能体查看运行状态、管理 Skills 或修改配置。"
+      action={<Button asChild><Link to="/agents/new"><Plus />新建智能体</Link></Button>} />
     <ErrorAlert message={error} />
     <div className="mb-5 flex max-w-sm items-center gap-2 rounded-lg border bg-card px-3">
       <Search className="size-4 text-muted-foreground" aria-hidden="true" />
@@ -95,6 +96,7 @@ export const AgentCreatePage = () => {
   const [environments, setEnvironments] = useState<ProjectEnvironment[]>([]);
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<Provider>("codex");
+  const [instructions, setInstructions] = useState("");
   const [projectEnvironmentId, setProjectEnvironmentId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -114,21 +116,31 @@ export const AgentCreatePage = () => {
     if (name.trim() === "" || projectEnvironmentId === "") return;
     setBusy(true); setError("");
     try {
-      const created = await api<Agent>("/agents", { method: "POST", body: JSON.stringify({ name: name.trim(), provider, projectEnvironmentId }) });
+      const created = await api<Agent>("/agents", { method: "POST", body: JSON.stringify({
+        name: name.trim(), provider, projectEnvironmentId,
+        instructions: provider === "hermes" ? "" : instructions
+      }) });
       navigate(`/agents/${created.id}`);
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   };
 
   return <div className="mx-auto w-full max-w-3xl p-4 sm:p-6 lg:p-8">
-    <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />返回 Agent</Link></Button>
-    <PageHeader eyebrow="NEW EXECUTION PROFILE" title="新建 Agent" description="Provider 创建后不可修改；名称、项目环境和 Skills 可随时调整。" />
+    <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />返回智能体</Link></Button>
+    <PageHeader eyebrow="NEW EXECUTION PROFILE" title="新建智能体" description="执行器创建后不可修改；名称、项目环境、智能体指令和 Skills 可随时调整。" />
     <ErrorAlert message={error} />
     <Card><CardHeader><CardTitle>基础配置</CardTitle><CardDescription>绑定一个已准备完成的项目环境。</CardDescription></CardHeader>
       <CardContent><form className="flex flex-col gap-6" onSubmit={submit}><FieldGroup>
-        <Field><FieldLabel htmlFor="agent-name">Agent 名称</FieldLabel><Input id="agent-name" value={name} onChange={(event) => setName(event.target.value)} autoFocus /></Field>
-        <Field><FieldLabel htmlFor="provider">Provider</FieldLabel><NativeSelect id="provider" className="w-full" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>{Object.entries(providerNames).map(([value, label]) => <NativeSelectOption key={value} value={value}>{label}</NativeSelectOption>)}</NativeSelect></Field>
+        <Field><FieldLabel htmlFor="agent-name">智能体名称</FieldLabel><Input id="agent-name" value={name} onChange={(event) => setName(event.target.value)} autoFocus /></Field>
+        <Field><FieldLabel htmlFor="provider">执行器</FieldLabel><NativeSelect id="provider" className="w-full" value={provider} onChange={(event) => {
+          const nextProvider = event.target.value as Provider;
+          setProvider(nextProvider);
+          if (nextProvider === "hermes") setInstructions("");
+        }}>{Object.entries(providerNames).map(([value, label]) => <NativeSelectOption key={value} value={value}>{label}</NativeSelectOption>)}</NativeSelect></Field>
+        <Field data-disabled={provider === "hermes" || undefined}><FieldLabel htmlFor="agent-instructions">智能体指令</FieldLabel><Textarea id="agent-instructions" rows={6} value={instructions} disabled={provider === "hermes"} placeholder="说明这个智能体长期遵循的角色、边界和工作方式" onChange={(event) => setInstructions(event.target.value)} />
+          <FieldDescription>{provider === "hermes" ? "Hermes 当前不支持智能体指令" : "创建会话时保存快照；之后修改只影响新会话。"}</FieldDescription>
+        </Field>
         <Field><FieldLabel htmlFor="agent-environment">项目环境</FieldLabel><NativeSelect id="agent-environment" className="w-full" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}><NativeSelectOption value="" disabled>请选择可用环境</NativeSelectOption>{environments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect>{environments.length === 0 ? <FieldDescription>暂无已准备完成的项目环境。</FieldDescription> : null}</Field>
-        <div className="flex justify-end gap-2"><Button variant="outline" asChild><Link to="/agents">取消</Link></Button><Button type="submit" disabled={busy || projectEnvironmentId === ""}>{busy ? "创建中…" : "创建 Agent"}</Button></div>
+        <div className="flex justify-end gap-2"><Button variant="outline" asChild><Link to="/agents">取消</Link></Button><Button type="submit" disabled={busy || projectEnvironmentId === ""}>{busy ? "创建中…" : "创建智能体"}</Button></div>
       </FieldGroup></form></CardContent>
     </Card>
   </div>;
@@ -200,7 +212,9 @@ export const AgentSkillsPage = () => {
     void api<AgentSkill[]>(`/agents/${agent.id}/skills`, { signal: controller.signal }).then(setSkills).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [agent.id]);
-  const visible = (skills ?? []).filter((skill) => `${skill.name} ${skill.description}`.toLowerCase().includes(query.trim().toLowerCase()));
+  const visible = (skills ?? [])
+    .filter((skill) => `${skill.name} ${skill.description}`.toLowerCase().includes(query.trim().toLowerCase()))
+    .toSorted((left, right) => Number(right.enabled) - Number(left.enabled));
   const toggle = async (skill: AgentSkill) => {
     setBusy(skill.id); setError("");
     try {
@@ -223,7 +237,7 @@ export const AgentSkillsPage = () => {
       <Button variant="outline" asChild><label><Upload />{busy === "upload" ? "上传中…" : "上传 ZIP"}<input className="sr-only" type="file" accept=".zip,application/zip" disabled={busy !== ""} onChange={(event) => void upload(event.target.files?.[0], event.currentTarget)} /></label></Button>
     </div>
     <p className="text-sm text-muted-foreground">已启用 {(skills ?? []).filter((item) => item.enabled).length} / {(skills ?? []).length}。配置会在下一次 Run 生效。</p>
-    {skills === null ? <Skeleton className="h-64" /> : visible.length === 0 ? <Card className="border-dashed"><CardContent className="py-12 text-center text-muted-foreground">暂无匹配的 Skill。</CardContent></Card> : <div className="divide-y rounded-xl border bg-card">{visible.map((skill) => <div key={skill.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex items-center gap-2"><p className="font-medium">{skill.name}</p><Badge variant="outline">{skillSourceNames[skill.source]}</Badge>{!skill.available ? <Badge variant="destructive">不可用</Badge> : null}</div><p className="mt-1 text-sm text-muted-foreground">{skill.description || "暂无说明"}</p></div><Button size="sm" variant={skill.enabled ? "outline" : "default"} disabled={busy !== "" || !skill.available} onClick={() => void toggle(skill)}>{skill.enabled ? "停用" : "启用"}</Button></div>)}</div>}
+    {skills === null ? <Skeleton className="h-64" /> : visible.length === 0 ? <Card className="border-dashed"><CardContent className="py-12 text-center text-muted-foreground">暂无匹配的 Skill。</CardContent></Card> : <div className="divide-y rounded-xl border bg-card">{visible.map((skill) => <div key={skill.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex items-center gap-2"><p className="font-medium">{skill.name}</p><Badge variant="outline">{skillSourceNames[skill.source]}</Badge>{!skill.available ? <Badge variant="destructive">不可用</Badge> : null}</div><p className="mt-1 line-clamp-1 text-sm text-muted-foreground" title={skill.description || "暂无说明"}>{skill.description || "暂无说明"}</p></div><Button size="sm" variant={skill.enabled ? "outline" : "default"} disabled={busy !== "" || !skill.available} onClick={() => void toggle(skill)}>{skill.enabled ? "停用" : "启用"}</Button></div>)}</div>}
   </div>;
 };
 
@@ -232,6 +246,7 @@ export const AgentSettingsPage = () => {
   const navigate = useNavigate();
   const [environments, setEnvironments] = useState<ProjectEnvironment[]>([]);
   const [name, setName] = useState(agent.name);
+  const [instructions, setInstructions] = useState(agent.instructions);
   const [projectEnvironmentId, setProjectEnvironmentId] = useState(agent.projectEnvironmentId ?? "");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -243,7 +258,10 @@ export const AgentSettingsPage = () => {
   const save = async (event: FormEvent) => {
     event.preventDefault(); if (name.trim() === "" || projectEnvironmentId === "") return;
     setBusy("save"); setError("");
-    try { setAgent(await api<Agent>(`/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({ name: name.trim(), projectEnvironmentId }) })); }
+    try { setAgent(await api<Agent>(`/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({
+      name: name.trim(), projectEnvironmentId,
+      instructions: agent.provider === "hermes" ? "" : instructions
+    }) })); }
     catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
   const remove = async () => {
@@ -256,6 +274,9 @@ export const AgentSettingsPage = () => {
       <Field><FieldLabel htmlFor="settings-agent-name">名称</FieldLabel><Input id="settings-agent-name" value={name} onChange={(event) => setName(event.target.value)} /></Field>
       <Field data-disabled><FieldLabel htmlFor="settings-provider">Provider</FieldLabel><Input id="settings-provider" value={providerNames[agent.provider]} disabled /></Field>
       <Field><FieldLabel htmlFor="settings-environment">项目环境</FieldLabel><NativeSelect id="settings-environment" className="w-full" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}>{environments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></Field>
+      <Field data-disabled={agent.provider === "hermes" || undefined}><FieldLabel htmlFor="settings-agent-instructions">智能体指令</FieldLabel><Textarea id="settings-agent-instructions" rows={8} value={instructions} disabled={agent.provider === "hermes"} placeholder="说明这个智能体长期遵循的角色、边界和工作方式" onChange={(event) => setInstructions(event.target.value)} />
+        <FieldDescription>{agent.provider === "hermes" ? "Hermes 当前不支持智能体指令" : "创建会话时保存快照；之后修改只影响新会话。"}</FieldDescription>
+      </Field>
       <Button type="submit" disabled={busy !== ""}>{busy === "save" ? "保存中…" : "保存设置"}</Button>
     </FieldGroup></form></CardContent></Card>
     <Card className="border-destructive/40"><CardHeader><CardTitle className="flex items-center gap-2 text-destructive"><ShieldCheck className="size-5" />危险操作</CardTitle><CardDescription>只有从未创建过 Session 的 Agent 才能删除；否则请停用 Agent。</CardDescription></CardHeader><CardContent>

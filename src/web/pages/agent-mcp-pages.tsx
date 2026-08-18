@@ -10,6 +10,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
@@ -19,6 +20,11 @@ import { PageHeader } from "@/components/page-header";
 const ErrorAlert = ({ message }: { message: string }) => message === "" ? null : (
   <Alert variant="destructive"><XCircle /><AlertTitle>操作失败</AlertTitle><AlertDescription>{message}</AlertDescription></Alert>
 );
+
+type McpToolSummary = { name: string; description: string | null };
+type McpCheckResponse =
+  | { status: "passed"; toolCount: number; message: string; tools?: McpToolSummary[] }
+  | { status: "failed"; message: string };
 
 export const AgentMcpPage = () => {
   const { id = "" } = useParams();
@@ -33,6 +39,7 @@ export const AgentMcpPage = () => {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const [toolDialog, setToolDialog] = useState<{ serverName: string; tools: McpToolSummary[] } | null>(null);
 
   const load = () => Promise.all([
     api<AgentMcpServerSummary[]>(`/agents/${id}/mcp-servers`),
@@ -54,15 +61,25 @@ export const AgentMcpPage = () => {
     return () => controller.abort();
   }, [id]);
 
+  const probe = (server: AgentMcpServerSummary) => api<McpCheckResponse>(
+    `/agents/${id}/mcp-servers/${server.id}/check`, {
+      method: "POST", body: checkSessionId === "" ? undefined : JSON.stringify({ sessionId: checkSessionId })
+    }
+  );
   const check = async (server: AgentMcpServerSummary) => {
     setBusy(`check-${server.id}`); setError(""); setNotice("");
     try {
-      const result = await api<{ status: "passed" | "failed"; toolCount?: number; message: string }>(
-        `/agents/${id}/mcp-servers/${server.id}/check`, {
-          method: "POST", body: checkSessionId === "" ? undefined : JSON.stringify({ sessionId: checkSessionId })
-        }
-      );
+      const result = await probe(server);
       setNotice(result.status === "passed" ? `${result.toolCount ?? 0} 个工具可用` : result.message);
+      await load();
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
+  };
+  const showTools = async (server: AgentMcpServerSummary) => {
+    setBusy(`tools-${server.id}`); setError("");
+    try {
+      const result = await probe(server);
+      if (result.status === "failed") { setError(result.message); return; }
+      setToolDialog({ serverName: server.name, tools: result.tools ?? [] });
       await load();
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
@@ -88,9 +105,10 @@ export const AgentMcpPage = () => {
   };
 
   return <div className="flex flex-col gap-6"><ErrorAlert message={error} />
+    <Dialog open={toolDialog !== null} onOpenChange={(open) => { if (!open) setToolDialog(null); }}><DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>{toolDialog?.serverName ?? "MCP"} 的工具</DialogTitle><DialogDescription>实时读取当前 MCP 服务器公开的工具名称和说明。</DialogDescription></DialogHeader>{toolDialog?.tools.length === 0 ? <p className="py-6 text-sm text-muted-foreground">当前没有可用工具。</p> : <div className="divide-y rounded-lg border">{toolDialog?.tools.map((tool) => <div key={tool.name} className="p-4"><code className="text-sm font-semibold">{tool.name}</code><p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{tool.description ?? "暂无说明"}</p></div>)}</div>}</DialogContent></Dialog>
     {notice === "" ? null : <Alert><CheckCircle2 /><AlertTitle>连接正常</AlertTitle><AlertDescription>{notice}</AlertDescription></Alert>}
     <Card><CardHeader className="flex-row items-start justify-between gap-4"><div><CardTitle>MCP 服务器</CardTitle><CardDescription className="mt-2">每次 Run 开始前都会检查所有已启用 MCP。</CardDescription></div><Button asChild><Link to={`/agents/${id}/mcp/new`}><Plus />新建 MCP</Link></Button></CardHeader>
-      <CardContent className="flex flex-col gap-4"><Field><FieldLabel htmlFor="check-session">检查使用的 Session</FieldLabel><NativeSelect id="check-session" className="max-w-sm" value={checkSessionId} onChange={(event) => setCheckSessionId(event.target.value)}><NativeSelectOption value="">不使用 Session 参数</NativeSelectOption>{sessions.map((session) => <NativeSelectOption key={session.id} value={session.id}>{session.title}</NativeSelectOption>)}</NativeSelect><FieldDescription>只有 MCP 引用了 Session 参数时才需要选择。</FieldDescription></Field>{servers === null ? <Skeleton className="h-36" /> : servers.length === 0 ? <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">尚未配置 MCP。</div> : <div className="divide-y rounded-lg border">{servers.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2"><Link className="font-medium hover:underline" to={`/agents/${id}/mcp/${server.id}`}>{server.name}</Link><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant={server.enabled ? "default" : "secondary"}>{server.enabled ? "已启用" : "已停用"}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{server.lastCheckStatus === null ? "尚未检查" : server.lastCheckStatus === "passed" ? `最近检查通过 · ${server.lastToolCount ?? 0} 个工具` : "最近检查失败"}</p></div><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void check(server)}><RefreshCw className={busy === `check-${server.id}` ? "animate-spin" : ""} />检查连接</Button></div>)}</div>}</CardContent>
+      <CardContent className="flex flex-col gap-4"><Field><FieldLabel htmlFor="check-session">检查使用的 Session</FieldLabel><NativeSelect id="check-session" className="max-w-sm" value={checkSessionId} onChange={(event) => setCheckSessionId(event.target.value)}><NativeSelectOption value="">不使用 Session 参数</NativeSelectOption>{sessions.map((session) => <NativeSelectOption key={session.id} value={session.id}>{session.title}</NativeSelectOption>)}</NativeSelect><FieldDescription>只有 MCP 引用了 Session 参数时才需要选择。</FieldDescription></Field>{servers === null ? <Skeleton className="h-36" /> : servers.length === 0 ? <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">尚未配置 MCP。</div> : <div className="divide-y rounded-lg border">{servers.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2"><Link className="font-medium hover:underline" to={`/agents/${id}/mcp/${server.id}`}>{server.name}</Link><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant={server.enabled ? "default" : "secondary"}>{server.enabled ? "已启用" : "已停用"}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{server.lastCheckStatus === null ? "尚未检查" : server.lastCheckStatus === "passed" ? <>最近检查通过 · <button type="button" className="font-medium underline underline-offset-4 hover:text-foreground" aria-label={`查看 ${server.lastToolCount ?? 0} 个工具`} disabled={busy !== ""} onClick={() => void showTools(server)}>{server.lastToolCount ?? 0} 个工具</button></> : "最近检查失败"}</p></div><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void check(server)}><RefreshCw className={busy === `check-${server.id}` ? "animate-spin" : ""} />检查连接</Button></div>)}</div>}</CardContent>
     </Card>
     <Card><CardHeader><CardTitle>Session 参数</CardTitle><CardDescription>声明可由不同 Session 提供的值，再在 MCP Header、Argument 或 Environment 中引用。</CardDescription></CardHeader><CardContent className="flex flex-col gap-5">
       {parameters === null ? <Skeleton className="h-24" /> : parameters.length === 0 ? <p className="text-sm text-muted-foreground">暂无 Session 参数。</p> : <div className="divide-y rounded-lg border">{parameters.map((parameter) => <div key={parameter.id} className="grid gap-3 p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end"><Field><FieldLabel htmlFor={`label-${parameter.id}`}>显示名称</FieldLabel><Input id={`label-${parameter.id}`} value={parameter.label} readOnly /></Field><div className="pb-2 text-sm"><code>{parameter.key}</code> · {parameter.required ? "必填" : "可选"} · {parameter.secret ? "敏感" : "普通"}</div><Button aria-label={`删除参数 ${parameter.label}`} variant="ghost" size="icon-sm" disabled={busy !== ""} onClick={() => void removeParameter(parameter.id)}><Trash2 /></Button></div>)}</div>}

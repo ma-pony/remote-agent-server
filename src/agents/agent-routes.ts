@@ -7,15 +7,18 @@ import { SkillManagerError, type SkillManager } from "../skills/skill-manager.js
 const createAgentSchema = z.object({
   name: z.string().trim().min(1),
   provider: z.enum(["claude_code", "codex", "hermes"]),
-  projectEnvironmentId: z.string().uuid()
+  projectEnvironmentId: z.string().uuid(),
+  instructions: z.string().max(20_000).default("")
 }).strict();
 
 const updateAgentSchema = z.object({
   name: z.string().trim().min(1).optional(),
   enabled: z.boolean().optional(),
-  projectEnvironmentId: z.string().uuid().optional()
+  projectEnvironmentId: z.string().uuid().optional(),
+  instructions: z.string().max(20_000).optional()
 }).strict().refine(
-  (input) => input.name !== undefined || input.enabled !== undefined || input.projectEnvironmentId !== undefined,
+  (input) => input.name !== undefined || input.enabled !== undefined
+    || input.projectEnvironmentId !== undefined || input.instructions !== undefined,
   {
   message: "At least one field must be provided"
   }
@@ -35,6 +38,11 @@ const notFound = (reply: FastifyReply) =>
 
 const handleAgentError = (reply: FastifyReply, error: unknown) => {
   if (error instanceof AgentManagerError) {
+    if (error.code === "agent_instructions_unsupported") {
+      return reply.code(400).send({
+        error: { code: error.code, message: "Hermes 当前不支持智能体指令" }
+      });
+    }
     if (error.code === "agent_has_sessions" || error.code === "agent_has_integration_endpoints") {
       return reply.code(409).send({
         error: {

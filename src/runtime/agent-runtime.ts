@@ -8,6 +8,7 @@ export type RuntimeSessionInput = {
   workspacePath: string;
   browserProfilePath: string;
   providerSessionId: string | null;
+  instructions: string;
   memory: string;
   mcpServers: RuntimeMcpServer[];
 };

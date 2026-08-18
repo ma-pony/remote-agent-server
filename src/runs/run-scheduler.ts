@@ -4,7 +4,7 @@ import type { RunExecutor } from "./run-executor.js";
 import type { RunRepository } from "./run-repository.js";
 
 export type RunSchedulerDependencies = {
-  runRepository: Pick<RunRepository, "get" | "listQueued">;
+  runRepository: Pick<RunRepository, "get" | "listQueued" | "failQueued">;
   executor: Pick<RunExecutor, "execute" | "cancel">;
   maxConcurrentRuns: number;
   onExecutionError?: (error: unknown, runId: string) => void;
@@ -29,7 +29,7 @@ export class RunSchedulerError extends Error {
 export class RunScheduler {
   private readonly pending: string[] = [];
   private readonly active = new Set<string>();
-  private readonly runRepository: Pick<RunRepository, "get" | "listQueued">;
+  private readonly runRepository: Pick<RunRepository, "get" | "listQueued" | "failQueued">;
   private readonly executor: Pick<RunExecutor, "execute" | "cancel">;
   private readonly maxConcurrentRuns: number;
   private readonly onExecutionError: (error: unknown, runId: string) => void;
@@ -131,6 +131,15 @@ export class RunScheduler {
     const attempts = this.retryAttempts.get(runId) ?? 0;
     if (attempts >= MAX_AUTOMATIC_RETRIES) {
       this.exhaustedRuns.add(runId);
+      try {
+        this.runRepository.failQueued(runId, "run_retry_exhausted");
+        const timer = this.retryTimers.get(runId);
+        if (timer !== undefined) clearTimeout(timer);
+        this.retryTimers.delete(runId);
+        this.retryAttempts.delete(runId);
+      } catch (_failureError) {
+        // The original scheduler failure remains observable and no further execution is attempted.
+      }
       this.reportExecutionError(new RunSchedulerError("run_retry_exhausted"), runId);
       return;
     }

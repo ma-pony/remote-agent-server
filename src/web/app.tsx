@@ -21,6 +21,7 @@ import { SessionSettingsPage } from "./pages/session-settings-page.js";
 import {
   IntegrationConversationPage, IntegrationEndpointCreatePage, IntegrationEndpointDetailLayout,
   IntegrationEndpointListPage, IntegrationEndpointMappingsPage, IntegrationEndpointOverviewPage,
+  IntegrationEndpointUsagePage,
   IntegrationEndpointSettingsPage, IntegrationEndpointTasksPage, IntegrationEndpointWebhooksPage,
   IntegrationTaskDetailPage
 } from "./pages/integration-pages.js";
@@ -64,6 +65,7 @@ export const App = () => {
       <Route path="/integration-endpoints/new" element={<IntegrationEndpointCreatePage />} />
       <Route path="/integration-endpoints/:id" element={<IntegrationEndpointDetailLayout />}>
         <Route index element={<IntegrationEndpointOverviewPage />} />
+        <Route path="usage" element={<IntegrationEndpointUsagePage />} />
         <Route path="mappings" element={<IntegrationEndpointMappingsPage />} />
         <Route path="webhooks" element={<IntegrationEndpointWebhooksPage />} />
         <Route path="conversations" element={<IntegrationConversationPage />} />

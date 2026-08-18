@@ -18,6 +18,7 @@ import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import { importLegacyProjectEnvironment } from "./project-environments/import-legacy-project-environment.js";
 import { ProjectEnvironmentStore } from "./project-environments/project-environment-store.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
+import { applyServicePath, removeServiceSecretsFromEnvironment } from "./runtime/service-path.js";
 import { RunRepository } from "./runs/run-repository.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import { type FileSystemInspector } from "./workspaces/apfs-workspace.js";
@@ -50,6 +51,7 @@ const defaultListen = (app: FastifyInstance, config: AppConfig): Promise<string>
  */
 export const startServer = async (options: StartServerOptions = {}): Promise<RunningServer> => {
   const config = loadConfig(options.env ?? process.env);
+  removeServiceSecretsFromEnvironment(process.env);
   mkdirSync(config.dataDir, { recursive: true });
   mkdirSync(dirname(config.databasePath), { recursive: true });
   mkdirSync(config.projectEnvironmentsRoot, { recursive: true });
@@ -176,6 +178,7 @@ const isEntrypoint = process.argv[1] !== undefined
   && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isEntrypoint) {
+  applyServicePath();
   void startServer().catch((error: unknown) => {
     console.error(error);
     process.exitCode = 1;

@@ -17,7 +17,7 @@ const environment = {
   sync: { status: "idle" as const, automatic: true as const, intervalMs: 10_800_000, nextScheduledAt: "2026-08-13T03:00:00.000Z" },
   repositories: [{
     id: "repository-1", projectEnvironmentId: "environment-1", name: "example-service",
-    gitUrl: "git@example.test:rcc/example-service.git", prepareCommand: "bundle install",
+    gitUrl: "git@example.test:team/example-service.git", prepareCommand: "bundle install",
     workspacePath: `${revision.workspacePath}/example-service`, createdAt: now, updatedAt: now
   }],
   currentRevision: revision, latestRevision: revision, createdAt: now, updatedAt: now

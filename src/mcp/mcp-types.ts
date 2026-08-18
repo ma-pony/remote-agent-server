@@ -163,6 +163,8 @@ export type SessionMcpStatus = {
   mcpParameters: SessionMcpParameterStatus[];
 };
 
+export type McpToolSummary = { name: string; description: string | null };
+
 export type McpCheckResult =
-  | { status: "passed"; toolCount: number; message: string }
+  | { status: "passed"; toolCount: number; message: string; tools?: McpToolSummary[] }
   | { status: "failed"; code: "mcp_check_failed"; message: string };
