@@ -37,10 +37,10 @@ it("创建 Session 时加载所选 Agent 的 MCP 参数", async () => {
   vi.stubGlobal("fetch", fetchMock);
 
   render(<App />);
-  fireEvent.change(await screen.findByLabelText("Session 标题"), { target: { value: "租户工单" } });
+  fireEvent.change(await screen.findByLabelText("会话标题"), { target: { value: "租户工单" } });
   expect(await screen.findByLabelText("访问令牌（必填）")).toHaveAttribute("type", "password");
   fireEvent.change(screen.getByLabelText("访问令牌（必填）"), { target: { value: "session-secret" } });
-  fireEvent.click(screen.getByRole("button", { name: "创建 Session" }));
+  fireEvent.click(screen.getByRole("button", { name: "创建会话" }));
   await waitFor(() => expect(window.location.pathname).toBe("/sessions/session-1"));
 });
 

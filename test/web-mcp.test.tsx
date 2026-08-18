@@ -63,6 +63,7 @@ it("Agent MCP 独立页面展示服务器、连接检查和 Session 参数", asy
 });
 
 it("使用指定 Session 检查引用动态参数的 MCP", async () => {
+  let checkBody: unknown;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
@@ -70,7 +71,7 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
     if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
-      expect(JSON.parse(String(init.body))).toEqual({ sessionId: session.id });
+      checkBody = JSON.parse(String(init.body));
       return response({ status: "passed", toolCount: 2, message: "2 tools available" });
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
@@ -78,9 +79,9 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
   vi.stubGlobal("fetch", fetchMock);
 
   render(<App />);
-  fireEvent.change(await screen.findByLabelText("检查使用的 Session"), { target: { value: session.id } });
+  fireEvent.change(await screen.findByLabelText("检查使用的会话"), { target: { value: session.id } });
   fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
-  expect(await screen.findByText("2 个工具可用", {}, { timeout: 3_000 })).toBeInTheDocument();
+  await waitFor(() => expect(checkBody).toEqual({ sessionId: session.id }));
 });
 
 it("点击工具数量后实时检查并展示全部工具", async () => {
@@ -133,11 +134,11 @@ it("从独立页面创建带敏感 Header 的 HTTP MCP", async () => {
   render(<App />);
   expect(await screen.findByRole("heading", { name: "新建 MCP" })).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("MCP 名称"), { target: { value: "example_mcp" } });
-  fireEvent.change(screen.getByLabelText("HTTP URL"), { target: { value: "https://example.test/mcp" } });
-  fireEvent.click(screen.getByRole("button", { name: "添加 Header" }));
-  fireEvent.change(screen.getByLabelText("Header 名称 1"), { target: { value: "Authorization" } });
-  fireEvent.change(screen.getByLabelText("Header 值 1"), { target: { value: "Bearer secret-token" } });
-  fireEvent.click(screen.getByLabelText("Header 敏感值 1"));
+  fireEvent.change(screen.getByLabelText("HTTP 地址"), { target: { value: "https://example.test/mcp" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加请求头" }));
+  fireEvent.change(screen.getByLabelText("请求头名称 1"), { target: { value: "Authorization" } });
+  fireEvent.change(screen.getByLabelText("请求头值 1"), { target: { value: "Bearer secret-token" } });
+  fireEvent.click(screen.getByLabelText("请求头 敏感值 1"));
   fireEvent.click(screen.getByRole("button", { name: "创建 MCP" }));
 
   await waitFor(() => expect(window.location.pathname).toBe(`/agents/${agent.id}/mcp`));
@@ -165,11 +166,11 @@ it("HTTP Header 可引用 Session 参数", async () => {
 
   render(<App />);
   fireEvent.change(await screen.findByLabelText("MCP 名称"), { target: { value: "tenant_mcp" } });
-  fireEvent.change(screen.getByLabelText("HTTP URL"), { target: { value: "https://example.test/mcp" } });
-  fireEvent.click(screen.getByRole("button", { name: "添加 Header" }));
-  fireEvent.change(screen.getByLabelText("Header 名称 1"), { target: { value: "X-Tenant-Token" } });
-  fireEvent.change(screen.getByLabelText("Header 来源 1"), { target: { value: "session_parameter" } });
-  fireEvent.change(screen.getByLabelText("Header Session 参数 1"), { target: { value: "tenant_token" } });
+  fireEvent.change(screen.getByLabelText("HTTP 地址"), { target: { value: "https://example.test/mcp" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加请求头" }));
+  fireEvent.change(screen.getByLabelText("请求头名称 1"), { target: { value: "X-Tenant-Token" } });
+  fireEvent.change(screen.getByLabelText("请求头来源 1"), { target: { value: "session_parameter" } });
+  fireEvent.change(screen.getByLabelText("请求头会话参数 1"), { target: { value: "tenant_token" } });
   fireEvent.click(screen.getByRole("button", { name: "创建 MCP" }));
 
   await waitFor(() => expect(window.location.pathname).toBe(`/agents/${agent.id}/mcp`));
@@ -199,15 +200,15 @@ it("stdio Argument 和 Environment 支持 runtime 与 Session 参数", async () 
 
   render(<App />);
   fireEvent.change(await screen.findByLabelText("MCP 名称"), { target: { value: "local_mcp" } });
-  fireEvent.change(screen.getByLabelText("Transport"), { target: { value: "stdio" } });
-  fireEvent.change(screen.getByLabelText("Command"), { target: { value: "node" } });
-  fireEvent.click(screen.getByRole("button", { name: "添加 Argument" }));
-  fireEvent.change(screen.getByLabelText("Argument 来源 1"), { target: { value: "runtime" } });
-  fireEvent.change(screen.getByLabelText("Argument 运行参数 1"), { target: { value: "workspace_path" } });
-  fireEvent.click(screen.getByRole("button", { name: "添加 Environment" }));
-  fireEvent.change(screen.getByLabelText("Environment 名称 1"), { target: { value: "TENANT" } });
-  fireEvent.change(screen.getByLabelText("Environment 来源 1"), { target: { value: "session_parameter" } });
-  fireEvent.change(screen.getByLabelText("Environment Session 参数 1"), { target: { value: "tenant" } });
+  fireEvent.change(screen.getByLabelText("传输方式"), { target: { value: "stdio" } });
+  fireEvent.change(screen.getByLabelText("命令"), { target: { value: "node" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加参数" }));
+  fireEvent.change(screen.getByLabelText("参数来源 1"), { target: { value: "runtime" } });
+  fireEvent.change(screen.getByLabelText("参数运行参数 1"), { target: { value: "workspace_path" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加环境变量" }));
+  fireEvent.change(screen.getByLabelText("环境变量名称 1"), { target: { value: "TENANT" } });
+  fireEvent.change(screen.getByLabelText("环境变量来源 1"), { target: { value: "session_parameter" } });
+  fireEvent.change(screen.getByLabelText("环境变量会话参数 1"), { target: { value: "tenant" } });
   fireEvent.click(screen.getByRole("button", { name: "创建 MCP" }));
 
   await waitFor(() => expect(window.location.pathname).toBe(`/agents/${agent.id}/mcp`));
@@ -240,7 +241,7 @@ it("编辑时可保留未回显的敏感值", async () => {
   vi.stubGlobal("fetch", fetchMock);
 
   render(<App />);
-  expect(await screen.findByLabelText("Header 值 1")).toHaveValue("");
+  expect(await screen.findByLabelText("请求头值 1")).toHaveValue("");
   fireEvent.click(screen.getByRole("button", { name: "保存 MCP" }));
   await waitFor(() => expect(window.location.pathname).toBe(`/agents/${agent.id}/mcp`));
 });

@@ -6,6 +6,7 @@ import { Button } from "./components/ui/button.js";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card.js";
 import { Input } from "./components/ui/input.js";
 import { Field, FieldGroup, FieldLabel } from "./components/ui/field.js";
+import { I18nProvider, useI18n } from "./i18n.js";
 import {
   AgentCreatePage, AgentDetailLayout, AgentListPage, AgentOverviewPage,
   AgentSettingsPage, AgentSkillsPage
@@ -26,7 +27,9 @@ import {
   IntegrationTaskDetailPage
 } from "./pages/integration-pages.js";
 
-export const App = () => {
+export const App = () => <I18nProvider><Application /></I18nProvider>;
+
+const Application = () => {
   const [token, setToken] = useState(() => sessionStorage.getItem("apiToken"));
 
   if (token === null) {
@@ -85,6 +88,7 @@ const SessionRoute = () => {
 
 const TokenGate = ({ onSave }: { onSave(token: string): void }) => {
   const [value, setValue] = useState("");
+  const { locale, setLocale, text } = useI18n();
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -96,13 +100,13 @@ const TokenGate = ({ onSave }: { onSave(token: string): void }) => {
     <main className="grid min-h-svh place-items-center bg-sidebar p-5">
       <Card className="w-full max-w-md border-0 border-t-4 border-t-sidebar-primary shadow-2xl">
         <CardHeader className="flex flex-col gap-3 p-7 pb-3 sm:p-9 sm:pb-3">
-          <p className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">REMOTE AGENT SERVER</p>
-          <CardTitle id="token-title" className="text-3xl">连接 Remote Agent</CardTitle>
-          <CardDescription className="leading-6">输入服务器 API Token。凭证仅保留在当前浏览器会话中。</CardDescription>
+          <div className="flex items-center justify-between gap-4"><p className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">REMOTE AGENT SERVER</p><Button type="button" size="sm" variant="ghost" aria-label={text("切换为 English", "Switch to 简体中文")} onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}>{locale === "zh-CN" ? "English" : "简体中文"}</Button></div>
+          <CardTitle id="token-title" role="heading" aria-level={1} className="text-3xl">{text("连接智能体服务", "Connect to Remote Agent")}</CardTitle>
+          <CardDescription className="leading-6">{text("输入服务器 API 令牌。凭证仅保留在当前浏览器会话中。", "Enter the server API token. It is kept only for this browser session.")}</CardDescription>
         </CardHeader>
         <CardContent className="p-7 pt-4 sm:p-9 sm:pt-4"><form className="flex flex-col gap-4" onSubmit={submit} aria-labelledby="token-title"><FieldGroup>
-          <Field><FieldLabel htmlFor="api-token">API Token</FieldLabel><Input id="api-token" type="password" autoComplete="off" value={value} onChange={(event) => setValue(event.target.value)} autoFocus /></Field>
-          <Button className="w-full" type="submit">进入管理台</Button>
+          <Field><FieldLabel htmlFor="api-token">{text("API 令牌", "API token")}</FieldLabel><Input id="api-token" type="password" autoComplete="off" value={value} onChange={(event) => setValue(event.target.value)} autoFocus /></Field>
+          <Button className="w-full" type="submit">{text("进入管理台", "Open console")}</Button>
         </FieldGroup></form></CardContent>
       </Card>
     </main>

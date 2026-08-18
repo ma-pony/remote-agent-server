@@ -71,9 +71,9 @@ it("在 Agent 独立 Skills 页面搜索并启用 Skill", async () => {
   render(<App />);
 
   expect(await screen.findByText("code-review")).toBeInTheDocument();
-  expect(screen.getByText("已启用 0 / 1。配置会在下一次 Run 生效。")).toBeInTheDocument();
+  expect(screen.getByText("已启用 0 / 1。配置会在下一次运行生效。")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "启用" }));
-  expect(await screen.findByText("已启用 1 / 1。配置会在下一次 Run 生效。")).toBeInTheDocument();
+  expect(await screen.findByText("已启用 1 / 1。配置会在下一次运行生效。")).toBeInTheDocument();
 });
 
 it("Skills 已启用项排在前面且描述单行省略并悬浮显示全文", async () => {

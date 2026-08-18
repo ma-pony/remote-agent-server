@@ -25,10 +25,10 @@ afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 it("Session 列表与创建表单分离", async () => {
   render(<App />);
   expect(await screen.findByRole("link", { name: "修复工单 1332" })).toBeInTheDocument();
-  expect(screen.queryByLabelText("Session 标题")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("link", { name: "新建 Session" }));
+  expect(screen.queryByLabelText("会话标题")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("link", { name: "新建会话" }));
   await waitFor(() => expect(window.location.pathname).toBe("/sessions/new"));
-  expect(await screen.findByLabelText("Session 标题")).toBeInTheDocument();
+  expect(await screen.findByLabelText("会话标题")).toBeInTheDocument();
 });
 
 it("列表二次确认后永久删除空闲 Session 并原地移除", async () => {
@@ -43,7 +43,7 @@ it("列表二次确认后永久删除空闲 Session 并原地移除", async () =
   render(<App />);
 
   fireEvent.click(await screen.findByRole("button", { name: `删除 ${session.title}` }));
-  expect(screen.getByRole("alertdialog")).toHaveTextContent("全部对话历史和 Workspace 都会永久删除");
+  expect(screen.getByRole("alertdialog")).toHaveTextContent("全部对话历史和工作区都会永久删除");
   fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
 
   await waitFor(() => expect(screen.queryByRole("link", { name: session.title })).not.toBeInTheDocument());

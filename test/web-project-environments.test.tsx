@@ -58,7 +58,7 @@ it("展示整个项目环境的同步计划和路径，并可立即同步", asyn
 
   expect(await screen.findByText(revision.workspacePath)).toBeInTheDocument();
   expect(screen.getByText("每 3 小时")).toBeInTheDocument();
-  expect(screen.getByText("2026/8/13 11:00:00")).toBeInTheDocument();
+  expect(screen.getByText("2026/08/13 11:00")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "立即同步" }));
   await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) =>
     input === `/api/project-environments/${environment.id}/sync` && init?.method === "POST"

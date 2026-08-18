@@ -59,9 +59,9 @@ it("移动端从侧栏导航后自动关闭抽屉", async () => {
 
   await waitFor(() => expect(screen.getByRole("button", { name: "切换导航" })).toBeInTheDocument());
   fireEvent.click(screen.getByRole("button", { name: "切换导航" }));
-  expect(await screen.findByRole("dialog", { name: "Sidebar" })).toBeInTheDocument();
+  expect(await screen.findByRole("dialog", { name: "侧边栏" })).toBeInTheDocument();
   const navigation = await screen.findByRole("navigation", { name: "主导航" });
   fireEvent.click(within(navigation).getByRole("link", { name: "项目环境" }));
 
-  await waitFor(() => expect(screen.queryByRole("dialog", { name: "Sidebar" })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "侧边栏" })).not.toBeInTheDocument());
 });

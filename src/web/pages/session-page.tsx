@@ -11,17 +11,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { PageHeader } from "@/components/page-header";
 import { SessionDeleteDialog } from "./session-pages.js";
+import { useI18n } from "@/i18n";
 
 type RunView = { run: Run; events: RunEvent[]; historyError: string | null };
 const activeStatuses = new Set<RunStatus>(["queued", "running"]);
 const terminalStatuses = new Set<RunStatus>(["succeeded", "failed", "cancelled"]);
-const statusNames: Record<RunStatus, string> = {
-  queued: "排队中",
-  running: "运行中",
-  succeeded: "已完成",
-  failed: "失败",
-  cancelled: "已取消"
-};
 const streamRetryDelays = [500, 1_000, 2_000, 4_000, 5_000] as const;
 const canonicalPollIntervalMs = 5_000;
 
@@ -64,6 +58,7 @@ const mergeEvent = (views: RunView[], runId: string, item: RunEvent): RunView[] 
 });
 
 export const SessionPage = ({ sessionId }: { sessionId: string }) => {
+  const { text } = useI18n();
   const navigate = useNavigate();
   const [session, setSession] = useState<SessionDetail | null>(null);
   const [agentName, setAgentName] = useState("");
@@ -104,7 +99,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
         return {
           run,
           events: [],
-          historyError: `历史加载失败：${errorMessage(history?.reason)}`
+          historyError: text(`历史加载失败：${errorMessage(history?.reason)}`, `Failed to load history: ${errorMessage(history?.reason)}`)
         };
       }));
       setInitialLoading(false);
@@ -187,16 +182,16 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
         clearCanonicalPoll();
         if (controller.signal.aborted || await refreshCanonicalRun()) return;
         if (isRunStreamPermanentError(reason)) {
-          setStreamError(`实时连接失败：${errorMessage(reason)}`);
+          setStreamError(text(`实时连接失败：${errorMessage(reason)}`, `Live connection failed: ${errorMessage(reason)}`));
           return;
         }
         const delay = streamRetryDelays[consecutiveFailures];
         if (delay === undefined) {
-          setStreamError(`实时连接已中断：${errorMessage(reason)}。自动重连已停止。`);
+          setStreamError(text(`实时连接已中断：${errorMessage(reason)}。自动重连已停止。`, `Live connection interrupted: ${errorMessage(reason)}. Automatic reconnection stopped.`));
           return;
         }
         consecutiveFailures += 1;
-        setStreamError(`实时连接中断：${errorMessage(reason)}，将在 ${delay / 1_000} 秒后重连`);
+        setStreamError(text(`实时连接中断：${errorMessage(reason)}，将在 ${delay / 1_000} 秒后重连`, `Live connection interrupted: ${errorMessage(reason)}. Reconnecting in ${delay / 1_000} seconds.`));
         retryTimer = setTimeout(() => {
           retryTimer = undefined;
           void connect();
@@ -209,7 +204,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       if (retryTimer !== undefined) clearTimeout(retryTimer);
       clearCanonicalPoll();
     };
-  }, [activeRunId, streamReconnectGeneration]);
+  }, [activeRunId, streamReconnectGeneration, text]);
 
   const send = async (event: FormEvent) => {
     event.preventDefault();
@@ -246,21 +241,21 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
 
   return (
     <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
-      <Button asChild variant="ghost" className="mb-4"><Link to="/sessions"><ArrowLeft />返回 Session</Link></Button>
-      <PageHeader eyebrow={`SESSION / ${initialLoading ? "LOADING" : activeRunId !== null ? "RUNNING" : "IDLE"}`} title={session?.title ?? "加载 Session…"} description={agentName === "" ? "正在读取 Agent…" : `Agent · ${agentName}`} action={<div className="flex items-center gap-2">{session === null ? null : <Button asChild size="sm" variant="outline"><Link to={`/sessions/${session.id}/settings`}><Settings2 />设置</Link></Button>}<Badge variant={activeRunId === null ? "secondary" : "default"}>{activeRunId === null ? "空闲" : "活动中"}</Badge>{session === null ? null : <SessionDeleteDialog session={activeRunId === null ? session : { ...session, status: "running" }} onDeleted={() => navigate("/sessions")} onError={setError} />}</div>} />
+      <Button asChild variant="ghost" className="mb-4"><Link to="/sessions"><ArrowLeft />{text("返回会话", "Back to sessions")}</Link></Button>
+      <PageHeader eyebrow={text(`会话 / ${initialLoading ? "加载中" : activeRunId !== null ? "运行中" : "空闲"}`, `SESSION / ${initialLoading ? "LOADING" : activeRunId !== null ? "RUNNING" : "IDLE"}`)} title={session?.title ?? text("加载会话…", "Loading session…")} description={agentName === "" ? text("正在读取智能体…", "Loading agent…") : text(`智能体 · ${agentName}`, `Agent · ${agentName}`)} action={<div className="flex items-center gap-2">{session === null ? null : <Button asChild size="sm" variant="outline"><Link to={`/sessions/${session.id}/settings`}><Settings2 />{text("设置", "Settings")}</Link></Button>}<Badge variant={activeRunId === null ? "secondary" : "default"}>{activeRunId === null ? text("空闲", "Idle") : text("活动中", "Active")}</Badge>{session === null ? null : <SessionDeleteDialog session={activeRunId === null ? session : { ...session, status: "running" }} onDeleted={() => navigate("/sessions")} onError={setError} />}</div>} />
       <div className="flex flex-col gap-4">
-        {loadError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>Session 加载失败</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{loadError}</span><Button size="sm" variant="outline" type="button" onClick={() => setReloadGeneration((current) => current + 1)}>重试加载</Button></AlertDescription></Alert> : error !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>操作失败</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
-        {streamError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>实时连接异常</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{streamError}</span>{streamError.includes("自动重连已停止") ? <Button size="sm" variant="outline" type="button" onClick={() => setStreamReconnectGeneration((current) => current + 1)}>重新连接实时事件</Button> : null}</AlertDescription></Alert> : null}
+        {loadError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>{text("会话加载失败", "Session failed to load")}</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{loadError}</span><Button size="sm" variant="outline" type="button" onClick={() => setReloadGeneration((current) => current + 1)}>{text("重试加载", "Retry")}</Button></AlertDescription></Alert> : error !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>{text("操作失败", "Operation failed")}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+        {streamError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>{text("实时连接异常", "Live connection error")}</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{streamError}</span>{streamError.includes("自动重连已停止") || streamError.includes("Automatic reconnection stopped") ? <Button size="sm" variant="outline" type="button" onClick={() => setStreamReconnectGeneration((current) => current + 1)}>{text("重新连接实时事件", "Reconnect live events")}</Button> : null}</AlertDescription></Alert> : null}
       </div>
-      <section className="mt-6 flex flex-col gap-5" aria-label="运行历史" aria-live="polite">
-        {views.length === 0 && session !== null ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">还没有消息，输入任务开始第一轮。</CardContent></Card> : views.map((view) => <RunBlock key={view.run.id} view={view} />)}
+      <section className="mt-6 flex flex-col gap-5" aria-label={text("运行历史", "Run history")} aria-live="polite">
+        {views.length === 0 && session !== null ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">{text("还没有消息，输入任务开始第一轮。", "No messages yet. Enter a task to start the first turn.")}</CardContent></Card> : views.map((view) => <RunBlock key={view.run.id} view={view} />)}
       </section>
-      {session !== null && !mcpParametersValid ? <Alert className="mt-6"><XCircle /><AlertTitle>缺少 MCP 参数</AlertTitle><AlertDescription>请先在 <Link className="underline" to={`/sessions/${session.id}/settings`}>Session 设置</Link> 中填写：{missingMcpParameters.join("、")}</AlertDescription></Alert> : null}
+      {session !== null && !mcpParametersValid ? <Alert className="mt-6"><XCircle /><AlertTitle>{text("缺少 MCP 参数", "Missing MCP parameters")}</AlertTitle><AlertDescription>{text("请先在", "Complete these in")} <Link className="underline" to={`/sessions/${session.id}/settings`}>{text("会话设置", "session settings")}</Link>{text(` 中填写：${missingMcpParameters.join("、")}`, `: ${missingMcpParameters.join(", ")}`)}</AlertDescription></Alert> : null}
       <Card className="sticky bottom-4 mt-6 shadow-lg"><CardContent className="p-4"><form className="flex flex-col gap-3" onSubmit={send}>
-        <Field data-disabled={composerDisabled || undefined}><FieldLabel htmlFor="run-input">发送给 Agent</FieldLabel><Textarea id="run-input" rows={3} value={input} onChange={(event) => setInput(event.target.value)} disabled={composerDisabled} placeholder={activeRunId === null ? "描述下一步任务…" : "当前 Run 结束后可继续输入"} /></Field>
+        <Field data-disabled={composerDisabled || undefined}><FieldLabel htmlFor="run-input">{text("发送给智能体", "Send to agent")}</FieldLabel><Textarea id="run-input" rows={3} value={input} onChange={(event) => setInput(event.target.value)} disabled={composerDisabled} placeholder={activeRunId === null ? text("描述下一步任务…", "Describe the next task…") : text("当前运行结束后可继续输入", "Continue after the current run finishes")} /></Field>
         <div className="flex justify-end gap-2">
-          {activeRunId !== null ? <Button type="button" variant="destructive" onClick={() => void cancel()}><Square />取消运行</Button> : null}
-          <Button type="submit" disabled={composerDisabled || input.trim() === ""}><Send />{submitting ? "发送中…" : "发送"}</Button>
+          {activeRunId !== null ? <Button type="button" variant="destructive" onClick={() => void cancel()}><Square />{text("取消运行", "Cancel run")}</Button> : null}
+          <Button type="submit" disabled={composerDisabled || input.trim() === ""}><Send />{submitting ? text("发送中…", "Sending…") : text("发送", "Send")}</Button>
         </div>
       </form></CardContent></Card>
     </div>
@@ -268,6 +263,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
 };
 
 const RunBlock = ({ view }: { view: RunView }) => {
+  const { text } = useI18n();
   let output = "";
   const details: RunEvent[] = [];
   for (const item of view.events) {
@@ -278,12 +274,12 @@ const RunBlock = ({ view }: { view: RunView }) => {
   if (output === "" && view.run.result !== null) output = view.run.result;
 
   return <article className="flex flex-col gap-3">
-    <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-foreground px-4 py-3 text-background"><span className="mb-1 block text-xs font-semibold uppercase tracking-wide opacity-70">你</span><p className="whitespace-pre-wrap">{view.run.input}</p></div>
+    <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-foreground px-4 py-3 text-background"><span className="mb-1 block text-xs font-semibold uppercase tracking-wide opacity-70">{text("你", "You")}</span><p className="whitespace-pre-wrap">{view.run.input}</p></div>
     <Card className="border-l-4 border-l-primary"><CardContent className="p-5">
-      <div className="mb-4 flex items-center justify-between"><span className="text-sm font-semibold">Agent</span><Badge variant={view.run.status === "failed" ? "destructive" : view.run.status === "succeeded" ? "default" : "secondary"}>{statusNames[view.run.status]}</Badge></div>
-      {output !== "" ? <p className="whitespace-pre-wrap leading-7">{output}</p> : activeStatuses.has(view.run.status) ? <p className="text-muted-foreground">等待 Agent 输出…</p> : null}
+      <div className="mb-4 flex items-center justify-between"><span className="text-sm font-semibold">{text("智能体", "Agent")}</span><Badge variant={view.run.status === "failed" ? "destructive" : view.run.status === "succeeded" ? "default" : "secondary"}>{({ queued: text("排队中", "Queued"), running: text("运行中", "Running"), succeeded: text("已完成", "Completed"), failed: text("失败", "Failed"), cancelled: text("已取消", "Cancelled") } satisfies Record<RunStatus, string>)[view.run.status]}</Badge></div>
+      {output !== "" ? <p className="whitespace-pre-wrap leading-7">{output}</p> : activeStatuses.has(view.run.status) ? <p className="text-muted-foreground">{text("等待智能体输出…", "Waiting for agent output…")}</p> : null}
       {(details.length > 0 || view.historyError !== null || (view.run.error !== null && !details.some((item) => item.type === "error"))) ? <details className="group mt-5 rounded-lg border bg-muted/30">
-        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium"><span>执行轨迹 · {details.length} 条</span><ChevronDown className="size-4 transition-transform group-open:rotate-180" /></summary>
+        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium"><span>{text(`执行轨迹 · ${details.length} 条`, `Execution trace · ${details.length}`)}</span><ChevronDown className="size-4 transition-transform group-open:rotate-180" /></summary>
         <div className="flex flex-col gap-2 border-t p-3">
           {view.historyError !== null ? <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{view.historyError}</div> : null}
           {details.map((item) => <EventRow key={item.id} item={item} />)}
@@ -295,16 +291,17 @@ const RunBlock = ({ view }: { view: RunView }) => {
 };
 
 const EventRow = ({ item }: { item: RunEvent }) => {
+  const { text } = useI18n();
   const content = eventContent(item);
-  if (item.type === "error") return <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive" role="alert">{String(content.message ?? "运行失败")}</div>;
+  if (item.type === "error") return <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive" role="alert">{String(content.message ?? text("运行失败", "Run failed"))}</div>;
   if (item.type === "status") {
     if (typeof content.text !== "string") return null;
-    return <div className="rounded-md border bg-background p-3 text-sm"><span className="mr-2 font-medium text-muted-foreground">状态</span>{content.text}</div>;
+    return <div className="rounded-md border bg-background p-3 text-sm"><span className="mr-2 font-medium text-muted-foreground">{text("状态", "Status")}</span>{content.text}</div>;
   }
   if (item.type === "tool") {
     const status = String(content.status ?? "running");
-    const label = status === "completed" ? "已完成" : status === "failed" ? "失败" : "运行中";
-    return <details className="rounded-md border bg-background"><summary className="flex cursor-pointer items-center gap-2 p-3 text-sm"><span className="text-muted-foreground">工具</span><strong>{String(content.title ?? content.name ?? "工具调用")}</strong><Badge className="ml-auto" variant="outline">{label}</Badge></summary><pre className="overflow-auto border-t p-3 text-xs">{JSON.stringify(content, null, 2)}</pre></details>;
+    const label = status === "completed" ? text("已完成", "Completed") : status === "failed" ? text("失败", "Failed") : text("运行中", "Running");
+    return <details className="rounded-md border bg-background"><summary className="flex cursor-pointer items-center gap-2 p-3 text-sm"><span className="text-muted-foreground">{text("工具", "Tool")}</span><strong>{String(content.title ?? content.name ?? text("工具调用", "Tool call"))}</strong><Badge className="ml-auto" variant="outline">{label}</Badge></summary><pre className="overflow-auto border-t p-3 text-xs">{JSON.stringify(content, null, 2)}</pre></details>;
   }
   return null;
 };

@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { App } from "../src/web/app.js";
+import { I18nProvider } from "../src/web/i18n.js";
 import { SessionPage } from "../src/web/pages/session-page.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
@@ -174,7 +175,7 @@ describe("最小管理界面", () => {
     expect(await screen.findByText("已经完成")).toBeInTheDocument();
     expect(screen.getByText("已完成")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "取消运行" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("发送给 Agent")).toBeEnabled();
+    expect(screen.getByLabelText("发送给智能体")).toBeEnabled();
     expect(fetchEventSourceMock).not.toHaveBeenCalled();
   });
 
@@ -204,7 +205,7 @@ describe("最小管理界面", () => {
     expect(screen.getByText("检查配置")).toBeInTheDocument();
     expect(screen.getByText("配置正常")).toBeInTheDocument();
     expect(screen.getByText("历史加载失败：历史服务暂不可用")).toBeInTheDocument();
-    expect(screen.getByLabelText("发送给 Agent")).toBeEnabled();
+    expect(screen.getByLabelText("发送给智能体")).toBeEnabled();
   });
 
   it("初始加载期间和失败后禁止发送，重试可恢复且旧请求不会覆盖新 Session", async () => {
@@ -226,20 +227,20 @@ describe("最小管理界面", () => {
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    const rendered = render(<MemoryRouter><SessionPage sessionId="session-old" /></MemoryRouter>);
-    expect(screen.getByLabelText("发送给 Agent")).toBeDisabled();
+    const rendered = render(<I18nProvider><MemoryRouter><SessionPage sessionId="session-old" /></MemoryRouter></I18nProvider>);
+    expect(screen.getByLabelText("发送给智能体")).toBeDisabled();
     expect(screen.getByRole("button", { name: "发送" })).toBeDisabled();
-    fireEvent.submit(screen.getByLabelText("发送给 Agent").closest("form")!);
+    fireEvent.submit(screen.getByLabelText("发送给智能体").closest("form")!);
     expect(fetchMock.mock.calls.some(([input]) => requestUrl(input) === "/api/sessions/session-old/runs")).toBe(false);
 
-    rendered.rerender(<MemoryRouter><SessionPage sessionId="session-new" /></MemoryRouter>);
+    rendered.rerender(<I18nProvider><MemoryRouter><SessionPage sessionId="session-new" /></MemoryRouter></I18nProvider>);
     expect(await screen.findByRole("alert")).toHaveTextContent("Session 加载失败");
-    expect(screen.getByLabelText("发送给 Agent")).toBeDisabled();
+    expect(screen.getByLabelText("发送给智能体")).toBeDisabled();
     expect(screen.getByRole("button", { name: "重试加载" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "重试加载" }));
     expect(await screen.findByRole("heading", { name: "新 Session" })).toBeInTheDocument();
-    expect(screen.getByLabelText("发送给 Agent")).toBeEnabled();
+    expect(screen.getByLabelText("发送给智能体")).toBeEnabled();
 
     await act(async () => oldResponse.resolve(jsonResponse(oldSession)));
     expect(screen.queryByRole("heading", { name: "旧 Session" })).not.toBeInTheDocument();
@@ -302,7 +303,7 @@ describe("最小管理界面", () => {
     expect(await screen.findByText("先读取日志")).toBeInTheDocument();
     expect(screen.getByText("日志已读取")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByLabelText("发送给 Agent"), { target: { value: "修复它" } });
+    fireEvent.change(screen.getByLabelText("发送给智能体"), { target: { value: "修复它" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
 
     expect(await screen.findByText("修复它")).toBeInTheDocument();
@@ -337,9 +338,9 @@ describe("最小管理界面", () => {
       streams[0]!.options.onmessage({ data: JSON.stringify(event("run-1", 6, "status", { status: "succeeded" })) });
     });
     expect(screen.queryByRole("button", { name: "取消运行" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("发送给 Agent")).toBeEnabled();
+    expect(screen.getByLabelText("发送给智能体")).toBeEnabled();
 
-    fireEvent.change(screen.getByLabelText("发送给 Agent"), { target: { value: "继续验证" } });
+    fireEvent.change(screen.getByLabelText("发送给智能体"), { target: { value: "继续验证" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(await screen.findByText("继续验证")).toBeInTheDocument();
     await waitFor(() => expect(streams).toHaveLength(2));
@@ -424,7 +425,7 @@ describe("最小管理界面", () => {
     expect(screen.getByText("失败")).toBeInTheDocument();
     expect(screen.getByText("执行异常")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "取消运行" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("发送给 Agent")).toBeEnabled();
+    expect(screen.getByLabelText("发送给智能体")).toBeEnabled();
   });
 
   it("SSE 保持 open 但没有 terminal Event 时低频轮询 canonical Run 并收尾", async () => {
@@ -480,7 +481,7 @@ describe("最小管理界面", () => {
     expect(screen.getByText("已完成")).toBeInTheDocument();
     expect(screen.getByText("canonical result")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "取消运行" })).not.toBeInTheDocument();
-    expect(screen.getByLabelText("发送给 Agent")).toBeEnabled();
+    expect(screen.getByLabelText("发送给智能体")).toBeEnabled();
     expect(vi.getTimerCount()).toBe(0);
   });
 
