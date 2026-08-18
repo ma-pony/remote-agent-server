@@ -79,6 +79,7 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
   vi.stubGlobal("fetch", fetchMock);
 
   render(<App />);
+  await screen.findByRole("option", { name: session.title });
   fireEvent.change(await screen.findByLabelText("检查使用的会话"), { target: { value: session.id } });
   fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
   await waitFor(() => expect(checkBody).toEqual({ sessionId: session.id }));
