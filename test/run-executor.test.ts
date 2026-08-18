@@ -52,7 +52,7 @@ const setup = (
     "INSERT INTO sessions (id, agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
   ).run("session-1", agent.id, "Test session", "idle", workspacePath, createdAt, createdAt);
   const workspaceManager = new BtrfsWorkspaceManager({
-    workspaceTemplate: join(root, "template"),
+    projectEnvironmentsRoot: join(root, "environments"),
     sessionsRoot: join(root, "sessions"),
     commandRunner: { run: async () => ({ stdout: "", stderr: "" }) }
   });

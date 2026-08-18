@@ -15,14 +15,13 @@ import { WebhookDispatcher } from "./integrations/webhook-dispatcher.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { SecretStore } from "./mcp/secret-store.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
-import { importLegacyProjectEnvironment } from "./project-environments/import-legacy-project-environment.js";
 import { ProjectEnvironmentStore } from "./project-environments/project-environment-store.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { applyServicePath, removeServiceSecretsFromEnvironment } from "./runtime/service-path.js";
 import { RunRepository } from "./runs/run-repository.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import { type FileSystemInspector } from "./workspaces/apfs-workspace.js";
-import { systemCommandRunner, type CommandRunner } from "./workspaces/workspace-manager.js";
+import type { CommandRunner } from "./workspaces/workspace-manager.js";
 
 export type StartServerOptions = {
   env?: Record<string, string | undefined>;
@@ -63,7 +62,7 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     migrate(db);
     const workspaceManager = createWorkspaceManager({
       platform: options.platform,
-      workspaceTemplate: config.workspaceTemplate,
+      projectEnvironmentsRoot: config.projectEnvironmentsRoot,
       sessionsRoot: config.sessionsRoot,
       commandRunner: options.commandRunner,
       fileSystemInspector: options.fileSystemInspector
@@ -81,13 +80,6 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
         // The failed revision stays visible so its exact Workspace can be cleaned manually.
       }
     }
-    await importLegacyProjectEnvironment({
-      db,
-      store: projectEnvironmentStore,
-      workspaceTemplate: config.workspaceTemplate,
-      commandRunner: options.commandRunner ?? systemCommandRunner
-    });
-
     const integrationStore = new IntegrationStore({ db });
     const secrets = SecretStore.open({ dataDir: config.dataDir });
     let eventStore!: EventStore;

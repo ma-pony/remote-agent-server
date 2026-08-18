@@ -95,7 +95,6 @@ The application does not load `.env` by itself. Source it before `pnpm start`, o
 | `PORT` | No | `3000` | HTTP port. |
 | `DATA_DIR` | No | `/srv/remote-agent/data` | Runtime data and encryption key directory. |
 | `DATABASE_PATH` | No | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite database path. |
-| `WORKSPACE_TEMPLATE` | No | `/srv/remote-agent/template/workspace` | One-time import source for an older global workspace. |
 | `PROJECT_ENVIRONMENTS_ROOT` | No | `/srv/remote-agent/environments` | Immutable project environment revisions. |
 | `SESSIONS_ROOT` | No | `/srv/remote-agent/sessions` | Isolated session workspaces. |
 | `MAX_CONCURRENT_RUNS` | No | `4` | Maximum concurrently executing runs. |

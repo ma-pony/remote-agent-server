@@ -11,13 +11,13 @@ import {
 } from "./workspace-manager.js";
 
 export type ApfsWorkspaceManagerDependencies = {
-  workspaceTemplate: string;
+  projectEnvironmentsRoot: string;
   sessionsRoot: string;
   commandRunner: CommandRunner;
   fileSystemInspector?: FileSystemInspector;
 };
 
-const APFS_CHECK_ERROR = "macOS workspace requires template and sessions on the same APFS volume";
+const APFS_CHECK_ERROR = "macOS workspace requires environments and sessions on the same APFS volume";
 const APFS_FILE_SYSTEM_TYPE = 26;
 
 export interface FileSystemInspector {
@@ -40,37 +40,37 @@ export const nodeFileSystemInspector: FileSystemInspector = {
  * Creates isolated writable APFS clones for Sessions on macOS.
  */
 export class ApfsWorkspaceManager implements WorkspaceManager {
-  private readonly workspaceTemplate: string;
+  private readonly projectEnvironmentsRoot: string;
   private readonly sessionsRoot: string;
   private readonly commandRunner: CommandRunner;
   private readonly fileSystemInspector: FileSystemInspector;
 
   constructor({
-    workspaceTemplate,
+    projectEnvironmentsRoot,
     sessionsRoot,
     commandRunner,
     fileSystemInspector = nodeFileSystemInspector
   }: ApfsWorkspaceManagerDependencies) {
-    this.workspaceTemplate = workspaceTemplate;
+    this.projectEnvironmentsRoot = projectEnvironmentsRoot;
     this.sessionsRoot = sessionsRoot;
     this.commandRunner = commandRunner;
     this.fileSystemInspector = fileSystemInspector;
   }
 
   /**
-   * Verifies that template and Sessions share one APFS volume.
+   * Verifies that project environments and Sessions share one APFS volume.
    */
   async check(): Promise<void> {
     try {
-      const templateType = (await this.fileSystemInspector.statfs(this.workspaceTemplate)).type;
+      const environmentsType = (await this.fileSystemInspector.statfs(this.projectEnvironmentsRoot)).type;
       const sessionsType = (await this.fileSystemInspector.statfs(this.sessionsRoot)).type;
-      const templateDevice = (await this.fileSystemInspector.stat(this.workspaceTemplate)).dev;
+      const environmentsDevice = (await this.fileSystemInspector.stat(this.projectEnvironmentsRoot)).dev;
       const sessionsDevice = (await this.fileSystemInspector.stat(this.sessionsRoot)).dev;
 
       if (
-        templateType !== APFS_FILE_SYSTEM_TYPE
+        environmentsType !== APFS_FILE_SYSTEM_TYPE
         || sessionsType !== APFS_FILE_SYSTEM_TYPE
-        || templateDevice !== sessionsDevice
+        || environmentsDevice !== sessionsDevice
       ) {
         throw new WorkspaceCheckError(APFS_CHECK_ERROR);
       }
@@ -80,9 +80,6 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
     }
   }
 
-  /**
-   * Creates the Session directories and its writable APFS clone.
-   */
   /**
    * Creates a Session from one explicitly selected environment revision.
    */
@@ -105,9 +102,6 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
     return { workspacePath, runtimePath, browserProfilePath };
   }
 
-  /**
-   * Removes a newly-created APFS Session after persistence fails.
-   */
   /** Removes a newly-created Session directory. */
   async deleteSession(id: string): Promise<void> {
     await rm(join(this.sessionsRoot, id), { force: true, recursive: true });

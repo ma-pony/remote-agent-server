@@ -11,7 +11,7 @@ import {
 } from "./workspace-manager.js";
 
 export type BtrfsWorkspaceManagerDependencies = {
-  workspaceTemplate: string;
+  projectEnvironmentsRoot: string;
   sessionsRoot: string;
   commandRunner: CommandRunner;
 };
@@ -20,30 +20,31 @@ export type BtrfsWorkspaceManagerDependencies = {
  * Creates isolated writable Btrfs workspace snapshots for Sessions.
  */
 export class BtrfsWorkspaceManager implements WorkspaceManager {
-  private readonly workspaceTemplate: string;
+  private readonly projectEnvironmentsRoot: string;
   private readonly sessionsRoot: string;
   private readonly commandRunner: CommandRunner;
 
-  constructor({ workspaceTemplate, sessionsRoot, commandRunner }: BtrfsWorkspaceManagerDependencies) {
-    this.workspaceTemplate = workspaceTemplate;
+  constructor({ projectEnvironmentsRoot, sessionsRoot, commandRunner }: BtrfsWorkspaceManagerDependencies) {
+    this.projectEnvironmentsRoot = projectEnvironmentsRoot;
     this.sessionsRoot = sessionsRoot;
     this.commandRunner = commandRunner;
   }
 
   /**
-   * Verifies that the configured workspace template is a Btrfs subvolume.
+   * Verifies that project environments and Sessions use one Btrfs filesystem.
    */
   async check(): Promise<void> {
     try {
-      await this.commandRunner.run("btrfs", ["subvolume", "show", this.workspaceTemplate]);
+      await this.commandRunner.run("btrfs", ["filesystem", "show", this.projectEnvironmentsRoot]);
+      await this.commandRunner.run("btrfs", ["filesystem", "show", this.sessionsRoot]);
+      const environmentsDevice = (await stat(this.projectEnvironmentsRoot)).dev;
+      const sessionsDevice = (await stat(this.sessionsRoot)).dev;
+      if (environmentsDevice !== sessionsDevice) throw new Error("different filesystems");
     } catch (_error) {
-      throw new WorkspaceCheckError("Linux workspace requires Btrfs");
+      throw new WorkspaceCheckError("Linux workspace requires environments and sessions on the same Btrfs filesystem");
     }
   }
 
-  /**
-   * Creates the Session directories and its writable template snapshot.
-   */
   /**
    * Creates a Session from one explicitly selected environment revision.
    */
@@ -70,9 +71,6 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
     return { workspacePath, runtimePath, browserProfilePath };
   }
 
-  /**
-   * Removes a newly-created snapshot after Session persistence fails.
-   */
   /** Removes a newly-created Session snapshot and its runtime directories. */
   async deleteSession(id: string): Promise<void> {
     const sessionPath = join(this.sessionsRoot, id);

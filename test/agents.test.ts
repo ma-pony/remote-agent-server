@@ -46,9 +46,11 @@ const createTestApp = async (): Promise<{
       apiToken,
       dataDir,
       databasePath: ":memory:",
-      workspaceTemplate: "/unused/template",
+      projectEnvironmentsRoot: "/unused/environments",
       sessionsRoot: "/unused/sessions",
-      maxConcurrentRuns: 4
+      maxConcurrentRuns: 4,
+      projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
+      projectPrepareTimeoutMs: 30 * 60 * 1000
     },
     db,
     runtime: createFakeRuntime()

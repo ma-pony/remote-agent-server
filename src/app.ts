@@ -101,7 +101,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     fetch: deps.webhookFetch
   });
   const workspaceManager = deps.workspaceManager ?? createWorkspaceManager({
-    workspaceTemplate: deps.config.workspaceTemplate,
+    projectEnvironmentsRoot: deps.config.projectEnvironmentsRoot,
     sessionsRoot: deps.config.sessionsRoot,
     commandRunner: deps.commandRunner
   });
@@ -129,10 +129,10 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
       store: projectEnvironmentStore,
       workspaceManager,
       commands: new SystemProjectEnvironmentCommands(),
-      projectEnvironmentsRoot: deps.config.projectEnvironmentsRoot ?? "/srv/remote-agent/environments",
-      prepareTimeoutMs: deps.config.projectPrepareTimeoutMs ?? 30 * 60 * 1000
+      projectEnvironmentsRoot: deps.config.projectEnvironmentsRoot,
+      prepareTimeoutMs: deps.config.projectPrepareTimeoutMs
     }),
-    intervalMs: deps.config.projectEnvironmentCheckIntervalMs ?? 3 * 60 * 60 * 1000
+    intervalMs: deps.config.projectEnvironmentCheckIntervalMs
   });
   const executor = new RunExecutor({ runtime, skillProjector, runRepository, eventStore, sessionManager, mcpPreparer });
   const scheduler = new RunScheduler({

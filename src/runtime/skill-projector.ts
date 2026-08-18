@@ -13,8 +13,7 @@ export type SkillProjectionSession = {
   workspacePath: string;
 };
 
-const legacyManagedDirectory = "_remote-agent-managed";
-const managedPrefix = `${legacyManagedDirectory}-`;
+const managedPrefix = "_remote-agent-managed-";
 
 export type SkillProjectorFileSystem = {
   exists(path: string): boolean;
@@ -37,7 +36,7 @@ const nodeFileSystem: SkillProjectorFileSystem = {
 };
 
 /**
- * Projects an Agent's managed Skills without touching template-owned Skills.
+ * Projects an Agent's managed Skills without touching project-owned Skills.
  */
 export class SkillProjector {
   private readonly fileSystem: SkillProjectorFileSystem;
@@ -53,8 +52,8 @@ export class SkillProjector {
     const source = join(agentDirectory, "skills");
     const skillsRoot = this.skillsRoot(agent, session);
     const token = randomUUID();
-    const temporary = join(skillsRoot, `.${legacyManagedDirectory}.tmp-${token}`);
-    const backup = join(skillsRoot, `.${legacyManagedDirectory}.backup-${token}`);
+    const temporary = join(skillsRoot, `.remote-agent-skills.tmp-${token}`);
+    const backup = join(skillsRoot, `.remote-agent-skills.backup-${token}`);
     const movedExisting: string[] = [];
     const installed: string[] = [];
 
@@ -68,9 +67,7 @@ export class SkillProjector {
         }
       }
 
-      const existingManaged = this.fileSystem.list(skillsRoot).filter(
-        (name) => name === legacyManagedDirectory || name.startsWith(managedPrefix)
-      );
+      const existingManaged = this.fileSystem.list(skillsRoot).filter((name) => name.startsWith(managedPrefix));
       for (const name of existingManaged) {
         this.fileSystem.rename(join(skillsRoot, name), join(backup, name));
         movedExisting.push(name);

@@ -42,9 +42,11 @@ const createApiTestApp = async (options: { runtime?: AgentRuntime; maxConcurrent
       apiToken,
       dataDir: join(root, "data"),
       databasePath: ":memory:",
-      workspaceTemplate: join(root, "template"),
+      projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot: join(root, "sessions"),
-      maxConcurrentRuns: options.maxConcurrentRuns ?? 2
+      maxConcurrentRuns: options.maxConcurrentRuns ?? 2,
+      projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
+      projectPrepareTimeoutMs: 30 * 60 * 1000
     },
     db,
     runtime: options.runtime ?? createFakeRuntime(),
@@ -706,7 +708,6 @@ describe("Server startup and shutdown", () => {
       API_TOKEN: apiToken,
       DATA_DIR: join(root, "data"),
       DATABASE_PATH: join(root, "server.sqlite3"),
-      WORKSPACE_TEMPLATE: join(root, "template"),
       PROJECT_ENVIRONMENTS_ROOT: join(root, "environments"),
       SESSIONS_ROOT: join(root, "sessions"),
       MAX_CONCURRENT_RUNS: "1"
@@ -766,8 +767,11 @@ describe("Server startup and shutdown", () => {
       expect(delivery).toEqual({ status: "succeeded" });
     });
 
-    expect(order).toEqual(["check", "runtime", "listen"]);
-    expect(commandRunner.run).toHaveBeenCalledWith("btrfs", ["subvolume", "show", join(root, "template")]);
+    expect(order).toEqual(["check", "check", "runtime", "listen"]);
+    expect(commandRunner.run.mock.calls).toEqual([
+      ["btrfs", ["filesystem", "show", join(root, "environments")]],
+      ["btrfs", ["filesystem", "show", join(root, "sessions")]]
+    ]);
     expect(runtime.startTurn).toHaveBeenCalledTimes(1);
     expect(webhookFetch).toHaveBeenCalledTimes(1);
     expect(runtime.startTurn).toHaveBeenCalledWith({
@@ -793,7 +797,7 @@ describe("Server startup and shutdown", () => {
         run: async () => Promise.reject(new Error("not a btrfs subvolume"))
       }),
       platform: "linux"
-    })).rejects.toThrow("Linux workspace requires Btrfs");
+    })).rejects.toThrow("Linux workspace requires environments and sessions on the same Btrfs filesystem");
 
     const observer = openDatabase(databasePath);
     expect(observer.prepare("SELECT status, error FROM runs WHERE id = 'old-run'").get()).toEqual({
@@ -839,9 +843,9 @@ describe("Server startup and shutdown", () => {
     await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
 
     expect(fileSystemCalls).toEqual([
-      { operation: "statfs", path: join(root, "template") },
+      { operation: "statfs", path: join(root, "environments") },
       { operation: "statfs", path: join(root, "sessions") },
-      { operation: "stat", path: join(root, "template") },
+      { operation: "stat", path: join(root, "environments") },
       { operation: "stat", path: join(root, "sessions") }
     ]);
     expect(commandRunner.run).not.toHaveBeenCalled();

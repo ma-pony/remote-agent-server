@@ -129,9 +129,11 @@ describe("Agent Skills API", () => {
         apiToken,
         dataDir,
         databasePath: ":memory:",
-        workspaceTemplate: "/unused/template",
+        projectEnvironmentsRoot: "/unused/environments",
         sessionsRoot: "/unused/sessions",
-        maxConcurrentRuns: 1
+        maxConcurrentRuns: 1,
+        projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
+        projectPrepareTimeoutMs: 30 * 60 * 1000
       },
       db,
       runtime: createFakeRuntime(),

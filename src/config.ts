@@ -6,7 +6,6 @@ export type AppConfig = {
   apiToken: string;
   dataDir: string;
   databasePath: string;
-  workspaceTemplate: string;
   projectEnvironmentsRoot: string;
   sessionsRoot: string;
   maxConcurrentRuns: number;
@@ -20,7 +19,6 @@ const configSchema = z.object({
   API_TOKEN: z.string().min(1),
   DATA_DIR: z.string().default("/srv/remote-agent/data"),
   DATABASE_PATH: z.string().default("/srv/remote-agent/data/remote-agent.sqlite3"),
-  WORKSPACE_TEMPLATE: z.string().default("/srv/remote-agent/template/workspace"),
   PROJECT_ENVIRONMENTS_ROOT: z.string().default("/srv/remote-agent/environments"),
   SESSIONS_ROOT: z.string().default("/srv/remote-agent/sessions"),
   MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().default(4),
@@ -40,7 +38,6 @@ export const loadConfig = (env: Record<string, string | undefined>): AppConfig =
     apiToken: config.API_TOKEN,
     dataDir: config.DATA_DIR,
     databasePath: config.DATABASE_PATH,
-    workspaceTemplate: config.WORKSPACE_TEMPLATE,
     projectEnvironmentsRoot: config.PROJECT_ENVIRONMENTS_ROOT,
     sessionsRoot: config.SESSIONS_ROOT,
     maxConcurrentRuns: config.MAX_CONCURRENT_RUNS,

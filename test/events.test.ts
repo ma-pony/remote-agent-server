@@ -53,9 +53,11 @@ const createEventApp = async () => {
       apiToken,
       dataDir,
       databasePath: ":memory:",
-      workspaceTemplate: join(dataDir, "template"),
+      projectEnvironmentsRoot: join(dataDir, "environments"),
       sessionsRoot: join(dataDir, "sessions"),
-      maxConcurrentRuns: 2
+      maxConcurrentRuns: 2,
+      projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
+      projectPrepareTimeoutMs: 30 * 60 * 1000
     },
     db,
     runtime: createFakeRuntime(),

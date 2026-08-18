@@ -13,19 +13,18 @@ macOS 部署应使用实际登录桌面的普通用户，不使用 root，也不
 ```bash
 REMOTE_AGENT_ROOT="$HOME/Library/Application Support/remote-agent-server"
 mkdir -p "$REMOTE_AGENT_ROOT/data"
-mkdir -p "$REMOTE_AGENT_ROOT/template/workspace"
 mkdir -p "$REMOTE_AGENT_ROOT/environments"
 mkdir -p "$REMOTE_AGENT_ROOT/sessions"
 
-TEMPLATE_DEVICE="$(df "$REMOTE_AGENT_ROOT/template/workspace" | awk 'NR == 2 { print $1 }')"
+ENVIRONMENTS_DEVICE="$(df "$REMOTE_AGENT_ROOT/environments" | awk 'NR == 2 { print $1 }')"
 SESSIONS_DEVICE="$(df "$REMOTE_AGENT_ROOT/sessions" | awk 'NR == 2 { print $1 }')"
-test "$TEMPLATE_DEVICE" = "$SESSIONS_DEVICE"
-diskutil info "$TEMPLATE_DEVICE" | grep 'File System Personality:.*APFS'
+test "$ENVIRONMENTS_DEVICE" = "$SESSIONS_DEVICE"
+diskutil info "$ENVIRONMENTS_DEVICE" | grep 'File System Personality:.*APFS'
 ```
 
-`template/workspace`、`environments/` 和 `sessions/` 必须位于同一个 APFS Volume。服务启动时会再次检查文件系统类型和 Volume；不符合时直接拒绝启动。
+`environments/` 和 `sessions/` 必须位于同一个 APFS Volume。服务启动时会再次检查文件系统类型和 Volume；不符合时直接拒绝启动。
 
-`WORKSPACE_TEMPLATE` 只用于首次升级时导入原有全局 Workspace。日常项目和依赖由页面中的“项目环境”维护：添加 Git 地址和可选准备命令后，系统自动构建不可变环境版本；每三小时检查远程默认分支，也可点击“立即检查”。新 Session 通过 `cp -cR` 从 Agent 当前环境版本创建独立 APFS Clone，不会重新 clone 或安装依赖。
+项目和依赖由页面中的“项目环境”维护：添加 Git 地址和可选准备命令后，系统自动构建不可变环境版本；每三小时检查远程默认分支，也可点击“立即检查”。新 Session 通过 `cp -cR` 从 Agent 当前环境版本创建独立 APFS Clone，不会重新 clone 或安装依赖。
 
 ### 2. 安装、构建并配置环境
 
@@ -47,7 +46,6 @@ PORT=3000
 API_TOKEN=替换为刚生成的随机值
 DATA_DIR="/Users/当前用户/Library/Application Support/remote-agent-server/data"
 DATABASE_PATH="/Users/当前用户/Library/Application Support/remote-agent-server/data/remote-agent.sqlite3"
-WORKSPACE_TEMPLATE="/Users/当前用户/Library/Application Support/remote-agent-server/template/workspace"
 PROJECT_ENVIRONMENTS_ROOT="/Users/当前用户/Library/Application Support/remote-agent-server/environments"
 SESSIONS_ROOT="/Users/当前用户/Library/Application Support/remote-agent-server/sessions"
 MAX_CONCURRENT_RUNS=4
@@ -140,7 +138,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.remote-agent-
 
 ## Linux：Btrfs 原生部署
 
-以下示例使用发布目录 `/opt/remote-agent-server` 和 Btrfs 挂载点 `/srv/remote-agent`。请按实际发行版本替换项目路径，但不要让导入 Workspace、项目环境和 Session 根目录跨越不同的 Btrfs 文件系统。
+以下示例使用发布目录 `/opt/remote-agent-server` 和 Btrfs 挂载点 `/srv/remote-agent`。请按实际发行版本替换项目路径，但不要让项目环境和 Session 根目录跨越不同的 Btrfs 文件系统。
 
 ## 1. 创建专用用户和 Btrfs 目录
 
@@ -149,24 +147,26 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.remote-agent-
 ```bash
 sudo useradd --create-home --shell /bin/bash remote-agent
 sudo install -d -o remote-agent -g remote-agent -m 0750 /srv/remote-agent
-sudo install -d -o remote-agent -g remote-agent -m 0750 /srv/remote-agent/template
-sudo btrfs subvolume create /srv/remote-agent/template/workspace
 sudo mkdir -p /srv/remote-agent/environments /srv/remote-agent/sessions /srv/remote-agent/data
 sudo chown -R remote-agent:remote-agent /srv/remote-agent
-sudo -u remote-agent btrfs subvolume show /srv/remote-agent/template/workspace
+sudo -u remote-agent btrfs filesystem show /srv/remote-agent/environments
+sudo -u remote-agent btrfs filesystem show /srv/remote-agent/sessions
 ```
 
-服务进程会直接调用 `btrfs subvolume show` 和 `btrfs subvolume snapshot`。因此必须在部署前用同一个用户验证创建快照也可行：
+服务进程会直接调用 `btrfs subvolume create` 和 `btrfs subvolume snapshot`。因此必须在部署前用同一个用户验证创建和快照也可行：
 
 ```bash
+sudo -u remote-agent btrfs subvolume create \
+  /srv/remote-agent/environments/permission-source
 sudo -u remote-agent btrfs subvolume snapshot \
-  /srv/remote-agent/template/workspace /srv/remote-agent/sessions/permission-check
+  /srv/remote-agent/environments/permission-source /srv/remote-agent/sessions/permission-check
 sudo -u remote-agent btrfs subvolume delete /srv/remote-agent/sessions/permission-check
+sudo -u remote-agent btrfs subvolume delete /srv/remote-agent/environments/permission-source
 ```
 
 推荐做法是让 `remote-agent` 对这个专用 Btrfs 挂载点及以上两个目录拥有写权限，如上所示。不要为服务配置 `NOPASSWD: btrfs`、不要以 root 运行 Node，也不要向整个 Node 进程授予 `CAP_SYS_ADMIN`；该 capability 过宽。若当前内核/挂载策略仍拒绝上述 `sudo -u remote-agent` 检查，此版本不能在该挂载配置安全部署：先调整为同一服务用户可创建快照的专用 Btrfs 挂载，或在后续版本引入只允许固定快照参数的独立受限 helper。
 
-导入用 Workspace 和每个项目环境版本都是 Btrfs subvolume，内部不得嵌套其他 subvolume。`environments/`、`sessions/` 和导入用 Workspace 必须在同一 Btrfs 文件系统上；`data/` 也应归 `remote-agent` 所有。
+每个项目环境版本和 Session Workspace 都是 Btrfs subvolume，内部不得嵌套其他 subvolume。`environments/` 和 `sessions/` 必须在同一 Btrfs 文件系统上；`data/` 也应归 `remote-agent` 所有。
 
 ## 2. 安装发布目录
 
@@ -178,7 +178,7 @@ sudo rsync -a --delete --chown=remote-agent:remote-agent ./ /opt/remote-agent-se
 sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && corepack enable && pnpm install --frozen-lockfile'
 ```
 
-不要再由管理员手工更新全局模板。服务启动后，在“项目环境”页面创建环境、添加一个或多个 Git 项目，并为需要安装依赖的项目填写一次准备命令。系统在环境版本中 clone/update 和安装依赖，全部成功后才发布；失败不会替换当前版本。已有 Session 不会自动升级。
+服务启动后，在“项目环境”页面创建环境、添加一个或多个 Git 项目，并为需要安装依赖的项目填写一次准备命令。系统在环境版本中 clone/update 和安装依赖，全部成功后才发布；失败不会替换当前版本。已有 Session 不会自动升级。
 
 ## 3. 配置服务环境
 
@@ -219,7 +219,8 @@ Hermes 的模型配置必须写入服务为具体 Agent 创建的 home，不能�
 
 ```bash
 sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && pnpm build'
-sudo -u remote-agent btrfs subvolume show /srv/remote-agent/template/workspace
+sudo -u remote-agent btrfs filesystem show /srv/remote-agent/environments
+sudo -u remote-agent btrfs filesystem show /srv/remote-agent/sessions
 ```
 
 服务入口也会尝试读取 `remote-agent` 用户的登录 Shell PATH，作为 launchd/systemd 最小环境的兜底。

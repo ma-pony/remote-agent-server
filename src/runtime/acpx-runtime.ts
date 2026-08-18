@@ -575,7 +575,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     mcpServers: RuntimeSessionInput["mcpServers"] = []
   ): AcpRuntime {
     const options: AcpRuntimeOptions = {
-      cwd: this.config.workspaceTemplate,
+      cwd: this.config.projectEnvironmentsRoot,
       sessionStore: createRuntimeStore({ stateDir: join(this.config.dataDir, "acpx") }),
       agentRegistry,
       permissionMode: "approve-all",

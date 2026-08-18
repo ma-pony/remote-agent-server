@@ -95,7 +95,6 @@ curl --fail http://127.0.0.1:3000/api/health
 | `PORT` | 否 | `3000` | HTTP 端口。 |
 | `DATA_DIR` | 否 | `/srv/remote-agent/data` | 运行数据和加密主密钥目录。 |
 | `DATABASE_PATH` | 否 | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite 数据库路径。 |
-| `WORKSPACE_TEMPLATE` | 否 | `/srv/remote-agent/template/workspace` | 旧版全局 Workspace 的一次性导入来源。 |
 | `PROJECT_ENVIRONMENTS_ROOT` | 否 | `/srv/remote-agent/environments` | 不可变项目环境版本目录。 |
 | `SESSIONS_ROOT` | 否 | `/srv/remote-agent/sessions` | 独立 Session Workspace 目录。 |
 | `MAX_CONCURRENT_RUNS` | 否 | `4` | 同时执行的 Run 数量上限。 |

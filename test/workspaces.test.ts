@@ -63,28 +63,35 @@ afterEach(() => {
 describe("BtrfsWorkspaceManager", () => {
   it("Btrfs 检查失败时返回明确的文件系统错误", async () => {
     const manager: WorkspaceManager = new BtrfsWorkspaceManager({
-      workspaceTemplate: "/template",
+      projectEnvironmentsRoot: "/environments",
       sessionsRoot: "/sessions",
       commandRunner: { run: async () => Promise.reject(new Error("not btrfs")) }
     });
 
     await expect(manager.check()).rejects.toEqual(
-      new WorkspaceCheckError("Linux workspace requires Btrfs")
+      new WorkspaceCheckError("Linux workspace requires environments and sessions on the same Btrfs filesystem")
     );
   });
 
-  it("通过可注入命令边界检查模板 Subvolume", async () => {
+  it("检查项目环境和 Session 根目录位于同一 Btrfs 文件系统", async () => {
     const root = createTempDir();
+    const projectEnvironmentsRoot = join(root, "environments");
+    const sessionsRoot = join(root, "sessions");
+    mkdirSync(projectEnvironmentsRoot);
+    mkdirSync(sessionsRoot);
     const { runner, calls } = createRunner();
     const manager = new BtrfsWorkspaceManager({
-      workspaceTemplate: join(root, "template"),
-      sessionsRoot: join(root, "sessions"),
+      projectEnvironmentsRoot,
+      sessionsRoot,
       commandRunner: runner
     });
 
     await manager.check();
 
-    expect(calls).toEqual([{ command: "btrfs", args: ["subvolume", "show", join(root, "template")] }]);
+    expect(calls).toEqual([
+      { command: "btrfs", args: ["filesystem", "show", projectEnvironmentsRoot] },
+      { command: "btrfs", args: ["filesystem", "show", sessionsRoot] }
+    ]);
   });
 
   it("创建 Session 目录和模板快照", async () => {
@@ -104,7 +111,9 @@ describe("BtrfsWorkspaceManager", () => {
         return { stdout: "", stderr: "" };
       }
     };
-    const manager = new BtrfsWorkspaceManager({ workspaceTemplate: template, sessionsRoot, commandRunner: runner });
+    const manager = new BtrfsWorkspaceManager({
+      projectEnvironmentsRoot: join(root, "environments"), sessionsRoot, commandRunner: runner
+    });
 
     const workspace = await manager.createSession("session-123", template);
 
@@ -130,7 +139,7 @@ describe("BtrfsWorkspaceManager", () => {
     const copiedRevision = join(root, "environment-v3");
     const { runner, calls } = createRunner();
     const manager = new BtrfsWorkspaceManager({
-      workspaceTemplate: join(root, "legacy-template"),
+      projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot,
       commandRunner: runner
     });
@@ -152,7 +161,7 @@ describe("BtrfsWorkspaceManager", () => {
     const root = createTempDir();
     const sessionsRoot = join(root, "sessions");
     const manager = new BtrfsWorkspaceManager({
-      workspaceTemplate: join(root, "template"),
+      projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot,
       commandRunner: { run: async () => Promise.reject(new Error("snapshot failed")) }
     });
@@ -169,7 +178,7 @@ describe("BtrfsWorkspaceManager", () => {
     mkdirSync(workspacePath, { recursive: true });
     const { runner, calls } = createRunner();
     const manager = new BtrfsWorkspaceManager({
-      workspaceTemplate: join(root, "template"),
+      projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot,
       commandRunner: runner
     });
@@ -182,13 +191,13 @@ describe("BtrfsWorkspaceManager", () => {
 });
 
 describe("ApfsWorkspaceManager", () => {
-  it("检查模板和 Sessions 根目录位于同一 APFS Volume", async () => {
+  it("检查项目环境和 Sessions 根目录位于同一 APFS Volume", async () => {
     const root = createTempDir();
-    const template = join(root, "template");
+    const projectEnvironmentsRoot = join(root, "environments");
     const sessionsRoot = join(root, "sessions");
     const { fileSystemInspector, calls } = createFileSystemInspector([26, 26], [42, 42]);
     const manager = new ApfsWorkspaceManager({
-      workspaceTemplate: template,
+      projectEnvironmentsRoot,
       sessionsRoot,
       commandRunner: createRunner().runner,
       fileSystemInspector
@@ -197,9 +206,9 @@ describe("ApfsWorkspaceManager", () => {
     await manager.check();
 
     expect(calls).toEqual([
-      { operation: "statfs", path: template },
+      { operation: "statfs", path: projectEnvironmentsRoot },
       { operation: "statfs", path: sessionsRoot },
-      { operation: "stat", path: template },
+      { operation: "stat", path: projectEnvironmentsRoot },
       { operation: "stat", path: sessionsRoot }
     ]);
   });
@@ -211,20 +220,20 @@ describe("ApfsWorkspaceManager", () => {
     const root = createTempDir();
     const { fileSystemInspector } = createFileSystemInspector(types, devices);
     const manager = new ApfsWorkspaceManager({
-      workspaceTemplate: join(root, "template"),
+      projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot: join(root, "sessions"),
       commandRunner: createRunner().runner,
       fileSystemInspector
     });
 
     await expect(manager.check()).rejects.toThrow(
-      "macOS workspace requires template and sessions on the same APFS volume"
+      "macOS workspace requires environments and sessions on the same APFS volume"
     );
   });
 
   it("文件系统命令失败时返回明确的检查错误", async () => {
     const manager = new ApfsWorkspaceManager({
-      workspaceTemplate: "/template",
+      projectEnvironmentsRoot: "/environments",
       sessionsRoot: "/sessions",
       commandRunner: createRunner().runner,
       fileSystemInspector: {
@@ -234,7 +243,7 @@ describe("ApfsWorkspaceManager", () => {
     });
 
     await expect(manager.check()).rejects.toEqual(
-      new WorkspaceCheckError("macOS workspace requires template and sessions on the same APFS volume")
+      new WorkspaceCheckError("macOS workspace requires environments and sessions on the same APFS volume")
     );
   });
 
@@ -250,7 +259,9 @@ describe("ApfsWorkspaceManager", () => {
         return { stdout: "", stderr: "" };
       }
     };
-    const manager = new ApfsWorkspaceManager({ workspaceTemplate: template, sessionsRoot, commandRunner: runner });
+    const manager = new ApfsWorkspaceManager({
+      projectEnvironmentsRoot: join(root, "environments"), sessionsRoot, commandRunner: runner
+    });
 
     const workspace = await manager.createSession("session-123", template);
 
@@ -269,7 +280,7 @@ describe("ApfsWorkspaceManager", () => {
     mkdirSync(source);
     const { runner, calls } = createRunner();
     const manager = new ApfsWorkspaceManager({
-      workspaceTemplate: join(root, "legacy-template"),
+      projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot,
       commandRunner: runner
     });
@@ -291,7 +302,7 @@ describe("ApfsWorkspaceManager", () => {
     const root = createTempDir();
     const sessionsRoot = join(root, "sessions");
     const manager = new ApfsWorkspaceManager({
-      workspaceTemplate: join(root, "template"),
+      projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot,
       commandRunner: { run: async () => Promise.reject(new Error("clone failed")) }
     });
@@ -306,7 +317,7 @@ describe("ApfsWorkspaceManager", () => {
     const sessionPath = join(sessionsRoot, "session-123");
     mkdirSync(sessionPath, { recursive: true });
     const manager = new ApfsWorkspaceManager({
-      workspaceTemplate: join(root, "template"),
+      projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot,
       commandRunner: createRunner().runner
     });
@@ -321,7 +332,7 @@ describe("ApfsWorkspaceManager", () => {
 describe("createWorkspaceManager", () => {
   it("按平台选择原生实现并拒绝其他平台", () => {
     const dependencies = {
-      workspaceTemplate: "/template",
+      projectEnvironmentsRoot: "/environments",
       sessionsRoot: "/sessions",
       commandRunner: createRunner().runner
     };

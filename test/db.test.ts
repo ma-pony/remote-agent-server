@@ -8,7 +8,6 @@ const validEnv = {
   API_TOKEN: "test-token",
   DATA_DIR: "/var/lib/remote-agent",
   DATABASE_PATH: "/var/lib/remote-agent/remote-agent.sqlite3",
-  WORKSPACE_TEMPLATE: "/var/lib/remote-agent/template/workspace",
   SESSIONS_ROOT: "/var/lib/remote-agent/sessions"
 };
 

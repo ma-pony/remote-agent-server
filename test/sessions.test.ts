@@ -55,16 +55,18 @@ const createTestApp = async (options: {
     apiToken,
     dataDir,
     databasePath: ":memory:",
-    workspaceTemplate: join(dataDir, "template"),
+    projectEnvironmentsRoot: join(dataDir, "environments"),
     sessionsRoot: join(dataDir, "sessions"),
-    maxConcurrentRuns: 4
+    maxConcurrentRuns: 4,
+    projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
+    projectPrepareTimeoutMs: 30 * 60 * 1000
   };
   const app = buildApp({
     config,
     db,
     runtime: options.runtime ?? createFakeRuntime(),
     workspaceManager: new BtrfsWorkspaceManager({
-      workspaceTemplate: config.workspaceTemplate,
+      projectEnvironmentsRoot: config.projectEnvironmentsRoot,
       sessionsRoot: config.sessionsRoot,
       commandRunner
     })
@@ -367,7 +369,7 @@ describe("Session API", () => {
     const runtime = createFakeRuntime();
     const agentManager = new AgentManager({ db, dataDir, runtime });
     const workspaceManager = new BtrfsWorkspaceManager({
-      workspaceTemplate: join(dataDir, "template"),
+      projectEnvironmentsRoot: join(dataDir, "environments"),
       sessionsRoot: join(dataDir, "sessions"),
       commandRunner
     });

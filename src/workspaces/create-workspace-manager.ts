@@ -9,7 +9,7 @@ import {
 
 export type CreateWorkspaceManagerInput = {
   platform?: NodeJS.Platform;
-  workspaceTemplate: string;
+  projectEnvironmentsRoot: string;
   sessionsRoot: string;
   commandRunner?: CommandRunner;
   fileSystemInspector?: FileSystemInspector;
@@ -20,12 +20,12 @@ export type CreateWorkspaceManagerInput = {
  */
 export const createWorkspaceManager = ({
   platform = process.platform,
-  workspaceTemplate,
+  projectEnvironmentsRoot,
   sessionsRoot,
   commandRunner = systemCommandRunner,
   fileSystemInspector
 }: CreateWorkspaceManagerInput): WorkspaceManager => {
-  const dependencies = { workspaceTemplate, sessionsRoot, commandRunner };
+  const dependencies = { projectEnvironmentsRoot, sessionsRoot, commandRunner };
 
   if (platform === "darwin") return new ApfsWorkspaceManager({ ...dependencies, fileSystemInspector });
   if (platform === "linux") return new BtrfsWorkspaceManager(dependencies);

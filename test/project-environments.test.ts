@@ -452,7 +452,6 @@ describe("Project environment API", () => {
         apiToken: "secret-token",
         dataDir: fixture.root,
         databasePath: ":memory:",
-        workspaceTemplate: join(fixture.root, "template"),
         projectEnvironmentsRoot: fixture.root,
         sessionsRoot: join(fixture.root, "sessions"),
         maxConcurrentRuns: 1,

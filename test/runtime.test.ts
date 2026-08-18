@@ -50,9 +50,11 @@ const makeConfig = (root: string): AppConfig => ({
   apiToken: "test-token",
   dataDir: join(root, "data"),
   databasePath: join(root, "data", "db.sqlite3"),
-  workspaceTemplate: join(root, "template"),
+  projectEnvironmentsRoot: join(root, "environments"),
   sessionsRoot: join(root, "sessions"),
-  maxConcurrentRuns: 4
+  maxConcurrentRuns: 4,
+  projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
+  projectPrepareTimeoutMs: 30 * 60 * 1000
 });
 
 const sessionInput = (root: string, overrides: Partial<RuntimeSessionInput> = {}): RuntimeSessionInput => ({
@@ -163,10 +165,8 @@ describe("SkillProjector", () => {
     const destination = join(root, ...destinationParts);
     mkdirSync(source, { recursive: true });
     mkdirSync(join(destination, "template-skill"), { recursive: true });
-    mkdirSync(join(destination, "_remote-agent-managed", "stale"), { recursive: true });
     writeFileSync(join(source, "SKILL.md"), "new skill");
     writeFileSync(join(destination, "template-skill", "SKILL.md"), "keep me");
-    writeFileSync(join(destination, "_remote-agent-managed", "stale", "SKILL.md"), "remove me");
     const memoryPath = join(config.dataDir, "agents", AGENT_ID, "MEMORY.md");
     writeFileSync(memoryPath, "remember this");
 
@@ -178,7 +178,6 @@ describe("SkillProjector", () => {
     expect(memory).toBe("remember this");
     expect(readFileSync(join(destination, "_remote-agent-managed-ticket-workflow", "SKILL.md"), "utf8")).toBe("new skill");
     expect(readFileSync(join(destination, "template-skill", "SKILL.md"), "utf8")).toBe("keep me");
-    expect(existsSync(join(destination, "_remote-agent-managed", "stale"))).toBe(false);
   });
 
   it("MEMORY.md 不存在时返回空文本", () => {
@@ -348,7 +347,7 @@ describe("AcpxAgentRuntime", () => {
     expect(acpxMocks.createRuntimeStore).toHaveBeenCalledWith({ stateDir: join(config.dataDir, "acpx") });
     const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
     expect(options).toMatchObject({
-      cwd: config.workspaceTemplate,
+      cwd: config.projectEnvironmentsRoot,
       permissionMode: "approve-all",
       nonInteractivePermissions: "fail"
     });
