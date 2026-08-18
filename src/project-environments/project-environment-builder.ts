@@ -92,8 +92,19 @@ export class ProjectEnvironmentBuilder {
     };
     const inputFingerprint = fingerprint(manifest.repositories);
     const current = this.dependencies.store.getCurrentRevision(environmentId);
+    const invalidRepositories = new Set<string>();
+    if (current !== undefined && current.workspacePath !== null) {
+      for (const { repository } of inspected) {
+        const destination = join(current.workspacePath, repository.name);
+        if (!await this.dependencies.commands.isRepository(destination, signal)) {
+          invalidRepositories.add(repository.name);
+        }
+      }
+    }
     this.dependencies.store.markChecked(environmentId);
-    if (current?.inputFingerprint === inputFingerprint) return { outcome: "unchanged" };
+    if (current?.inputFingerprint === inputFingerprint && invalidRepositories.size === 0) {
+      return { outcome: "unchanged" };
+    }
 
     const revisionId = randomUUID();
     const workspacePath = join(
@@ -125,7 +136,9 @@ export class ProjectEnvironmentBuilder {
       for (const { repository, state } of inspected) {
         const previous = previousByName.get(repository.name);
         const destination = join(workspacePath, repository.name);
-        const needsClone = previous === undefined || previous.gitUrl !== repository.gitUrl;
+        const needsClone = previous === undefined
+          || previous.gitUrl !== repository.gitUrl
+          || invalidRepositories.has(repository.name);
         const sourceChanged = needsClone || previous.commit !== state.commit || previous.defaultBranch !== state.defaultBranch;
         const prepareChanged = previous?.prepareCommand !== repository.prepareCommand;
         if (needsClone) {

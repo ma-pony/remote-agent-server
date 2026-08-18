@@ -31,9 +31,11 @@ const createBuilderFixture = () => {
   const calls: string[] = [];
   const commands: ProjectEnvironmentCommands = {
     inspect: async (repository) => ({ defaultBranch: "main", commit: remoteCommits.get(repository.name) ?? "commit-1" }),
+    isRepository: async (destination) => existsSync(join(destination, ".git", "HEAD")),
     clone: async (repository, destination) => {
       calls.push(`clone:${repository.name}`);
-      mkdirSync(destination, { recursive: true });
+      mkdirSync(join(destination, ".git"), { recursive: true });
+      writeFileSync(join(destination, ".git", "HEAD"), "ref: refs/heads/main\n");
     },
     update: async (repository, destination) => {
       calls.push(`update:${repository.name}`);
@@ -237,6 +239,24 @@ describe("ProjectEnvironmentBuilder", () => {
     expect(calls).toEqual([]);
     expect(store.listRevisions(environment.id)).toHaveLength(1);
     expect(store.get(environment.id)?.currentRevisionId).toBe(first.revisionId);
+    db.close();
+  });
+
+  it("当前项目副本损坏时重新克隆并发布完整版本", async () => {
+    const { db, store, calls, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" });
+    await builder.checkAndBuild(environment.id);
+    const currentWorkspace = store.getCurrentRevision(environment.id)?.workspacePath;
+    expect(currentWorkspace).not.toBeNull();
+    rmSync(join(currentWorkspace!, "api", ".git", "HEAD"));
+    calls.splice(0);
+
+    const rebuilt = await builder.checkAndBuild(environment.id);
+
+    expect(rebuilt).toMatchObject({ outcome: "published", revisionId: expect.any(String) });
+    expect(calls).toEqual(["clone:api", "prepare:api"]);
+    expect(existsSync(join(store.getCurrentRevision(environment.id)!.workspacePath!, "api", ".git", "HEAD"))).toBe(true);
     db.close();
   });
 

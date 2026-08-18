@@ -7,6 +7,7 @@ export type RemoteRepositoryState = { defaultBranch: string; commit: string };
 
 export interface ProjectEnvironmentCommands {
   inspect(repository: EnvironmentRepository, signal: AbortSignal): Promise<RemoteRepositoryState>;
+  isRepository(destination: string, signal: AbortSignal): Promise<boolean>;
   clone(
     repository: EnvironmentRepository,
     destination: string,
@@ -104,6 +105,17 @@ export class SystemProjectEnvironmentCommands implements ProjectEnvironmentComma
     const commit = stdout.match(/^([0-9a-fA-F]+)\s+HEAD$/m)?.[1];
     if (branch === undefined || commit === undefined) throw new Error("git_remote_default_branch_not_found");
     return { defaultBranch: branch, commit };
+  }
+
+  async isRepository(destination: string, signal: AbortSignal): Promise<boolean> {
+    try {
+      const { stdout } = await runProcess("git", ["rev-parse", "--is-inside-work-tree"], {
+        cwd: destination, environment: this.environment, signal
+      });
+      return stdout.trim() === "true";
+    } catch (_error) {
+      return false;
+    }
   }
 
   async clone(
