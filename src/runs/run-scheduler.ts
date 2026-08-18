@@ -131,16 +131,8 @@ export class RunScheduler {
     const attempts = this.retryAttempts.get(runId) ?? 0;
     if (attempts >= MAX_AUTOMATIC_RETRIES) {
       this.exhaustedRuns.add(runId);
-      try {
-        this.runRepository.failQueued(runId, "run_retry_exhausted");
-        const timer = this.retryTimers.get(runId);
-        if (timer !== undefined) clearTimeout(timer);
-        this.retryTimers.delete(runId);
-        this.retryAttempts.delete(runId);
-      } catch (_failureError) {
-        // The original scheduler failure remains observable and no further execution is attempted.
-      }
       this.reportExecutionError(new RunSchedulerError("run_retry_exhausted"), runId);
+      this.finalizeExhaustedRun(runId);
       return;
     }
     this.retryAttempts.set(runId, attempts + 1);
@@ -148,6 +140,27 @@ export class RunScheduler {
     const timer = setTimeout(() => {
       this.retryTimers.delete(runId);
       if (this.started) this.enqueue(runId);
+    }, this.retryDelayMs);
+    timer.unref?.();
+    this.retryTimers.set(runId, timer);
+  }
+
+  private finalizeExhaustedRun(runId: string): void {
+    try {
+      const run = this.runRepository.get(runId);
+      if (run?.status === "queued") this.runRepository.failQueued(runId, "run_retry_exhausted");
+      const timer = this.retryTimers.get(runId);
+      if (timer !== undefined) clearTimeout(timer);
+      this.retryTimers.delete(runId);
+      this.retryAttempts.delete(runId);
+      return;
+    } catch (_failureError) {
+      if (!this.started || this.retryTimers.has(runId)) return;
+    }
+
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(runId);
+      if (this.started) this.finalizeExhaustedRun(runId);
     }, this.retryDelayMs);
     timer.unref?.();
     this.retryTimers.set(runId, timer);

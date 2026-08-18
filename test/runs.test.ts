@@ -332,6 +332,59 @@ describe("RunScheduler", () => {
     }
   });
 
+  it("写入 exhausted 终态暂时失败时继续重试终态写入，不再执行 Run", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, seed } = createTestDatabase();
+      const session = seed.session();
+      const repository = new RunRepository({
+        db,
+        projection: {
+          onStarted: () => { throw new Error("persistent start projection failure"); },
+          onFinished: () => undefined,
+          afterCommit: () => undefined
+        }
+      });
+      const run = repository.create({ sessionId: session.id, input: "retry terminal write" });
+      const execute = vi.fn(async (runId: string) => repository.markRunning(runId));
+      const failQueued = repository.failQueued.bind(repository);
+      let terminalWriteLocked = true;
+      vi.spyOn(repository, "failQueued").mockImplementation((runId, error) => {
+        if (terminalWriteLocked) throw new Error("SQLITE_BUSY");
+        return failQueued(runId, error);
+      });
+      const scheduler = new RunScheduler({
+        runRepository: repository,
+        executor: { execute, cancel: async () => ({}) as Run },
+        maxConcurrentRuns: 1,
+        retryDelayMs: 1_000,
+        onExecutionError: () => undefined
+      });
+
+      scheduler.start();
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(execute).toHaveBeenCalledTimes(4);
+      expect(repository.get(run.id)).toMatchObject({ status: "queued", error: null });
+      expect(vi.getTimerCount()).toBe(1);
+
+      scheduler.enqueue(run.id);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(execute).toHaveBeenCalledTimes(4);
+
+      terminalWriteLocked = false;
+      await vi.advanceTimersByTimeAsync(500);
+
+      expect(execute).toHaveBeenCalledTimes(4);
+      expect(repository.get(run.id)).toMatchObject({ status: "failed", error: "run_retry_exhausted" });
+      expect(vi.getTimerCount()).toBe(0);
+      await scheduler.stop();
+      db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("markRunning 投影失败且 Run 仍 queued 时有界延迟重试成功", async () => {
     vi.useFakeTimers();
     try {
