@@ -24,6 +24,9 @@ const updateAgentSchema = z.object({
   message: "At least one field must be provided"
   }
 );
+const cloneAgentSchema = z.object({
+  name: z.string().trim().min(1)
+}).strict();
 
 const updateSkillSchema = z.object({ enabled: z.boolean() }).strict();
 const uploadSkillSchema = z.object({
@@ -89,6 +92,19 @@ export const registerAgentRoutes = (
 
     try {
       return reply.code(201).send(agentManager.create(parsed.data));
+    } catch (error) {
+      return handleAgentError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/agents/:id/clone", (request, reply) => {
+    const parsed = cloneAgentSchema.safeParse(request.body);
+    if (!parsed.success) return badRequest(reply, "Invalid Agent clone input");
+    try {
+      const id = parseId(request.params.id);
+      if (id === undefined) return notFound(reply);
+      const agent = agentManager.clone(id, parsed.data);
+      return agent === undefined ? notFound(reply) : reply.code(201).send(agent);
     } catch (error) {
       return handleAgentError(reply, error);
     }

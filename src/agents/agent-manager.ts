@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type Database from "better-sqlite3";
@@ -31,6 +31,10 @@ export type UpdateAgentInput = {
   enabled?: boolean;
   projectEnvironmentId?: number;
   instructions?: string;
+};
+
+export type CloneAgentInput = {
+  name: string;
 };
 
 export type AgentManagerDependencies = {
@@ -77,13 +81,9 @@ export class AgentManager {
         "INSERT INTO agents (name, provider, enabled, instructions, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
       )
       .run(input.name, input.provider, 1, instructions, input.projectEnvironmentId, createdAt, createdAt));
-    const agentDir = join(this.dataDir, "agents", String(id));
+    const agentDir = this.agentDirectory(id);
     try {
-      mkdirSync(join(agentDir, "skills"), { recursive: true });
-      for (const providerHome of ["claude", "codex", "hermes"]) {
-        mkdirSync(join(agentDir, "provider-home", providerHome), { recursive: true });
-      }
-      writeFileSync(join(agentDir, "MEMORY.md"), "", { flag: "a" });
+      this.initializeAgentDirectory(id);
     } catch (error) {
       this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
       throw error;
@@ -96,6 +96,128 @@ export class AgentManager {
       enabled: true,
       instructions,
       projectEnvironmentId: input.projectEnvironmentId,
+      createdAt,
+      updatedAt: createdAt
+    };
+  }
+
+  clone(id: number, input: CloneAgentInput): Agent | undefined {
+    const source = this.get(id);
+    if (source === undefined) return undefined;
+    if (source.projectEnvironmentId === null) throw new AgentManagerError("project_environment_unavailable");
+    this.requireReadyEnvironment(source.projectEnvironmentId);
+
+    const createdAt = new Date().toISOString();
+    let clonedId = 0;
+    try {
+      this.db.transaction(() => {
+        clonedId = insertedId(this.db.prepare(`
+          INSERT INTO agents
+            (name, provider, enabled, instructions, project_environment_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          input.name,
+          source.provider,
+          source.enabled ? 1 : 0,
+          source.instructions,
+          source.projectEnvironmentId,
+          createdAt,
+          createdAt
+        ));
+
+        const parameterIds = new Map<number, number>();
+        const parameters = this.db.prepare(`
+          SELECT id, key, label, description, required, secret
+          FROM agent_session_parameters WHERE agent_id = ? ORDER BY created_at ASC, id ASC
+        `).all(id) as Array<{
+          id: number; key: string; label: string; description: string | null; required: number; secret: number;
+        }>;
+        for (const parameter of parameters) {
+          const newId = insertedId(this.db.prepare(`
+            INSERT INTO agent_session_parameters
+              (agent_id, key, label, description, required, secret, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            clonedId,
+            parameter.key,
+            parameter.label,
+            parameter.description,
+            parameter.required,
+            parameter.secret,
+            createdAt,
+            createdAt
+          ));
+          parameterIds.set(parameter.id, newId);
+        }
+
+        const servers = this.db.prepare(`
+          SELECT id, name, transport, enabled, url, command, check_timeout_seconds
+          FROM agent_mcp_servers WHERE agent_id = ? ORDER BY created_at ASC, id ASC
+        `).all(id) as Array<{
+          id: number; name: string; transport: string; enabled: number; url: string | null;
+          command: string | null; check_timeout_seconds: number;
+        }>;
+        for (const server of servers) {
+          const newServerId = insertedId(this.db.prepare(`
+            INSERT INTO agent_mcp_servers
+              (agent_id, name, transport, enabled, url, command, check_timeout_seconds, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            clonedId,
+            server.name,
+            server.transport,
+            server.enabled,
+            server.url,
+            server.command,
+            server.check_timeout_seconds,
+            createdAt,
+            createdAt
+          ));
+          const values = this.db.prepare(`
+            SELECT kind, position, target_name, source_type, plain_value, encrypted_value,
+                   secret, session_parameter_id, runtime_key
+            FROM agent_mcp_values WHERE mcp_server_id = ? ORDER BY kind ASC, position ASC
+          `).all(server.id) as Array<{
+            kind: string; position: number; target_name: string | null; source_type: string;
+            plain_value: string | null; encrypted_value: string | null; secret: number;
+            session_parameter_id: number | null; runtime_key: string | null;
+          }>;
+          for (const value of values) {
+            this.db.prepare(`
+              INSERT INTO agent_mcp_values
+                (mcp_server_id, kind, position, target_name, source_type, plain_value,
+                 encrypted_value, secret, session_parameter_id, runtime_key)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+              newServerId,
+              value.kind,
+              value.position,
+              value.target_name,
+              value.source_type,
+              value.plain_value,
+              value.encrypted_value,
+              value.secret,
+              value.session_parameter_id === null ? null : parameterIds.get(value.session_parameter_id),
+              value.runtime_key
+            );
+          }
+        }
+
+        this.initializeAgentDirectory(clonedId);
+        this.copySkillConfiguration(id, clonedId);
+      }).immediate();
+    } catch (error) {
+      if (clonedId !== 0) rmSync(this.agentDirectory(clonedId), { recursive: true, force: true });
+      throw error;
+    }
+
+    return {
+      id: clonedId,
+      name: input.name,
+      provider: source.provider,
+      enabled: source.enabled,
+      instructions: source.instructions,
+      projectEnvironmentId: source.projectEnvironmentId,
       createdAt,
       updatedAt: createdAt
     };
@@ -163,6 +285,29 @@ export class AgentManager {
     const revision = this.projectEnvironmentStore.getCurrentRevision(id);
     if (revision?.status !== "ready" || revision.workspacePath === null) {
       throw new AgentManagerError("project_environment_unavailable");
+    }
+  }
+
+  private agentDirectory(id: number): string {
+    return join(this.dataDir, "agents", String(id));
+  }
+
+  private initializeAgentDirectory(id: number): void {
+    const agentDir = this.agentDirectory(id);
+    mkdirSync(join(agentDir, "skills"), { recursive: true });
+    for (const providerHome of ["claude", "codex", "hermes"]) {
+      mkdirSync(join(agentDir, "provider-home", providerHome), { recursive: true });
+    }
+    writeFileSync(join(agentDir, "MEMORY.md"), "", { flag: "a" });
+  }
+
+  private copySkillConfiguration(sourceId: number, destinationId: number): void {
+    for (const directory of ["skills", "skill-library"]) {
+      const source = join(this.agentDirectory(sourceId), directory);
+      if (!existsSync(source)) continue;
+      const destination = join(this.agentDirectory(destinationId), directory);
+      rmSync(destination, { recursive: true, force: true });
+      cpSync(source, destination, { recursive: true });
     }
   }
 

@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { constantTimeTokenEqual } from "../src/auth.js";
+import { SecretStore } from "../src/mcp/secret-store.js";
 import type { AgentRuntime, RuntimeDoctor, RuntimeSession, RuntimeSessionInput, RuntimeTurn, RuntimeTurnInput } from "../src/runtime/agent-runtime.js";
 import { createTestDatabase } from "./helpers.js";
 
@@ -75,6 +76,146 @@ afterEach(async () => {
 });
 
 describe("Agent API", () => {
+  it("复制 Agent 配置但不复制会话、接入端点和执行器运行数据", async () => {
+    const { app, dataDir, db, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: {
+        name: "主力 Codex",
+        provider: "codex",
+        projectEnvironmentId,
+        instructions: "先运行测试再给出结论。"
+      }
+    });
+    const source = created.json() as { id: number };
+    await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${source.id}`,
+      headers: authHeaders(),
+      payload: { enabled: false }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/agents/${source.id}/session-parameters`,
+      headers: authHeaders(),
+      payload: {
+        key: "tenant_token",
+        label: "租户令牌",
+        description: "每个会话单独配置",
+        required: true,
+        secret: true
+      }
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/agents/${source.id}/mcp-servers`,
+      headers: authHeaders(),
+      payload: {
+        name: "example_mcp",
+        transport: "http",
+        enabled: true,
+        url: "https://example.test/mcp",
+        checkTimeoutSeconds: 20,
+        headers: [
+          { name: "Authorization", source: "fixed", value: "Bearer fixed-secret", secret: true },
+          { name: "X-Tenant", source: "session_parameter", parameterKey: "tenant_token" }
+        ]
+      }
+    });
+
+    const sourceDir = join(dataDir, "agents", String(source.id));
+    for (const root of ["skills", "skill-library"]) {
+      const directory = join(sourceDir, root, "upload-review");
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "SKILL.md"), "# Review\n");
+    }
+    writeFileSync(join(sourceDir, "MEMORY.md"), "source memory");
+    mkdirSync(join(sourceDir, "provider-home", "codex", "sessions", "old"), { recursive: true });
+    writeFileSync(join(sourceDir, "provider-home", "codex", "sessions", "old", "rollout.jsonl"), "history");
+
+    const timestamp = "2026-08-19T00:00:00.000Z";
+    db.prepare(`
+      INSERT INTO sessions
+        (agent_id, title, status, workspace_path, instructions_snapshot, created_at, updated_at)
+      VALUES (?, ?, 'idle', ?, ?, ?, ?)
+    `).run(source.id, "旧会话", `/tmp/source-session-${source.id}`, "旧指令", timestamp, timestamp);
+    db.prepare(`
+      INSERT INTO integration_endpoints
+        (name, slug, agent_id, enabled, token_hash, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, ?, ?)
+    `).run("旧入口", `source-${source.id}`, source.id, `hash-${source.id}`, timestamp, timestamp);
+
+    const cloned = await app.inject({
+      method: "POST",
+      url: `/api/agents/${source.id}/clone`,
+      headers: authHeaders(),
+      payload: { name: "主力 Codex 副本" }
+    });
+
+    expect(cloned.statusCode).toBe(201);
+    expect(cloned.json()).toMatchObject({
+      name: "主力 Codex 副本",
+      provider: "codex",
+      enabled: false,
+      instructions: "先运行测试再给出结论。",
+      projectEnvironmentId
+    });
+    const clone = cloned.json() as { id: number };
+    expect(clone.id).not.toBe(source.id);
+
+    const parameters = await app.inject({
+      method: "GET",
+      url: `/api/agents/${clone.id}/session-parameters`,
+      headers: authHeaders()
+    });
+    expect(parameters.json()).toMatchObject([{
+      agentId: clone.id,
+      key: "tenant_token",
+      label: "租户令牌",
+      required: true,
+      secret: true
+    }]);
+    const servers = await app.inject({
+      method: "GET",
+      url: `/api/agents/${clone.id}/mcp-servers`,
+      headers: authHeaders()
+    });
+    expect(servers.json()).toMatchObject([{
+      agentId: clone.id,
+      name: "example_mcp",
+      enabled: true,
+      lastCheckedAt: null,
+      lastCheckStatus: null
+    }]);
+    const cloneServerId = (servers.json() as Array<{ id: number }>)[0]!.id;
+    const server = await app.inject({
+      method: "GET",
+      url: `/api/agents/${clone.id}/mcp-servers/${cloneServerId}`,
+      headers: authHeaders()
+    });
+    expect(server.json()).toMatchObject({
+      headers: [
+        { name: "Authorization", source: "fixed", secret: true, configured: true },
+        { name: "X-Tenant", source: "session_parameter", parameterKey: "tenant_token" }
+      ]
+    });
+    const encrypted = db.prepare(`
+      SELECT encrypted_value FROM agent_mcp_values
+      WHERE mcp_server_id = ? AND secret = 1
+    `).get(cloneServerId) as { encrypted_value: string };
+    expect(SecretStore.open({ dataDir }).decrypt(encrypted.encrypted_value)).toBe("Bearer fixed-secret");
+
+    const cloneDir = join(dataDir, "agents", String(clone.id));
+    expect(readFileSync(join(cloneDir, "skills", "upload-review", "SKILL.md"), "utf8")).toBe("# Review\n");
+    expect(readFileSync(join(cloneDir, "skill-library", "upload-review", "SKILL.md"), "utf8")).toBe("# Review\n");
+    expect(readFileSync(join(cloneDir, "MEMORY.md"), "utf8")).toBe("");
+    expect(existsSync(join(cloneDir, "provider-home", "codex", "sessions", "old"))).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM sessions WHERE agent_id = ?").get(clone.id)).toEqual({ count: 0 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM integration_endpoints WHERE agent_id = ?").get(clone.id)).toEqual({ count: 0 });
+  });
+
   it("按 ID 返回 Agent 详情，并对不存在的 Agent 返回 404", async () => {
     const { app, projectEnvironmentId } = await createTestApp();
     const created = await app.inject({

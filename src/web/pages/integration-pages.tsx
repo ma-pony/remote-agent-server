@@ -3,7 +3,7 @@ import {
   ArrowLeft, BookOpenText, Cable, Check, Clipboard, KeyRound, Play, Plus, RefreshCw, RotateCcw, Settings2,
   Trash2, Webhook, XCircle
 } from "lucide-react";
-import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams } from "react-router";
+import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from "react-router";
 
 import { PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -124,6 +124,8 @@ const mappingPayload = (parameters: AgentSessionParameter[], drafts: Record<stri
 export const IntegrationEndpointCreatePage = () => {
   const { text } = useI18n();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const requestedAgentId = searchParams.get("agentId");
   const [agents, setAgents] = useState<Agent[]>([]);
   const [parameters, setParameters] = useState<AgentSessionParameter[]>([]);
   const [drafts, setDrafts] = useState<Record<string, MappingDraft>>({});
@@ -138,10 +140,13 @@ export const IntegrationEndpointCreatePage = () => {
     const controller = new AbortController();
     void api<Agent[]>("/agents", { signal: controller.signal }).then((items) => {
       const active = items.filter((item) => item.enabled);
-      setAgents(active); setAgentId(active[0] === undefined ? "" : String(active[0].id));
+      const requested = requestedAgentId !== null && active.some((item) => String(item.id) === requestedAgentId)
+        ? requestedAgentId
+        : undefined;
+      setAgents(active); setAgentId(requested ?? (active[0] === undefined ? "" : String(active[0].id)));
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, []);
+  }, [requestedAgentId]);
   useEffect(() => {
     if (agentId === "") { setParameters([]); setDrafts({}); return; }
     const controller = new AbortController();

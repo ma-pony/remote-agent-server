@@ -186,6 +186,7 @@ it("在 Agent 概览用英文展示所有 Session 的累计用量", async () => 
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/integration-endpoints") return response([]);
     if (url === `/api/agents/${agent.id}/usage`) return response({
       ...summary,
       sessionCount: 4,

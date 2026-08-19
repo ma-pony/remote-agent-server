@@ -2,7 +2,7 @@
 
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import { App } from "../src/web/app.js";
@@ -16,6 +16,17 @@ const agent = {
   id: 1, name: "主力 Codex", provider: "codex", enabled: true,
   instructions: "先运行测试再给出结论。",
   projectEnvironmentId: environment.id, createdAt: now, updatedAt: now
+};
+const endpoint = {
+  id: 7, name: "工单入口", slug: "ticket-agent", agentId: agent.id, enabled: true,
+  activeConversationCount: 0, activeTaskCount: 0, latestTask: null, createdAt: now, updatedAt: now
+};
+const usageSummary = {
+  sessionCount: 0, measuredSessionCount: 0,
+  usage: {
+    inputTokens: null, outputTokens: null, cachedReadTokens: null,
+    cachedWriteTokens: null, thoughtTokens: null, totalTokens: null
+  }
 };
 const response = (value: unknown): Response => new Response(JSON.stringify(value), {
   headers: { "content-type": "application/json" }
@@ -48,6 +59,83 @@ it("Agent 列表只负责浏览，并从独立页面创建 Agent", async () => {
   await waitFor(() => expect(window.location.pathname).toBe("/agents/new"));
   expect(await screen.findByRole("heading", { name: "新建智能体" })).toBeInTheDocument();
   expect(screen.getByLabelText("智能体名称")).toBeInTheDocument();
+});
+
+it("在 Agent 详情页输入新名称并快捷复制配置", async () => {
+  window.history.replaceState({}, "", `/agents/${agent.id}`);
+  const cloned = { ...agent, id: 2, name: "主力 Codex 副本" };
+  let cloneBody: unknown;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}` && (init?.method ?? "GET") === "GET") return response(agent);
+    if (url === `/api/agents/${agent.id}/usage`) return response(usageSummary);
+    if (url === "/api/integration-endpoints") return response([]);
+    if (url === `/api/agents/${agent.id}/clone` && init?.method === "POST") {
+      cloneBody = JSON.parse(String(init.body));
+      return response(cloned);
+    }
+    if (url === `/api/agents/${cloned.id}` && (init?.method ?? "GET") === "GET") return response(cloned);
+    if (url === `/api/agents/${cloned.id}/usage`) return response(usageSummary);
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }));
+
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "复制创建" }));
+  const name = screen.getByLabelText("新智能体名称");
+  expect(name).toHaveValue("主力 Codex 副本");
+  fireEvent.click(screen.getByRole("button", { name: "创建副本" }));
+
+  await waitFor(() => expect(cloneBody).toEqual({ name: "主力 Codex 副本" }));
+  await waitFor(() => expect(window.location.pathname).toBe(`/agents/${cloned.id}`));
+});
+
+it("Agent 概览集中展示绑定的外部调用入口", async () => {
+  window.history.replaceState({}, "", `/agents/${agent.id}`);
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === `/api/agents/${agent.id}/usage`) return response(usageSummary);
+    if (url === "/api/integration-endpoints") return response([endpoint]);
+    throw new Error(`Unexpected request: GET ${url}`);
+  }));
+
+  render(<App />);
+
+  const heading = await screen.findByRole("heading", { name: "外部调用入口" });
+  const section = heading.closest("section");
+  expect(section).not.toBeNull();
+  const entryPoints = within(section!);
+  expect(await entryPoints.findByText("/ticket-agent")).toBeInTheDocument();
+  expect(entryPoints.getByText("已启用")).toBeInTheDocument();
+  expect(entryPoints.getByRole("link", { name: "调用说明" })).toHaveAttribute(
+    "href", `/integration-endpoints/${endpoint.id}/usage`
+  );
+  expect(entryPoints.getByRole("link", { name: "管理端点" })).toHaveAttribute(
+    "href", `/integration-endpoints/${endpoint.id}`
+  );
+});
+
+it("Agent 没有调用入口时可创建并在新建页自动选中当前 Agent", async () => {
+  window.history.replaceState({}, "", `/agents/${agent.id}`);
+  const otherAgent = { ...agent, id: 2, name: "其他智能体" };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === `/api/agents/${agent.id}/usage`) return response(usageSummary);
+    if (url === "/api/integration-endpoints") return response([]);
+    if (url === "/api/agents") return response([otherAgent, agent]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    throw new Error(`Unexpected request: GET ${url}`);
+  }));
+
+  render(<App />);
+
+  expect(await screen.findByText("智能体不能被外部系统直接调用，需要先创建接入端点。")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("link", { name: "创建接入端点" }));
+  await waitFor(() => expect(window.location.pathname).toBe("/integration-endpoints/new"));
+  expect(window.location.search).toBe(`?agentId=${agent.id}`);
+  expect(await screen.findByLabelText("智能体")).toHaveValue(String(agent.id));
 });
 
 it("在 Agent 独立 Skills 页面搜索并启用 Skill", async () => {

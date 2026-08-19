@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, CheckCircle2, Plus, RefreshCw, Search, Settings2, ShieldCheck, Upload, XCircle } from "lucide-react";
+import { ArrowLeft, Cable, CheckCircle2, Copy, Plus, RefreshCw, Search, Settings2, ShieldCheck, Upload, XCircle } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams } from "react-router";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -10,6 +10,9 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
@@ -19,7 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { PageHeader } from "@/components/page-header";
 import { TokenUsageSummaryCard } from "@/components/token-usage";
 import {
-  api, errorMessage, type Agent, type AgentDoctorResult, type AgentSkill,
+  api, errorMessage, type Agent, type AgentDoctorResult, type AgentSkill, type IntegrationEndpointSummary,
   type ProjectEnvironment, type Provider, type TokenUsageSummary
 } from "@/api";
 import { useI18n } from "@/i18n";
@@ -149,6 +152,41 @@ export const AgentCreatePage = () => {
 type AgentDetailContext = { agent: Agent; setAgent(agent: Agent): void };
 const useAgentDetail = () => useOutletContext<AgentDetailContext>();
 
+const AgentCloneDialog = ({ agent }: { agent: Agent }) => {
+  const { text } = useI18n();
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState(`${agent.name} ${text("副本", "copy")}`);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (name.trim() === "") return;
+    setBusy(true); setError("");
+    try {
+      const cloned = await api<Agent>(`/agents/${agent.id}/clone`, {
+        method: "POST",
+        body: JSON.stringify({ name: name.trim() })
+      });
+      setOpen(false);
+      navigate(`/agents/${cloned.id}`);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <Dialog open={open} onOpenChange={setOpen}>
+    <DialogTrigger asChild><Button size="sm" variant="outline"><Copy />{text("复制创建", "Duplicate")}</Button></DialogTrigger>
+    <DialogContent><form onSubmit={submit}>
+      <DialogHeader><DialogTitle>{text("复制创建智能体", "Duplicate agent")}</DialogTitle><DialogDescription>{text("复制执行器配置、项目环境、智能体指令、技能和 MCP；不会复制会话、用量、接入端点或执行历史。", "Copies the provider configuration, environment, instructions, Skills, and MCP. Sessions, usage, endpoints, and execution history are excluded.")}</DialogDescription></DialogHeader>
+      <div className="py-5"><Field><FieldLabel htmlFor="clone-agent-name">{text("新智能体名称", "New agent name")}</FieldLabel><Input id="clone-agent-name" value={name} autoFocus onChange={(event) => setName(event.target.value)} /></Field></div>
+      {error === "" ? null : <Alert variant="destructive" className="mb-4"><XCircle /><AlertTitle>{text("复制失败", "Duplication failed")}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
+      <DialogFooter><Button type="button" variant="outline" onClick={() => setOpen(false)}>{text("取消", "Cancel")}</Button><Button type="submit" disabled={busy || name.trim() === ""}>{busy ? text("复制中…", "Duplicating…") : text("创建副本", "Create copy")}</Button></DialogFooter>
+    </form></DialogContent>
+  </Dialog>;
+};
+
 export const AgentDetailLayout = () => {
   const { text } = useI18n();
   const { id = "" } = useParams();
@@ -168,7 +206,7 @@ export const AgentDetailLayout = () => {
 
   return <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
     <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />{text("返回智能体", "Back to agents")}</Link></Button>
-    <PageHeader eyebrow={providerNames[agent.provider]} title={agent.name} description={text("项目环境、运行检查和技能均在这个智能体范围内管理。", "Project environment, runtime checks, and skills are managed within this agent.")} action={<Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge>} />
+    <PageHeader eyebrow={providerNames[agent.provider]} title={agent.name} description={text("项目环境、运行检查和技能均在这个智能体范围内管理。", "Project environment, runtime checks, and skills are managed within this agent.")} action={<div className="flex items-center gap-2"><AgentCloneDialog key={agent.id} agent={agent} /><Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div>} />
     <Tabs value={section} onValueChange={(value) => navigate(value === "overview" ? `/agents/${id}` : `/agents/${id}/${value}`)}>
       <TabsList variant="line" aria-label={text("智能体管理", "Agent management")}><TabsTrigger value="overview">{text("概览", "Overview")}</TabsTrigger><TabsTrigger value="skills">{text("技能", "Skills")}</TabsTrigger><TabsTrigger value="mcp">MCP</TabsTrigger><TabsTrigger value="settings">{text("设置", "Settings")}</TabsTrigger></TabsList>
     </Tabs>
@@ -180,14 +218,21 @@ export const AgentOverviewPage = () => {
   const { text } = useI18n();
   const { agent, setAgent } = useAgentDetail();
   const [doctor, setDoctor] = useState<AgentDoctorResult | null>(null);
+  const [endpoints, setEndpoints] = useState<IntegrationEndpointSummary[] | null>(null);
+  const [endpointsError, setEndpointsError] = useState("");
   const [usage, setUsage] = useState<TokenUsageSummary | null>(null);
   const [usageError, setUsageError] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
+    setEndpoints(null);
+    setEndpointsError("");
     setUsage(null);
     setUsageError("");
+    void api<IntegrationEndpointSummary[]>("/integration-endpoints", { signal: controller.signal })
+      .then((items) => setEndpoints(items.filter((item) => item.agentId === agent.id)))
+      .catch((reason: unknown) => { if (!controller.signal.aborted) setEndpointsError(errorMessage(reason)); });
     void api<TokenUsageSummary>(`/agents/${agent.id}/usage`, { signal: controller.signal })
       .then(setUsage)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setUsageError(errorMessage(reason)); });
@@ -211,6 +256,19 @@ export const AgentOverviewPage = () => {
     {doctor === null ? null : <Card><CardHeader><CardTitle>{text("检查结果", "Check results")}</CardTitle></CardHeader><CardContent className="grid gap-3 md:grid-cols-2">
       {[{ label: text("执行器", "Provider"), value: doctor.provider }, { label: text("项目环境", "Project environment"), value: doctor.projectEnvironment }].map(({ label, value }) => <div key={label} className="rounded-lg border p-4"><div className="flex items-center gap-2 font-medium">{value.ok ? <CheckCircle2 className="size-4 text-primary" /> : <XCircle className="size-4 text-destructive" />}{label}</div><p className="mt-2 text-sm text-muted-foreground">{value.message}</p></div>)}
     </CardContent></Card>}
+    <section aria-labelledby="agent-integration-endpoints-title">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <h2 id="agent-integration-endpoints-title" className="font-heading text-lg font-medium">{text("外部调用入口", "External entry points")}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">{text("外部系统通过接入端点的路径标识调用这个智能体。", "External systems call this agent through an integration endpoint slug.")}</p>
+        </div>
+        {endpoints !== null && endpoints.length > 0 ? <Button size="sm" variant="outline" asChild><Link to={`/integration-endpoints/new?agentId=${agent.id}`}><Plus />{text("创建接入端点", "Create endpoint")}</Link></Button> : null}
+      </div>
+      {endpointsError !== "" ? <Alert variant="destructive"><XCircle /><AlertTitle>{text("调用入口加载失败", "Failed to load entry points")}</AlertTitle><AlertDescription>{endpointsError}</AlertDescription></Alert>
+        : endpoints === null ? <Skeleton className="h-32" />
+          : endpoints.length === 0 ? <Card className="border-dashed"><CardContent className="flex flex-col items-center gap-3 py-10 text-center"><span className="grid size-10 place-items-center rounded-full bg-muted"><Cable className="size-5 text-muted-foreground" /></span><div><p className="font-medium">{text("尚未配置外部调用入口", "No external entry point")}</p><p className="mt-1 text-sm text-muted-foreground">{text("智能体不能被外部系统直接调用，需要先创建接入端点。", "Agents cannot be called directly by external systems. Create an integration endpoint first.")}</p></div><Button asChild><Link to={`/integration-endpoints/new?agentId=${agent.id}`}><Plus />{text("创建接入端点", "Create endpoint")}</Link></Button></CardContent></Card>
+            : <div className="divide-y rounded-xl border bg-card">{endpoints.map((endpoint) => <div key={endpoint.id} className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex items-center gap-2"><p className="truncate font-medium">{endpoint.name}</p><Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div><p className="mt-1 font-mono text-sm text-muted-foreground">/{endpoint.slug}</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button size="sm" variant="ghost" asChild><Link to={`/integration-endpoints/${endpoint.id}/usage`}>{text("调用说明", "Usage")}</Link></Button><Button size="sm" variant="outline" asChild><Link to={`/integration-endpoints/${endpoint.id}`}>{text("管理端点", "Manage endpoint")}</Link></Button></div></div>)}</div>}
+    </section>
     <section aria-labelledby="agent-token-usage-title">
       <h2 id="agent-token-usage-title" className="mb-3 font-heading text-lg font-medium">{text("Token 用量", "Token usage")}</h2>
       {usageError !== "" ? <Alert variant="destructive"><XCircle /><AlertTitle>{text("用量加载失败", "Failed to load usage")}</AlertTitle><AlertDescription>{usageError}</AlertDescription></Alert>

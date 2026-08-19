@@ -187,11 +187,11 @@ it("stdio Argument 和 Environment 支持 runtime 与 Session 参数", async () 
     }]);
     if (url === `/api/agents/${agent.id}/mcp-servers` && init?.method === "POST") {
       expect(JSON.parse(String(init.body))).toMatchObject({
-        transport: "stdio", command: "node",
+        transport: "stdio", command: "npx",
         arguments: [{ source: "runtime", runtimeKey: "workspace_path" }],
         environment: [{ name: "TENANT", source: "session_parameter", parameterKey: "tenant" }]
       });
-      return response({ ...server, transport: "stdio", command: "node", arguments: [], environment: [] }, 201);
+      return response({ ...server, transport: "stdio", command: "npx", arguments: [], environment: [] }, 201);
     }
     if (url === `/api/agents/${agent.id}`) return response(agent);
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
@@ -202,7 +202,7 @@ it("stdio Argument 和 Environment 支持 runtime 与 Session 参数", async () 
   render(<App />);
   fireEvent.change(await screen.findByLabelText("MCP 名称"), { target: { value: "local_mcp" } });
   fireEvent.change(screen.getByLabelText("传输方式"), { target: { value: "stdio" } });
-  fireEvent.change(screen.getByLabelText("命令"), { target: { value: "node" } });
+  expect(screen.getByLabelText("命令")).toHaveValue("npx");
   fireEvent.click(screen.getByRole("button", { name: "添加参数" }));
   fireEvent.change(screen.getByLabelText("参数来源 1"), { target: { value: "runtime" } });
   fireEvent.change(screen.getByLabelText("参数运行参数 1"), { target: { value: "workspace_path" } });
@@ -213,6 +213,23 @@ it("stdio Argument 和 Environment 支持 runtime 与 Session 参数", async () 
   fireEvent.click(screen.getByRole("button", { name: "创建 MCP" }));
 
   await waitFor(() => expect(window.location.pathname).toBe(`/agents/${agent.id}/mcp`));
+});
+
+it("新建 stdio MCP 时空命令不能提交", async () => {
+  window.history.replaceState({}, "", `/agents/${agent.id}/mcp/new`);
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    throw new Error(`Unexpected request: GET ${url}`);
+  }));
+
+  render(<App />);
+  fireEvent.change(await screen.findByLabelText("MCP 名称"), { target: { value: "local_mcp" } });
+  fireEvent.change(screen.getByLabelText("传输方式"), { target: { value: "stdio" } });
+  fireEvent.change(screen.getByLabelText("命令"), { target: { value: "" } });
+
+  expect(screen.getByRole("button", { name: "创建 MCP" })).toBeDisabled();
 });
 
 it("编辑时可保留未回显的敏感值", async () => {
