@@ -107,6 +107,7 @@ export const createFakeRuntime = (options: FakeRuntimeOptions = {}): AgentRuntim
   },
   cancel: async (_sessionId: number): Promise<void> => undefined,
   reset: async (_input: RuntimeSessionInput): Promise<void> => undefined,
+  forgetSession: async (_sessionId: number): Promise<void> => undefined,
   doctor: async (): Promise<RuntimeDoctor> => options.doctor ?? ({ ok: true, message: "ready", details: [] }),
   shutdown: async (): Promise<void> => undefined
 });

@@ -845,6 +845,32 @@ describe("AcpxAgentRuntime", () => {
     }));
   });
 
+  it("遗忘未缓存的 Session 不会启动 Provider", async () => {
+    const root = makeRoot();
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+
+    await runtime.forgetSession(SESSION_ID);
+
+    expect(acpxMocks.createAcpRuntime).not.toHaveBeenCalled();
+  });
+
+  it("遗忘已缓存的 Session 会关闭 Handle 并移除 Runtime 引用", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+
+    await runtime.forgetSession(SESSION_ID);
+
+    expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({
+      reason: "session_deleted",
+      discardPersistentState: true
+    }));
+    expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" }))
+      .toThrow(expect.objectContaining({ code: "session_not_ready" }));
+  });
+
   it("session cancel 绑定 active turn 而不是可变 Handle cache", async () => {
     const root = makeRoot();
     const acp = runtimeStub();

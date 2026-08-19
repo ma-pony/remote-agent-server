@@ -341,26 +341,12 @@ export class SessionManager {
   async delete(id: number): Promise<void> {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
-    const agent = this.agentManager.get(session.agentId);
-    if (agent === undefined) throw new SessionManagerError("agent_not_found");
     this.claimForDelete(id);
 
-    const runtimeInput = {
-      sessionId: session.id,
-      agentId: agent.id,
-      provider: agent.provider,
-      workspacePath: session.workspacePath,
-      browserProfilePath: join(dirname(session.workspacePath), "browser"),
-      providerSessionId: session.providerSessionId,
-      instructions: session.instructionsSnapshot,
-      memory: readFileSync(join(this.dataDir, "agents", String(agent.id), "MEMORY.md"), "utf8"),
-      mcpServers: []
-    };
-
     try {
-      await this.runtime.reset(runtimeInput);
-    } catch (error) {
-      this.releaseDeleteClaim(id, false, error);
+      await this.runtime.forgetSession(id);
+    } catch {
+      // Provider cleanup is best-effort and must not block deletion of local resources.
     }
 
     try {

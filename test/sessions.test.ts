@@ -26,13 +26,17 @@ const deferred = <T,>() => {
   return { promise, resolve };
 };
 
-const createFakeRuntime = (reset = async (_input: RuntimeSessionInput): Promise<void> => undefined): AgentRuntime => ({
+const createFakeRuntime = (
+  reset = async (_input: RuntimeSessionInput): Promise<void> => undefined,
+  forgetSession = async (_sessionId: number): Promise<void> => undefined
+): AgentRuntime => ({
   ensureSession: async (_input: RuntimeSessionInput): Promise<RuntimeSession> => ({ providerSessionId: null }),
   startTurn: (_input: RuntimeTurnInput): RuntimeTurn => {
     throw new Error("Fake Runtime does not start turns in Session API tests");
   },
   cancel: async (_sessionId: number): Promise<void> => undefined,
   reset,
+  forgetSession,
   doctor: async (_provider: "claude_code" | "codex" | "hermes", _agentId: number): Promise<RuntimeDoctor> => ({
     ok: true,
     message: "ready",
@@ -556,11 +560,12 @@ describe("Session API", () => {
     expect(reset).not.toHaveBeenCalled();
   });
 
-  it("永久删除空闲 Session 的 Provider、Workspace、Run 和 Event", async () => {
+  it("永久删除空闲 Session 的 Runtime 引用、Workspace、Run 和 Event", async () => {
     const reset = vi.fn(async (_input: RuntimeSessionInput): Promise<void> => undefined);
+    const forgetSession = vi.fn(async (_sessionId: number): Promise<void> => undefined);
     const calls: Array<{ command: string; args: string[] }> = [];
-    const { app, db, dataDir } = await createTestApp({
-      runtime: createFakeRuntime(reset),
+    const { app, db } = await createTestApp({
+      runtime: createFakeRuntime(reset, forgetSession),
       commandRunner: {
         run: async (command, args) => {
           calls.push({ command, args });
@@ -571,7 +576,6 @@ describe("Session API", () => {
     });
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
-    writeFileSync(join(dataDir, "agents", String(agent.id), "MEMORY.md"), "remember delete");
     db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
     db.prepare(`
       INSERT INTO runs (session_id, status, input, result, created_at, started_at, finished_at)
@@ -586,13 +590,8 @@ describe("Session API", () => {
     const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
 
     expect(response.statusCode).toBe(204);
-    expect(reset).toHaveBeenCalledWith(expect.objectContaining({
-      sessionId: session.id,
-      agentId: agent.id,
-      providerSessionId: "provider-session-1",
-      workspacePath: session.workspacePath,
-      memory: "remember delete"
-    }));
+    expect(reset).not.toHaveBeenCalled();
+    expect(forgetSession).toHaveBeenCalledWith(session.id);
     expect(calls.at(-1)).toEqual({
       command: "btrfs",
       args: ["subvolume", "delete", session.workspacePath]
@@ -621,22 +620,21 @@ describe("Session API", () => {
     expect(reset).not.toHaveBeenCalled();
   });
 
-  it("Provider 清理失败时释放删除 claim 并保留全部本地资源", async () => {
+  it("Provider 清理失败不阻止删除本地 Session", async () => {
     const reset = vi.fn(async () => Promise.reject(new Error("provider delete failed")));
-    const { app, db } = await createTestApp({ runtime: createFakeRuntime(reset) });
+    const forgetSession = vi.fn(async () => Promise.reject(new Error("provider delete failed")));
+    const { app, db } = await createTestApp({ runtime: createFakeRuntime(reset, forgetSession) });
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
     db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
 
     const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
 
-    expect(response.statusCode).toBe(500);
-    expect(response.json()).toEqual({ error: { code: "session_delete_failed", message: "Failed to delete session" } });
-    expect(db.prepare("SELECT status, provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
-      status: "idle",
-      provider_session_id: "provider-session-1"
-    });
-    expect(existsSync(dirname(session.workspacePath))).toBe(true);
+    expect(response.statusCode).toBe(204);
+    expect(reset).not.toHaveBeenCalled();
+    expect(forgetSession).toHaveBeenCalledWith(session.id);
+    expect(db.prepare("SELECT id FROM sessions WHERE id = ?").get(session.id)).toBeUndefined();
+    expect(existsSync(dirname(session.workspacePath))).toBe(false);
   });
 
   it("Workspace 清理失败时清除 Provider ID、释放 claim 并保留历史", async () => {

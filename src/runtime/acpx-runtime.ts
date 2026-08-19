@@ -557,6 +557,25 @@ export class AcpxAgentRuntime implements AgentRuntime {
     });
   }
 
+  async forgetSession(sessionId: number): Promise<void> {
+    this.assertRunning();
+    await this.serializeSession(sessionId, async () => {
+      const session = this.sessions.get(sessionId);
+      if (session === undefined) return;
+      try {
+        await session.runtime.close({
+          handle: session.handle,
+          reason: "session_deleted",
+          discardPersistentState: true
+        });
+      } finally {
+        this.sessions.delete(sessionId);
+        this.activeTurns.delete(sessionId);
+        session.registry.unregister(session.target);
+      }
+    });
+  }
+
   async doctor(provider: Provider, agentId: number): Promise<RuntimeDoctor> {
     this.assertRunning();
     const sessionId = 0;

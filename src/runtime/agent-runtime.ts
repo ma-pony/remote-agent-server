@@ -40,6 +40,7 @@ export interface AgentRuntime {
   startTurn(input: RuntimeTurnInput): RuntimeTurn;
   cancel(sessionId: number): Promise<void>;
   reset(input: RuntimeSessionInput): Promise<void>;
+  forgetSession(sessionId: number): Promise<void>;
   doctor(provider: Provider, agentId: number): Promise<RuntimeDoctor>;
   shutdown(): Promise<void>;
 }

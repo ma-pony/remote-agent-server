@@ -21,6 +21,7 @@ const createFakeRuntime = (): AgentRuntime => ({
   },
   cancel: async (_sessionId: string): Promise<void> => undefined,
   reset: async (_input: RuntimeSessionInput): Promise<void> => undefined,
+  forgetSession: async (_sessionId: number): Promise<void> => undefined,
   doctor: async (provider: "claude_code" | "codex" | "hermes", _agentId: string): Promise<RuntimeDoctor> => ({
     ok: true,
     message: `${provider} ready`,
