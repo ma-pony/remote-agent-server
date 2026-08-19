@@ -73,6 +73,7 @@ const sessionInput = (root: string, overrides: Partial<RuntimeSessionInput> = {}
 type RuntimeStub = AcpRuntime & {
   ensureSession: ReturnType<typeof vi.fn>;
   startTurn: ReturnType<typeof vi.fn>;
+  getStatus: ReturnType<typeof vi.fn>;
   cancel: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
   doctor: ReturnType<typeof vi.fn>;
@@ -82,6 +83,22 @@ const runtimeStub = (overrides: {
   handle?: Partial<AcpRuntimeHandle>;
   events?: AcpRuntimeEvent[];
   result?: AcpRuntimeTurnResult;
+  cumulativeUsage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedReadTokens?: number;
+    cachedWriteTokens?: number;
+    thoughtTokens?: number;
+    totalTokens?: number;
+  };
+  perRequestUsage?: Record<string, {
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedReadTokens?: number;
+    cachedWriteTokens?: number;
+    thoughtTokens?: number;
+    totalTokens?: number;
+  }>;
   doctor?: AcpRuntimeDoctorReport;
 } = {}): RuntimeStub => {
   const handle: AcpRuntimeHandle = {
@@ -107,6 +124,15 @@ const runtimeStub = (overrides: {
     ensureSession: vi.fn(async () => handle),
     startTurn: vi.fn(() => turn),
     runTurn: vi.fn(),
+    getStatus: vi.fn(async () => ({
+      usage: overrides.cumulativeUsage === undefined
+        && overrides.perRequestUsage === undefined
+        ? undefined
+        : {
+          ...(overrides.cumulativeUsage === undefined ? {} : { cumulative: overrides.cumulativeUsage }),
+          ...(overrides.perRequestUsage === undefined ? {} : { perRequest: overrides.perRequestUsage })
+        }
+    })),
     cancel: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
     doctor: vi.fn(async () => overrides.doctor ?? ({ ok: true, message: "ready", details: [] }))
@@ -665,6 +691,98 @@ describe("AcpxAgentRuntime", () => {
     await turn.closeEvents();
     const acpTurn = acp.startTurn.mock.results[0]?.value as AcpRuntimeTurn;
     expect(acpTurn.closeStream).toHaveBeenCalledTimes(1);
+  });
+
+  it("将 acpx usage_update 保留为结构化用量并独立忽略无效字段", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub({
+      events: [
+        {
+          type: "status",
+          tag: "usage_update",
+          text: "usage updated",
+          used: 24_373,
+          size: 258_400,
+          breakdown: {
+            inputTokens: 12_000,
+            outputTokens: 2_000,
+            cachedReadTokens: 8_000,
+            cachedWriteTokens: -1,
+            thoughtTokens: Number.NaN,
+            totalTokens: 14_000
+          }
+        },
+        { type: "status", text: "working" }
+      ]
+    });
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+
+    const turn = runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
+    const events = [];
+    for await (const event of turn.events) events.push(event);
+
+    expect(events).toEqual([
+      {
+        type: "usage",
+        usage: {
+          inputTokens: 12_000,
+          outputTokens: 2_000,
+          cachedReadTokens: 8_000,
+          totalTokens: 14_000,
+          contextUsedTokens: 24_373,
+          contextWindowTokens: 258_400
+        }
+      },
+      { type: "status", text: "working" }
+    ]);
+  });
+
+  it("Turn 完成后汇总 acpx 的完整 perRequest 作为 Session 精确用量", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub({
+      cumulativeUsage: {
+        inputTokens: 897,
+        outputTokens: 17,
+        cachedReadTokens: 15_104,
+        thoughtTokens: 0,
+        totalTokens: 16_018
+      },
+      perRequestUsage: {
+        first: {
+          inputTokens: 4_759,
+          outputTokens: 14,
+          cachedReadTokens: 11_008,
+          thoughtTokens: 0,
+          totalTokens: 15_781
+        },
+        second: {
+          inputTokens: 897,
+          outputTokens: 17,
+          cachedReadTokens: 15_104,
+          thoughtTokens: 0,
+          totalTokens: 16_018
+        }
+      }
+    });
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+
+    const turn = runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
+
+    await expect(turn.result).resolves.toEqual({
+      status: "completed",
+      sessionUsage: {
+        inputTokens: 5_656,
+        outputTokens: 31,
+        cachedReadTokens: 26_112,
+        thoughtTokens: 0,
+        totalTokens: 31_799
+      }
+    });
+    expect(acp.getStatus).toHaveBeenCalledWith({ handle: expect.objectContaining({ agentSessionId: "provider-session-1" }) });
   });
 
   it("支持 turn cancel、session cancel 和 reset discard", async () => {

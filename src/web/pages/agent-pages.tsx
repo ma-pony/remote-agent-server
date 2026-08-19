@@ -17,9 +17,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { PageHeader } from "@/components/page-header";
+import { TokenUsageSummaryCard } from "@/components/token-usage";
 import {
   api, errorMessage, type Agent, type AgentDoctorResult, type AgentSkill,
-  type ProjectEnvironment, type Provider
+  type ProjectEnvironment, type Provider, type TokenUsageSummary
 } from "@/api";
 import { useI18n } from "@/i18n";
 
@@ -179,8 +180,19 @@ export const AgentOverviewPage = () => {
   const { text } = useI18n();
   const { agent, setAgent } = useAgentDetail();
   const [doctor, setDoctor] = useState<AgentDoctorResult | null>(null);
+  const [usage, setUsage] = useState<TokenUsageSummary | null>(null);
+  const [usageError, setUsageError] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    setUsage(null);
+    setUsageError("");
+    void api<TokenUsageSummary>(`/agents/${agent.id}/usage`, { signal: controller.signal })
+      .then(setUsage)
+      .catch((reason: unknown) => { if (!controller.signal.aborted) setUsageError(errorMessage(reason)); });
+    return () => controller.abort();
+  }, [agent.id]);
   const toggle = async () => {
     setBusy("toggle"); setError("");
     try { setAgent(await api<Agent>(`/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !agent.enabled }) })); }
@@ -199,6 +211,12 @@ export const AgentOverviewPage = () => {
     {doctor === null ? null : <Card><CardHeader><CardTitle>{text("检查结果", "Check results")}</CardTitle></CardHeader><CardContent className="grid gap-3 md:grid-cols-2">
       {[{ label: text("执行器", "Provider"), value: doctor.provider }, { label: text("项目环境", "Project environment"), value: doctor.projectEnvironment }].map(({ label, value }) => <div key={label} className="rounded-lg border p-4"><div className="flex items-center gap-2 font-medium">{value.ok ? <CheckCircle2 className="size-4 text-primary" /> : <XCircle className="size-4 text-destructive" />}{label}</div><p className="mt-2 text-sm text-muted-foreground">{value.message}</p></div>)}
     </CardContent></Card>}
+    <section aria-labelledby="agent-token-usage-title">
+      <h2 id="agent-token-usage-title" className="mb-3 font-heading text-lg font-medium">{text("Token 用量", "Token usage")}</h2>
+      {usageError !== "" ? <Alert variant="destructive"><XCircle /><AlertTitle>{text("用量加载失败", "Failed to load usage")}</AlertTitle><AlertDescription>{usageError}</AlertDescription></Alert>
+        : usage === null ? <Skeleton className="h-40" />
+          : <TokenUsageSummaryCard title={text("累计", "Cumulative")} summary={usage} />}
+    </section>
   </div>;
 };
 

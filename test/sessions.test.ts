@@ -106,6 +106,20 @@ afterEach(async () => {
 });
 
 describe("Session API", () => {
+  it("列表按创建时间倒序返回最新会话", async () => {
+    const { app, db } = await createTestApp();
+    const agent = await createAgent(app);
+    const older = await createSession(app, agent.id);
+    const newer = await createSession(app, agent.id);
+    db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-08-18T00:00:00.000Z", older.id);
+    db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-08-19T00:00:00.000Z", newer.id);
+
+    const response = await app.inject({ method: "GET", url: "/api/sessions", headers: authHeaders() });
+
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as Array<{ id: string }>).map(({ id }) => id)).toEqual([newer.id, older.id]);
+  });
+
   it("创建 Session 时保存 Agent 指令快照，之后修改 Agent 不影响已有 Session", async () => {
     const { app, db } = await createTestApp();
     const agent = await createAgent(app);

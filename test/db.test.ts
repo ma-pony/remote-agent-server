@@ -141,6 +141,44 @@ describe("database migration", () => {
     db.close();
   });
 
+  it("为新旧 runs 表增加可空 Token 用量列", () => {
+    const expected = [
+      "input_tokens",
+      "output_tokens",
+      "cached_read_tokens",
+      "cached_write_tokens",
+      "thought_tokens",
+      "total_tokens",
+      "context_used_tokens",
+      "context_window_tokens"
+    ];
+    const fresh = createTestDatabase();
+    expect(fresh.db.prepare("PRAGMA table_info(runs)").all().map((row) => (row as { name: string }).name))
+      .toEqual(expect.arrayContaining(expected));
+    fresh.db.close();
+
+    const existing = openDatabase(":memory:");
+    existing.exec(`
+      CREATE TABLE runs (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        input TEXT NOT NULL,
+        result TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+      )
+    `);
+
+    migrate(existing);
+
+    expect(existing.prepare("PRAGMA table_info(runs)").all().map((row) => (row as { name: string }).name))
+      .toEqual(expect.arrayContaining(expected));
+    existing.close();
+  });
+
   it("拒绝同一 Session 的第二个活动 Run", () => {
     const { db, seed } = createTestDatabase();
     const session = seed.session();

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
-import type { Run, RunStatus } from "../domain.js";
+import type { Run, RunStatus, TokenUsage, TokenUsageSummary } from "../domain.js";
 import { assertSynchronousTransactionHook } from "../transaction-hook.js";
 
 type RunRow = {
@@ -15,6 +15,28 @@ type RunRow = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_read_tokens: number | null;
+  cached_write_tokens: number | null;
+  thought_tokens: number | null;
+  total_tokens: number | null;
+  context_used_tokens: number | null;
+  context_window_tokens: number | null;
+};
+
+const rowUsage = (row: RunRow): TokenUsage | null => {
+  const usage: TokenUsage = {
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cachedReadTokens: row.cached_read_tokens,
+    cachedWriteTokens: row.cached_write_tokens,
+    thoughtTokens: row.thought_tokens,
+    totalTokens: row.total_tokens,
+    contextUsedTokens: row.context_used_tokens,
+    contextWindowTokens: row.context_window_tokens
+  };
+  return Object.values(usage).some((value) => value !== null) ? usage : null;
 };
 
 const toRun = (row: RunRow): Run => ({
@@ -26,7 +48,8 @@ const toRun = (row: RunRow): Run => ({
   error: row.error,
   createdAt: row.created_at,
   startedAt: row.started_at,
-  finishedAt: row.finished_at
+  finishedAt: row.finished_at,
+  usage: rowUsage(row)
 });
 
 const isTerminalStatus = (status: RunStatus): status is "succeeded" | "failed" | "cancelled" =>
@@ -41,7 +64,32 @@ export type FinishRunInput = {
   status: "succeeded" | "failed" | "cancelled";
   result?: string;
   error?: string;
+  usage?: Partial<TokenUsage>;
 };
+
+type UsageSummaryRow = {
+  session_count: number;
+  measured_session_count: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_read_tokens: number | null;
+  cached_write_tokens: number | null;
+  thought_tokens: number | null;
+  total_tokens: number | null;
+};
+
+const toUsageSummary = (row: UsageSummaryRow): TokenUsageSummary => ({
+  sessionCount: row.session_count,
+  measuredSessionCount: row.measured_session_count,
+  usage: {
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cachedReadTokens: row.cached_read_tokens,
+    cachedWriteTokens: row.cached_write_tokens,
+    thoughtTokens: row.thought_tokens,
+    totalTokens: row.total_tokens
+  }
+});
 
 export type RunStateProjection = {
   onStarted(run: Run): undefined;
@@ -102,7 +150,8 @@ export class RunRepository {
       error: null,
       createdAt,
       startedAt: null,
-      finishedAt: null
+      finishedAt: null,
+      usage: null
     };
 
     try {
@@ -153,6 +202,46 @@ export class RunRepository {
     return rows.map(toRun);
   }
 
+  /** Returns the exact cumulative usage stored for one Session. */
+  summarizeBySession(sessionId: string): TokenUsageSummary {
+    return toUsageSummary(this.db.prepare(`
+      SELECT
+        COUNT(*) AS session_count,
+        COALESCE(SUM(CASE WHEN
+          input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cached_read_tokens IS NOT NULL OR
+          cached_write_tokens IS NOT NULL OR thought_tokens IS NOT NULL OR total_tokens IS NOT NULL
+        THEN 1 ELSE 0 END), 0) AS measured_session_count,
+        SUM(input_tokens) AS input_tokens,
+        SUM(output_tokens) AS output_tokens,
+        SUM(cached_read_tokens) AS cached_read_tokens,
+        SUM(cached_write_tokens) AS cached_write_tokens,
+        SUM(thought_tokens) AS thought_tokens,
+        SUM(total_tokens) AS total_tokens
+      FROM sessions
+      WHERE id = ?
+    `).get(sessionId) as UsageSummaryRow);
+  }
+
+  /** Sums the latest cumulative usage of every Session owned by one Agent. */
+  summarizeByAgent(agentId: string): TokenUsageSummary {
+    return toUsageSummary(this.db.prepare(`
+      SELECT
+        COUNT(*) AS session_count,
+        COALESCE(SUM(CASE WHEN
+          input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cached_read_tokens IS NOT NULL OR
+          cached_write_tokens IS NOT NULL OR thought_tokens IS NOT NULL OR total_tokens IS NOT NULL
+        THEN 1 ELSE 0 END), 0) AS measured_session_count,
+        SUM(input_tokens) AS input_tokens,
+        SUM(output_tokens) AS output_tokens,
+        SUM(cached_read_tokens) AS cached_read_tokens,
+        SUM(cached_write_tokens) AS cached_write_tokens,
+        SUM(thought_tokens) AS thought_tokens,
+        SUM(total_tokens) AS total_tokens
+      FROM sessions
+      WHERE agent_id = ?
+    `).get(agentId) as UsageSummaryRow);
+  }
+
   /**
    * Transitions a queued Run to running before an external execution starts.
    */
@@ -184,11 +273,32 @@ export class RunRepository {
       const finishedAt = new Date().toISOString();
       const result = input.result ?? null;
       const error = input.error ?? null;
+      const usage = input.usage;
       this.db
-        .prepare("UPDATE runs SET status = ?, result = ?, error = ?, finished_at = ? WHERE id = ?")
-        .run(input.status, result, error, finishedAt, id);
+        .prepare(`
+          UPDATE runs SET
+            status = ?, result = ?, error = ?, finished_at = ?,
+            input_tokens = ?, output_tokens = ?, cached_read_tokens = ?, cached_write_tokens = ?,
+            thought_tokens = ?, total_tokens = ?, context_used_tokens = ?, context_window_tokens = ?
+          WHERE id = ?
+        `)
+        .run(
+          input.status,
+          result,
+          error,
+          finishedAt,
+          usage?.inputTokens ?? null,
+          usage?.outputTokens ?? null,
+          usage?.cachedReadTokens ?? null,
+          usage?.cachedWriteTokens ?? null,
+          usage?.thoughtTokens ?? null,
+          usage?.totalTokens ?? null,
+          usage?.contextUsedTokens ?? null,
+          usage?.contextWindowTokens ?? null,
+          id
+        );
       this.db.prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ?").run("idle", finishedAt, run.sessionId);
-      const finished = { ...run, status: input.status, result, error, finishedAt };
+      const finished = this.requireRun(id);
       assertSynchronousTransactionHook(this.projection.onFinished(finished));
       return finished;
     });

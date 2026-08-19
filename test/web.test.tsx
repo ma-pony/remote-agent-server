@@ -147,6 +147,60 @@ describe("最小管理界面", () => {
     }
   });
 
+  it("Fastify 启动后生成 Web 构建也能立即提供页面和静态资源", async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-late-web-"));
+    const webRoot = join(dataDir, "web");
+    const { db } = createTestDatabase();
+    const app = buildApp({
+      config: {
+        host: "127.0.0.1",
+        port: 3000,
+        apiToken: "secret-token",
+        dataDir,
+        databasePath: ":memory:",
+        projectEnvironmentsRoot: "/unused/environments",
+        sessionsRoot: "/unused/sessions",
+        maxConcurrentRuns: 1,
+        projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
+        projectPrepareTimeoutMs: 30 * 60 * 1000
+      },
+      db,
+      runtime: createFakeRuntime(),
+      commandRunner: { run: async () => ({ stdout: "", stderr: "" }) },
+      webRoot
+    });
+
+    try {
+      await app.ready();
+      const beforeBuild = await app.inject({ method: "GET", url: "/agents", headers: { accept: "text/html" } });
+      expect(beforeBuild.statusCode).toBe(404);
+
+      mkdirSync(join(webRoot, "assets"), { recursive: true });
+      writeFileSync(join(webRoot, "index.html"), "<!doctype html><title>Late Remote Agent UI</title>");
+      writeFileSync(join(webRoot, "assets", "app.js"), "globalThis.lateAppLoaded = true;");
+
+      const page = await app.inject({ method: "GET", url: "/agents", headers: { accept: "text/html" } });
+      const asset = await app.inject({ method: "GET", url: "/assets/app.js" });
+      expect(page.statusCode).toBe(200);
+      expect(page.body).toContain("Late Remote Agent UI");
+      expect(asset.statusCode).toBe(200);
+      expect(asset.body).toContain("lateAppLoaded");
+    } finally {
+      await app.close();
+      db.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("React 初始化异常时显示可重新加载的兜底页", () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("storage unavailable"); });
+
+    expect(() => render(<App />)).not.toThrow();
+    expect(screen.getByRole("heading", { name: "页面加载失败" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "重新加载" })).toBeInTheDocument();
+  });
+
   it("历史 terminal status 覆盖陈旧 running 快照并解锁输入", async () => {
     sessionStorage.setItem("apiToken", "secret-token");
     window.history.replaceState({}, "", `/sessions/${session.id}`);
@@ -287,6 +341,9 @@ describe("最小管理界面", () => {
       if (url === "/api/runs/run-1/cancel" && init?.method === "POST") {
         return jsonResponse({ ...oldRun, id: "run-1", status: "running", input: "修复它", result: null, finishedAt: null });
       }
+      if (url === "/api/runs/run-1") {
+        return jsonResponse({ ...oldRun, id: "run-1", status: "succeeded", input: "修复它" });
+      }
       throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
     }));
 
@@ -339,7 +396,7 @@ describe("最小管理界面", () => {
     await act(async () => {
       streams[0]!.options.onmessage({ data: JSON.stringify(event("run-1", 6, "status", { status: "succeeded" })) });
     });
-    expect(screen.queryByRole("button", { name: "取消运行" })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("button", { name: "取消运行" })).not.toBeInTheDocument());
     expect(screen.getByLabelText("发送给智能体")).toBeEnabled();
 
     fireEvent.change(screen.getByLabelText("发送给智能体"), { target: { value: "继续验证" } });

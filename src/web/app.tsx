@@ -1,4 +1,4 @@
-import { FormEvent, useState } from "react";
+import { Component, type ErrorInfo, type FormEvent, type ReactNode, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
 
 import { AppShellLayout } from "./components/app-shell.js";
@@ -27,7 +27,34 @@ import {
   IntegrationTaskDetailPage
 } from "./pages/integration-pages.js";
 
-export const App = () => <I18nProvider><Application /></I18nProvider>;
+type AppErrorBoundaryProps = { children: ReactNode };
+type AppErrorBoundaryState = { failed: boolean };
+
+class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundaryState> {
+  state: AppErrorBoundaryState = { failed: false };
+
+  static getDerivedStateFromError(): AppErrorBoundaryState {
+    return { failed: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo): void {
+    console.error("Remote Agent web application failed", error, info.componentStack);
+  }
+
+  render(): ReactNode {
+    if (!this.state.failed) return this.props.children;
+    return <main className="grid min-h-svh place-items-center p-6">
+      <section className="w-full max-w-lg rounded-xl border bg-card p-8 text-card-foreground shadow-lg" role="alert">
+        <p className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">REMOTE AGENT SERVER</p>
+        <h1 className="mt-4 text-2xl font-semibold">页面加载失败</h1>
+        <p className="mt-3 text-sm leading-6 text-muted-foreground">前端资源可能刚刚更新，请重新加载页面。<br />The web application failed to load. Please reload the page.</p>
+        <button className="mt-6 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground" type="button" onClick={() => window.location.reload()}>重新加载</button>
+      </section>
+    </main>;
+  }
+}
+
+export const App = () => <AppErrorBoundary><I18nProvider><Application /></I18nProvider></AppErrorBoundary>;
 
 const Application = () => {
   const [token, setToken] = useState(() => sessionStorage.getItem("apiToken"));

@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import { AgentManager, AgentManagerError } from "./agent-manager.js";
+import type { RunRepository } from "../runs/run-repository.js";
 import { SkillManagerError, type SkillManager } from "../skills/skill-manager.js";
 
 const createAgentSchema = z.object({
@@ -66,7 +67,8 @@ const handleAgentError = (reply: FastifyReply, error: unknown) => {
 export const registerAgentRoutes = (
   app: FastifyInstance,
   agentManager: AgentManager,
-  skillManager: SkillManager
+  skillManager: SkillManager,
+  runRepository: RunRepository
 ): void => {
   app.get("/agents", () => agentManager.list());
 
@@ -110,6 +112,11 @@ export const registerAgentRoutes = (
   app.get<{ Params: { id: string } }>("/agents/:id/doctor", async (request, reply) => {
     const result = await agentManager.doctor(request.params.id);
     return result === undefined ? notFound(reply) : result;
+  });
+
+  app.get<{ Params: { id: string } }>("/agents/:id/usage", (request, reply) => {
+    if (agentManager.get(request.params.id) === undefined) return notFound(reply);
+    return runRepository.summarizeByAgent(request.params.id);
   });
 
   app.get<{ Params: { id: string } }>("/agents/:id/skills", (request, reply) => {

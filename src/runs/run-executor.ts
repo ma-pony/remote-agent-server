@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 
-import type { EventType, Run } from "../domain.js";
+import type { EventType, Run, TokenUsage } from "../domain.js";
 import type { EventStore } from "../events/event-store.js";
 import type { RunMcpPreparer } from "../mcp/run-mcp-preparer.js";
 import type { AgentRuntime, RuntimeEvent, RuntimeTurn, RuntimeTurnResult } from "../runtime/agent-runtime.js";
@@ -20,7 +20,7 @@ export type RunExecutorDependencies = {
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
-const persistedEvent = (event: RuntimeEvent): { type: EventType; content: unknown } => {
+const persistedEvent = (event: Exclude<RuntimeEvent, { type: "usage" }>): { type: EventType; content: unknown } => {
   switch (event.type) {
     case "message":
       return { type: "message", content: { stream: event.stream, text: event.text } };
@@ -71,6 +71,7 @@ export class RunExecutor {
     let liveTurn: RuntimeTurn | undefined;
     let liveIterator: AsyncIterator<RuntimeEvent> | undefined;
     let publicNoticeCode: "mcp_preflight_failed" | undefined;
+    let usage: Partial<TokenUsage> = {};
 
     try {
       const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
@@ -104,7 +105,7 @@ export class RunExecutor {
       this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
 
       if (this.cancellationIntents.has(run.id)) {
-        return this.finishRun(run.id, { status: "cancelled" });
+        return this.finishRun(run.id, { status: "cancelled" }, usage);
       }
       const turn = this.runtime.startTurn({ sessionId: session.id, requestId: run.id, text: run.input });
       liveTurn = turn;
@@ -145,13 +146,21 @@ export class RunExecutor {
         }
 
         const runtimeEvent = outcome.iteration.value;
+        if (runtimeEvent.type === "usage") {
+          usage = { ...usage, ...runtimeEvent.usage };
+          nextEvent = this.nextEvent(iterator);
+          continue;
+        }
         if (runtimeEvent.type === "message" && runtimeEvent.stream === "output") output += runtimeEvent.text;
         const event = persistedEvent(runtimeEvent);
         this.eventStore.append(run.id, event.type, event.content);
         nextEvent = this.nextEvent(iterator);
       }
 
-      return this.finishFromCanonicalResult(run.id, output, result);
+      if (result.sessionUsage !== undefined) {
+        this.sessionManager.saveTokenUsage(session.id, result.sessionUsage);
+      }
+      return this.finishFromCanonicalResult(run.id, output, result, usage);
     } catch (error) {
       await this.cleanupFailedTurn(liveTurn, liveIterator);
       const message = errorMessage(error);
@@ -161,7 +170,7 @@ export class RunExecutor {
         this.appendBestEffort(run.id, "status", { status: "failed", publicNoticeCode: stableNoticeCode });
       }
       this.appendBestEffort(run.id, "error", { message });
-      return this.finishRun(run.id, { status: "failed", error: message });
+      return this.finishRun(run.id, { status: "failed", error: message }, usage);
     } finally {
       this.cancellationIntents.delete(run.id);
     }
@@ -187,27 +196,36 @@ export class RunExecutor {
     return this.requireRun(runId);
   }
 
-  private finishFromCanonicalResult(runId: string, output: string, result: RuntimeTurnResult): Run {
+  private finishFromCanonicalResult(
+    runId: string,
+    output: string,
+    result: RuntimeTurnResult,
+    usage: Partial<TokenUsage>
+  ): Run {
     if (result.status === "completed") {
-      return this.finishRun(runId, { status: "succeeded", result: output });
+      return this.finishRun(runId, { status: "succeeded", result: output }, usage);
     }
     if (result.status === "cancelled") {
-      return this.finishRun(runId, { status: "cancelled" });
+      return this.finishRun(runId, { status: "cancelled" }, usage);
     }
 
     this.appendBestEffort(runId, "error", {
       ...(result.code === undefined ? {} : { code: result.code }),
       message: result.message
     });
-    return this.finishRun(runId, { status: "failed", error: result.message });
+    return this.finishRun(runId, { status: "failed", error: result.message }, usage);
   }
 
   private finishRun(
     runId: string,
-    result: { status: "succeeded"; result: string } | { status: "failed"; error: string } | { status: "cancelled" }
+    result: { status: "succeeded"; result: string } | { status: "failed"; error: string } | { status: "cancelled" },
+    usage: Partial<TokenUsage> = {}
   ): Run {
     this.appendBestEffort(runId, "status", { status: result.status });
-    return this.runRepository.finish(runId, result);
+    return this.runRepository.finish(runId, {
+      ...result,
+      ...(Object.keys(usage).length === 0 ? {} : { usage })
+    });
   }
 
   private appendBestEffort(runId: string, type: EventType, content: unknown): void {

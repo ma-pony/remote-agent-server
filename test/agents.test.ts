@@ -396,6 +396,52 @@ describe("Agent API", () => {
     });
   });
 
+  it("返回 Agent 所有 Session 的累计 Token 汇总", async () => {
+    const { app, db, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "Usage Agent", provider: "codex", projectEnvironmentId }
+    });
+    const { id: agentId } = created.json() as { id: string };
+    const recent = new Date().toISOString();
+    const insert = db.prepare(`
+      INSERT INTO sessions (
+        id, agent_id, title, status, workspace_path, input_tokens, output_tokens,
+        cached_read_tokens, thought_tokens, total_tokens, created_at, updated_at
+      ) VALUES (?, ?, ?, 'idle', ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insert.run("usage-session", agentId, "Usage", "/tmp/usage-session", 100, 20, 30, 5, 120, recent, recent);
+    insert.run("unknown-session", agentId, "Unknown", "/tmp/unknown-session", null, null, null, null, null, recent, recent);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/agents/${agentId}/usage`,
+      headers: authHeaders()
+    });
+    const missing = await app.inject({
+      method: "GET",
+      url: "/api/agents/00000000-0000-4000-8000-000000000000/usage",
+      headers: authHeaders()
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      sessionCount: 2,
+      measuredSessionCount: 1,
+      usage: {
+        inputTokens: 100,
+        outputTokens: 20,
+        cachedReadTokens: 30,
+        cachedWriteTokens: null,
+        thoughtTokens: 5,
+        totalTokens: 120
+      }
+    });
+    expect(missing.statusCode).toBe(404);
+  });
+
   it("健康检查不需要鉴权", async () => {
     const { app } = await createTestApp();
 

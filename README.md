@@ -68,7 +68,6 @@ cd remote-agent-server
 nvm use
 corepack enable
 pnpm install --frozen-lockfile
-pnpm build
 
 cp .env.example .env
 chmod 0600 .env
@@ -84,6 +83,8 @@ set +a
 pnpm start
 ```
 
+`pnpm start` 会先构建服务端和 Web 管理台，再以生产模式启动。若直接执行构建后的 Node 入口但 Web 构建不完整，服务会明确报错退出，不会启动一个只有 API、页面必然白屏的进程。
+
 检查服务：
 
 ```bash
@@ -91,6 +92,16 @@ curl --fail http://127.0.0.1:3000/api/health
 ```
 
 打开 `http://127.0.0.1:3000`，输入 `API_TOKEN`。Web 界面只在当前浏览器会话中保存 Token。
+
+### 本地开发
+
+加载 `.env` 后运行：
+
+```bash
+pnpm dev
+```
+
+该命令会同时启动后端监听和 Vite 前端开发服务器。后端使用 `.env` 中的 `PORT`，Vite 默认位于 `http://127.0.0.1:5173`，并把 `/api` 和 `/integration` 自动代理到该后端端口；前端修改可热更新，无需重复构建或重启后端。
 
 ## 从零完成一次 Agent 执行
 

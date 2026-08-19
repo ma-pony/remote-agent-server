@@ -116,6 +116,12 @@ export const migrate = (db: Database.Database): void => {
       workspace_path TEXT NOT NULL UNIQUE,
       project_environment_revision_id TEXT REFERENCES project_environment_revisions(id),
       instructions_snapshot TEXT NOT NULL DEFAULT '',
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      cached_read_tokens INTEGER,
+      cached_write_tokens INTEGER,
+      thought_tokens INTEGER,
+      total_tokens INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -139,7 +145,15 @@ export const migrate = (db: Database.Database): void => {
       error TEXT,
       created_at TEXT NOT NULL,
       started_at TEXT,
-      finished_at TEXT
+      finished_at TEXT,
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      cached_read_tokens INTEGER,
+      cached_write_tokens INTEGER,
+      thought_tokens INTEGER,
+      total_tokens INTEGER,
+      context_used_tokens INTEGER,
+      context_window_tokens INTEGER
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_session
@@ -266,6 +280,16 @@ export const migrate = (db: Database.Database): void => {
   if (!hasColumn("sessions", "instructions_snapshot")) {
     db.exec("ALTER TABLE sessions ADD COLUMN instructions_snapshot TEXT NOT NULL DEFAULT ''");
   }
+  for (const column of [
+    "input_tokens",
+    "output_tokens",
+    "cached_read_tokens",
+    "cached_write_tokens",
+    "thought_tokens",
+    "total_tokens"
+  ]) {
+    if (!hasColumn("sessions", column)) db.exec(`ALTER TABLE sessions ADD COLUMN ${column} INTEGER`);
+  }
   if (!hasColumn("integration_tasks", "event_sequences_json")) {
     db.exec("ALTER TABLE integration_tasks ADD COLUMN event_sequences_json TEXT NOT NULL DEFAULT '{}'");
   }
@@ -286,5 +310,17 @@ export const migrate = (db: Database.Database): void => {
   }
   if (!hasColumn("integration_tasks", "public_notice_event_seq")) {
     db.exec("ALTER TABLE integration_tasks ADD COLUMN public_notice_event_seq INTEGER");
+  }
+  for (const column of [
+    "input_tokens",
+    "output_tokens",
+    "cached_read_tokens",
+    "cached_write_tokens",
+    "thought_tokens",
+    "total_tokens",
+    "context_used_tokens",
+    "context_window_tokens"
+  ]) {
+    if (!hasColumn("runs", column)) db.exec(`ALTER TABLE runs ADD COLUMN ${column} INTEGER`);
   }
 };

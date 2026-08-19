@@ -389,6 +389,70 @@ describe("RunExecutor", () => {
     setupResult.db.close();
   });
 
+  it("合并多次部分用量更新并只在 Run 终态保存最终快照", async () => {
+    const setupResult = setup(createFakeRuntime({
+      events: [
+        { type: "usage", usage: { inputTokens: 100, outputTokens: 40, totalTokens: 140 } },
+        {
+          type: "usage",
+          usage: { inputTokens: 120, cachedReadTokens: 30, contextUsedTokens: 1_000, contextWindowTokens: 8_000 }
+        },
+        { type: "message", stream: "output", text: "完成" }
+      ],
+      result: { status: "completed" }
+    }));
+
+    await setupResult.executor.execute(setupResult.run.id);
+
+    expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+      status: "succeeded",
+      usage: {
+        inputTokens: 120,
+        outputTokens: 40,
+        cachedReadTokens: 30,
+        cachedWriteTokens: null,
+        thoughtTokens: null,
+        totalTokens: 140,
+        contextUsedTokens: 1_000,
+        contextWindowTokens: 8_000
+      }
+    });
+    expect(setupResult.eventStore.list(setupResult.run.id, 0).map((event) => event.type))
+      .toEqual(["message", "status"]);
+    setupResult.db.close();
+  });
+
+  it("将 Runtime 返回的累计精确用量保存到 Session 而不是 Run", async () => {
+    const runtime = createFakeRuntime({
+      result: {
+        status: "completed",
+        sessionUsage: {
+          inputTokens: 897,
+          outputTokens: 17,
+          cachedReadTokens: 15_104,
+          thoughtTokens: 0,
+          totalTokens: 16_018
+        }
+      } as RuntimeTurnResult
+    });
+    const setupResult = setup(runtime);
+
+    await setupResult.executor.execute(setupResult.run.id);
+
+    expect(setupResult.sessionManager.get("session-1")).toMatchObject({
+      usage: {
+        inputTokens: 897,
+        outputTokens: 17,
+        cachedReadTokens: 15_104,
+        cachedWriteTokens: null,
+        thoughtTokens: 0,
+        totalTokens: 16_018
+      }
+    });
+    expect(setupResult.runRepository.get(setupResult.run.id)?.usage).toBeNull();
+    setupResult.db.close();
+  });
+
   it("保存 Runtime error 事件，但仍只用 canonical result 决定终态", async () => {
     const setupResult = setup(createFakeRuntime({
       events: [{ type: "error", code: "transient", message: "reported by provider" }],

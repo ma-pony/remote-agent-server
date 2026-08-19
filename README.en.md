@@ -68,7 +68,6 @@ cd remote-agent-server
 nvm use
 corepack enable
 pnpm install --frozen-lockfile
-pnpm build
 
 cp .env.example .env
 chmod 0600 .env
@@ -84,6 +83,8 @@ set +a
 pnpm start
 ```
 
+`pnpm start` builds both the server and web console before starting in production mode. If the compiled Node entrypoint is invoked directly with an incomplete web build, the process exits with a clear error instead of starting an API-only service whose UI can only render blank.
+
 Check the server:
 
 ```bash
@@ -91,6 +92,16 @@ curl --fail http://127.0.0.1:3000/api/health
 ```
 
 Open `http://127.0.0.1:3000` and enter `API_TOKEN`. The web interface keeps it only in the current browser session.
+
+### Local development
+
+After loading `.env`, run:
+
+```bash
+pnpm dev
+```
+
+This starts the watched API server and Vite development server together. The API uses `PORT` from `.env`; Vite defaults to `http://127.0.0.1:5173` and proxies `/api` and `/integration` to that API port. Frontend edits use hot module replacement without rebuilding or restarting the API.
 
 ## Complete one agent run
 

@@ -7,10 +7,12 @@
     "node": ">=22.13.0 <23"
   },
   "scripts": {
-    "dev": "tsx watch src/main.ts",
-    "dev:web": "vite",
+    "dev": "concurrently --kill-others --names api,web \"pnpm dev:server\" \"pnpm dev:web\"",
+    "dev:server": "NODE_ENV=development tsx watch src/main.ts",
+    "dev:web": "vite --host 127.0.0.1",
     "build": "tsc -p tsconfig.server.json && vite build",
-    "start": "node dist/server/main.js",
+    "prestart": "pnpm build",
+    "start": "NODE_ENV=production node dist/server/main.js",
     "smoke:integrations": "tsx scripts/smoke-integrations.ts",
     "smoke:providers": "tsx scripts/smoke-providers.ts",
     "test": "vitest run",
@@ -48,6 +50,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.0.5",
+    "concurrently": "^10.0.5",
     "jsdom": "^27.4.0",
     "tsx": "^4.23.12",
     "typescript": "^6.0.3",

@@ -1,4 +1,4 @@
-import type { Provider } from "../domain.js";
+import type { Provider, TokenUsage, TokenUsageTotals } from "../domain.js";
 import type { RuntimeMcpServer } from "../mcp/mcp-types.js";
 
 export type RuntimeSessionInput = {
@@ -19,11 +19,13 @@ export type RuntimeEvent =
   | { type: "message"; stream: "output" | "thought"; text: string }
   | { type: "tool"; content: Record<string, unknown> }
   | { type: "status"; text: string }
+  | { type: "usage"; usage: Partial<TokenUsage> }
   | { type: "error"; code?: string; message: string };
-export type RuntimeTurnResult =
+export type RuntimeTurnResult = (
   | { status: "completed" }
   | { status: "cancelled" }
-  | { status: "failed"; code?: string; message: string };
+  | { status: "failed"; code?: string; message: string }
+) & { sessionUsage?: Partial<TokenUsageTotals> };
 export type RuntimeDoctor = { ok: boolean; message: string; details: string[] };
 
 export type RuntimeTurn = {

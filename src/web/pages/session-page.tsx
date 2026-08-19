@@ -10,6 +10,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { PageHeader } from "@/components/page-header";
+import { TokenUsageSummaryCard } from "@/components/token-usage";
 import { SessionDeleteDialog } from "./session-pages.js";
 import { useI18n } from "@/i18n";
 
@@ -45,11 +46,13 @@ const foldHistoricalStatus = (run: Run, events: RunEvent[]): Run => {
   return status === run.status ? run : { ...run, status };
 };
 
-const mergeEvent = (views: RunView[], runId: string, item: RunEvent): RunView[] => views.map((view) => {
+const mergeEvent = (views: RunView[], runId: string, item: RunEvent, applyStatus = true): RunView[] => views.map((view) => {
   if (view.run.id !== runId || view.events.some((event) => event.seq === item.seq)) return view;
-  const status = eventStatus(item);
+  const status = applyStatus ? eventStatus(item) : undefined;
   return {
-    run: status === undefined
+    run: !applyStatus
+      ? view.run
+      : status === undefined
       ? view.run.status === "queued" ? { ...view.run, status: "running" } : view.run
       : { ...view.run, status },
     events: [...view.events, item].sort((left, right) => left.seq - right.seq),
@@ -143,13 +146,26 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
         try {
           const canonical = await api<Run>(`/runs/${activeRunId}`, { signal: controller.signal });
           if (controller.signal.aborted) return true;
-          setViews((current) => current.map((view) =>
-            view.run.id === canonical.id ? { ...view, run: canonical } : view
-          ));
           if (terminalStatuses.has(canonical.status)) {
+            let detail: SessionDetail | null = null;
+            try {
+              detail = await api<SessionDetail>(`/sessions/${sessionId}`, { signal: controller.signal });
+            } catch (_error) {
+              if (controller.signal.aborted) return true;
+            }
+            if (controller.signal.aborted) return true;
+            const runsById = new Map(detail?.runs.map((run) => [run.id, run]) ?? []);
+            if (detail !== null) setSession(detail);
+            setViews((current) => current.map((view) => ({
+              ...view,
+              run: view.run.id === canonical.id ? canonical : runsById.get(view.run.id) ?? view.run
+            })));
             finishTerminal();
             return true;
           }
+          setViews((current) => current.map((view) =>
+            view.run.id === canonical.id ? { ...view, run: canonical } : view
+          ));
         } catch (_error) {
           if (controller.signal.aborted) return true;
         }
@@ -157,14 +173,14 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       })().finally(() => { canonicalRefresh = undefined; });
       return canonicalRefresh;
     };
-    const scheduleCanonicalPoll = (): void => {
+    const scheduleCanonicalPoll = (delay = canonicalPollIntervalMs): void => {
       if (controller.signal.aborted || canonicalPollTimer !== undefined) return;
       canonicalPollTimer = setTimeout(() => {
         canonicalPollTimer = undefined;
         void refreshCanonicalRun().then((terminal) => {
           if (!terminal) scheduleCanonicalPoll();
         });
-      }, canonicalPollIntervalMs);
+      }, delay);
     };
 
     const connect = async (): Promise<void> => {
@@ -174,9 +190,15 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
           cursor = Math.max(cursor, item.seq);
           consecutiveFailures = 0;
           setStreamError("");
-          setViews((current) => mergeEvent(current, activeRunId, item));
           const status = eventStatus(item);
-          if (status !== undefined && terminalStatuses.has(status)) finishTerminal();
+          const terminal = status !== undefined && terminalStatuses.has(status);
+          setViews((current) => mergeEvent(current, activeRunId, item, !terminal));
+          if (terminal) {
+            clearCanonicalPoll();
+            void refreshCanonicalRun().then((terminal) => {
+              if (!terminal) scheduleCanonicalPoll(250);
+            });
+          }
         }, controller.signal);
       } catch (reason) {
         clearCanonicalPoll();
@@ -204,7 +226,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       if (retryTimer !== undefined) clearTimeout(retryTimer);
       clearCanonicalPoll();
     };
-  }, [activeRunId, streamReconnectGeneration, text]);
+  }, [activeRunId, sessionId, streamReconnectGeneration, text]);
 
   const send = async (event: FormEvent) => {
     event.preventDefault();
@@ -243,6 +265,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
       <Button asChild variant="ghost" className="mb-4"><Link to="/sessions"><ArrowLeft />{text("返回会话", "Back to sessions")}</Link></Button>
       <PageHeader eyebrow={text(`会话 / ${initialLoading ? "加载中" : activeRunId !== null ? "运行中" : "空闲"}`, `SESSION / ${initialLoading ? "LOADING" : activeRunId !== null ? "RUNNING" : "IDLE"}`)} title={session?.title ?? text("加载会话…", "Loading session…")} description={agentName === "" ? text("正在读取智能体…", "Loading agent…") : text(`智能体 · ${agentName}`, `Agent · ${agentName}`)} action={<div className="flex items-center gap-2">{session === null ? null : <Button asChild size="sm" variant="outline"><Link to={`/sessions/${session.id}/settings`}><Settings2 />{text("设置", "Settings")}</Link></Button>}<Badge variant={activeRunId === null ? "secondary" : "default"}>{activeRunId === null ? text("空闲", "Idle") : text("活动中", "Active")}</Badge>{session === null ? null : <SessionDeleteDialog session={activeRunId === null ? session : { ...session, status: "running" }} onDeleted={() => navigate("/sessions")} onError={setError} />}</div>} />
+      {session?.usageSummary === undefined ? null : <div className="mt-6"><TokenUsageSummaryCard headingLevel={2} title={text("累计 Token 用量", "Cumulative token usage")} summary={session.usageSummary} /></div>}
       <div className="flex flex-col gap-4">
         {loadError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>{text("会话加载失败", "Session failed to load")}</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{loadError}</span><Button size="sm" variant="outline" type="button" onClick={() => setReloadGeneration((current) => current + 1)}>{text("重试加载", "Retry")}</Button></AlertDescription></Alert> : error !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>{text("操作失败", "Operation failed")}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
         {streamError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>{text("实时连接异常", "Live connection error")}</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{streamError}</span>{streamError.includes("自动重连已停止") || streamError.includes("Automatic reconnection stopped") ? <Button size="sm" variant="outline" type="button" onClick={() => setStreamReconnectGeneration((current) => current + 1)}>{text("重新连接实时事件", "Reconnect live events")}</Button> : null}</AlertDescription></Alert> : null}

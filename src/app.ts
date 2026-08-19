@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -166,7 +166,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   app.register((api) => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
-    registerAgentRoutes(api, agentManager, skillManager);
+    registerAgentRoutes(api, agentManager, skillManager, runRepository);
     registerMcpRoutes(api, { mcpManager, mcpChecker });
     registerIntegrationAdminRoutes(api, {
       manager: integrationEndpointManager,
@@ -190,10 +190,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   });
 
   const webRoot = deps.webRoot ?? resolve(process.cwd(), "dist/web");
-  const hasWebRoot = existsSync(webRoot);
-  if (hasWebRoot) {
-    app.register(fastifyStatic, { root: webRoot, wildcard: false });
-  }
+  app.register(fastifyStatic, { root: webRoot, wildcard: true, suppressWarning: true });
   app.setNotFoundHandler((request, reply) => {
     const path = request.url.split("?", 1)[0] ?? request.url;
     if (path === "/api" || path?.startsWith("/api/") || path === "/integration" || path?.startsWith("/integration/")) {
@@ -203,7 +200,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     const lastSegment = path.split("/").at(-1) ?? "";
     const assetLike = /\.[^./]+$/.test(lastSegment);
     const assetPath = path === "/assets" || path.startsWith("/assets/");
-    if (hasWebRoot && (request.method === "GET" || request.method === "HEAD") && acceptsHtml && !assetPath && !assetLike) {
+    const hasWebIndex = existsSync(join(webRoot, "index.html"));
+    if (hasWebIndex && (request.method === "GET" || request.method === "HEAD") && acceptsHtml && !assetPath && !assetLike) {
       return reply.sendFile("index.html");
     }
     return reply.code(404).send({ error: { code: "not_found", message: "Route not found" } });

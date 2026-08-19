@@ -295,7 +295,8 @@ const toRun = (row: LinkedRunRow): Run => ({
   error: row.error,
   createdAt: row.created_at,
   startedAt: row.started_at,
-  finishedAt: row.finished_at
+  finishedAt: row.finished_at,
+  usage: null
 });
 
 /** Stores integration state; InTransaction methods join a caller-owned SQLite transaction. */

@@ -6,6 +6,25 @@ export type IntegrationTaskStatus = RunStatus;
 export type EventType = "message" | "tool" | "status" | "error";
 export type ProjectEnvironmentRevisionStatus = "preparing" | "ready" | "failed";
 
+export type TokenUsage = {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedReadTokens: number | null;
+  cachedWriteTokens: number | null;
+  thoughtTokens: number | null;
+  totalTokens: number | null;
+  contextUsedTokens: number | null;
+  contextWindowTokens: number | null;
+};
+
+export type TokenUsageTotals = Omit<TokenUsage, "contextUsedTokens" | "contextWindowTokens">;
+
+export type TokenUsageSummary = {
+  sessionCount: number;
+  measuredSessionCount: number;
+  usage: TokenUsageTotals;
+};
+
 export type ProjectEnvironment = {
   id: string;
   name: string;
@@ -63,6 +82,7 @@ export type Session = {
   workspacePath: string;
   projectEnvironmentRevisionId: string | null;
   instructionsSnapshot: string;
+  usage: TokenUsageTotals | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -77,6 +97,7 @@ export type Run = {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  usage: TokenUsage | null;
 };
 
 export type Event = {

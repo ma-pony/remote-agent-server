@@ -150,9 +150,27 @@ export type Run = {
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
+  usage: TokenUsage | null;
 };
 
-export type SessionDetail = Session & { runs: Run[] };
+export type TokenUsage = {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedReadTokens: number | null;
+  cachedWriteTokens: number | null;
+  thoughtTokens: number | null;
+  totalTokens: number | null;
+  contextUsedTokens: number | null;
+  contextWindowTokens: number | null;
+};
+
+export type TokenUsageSummary = {
+  sessionCount: number;
+  measuredSessionCount: number;
+  usage: Omit<TokenUsage, "contextUsedTokens" | "contextWindowTokens">;
+};
+
+export type SessionDetail = Session & { runs: Run[]; usageSummary?: TokenUsageSummary };
 
 export type RunEvent = {
   id: string;

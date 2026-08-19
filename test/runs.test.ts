@@ -286,6 +286,40 @@ describe("RunRepository", () => {
     expect(repository.listQueued()).toMatchObject([{ sessionId: queuedSession.id, status: "queued" }]);
     db.close();
   });
+
+  it("按 Session 和 Agent 聚合 Session 累计 Token 字段", () => {
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    const unknownSession = seed.session();
+    db.prepare(`
+      UPDATE sessions SET input_tokens = 300, output_tokens = 40, cached_read_tokens = 80, total_tokens = 340
+      WHERE id = ?
+    `).run(session.id);
+    const repository = new RunRepository({ db });
+
+    const expected = {
+      sessionCount: 1,
+      measuredSessionCount: 1,
+      usage: {
+        inputTokens: 300,
+        outputTokens: 40,
+        cachedReadTokens: 80,
+        cachedWriteTokens: null,
+        thoughtTokens: null,
+        totalTokens: 340
+      }
+    };
+    expect(repository.summarizeBySession(session.id)).toEqual(expected);
+    expect(repository.summarizeBySession(unknownSession.id)).toMatchObject({
+      sessionCount: 1,
+      measuredSessionCount: 0
+    });
+    expect(repository.summarizeByAgent(seed.agent.id)).toEqual({
+      ...expected,
+      sessionCount: 2
+    });
+    db.close();
+  });
 });
 
 describe("RunScheduler", () => {
@@ -621,6 +655,8 @@ describe("Run API", () => {
     await vi.waitFor(() => expect(new RunRepository({ db }).get(first.id)?.status).toBe("succeeded"));
     const second = (await postRun(app, "session-1", "second")).json() as Run;
     await vi.waitFor(() => expect(new RunRepository({ db }).get(second.id)?.status).toBe("succeeded"));
+    db.prepare("UPDATE sessions SET input_tokens = 100, output_tokens = 20, total_tokens = 120 WHERE id = ?")
+      .run("session-1");
 
     const response = await app.inject({ method: "GET", url: "/api/sessions/session-1", headers: authHeaders() });
 
@@ -628,9 +664,19 @@ describe("Run API", () => {
     expect(response.json()).toMatchObject({
       id: "session-1",
       runs: [
-        { id: first.id, input: "first", status: "succeeded" },
-        { id: second.id, input: "second", status: "succeeded" }
-      ]
+        {
+          id: first.id,
+          input: "first",
+          status: "succeeded",
+          usage: null
+        },
+        { id: second.id, input: "second", status: "succeeded", usage: null }
+      ],
+      usageSummary: {
+        sessionCount: 1,
+        measuredSessionCount: 1,
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 }
+      }
     });
   });
 });

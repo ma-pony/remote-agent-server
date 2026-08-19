@@ -19,6 +19,7 @@ import { ProjectEnvironmentStore } from "./project-environments/project-environm
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { applyServicePath, removeServiceSecretsFromEnvironment } from "./runtime/service-path.js";
 import { RunRepository } from "./runs/run-repository.js";
+import { assertWebBuildAvailable } from "./web-build.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import { type FileSystemInspector } from "./workspaces/apfs-workspace.js";
 import type { CommandRunner } from "./workspaces/workspace-manager.js";
@@ -171,7 +172,12 @@ const isEntrypoint = process.argv[1] !== undefined
 
 if (isEntrypoint) {
   applyServicePath();
-  void startServer().catch((error: unknown) => {
+  void (async () => {
+    if (process.env.NODE_ENV !== "development") {
+      assertWebBuildAvailable(resolve(process.cwd(), "dist/web"));
+    }
+    await startServer();
+  })().catch((error: unknown) => {
     console.error(error);
     process.exitCode = 1;
   });

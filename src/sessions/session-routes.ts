@@ -72,7 +72,11 @@ export const registerSessionRoutes = (
     const session = sessionManager.get(request.params.id);
     return session === undefined
       ? sendError(reply, 404, "not_found", "Session not found")
-      : { ...session, runs: runRepository.listBySession(session.id) };
+      : {
+        ...session,
+        runs: runRepository.listBySession(session.id),
+        usageSummary: runRepository.summarizeBySession(session.id)
+      };
   });
 
   app.patch<{ Params: { id: string } }>("/sessions/:id/mcp-parameters", (request, reply) => {

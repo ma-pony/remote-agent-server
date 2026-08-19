@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import type Database from "better-sqlite3";
 
 import type { AgentManager } from "../agents/agent-manager.js";
-import type { Agent, Session, SessionStatus } from "../domain.js";
+import type { Agent, Session, SessionStatus, TokenUsageTotals } from "../domain.js";
 import { McpManager } from "../mcp/mcp-manager.js";
 import { SecretStore } from "../mcp/secret-store.js";
 import type { SessionMcpStatus } from "../mcp/mcp-types.js";
@@ -22,6 +22,12 @@ type SessionRow = {
   workspace_path: string;
   project_environment_revision_id: string | null;
   instructions_snapshot: string;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_read_tokens: number | null;
+  cached_write_tokens: number | null;
+  thought_tokens: number | null;
+  total_tokens: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -35,6 +41,21 @@ const toSession = (row: SessionRow): Session => ({
   workspacePath: row.workspace_path,
   projectEnvironmentRevisionId: row.project_environment_revision_id,
   instructionsSnapshot: row.instructions_snapshot,
+  usage: [
+    row.input_tokens,
+    row.output_tokens,
+    row.cached_read_tokens,
+    row.cached_write_tokens,
+    row.thought_tokens,
+    row.total_tokens
+  ].every((value) => value === null) ? null : {
+    inputTokens: row.input_tokens,
+    outputTokens: row.output_tokens,
+    cachedReadTokens: row.cached_read_tokens,
+    cachedWriteTokens: row.cached_write_tokens,
+    thoughtTokens: row.thought_tokens,
+    totalTokens: row.total_tokens
+  },
   createdAt: row.created_at,
   updatedAt: row.updated_at
 });
@@ -147,16 +168,15 @@ export class SessionManager {
       workspacePath: workspace.workspacePath,
       projectEnvironmentRevisionId: revision.id,
       instructionsSnapshot: agent.instructions,
+      usage: null,
       createdAt,
       updatedAt: createdAt
     });
   }
 
-  /**
-   * Lists persisted Sessions in creation order.
-   */
+  /** Lists persisted Sessions with the newest first. */
   list(): SessionWithMcpStatus[] {
-    const rows = this.db.prepare("SELECT * FROM sessions ORDER BY created_at ASC, id ASC").all() as SessionRow[];
+    const rows = this.db.prepare("SELECT * FROM sessions ORDER BY created_at DESC, id DESC").all() as SessionRow[];
     return rows.map((row) => this.withMcpStatus(toSession(row)));
   }
 
@@ -219,6 +239,30 @@ export class SessionManager {
       .prepare("UPDATE sessions SET provider_session_id = ?, updated_at = ? WHERE id = ?")
       .run(providerSessionId, updatedAt, id);
     return { ...session, providerSessionId, updatedAt };
+  }
+
+  /** Replaces the exact cumulative usage reported for the Provider Session. */
+  saveTokenUsage(id: string, usage: Partial<TokenUsageTotals>): Session {
+    const updatedAt = new Date().toISOString();
+    const updated = this.db.prepare(`
+      UPDATE sessions SET
+        input_tokens = ?, output_tokens = ?, cached_read_tokens = ?, cached_write_tokens = ?,
+        thought_tokens = ?, total_tokens = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      usage.inputTokens ?? null,
+      usage.outputTokens ?? null,
+      usage.cachedReadTokens ?? null,
+      usage.cachedWriteTokens ?? null,
+      usage.thoughtTokens ?? null,
+      usage.totalTokens ?? null,
+      updatedAt,
+      id
+    );
+    if (updated.changes !== 1) throw new SessionManagerError("session_not_found");
+    const session = this.get(id);
+    if (session === undefined) throw new SessionManagerError("session_not_found");
+    return session;
   }
 
   /**
@@ -363,7 +407,9 @@ export class SessionManager {
   private releaseResetClaim(id: string, clearProviderSessionId: boolean): Session {
     return this.inImmediateTransaction(() => {
       const updatedAt = new Date().toISOString();
-      const providerAssignment = clearProviderSessionId ? "provider_session_id = NULL," : "";
+      const providerAssignment = clearProviderSessionId
+        ? "provider_session_id = NULL, input_tokens = NULL, output_tokens = NULL, cached_read_tokens = NULL, cached_write_tokens = NULL, thought_tokens = NULL, total_tokens = NULL,"
+        : "";
       const result = this.db.prepare(`
         UPDATE sessions
         SET ${providerAssignment} status = 'idle', updated_at = ?
