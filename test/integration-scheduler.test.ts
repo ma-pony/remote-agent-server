@@ -24,7 +24,7 @@ const temporaryDirectories: string[] = [];
 const createHarness = (options: {
   databasePath?: string;
   retryDelayMs?: number;
-  onSchedulerError?: (failure: { taskId: string; code: string }) => undefined;
+  onSchedulerError?: (failure: { taskId: number; code: string }) => undefined;
 } = {}) => {
   const { db, seed } = createTestDatabase(options.databasePath);
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-integration-scheduler-"));
@@ -37,9 +37,9 @@ const createHarness = (options: {
   const workspaceManager: WorkspaceManager = {
     check: async () => undefined,
     createSession: async (id) => ({
-      workspacePath: join(dataDir, "sessions", id, "workspace"),
-      runtimePath: join(dataDir, "sessions", id, "runtime"),
-      browserProfilePath: join(dataDir, "sessions", id, "browser")
+      workspacePath: join(dataDir, "sessions", String(id), "workspace"),
+      runtimePath: join(dataDir, "sessions", String(id), "runtime"),
+      browserProfilePath: join(dataDir, "sessions", String(id), "browser")
     }),
     deleteSession: async () => undefined,
     createRevision: async () => undefined,
@@ -54,7 +54,6 @@ const createHarness = (options: {
     mcpManager
   });
   const endpoint = store.createEndpoint({
-    id: "endpoint-1",
     name: "Ticket endpoint",
     slug: "ticket-endpoint",
     agentId: seed.agent.id,
@@ -90,7 +89,7 @@ const createHarness = (options: {
   let nextTask = 0;
   const createTask = (options: {
     conversationKey?: string;
-    sessionId?: string;
+    sessionId?: number;
     parameters?: Record<string, string | null>;
     encryptedParameters?: string;
   } = {}) => {
@@ -100,13 +99,11 @@ const createHarness = (options: {
       ? undefined
       : store.getActiveConversation(endpoint.id, options.conversationKey)
         ?? store.createConversation({
-          id: `conversation-${options.conversationKey}`,
           endpointId: endpoint.id,
           conversationKey: options.conversationKey,
           sessionId
         });
     const task = store.createTask({
-      id: `task-${nextTask}`,
       endpointId: endpoint.id,
       conversationId: conversation?.id ?? null,
       sessionId: conversation?.sessionId ?? sessionId,
@@ -196,9 +193,9 @@ describe("IntegrationTaskScheduler", () => {
     const now = new Date().toISOString();
     harness.db.prepare(`
       INSERT INTO agent_session_parameters
-        (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('alpha-param', ?, 'alpha', 'Alpha', NULL, 0, 0, ?, ?),
-             ('beta-param', ?, 'beta', 'Beta', NULL, 0, 0, ?, ?)
+        (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'alpha', 'Alpha', NULL, 0, 0, ?, ?),
+             (?, 'beta', 'Beta', NULL, 0, 0, ?, ?)
     `).run(harness.seed.agent.id, now, now, harness.seed.agent.id, now, now);
     const session = harness.seed.session();
     harness.sessionManager.updateMcpParameters(session.id, { alpha: "old-alpha", beta: "old-beta" });

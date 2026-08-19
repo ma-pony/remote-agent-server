@@ -83,8 +83,8 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
   /**
    * Creates a Session from one explicitly selected environment revision.
    */
-  async createSession(id: string, sourcePath: string): Promise<Workspace> {
-    const sessionPath = join(this.sessionsRoot, id);
+  async createSession(id: number, sourcePath: string): Promise<Workspace> {
+    const sessionPath = join(this.sessionsRoot, String(id));
     const workspacePath = join(sessionPath, "workspace");
     const runtimePath = join(sessionPath, "runtime");
     const browserProfilePath = join(sessionPath, "browser");
@@ -103,8 +103,8 @@ export class ApfsWorkspaceManager implements WorkspaceManager {
   }
 
   /** Removes a newly-created Session directory. */
-  async deleteSession(id: string): Promise<void> {
-    await rm(join(this.sessionsRoot, id), { force: true, recursive: true });
+  async deleteSession(id: number): Promise<void> {
+    await rm(join(this.sessionsRoot, String(id)), { force: true, recursive: true });
   }
 
   /** Creates either an empty environment revision or an APFS clone. */

@@ -1,6 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import type Database from "better-sqlite3";
+import { insertedId } from "../db.js";
 
 import type {
   EnvironmentRepository,
@@ -11,17 +12,17 @@ import type {
 } from "../domain.js";
 
 type EnvironmentRow = {
-  id: string;
+  id: number;
   name: string;
-  current_revision_id: string | null;
+  current_revision_id: number | null;
   last_checked_at: string | null;
   created_at: string;
   updated_at: string;
 };
 
 type RepositoryRow = {
-  id: string;
-  project_environment_id: string;
+  id: number;
+  project_environment_id: number;
   name: string;
   git_url: string;
   prepare_command: string | null;
@@ -30,8 +31,8 @@ type RepositoryRow = {
 };
 
 type RevisionRow = {
-  id: string;
-  project_environment_id: string;
+  id: number;
+  project_environment_id: number;
   status: ProjectEnvironmentRevisionStatus;
   workspace_path: string | null;
   input_fingerprint: string;
@@ -79,11 +80,9 @@ export type CreateEnvironmentRepositoryInput = {
 };
 
 export type BeginRevisionInput = {
-  projectEnvironmentId: string;
+  projectEnvironmentId: number;
   configurationFingerprint: string;
   inputFingerprint: string;
-  workspacePath: string;
-  id?: string;
 };
 
 /** Stores project-environment configuration and revision state transitions. */
@@ -95,16 +94,15 @@ export class ProjectEnvironmentStore {
   }
 
   create(input: { name: string }): ProjectEnvironment {
-    const id = randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare(`
-      INSERT INTO project_environments (id, name, current_revision_id, last_checked_at, created_at, updated_at)
-      VALUES (?, ?, NULL, NULL, ?, ?)
-    `).run(id, input.name, now, now);
+    const id = insertedId(this.db.prepare(`
+      INSERT INTO project_environments (name, current_revision_id, last_checked_at, created_at, updated_at)
+      VALUES (?, NULL, NULL, ?, ?)
+    `).run(input.name, now, now));
     return toEnvironment(this.environmentRow(id)!);
   }
 
-  update(id: string, input: { name: string }): ProjectEnvironment | undefined {
+  update(id: number, input: { name: string }): ProjectEnvironment | undefined {
     this.assertMutable(id);
     const now = new Date().toISOString();
     const result = this.db.prepare("UPDATE project_environments SET name = ?, updated_at = ? WHERE id = ?")
@@ -117,26 +115,25 @@ export class ProjectEnvironmentStore {
     return rows.map((row) => this.detail(toEnvironment(row)));
   }
 
-  get(id: string): ProjectEnvironmentDetail | undefined {
+  get(id: number): ProjectEnvironmentDetail | undefined {
     const row = this.environmentRow(id);
     return row === undefined ? undefined : this.detail(toEnvironment(row));
   }
 
-  addRepository(projectEnvironmentId: string, input: CreateEnvironmentRepositoryInput): EnvironmentRepository {
+  addRepository(projectEnvironmentId: number, input: CreateEnvironmentRepositoryInput): EnvironmentRepository {
     this.assertMutable(projectEnvironmentId);
-    const id = randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare(`
+    const id = insertedId(this.db.prepare(`
       INSERT INTO environment_repositories
-        (id, project_environment_id, name, git_url, prepare_command, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(id, projectEnvironmentId, input.name, input.gitUrl, input.prepareCommand, now, now);
+        (project_environment_id, name, git_url, prepare_command, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(projectEnvironmentId, input.name, input.gitUrl, input.prepareCommand, now, now));
     return toRepository(this.repositoryRow(id)!);
   }
 
   updateRepository(
-    projectEnvironmentId: string,
-    id: string,
+    projectEnvironmentId: number,
+    id: number,
     input: Partial<CreateEnvironmentRepositoryInput>
   ): EnvironmentRepository | undefined {
     this.assertMutable(projectEnvironmentId);
@@ -158,13 +155,13 @@ export class ProjectEnvironmentStore {
     return toRepository(this.repositoryRow(id)!);
   }
 
-  removeRepository(projectEnvironmentId: string, id: string): boolean {
+  removeRepository(projectEnvironmentId: number, id: number): boolean {
     this.assertMutable(projectEnvironmentId);
     return this.db.prepare("DELETE FROM environment_repositories WHERE id = ? AND project_environment_id = ?")
       .run(id, projectEnvironmentId).changes === 1;
   }
 
-  listRepositories(projectEnvironmentId: string): EnvironmentRepository[] {
+  listRepositories(projectEnvironmentId: number): EnvironmentRepository[] {
     const rows = this.db.prepare(`
       SELECT * FROM environment_repositories
       WHERE project_environment_id = ? ORDER BY name ASC, id ASC
@@ -172,7 +169,7 @@ export class ProjectEnvironmentStore {
     return rows.map(toRepository);
   }
 
-  configurationFingerprint(projectEnvironmentId: string): string {
+  configurationFingerprint(projectEnvironmentId: number): string {
     const values = this.listRepositories(projectEnvironmentId).map(({ name, gitUrl, prepareCommand }) => ({
       name,
       gitUrl,
@@ -192,18 +189,22 @@ export class ProjectEnvironmentStore {
       `).get(input.projectEnvironmentId);
       if (active !== undefined) throw new Error("environment_busy");
 
-      const id = input.id ?? randomUUID();
       const now = new Date().toISOString();
-      this.db.prepare(`
+      const id = insertedId(this.db.prepare(`
         INSERT INTO project_environment_revisions
-          (id, project_environment_id, status, workspace_path, input_fingerprint, failure_stage, error, created_at, finished_at)
-        VALUES (?, ?, 'preparing', ?, ?, NULL, NULL, ?, NULL)
-      `).run(id, input.projectEnvironmentId, input.workspacePath, input.inputFingerprint, now);
+          (project_environment_id, status, workspace_path, input_fingerprint, failure_stage, error, created_at, finished_at)
+        VALUES (?, 'preparing', NULL, ?, NULL, NULL, ?, NULL)
+      `).run(input.projectEnvironmentId, input.inputFingerprint, now));
       return toRevision(this.revisionRow(id)!);
     });
   }
 
-  publishRevision(id: string): ProjectEnvironmentRevision {
+  setRevisionWorkspacePath(id: number, workspacePath: string): void {
+    this.db.prepare("UPDATE project_environment_revisions SET workspace_path = ? WHERE id = ?")
+      .run(workspacePath, id);
+  }
+
+  publishRevision(id: number): ProjectEnvironmentRevision {
     return this.immediateTransaction(() => {
       const row = this.revisionRow(id);
       if (row === undefined || row.status !== "preparing") throw new Error("invalid_revision_state");
@@ -219,7 +220,7 @@ export class ProjectEnvironmentStore {
     });
   }
 
-  failRevision(id: string, failureStage: string, error: string): ProjectEnvironmentRevision {
+  failRevision(id: number, failureStage: string, error: string): ProjectEnvironmentRevision {
     const now = new Date().toISOString();
     const result = this.db.prepare(`
       UPDATE project_environment_revisions
@@ -232,22 +233,22 @@ export class ProjectEnvironmentStore {
 
   recoverPreparing(): ProjectEnvironmentRevision[] {
     const rows = this.db.prepare("SELECT id FROM project_environment_revisions WHERE status = 'preparing'")
-      .all() as Array<{ id: string }>;
+      .all() as Array<{ id: number }>;
     return rows.map(({ id }) => this.failRevision(id, "interrupted", "Project environment build was interrupted"));
   }
 
-  getRevision(id: string): ProjectEnvironmentRevision | undefined {
+  getRevision(id: number): ProjectEnvironmentRevision | undefined {
     const row = this.revisionRow(id);
     return row === undefined ? undefined : toRevision(row);
   }
 
-  getCurrentRevision(projectEnvironmentId: string): ProjectEnvironmentRevision | undefined {
+  getCurrentRevision(projectEnvironmentId: number): ProjectEnvironmentRevision | undefined {
     const environment = this.environmentRow(projectEnvironmentId);
     if (environment?.current_revision_id === null || environment === undefined) return undefined;
     return this.getRevision(environment.current_revision_id);
   }
 
-  listRevisions(projectEnvironmentId: string): ProjectEnvironmentRevision[] {
+  listRevisions(projectEnvironmentId: number): ProjectEnvironmentRevision[] {
     const rows = this.db.prepare(`
       SELECT * FROM project_environment_revisions
       WHERE project_environment_id = ? ORDER BY created_at DESC, id DESC
@@ -255,17 +256,17 @@ export class ProjectEnvironmentStore {
     return rows.map(toRevision);
   }
 
-  markChecked(projectEnvironmentId: string): void {
+  markChecked(projectEnvironmentId: number): void {
     const now = new Date().toISOString();
     this.db.prepare("UPDATE project_environments SET last_checked_at = ?, updated_at = ? WHERE id = ?")
       .run(now, now, projectEnvironmentId);
   }
 
-  clearRevisionWorkspacePath(id: string): void {
+  clearRevisionWorkspacePath(id: number): void {
     this.db.prepare("UPDATE project_environment_revisions SET workspace_path = NULL WHERE id = ?").run(id);
   }
 
-  private assertMutable(projectEnvironmentId: string): void {
+  private assertMutable(projectEnvironmentId: number): void {
     const preparing = this.db.prepare(`
       SELECT 1 FROM project_environment_revisions
       WHERE project_environment_id = ? AND status = 'preparing'
@@ -273,15 +274,15 @@ export class ProjectEnvironmentStore {
     if (preparing !== undefined) throw new Error("environment_busy");
   }
 
-  private environmentRow(id: string): EnvironmentRow | undefined {
+  private environmentRow(id: number): EnvironmentRow | undefined {
     return this.db.prepare("SELECT * FROM project_environments WHERE id = ?").get(id) as EnvironmentRow | undefined;
   }
 
-  private repositoryRow(id: string): RepositoryRow | undefined {
+  private repositoryRow(id: number): RepositoryRow | undefined {
     return this.db.prepare("SELECT * FROM environment_repositories WHERE id = ?").get(id) as RepositoryRow | undefined;
   }
 
-  private revisionRow(id: string): RevisionRow | undefined {
+  private revisionRow(id: number): RevisionRow | undefined {
     return this.db.prepare("SELECT * FROM project_environment_revisions WHERE id = ?").get(id) as RevisionRow | undefined;
   }
 

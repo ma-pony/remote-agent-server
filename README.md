@@ -55,6 +55,7 @@ Remote Agent Server 是一个自托管的 Agent 运行服务。它把 Claude Cod
 - Git
 - 至少安装并登录一个 Provider CLI
 - macOS 使用 APFS；Linux 使用服务用户可操作的 Btrfs
+- Linux 需要安装 `btrfs-progs`，且服务用户必须能实际执行 `btrfs subvolume create/snapshot/delete`
 - 需要有头浏览器时，服务器必须有真实桌面或 X display
 
 项目环境和 Session Workspace 使用 APFS Clone 或 Btrfs Snapshot 创建写时复制副本。服务不提供普通目录复制回退。新主机请先完成[部署文档](docs/deployment.md)中的文件系统准备。
@@ -80,6 +81,23 @@ openssl rand -hex 32
 set -a
 source ./.env
 set +a
+```
+
+Linux 用户必须先按[部署文档](docs/deployment.md#linuxbtrfs-原生部署)准备 Btrfs，并在目录创建完成后执行与服务启动检查一致的预检：
+
+```bash
+command -v btrfs
+btrfs filesystem show "$PROJECT_ENVIRONMENTS_ROOT"
+btrfs filesystem show "$SESSIONS_ROOT"
+test "$(stat -c %d "$PROJECT_ENVIRONMENTS_ROOT")" = \
+     "$(stat -c %d "$SESSIONS_ROOT")"
+```
+
+如果预检失败，不要继续启动：非 Btrfs 主机必须先完成文件系统准备，服务不会回退到普通目录复制。`WorkspaceCheckError` 通常表示 `btrfs` 命令未安装、根目录不在可访问的 Btrfs 上，或两个根目录不在同一文件系统。
+
+启动服务：
+
+```bash
 pnpm start
 ```
 
@@ -107,16 +125,25 @@ pnpm dev
 
 ### 1. 准备 Provider
 
-Provider CLI 必须由运行服务的同一个操作系统用户安装并登录：
+Provider CLI 必须由运行服务的同一个操作系统用户安装并登录。安装和认证方式以官方文档为准：
+
+- [Claude Code](https://code.claude.com/docs/en/getting-started)
+- [Codex CLI](https://developers.openai.com/codex/cli)
+- [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/)
 
 ```bash
-claude login
+claude auth login
 codex login
+claude auth status
+codex login status
 claude --version
 codex --version
+hermes --version
 ```
 
-服务启动时读取登录 Shell 的 PATH，并合并当前 Node 目录和进程 PATH。每个 Agent 使用独立的 Provider Home，只复用必要的原生登录状态，不会自动继承主机 Skills。
+只需选择实际使用的 Provider，在运行服务的系统用户下完成认证和模型配置。
+
+服务启动时读取登录 Shell 的 PATH，并合并当前 Node 目录和进程 PATH。每个 Agent 使用独立的 Provider Home；启动 Codex、Claude Code 或 Hermes 时，服务会复制系统用户的配置、认证、模型、插件和 Skills，但不复制历史会话、缓存、日志和临时运行数据。
 
 ### 2. 创建项目环境
 

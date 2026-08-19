@@ -19,10 +19,10 @@ export type IntegrationErrorCode =
   | "missing_request_parameter" | "unknown_request_parameter" | "invalid_parameter_mapping";
 
 export type IntegrationEndpoint = {
-  id: string;
+  id: number;
   name: string;
   slug: string;
-  agentId: string;
+  agentId: number;
   enabled: boolean;
   promptPrefix: string;
   parameterMappings: ParameterMapping[];
@@ -37,7 +37,7 @@ export type IntegrationEndpointDetail = IntegrationEndpoint;
 export type CreateIntegrationEndpointInput = {
   name: string;
   slug: string;
-  agentId: string;
+  agentId: number;
   enabled: boolean;
   promptPrefix: string;
   parameterMappings: ParameterMappingInput[];
@@ -49,21 +49,21 @@ export type UpdateIntegrationEndpointInput = Omit<Partial<CreateIntegrationEndpo
 export type ResolvedIntegrationParameters = Record<string, string | null>;
 
 export type IntegrationConversation = {
-  id: string;
-  endpointId: string;
+  id: number;
+  endpointId: number;
   conversationKey: string;
-  sessionId: string;
+  sessionId: number;
   status: IntegrationConversationStatus;
   createdAt: string;
   endedAt: string | null;
 };
 
 export type IntegrationTask = {
-  id: string;
-  endpointId: string;
-  conversationId: string | null;
-  sessionId: string;
-  runId: string | null;
+  id: number;
+  endpointId: number;
+  conversationId: number | null;
+  sessionId: number;
+  runId: number | null;
   requestId: string;
   requestFingerprint: string;
   message: string;
@@ -82,17 +82,17 @@ export type IntegrationTask = {
 };
 
 export type ExternalIntegrationTask = {
-  taskId: string;
+  taskId: number;
   requestId: string;
   conversationKey: string | null;
-  sessionId: string;
-  runId: string | null;
+  sessionId: number;
+  runId: number | null;
   status: IntegrationTaskStatus;
 };
 
 export type WebhookSubscription = {
-  id: string;
-  endpointId: string;
+  id: number;
+  endpointId: number;
   name: string;
   url: string;
   enabled: boolean;
@@ -105,13 +105,13 @@ export type WebhookSubscription = {
 };
 
 export type WebhookDelivery = {
-  id: string;
+  id: number;
   eventId: string;
   eventKey: string;
   sequence: number;
   dispatchOrder: number;
-  subscriptionId: string;
-  taskId: string | null;
+  subscriptionId: number;
+  taskId: number | null;
   eventType: string;
   payloadJson: string;
   status: WebhookDeliveryStatus;

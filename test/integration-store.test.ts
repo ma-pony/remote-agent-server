@@ -21,7 +21,7 @@ const createHarness = () => {
   return { db, seed, dataDir, manager, store };
 };
 
-const validEndpointInput = (agentId: string) => ({
+const validEndpointInput = (agentId: number) => ({
   name: "示例平台",
   slug: "example-ticket",
   agentId,
@@ -30,7 +30,7 @@ const validEndpointInput = (agentId: string) => ({
   parameterMappings: []
 });
 
-const endpointInputWithFixedSecret = (agentId: string, value: string) => ({
+const endpointInputWithFixedSecret = (agentId: number, value: string) => ({
   ...validEndpointInput(agentId),
   parameterMappings: [{ parameterKey: "api_token", source: "fixed" as const, value }]
 });
@@ -65,8 +65,8 @@ describe("Integration endpoint domain", () => {
   it("固定敏感值加密且 API 领域对象只返回 configured", () => {
     const { db, seed, manager } = createHarness();
     db.prepare(`
-      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('parameter-api', ?, 'api_token', 'Token', NULL, 0, 1, ?, ?)
+      INSERT INTO agent_session_parameters (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'api_token', 'Token', NULL, 0, 1, ?, ?)
     `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
     const created = manager.create(endpointInputWithFixedSecret(seed.agent.id, "secret-value"));
 
@@ -79,8 +79,8 @@ describe("Integration endpoint domain", () => {
   it("required 固定参数拒绝空白值，详情仅将真实固定值标为 configured", () => {
     const { db, seed, dataDir, manager } = createHarness();
     db.prepare(`
-      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('parameter-api', ?, 'api_token', 'Token', NULL, 1, 1, ?, ?)
+      INSERT INTO agent_session_parameters (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'api_token', 'Token', NULL, 1, 1, ?, ?)
     `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
 
     expect(() => manager.create({
@@ -112,9 +112,9 @@ describe("Integration endpoint domain", () => {
   it("启用端点要求覆盖 Agent 的必填参数，并解析请求和固定值", () => {
     const { db, seed, manager } = createHarness();
     db.prepare(`
-      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('parameter-ticket', ?, 'ticket_id', 'Ticket', NULL, 1, 0, ?, ?),
-             ('parameter-token', ?, 'api_token', 'Token', NULL, 1, 1, ?, ?)
+      INSERT INTO agent_session_parameters (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'ticket_id', 'Ticket', NULL, 1, 0, ?, ?),
+             (?, 'api_token', 'Token', NULL, 1, 1, ?, ?)
     `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z", seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
 
     expect(() => manager.create({
@@ -144,8 +144,8 @@ describe("Integration endpoint domain", () => {
   it("required 请求参数将空白视为缺失", () => {
     const { db, seed, manager } = createHarness();
     db.prepare(`
-      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('parameter-ticket', ?, 'ticket_id', 'Ticket', NULL, 1, 0, ?, ?)
+      INSERT INTO agent_session_parameters (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'ticket_id', 'Ticket', NULL, 1, 0, ?, ?)
     `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
     const created = manager.create({
       ...validEndpointInput(seed.agent.id),
@@ -161,9 +161,9 @@ describe("Integration endpoint domain", () => {
   it("拒绝重复请求 Key 和不存在的目标参数", () => {
     const { db, seed, manager } = createHarness();
     db.prepare(`
-      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('parameter-ticket', ?, 'ticket_id', 'Ticket', NULL, 0, 0, ?, ?),
-             ('parameter-api', ?, 'api_token', 'Token', NULL, 0, 1, ?, ?)
+      INSERT INTO agent_session_parameters (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'ticket_id', 'Ticket', NULL, 0, 0, ?, ?),
+             (?, 'api_token', 'Token', NULL, 0, 1, ?, ?)
     `).run(
       seed.agent.id,
       "2026-08-13T00:00:00.000Z",
@@ -199,11 +199,10 @@ describe("Integration endpoint domain", () => {
 
     expect(() => manager.delete(created.endpoint.id)).toThrowError(new IntegrationEndpointManagerError("endpoint_in_use"));
 
-    const secondAgentId = "agent-second";
-    db.prepare(`
-      INSERT INTO agents (id, name, provider, project_environment_id, created_at, updated_at)
-      VALUES (?, 'Second agent', 'codex', ?, ?, ?)
-    `).run(secondAgentId, seed.projectEnvironment.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+    const secondAgentId = Number(db.prepare(`
+      INSERT INTO agents (name, provider, project_environment_id, created_at, updated_at)
+      VALUES ('Second agent', 'codex', ?, ?, ?)
+    `).run(seed.projectEnvironment.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z").lastInsertRowid);
     expect(() => manager.update(created.endpoint.id, { agentId: secondAgentId }))
       .toThrowError(new IntegrationEndpointManagerError("conversation_busy"));
     db.close();
@@ -230,8 +229,8 @@ describe("Integration endpoint domain", () => {
   it("每次解析都拒绝失效映射和新增未覆盖的 required 参数", () => {
     const { db, seed, manager } = createHarness();
     db.prepare(`
-      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('parameter-ticket', ?, 'ticket_id', 'Ticket', NULL, 1, 0, ?, ?)
+      INSERT INTO agent_session_parameters (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'ticket_id', 'Ticket', NULL, 1, 0, ?, ?)
     `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
     const created = manager.create({
       ...validEndpointInput(seed.agent.id),
@@ -240,14 +239,14 @@ describe("Integration endpoint domain", () => {
     });
 
     db.prepare(`
-      INSERT INTO agent_session_parameters (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('parameter-new', ?, 'new_required', 'New', NULL, 1, 0, ?, ?)
+      INSERT INTO agent_session_parameters (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'new_required', 'New', NULL, 1, 0, ?, ?)
     `).run(seed.agent.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
     expect(() => manager.resolveRequest(created.endpoint.id, { ticket: "1332" }))
       .toThrowError("invalid_parameter_mapping");
 
-    db.prepare("DELETE FROM agent_session_parameters WHERE id = 'parameter-new'").run();
-    db.prepare("DELETE FROM agent_session_parameters WHERE id = 'parameter-ticket'").run();
+    db.prepare("DELETE FROM agent_session_parameters WHERE key = 'new_required'").run();
+    db.prepare("DELETE FROM agent_session_parameters WHERE key = 'ticket_id'").run();
     expect(() => manager.resolveRequest(created.endpoint.id, { ticket: "1332" }))
       .toThrowError("invalid_parameter_mapping");
     db.close();
@@ -297,9 +296,9 @@ describe("Integration endpoint domain", () => {
     const second = manager.create({ ...validEndpointInput(seed.agent.id), slug: "large-history-b" }).endpoint;
     const session = seed.session();
 
+    const taskIds: number[] = [];
     for (let index = 0; index < 500; index += 1) {
-      store.createTask({
-        id: `history-${String(index).padStart(4, "0")}`,
+      taskIds.push(store.createTask({
         endpointId: first.id,
         conversationId: null,
         sessionId: session.id,
@@ -308,12 +307,12 @@ describe("Integration endpoint domain", () => {
         message: `message-${index}`,
         effectivePrompt: `message-${index}`,
         encryptedParameters: null
-      });
+      }).id);
     }
     db.prepare("UPDATE integration_tasks SET status = 'succeeded', finished_at = created_at WHERE endpoint_id = ?")
       .run(first.id);
-    db.prepare("UPDATE integration_tasks SET status = 'running' WHERE id = 'history-0498'").run();
-    db.prepare("UPDATE integration_tasks SET status = 'queued' WHERE id = 'history-0499'").run();
+    db.prepare("UPDATE integration_tasks SET status = 'running' WHERE id = ?").run(taskIds[498]);
+    db.prepare("UPDATE integration_tasks SET status = 'queued' WHERE id = ?").run(taskIds[499]);
 
     const summaries = store.listEndpointManagementSummaries();
 
@@ -321,7 +320,7 @@ describe("Integration endpoint domain", () => {
     expect(summaries.find((summary) => summary.endpointId === first.id)).toMatchObject({
       activeConversationCount: 0,
       activeTaskCount: 2,
-      latestTask: { id: "history-0499", requestId: "request-499", status: "queued" }
+      latestTask: { id: taskIds[499], requestId: "request-499", status: "queued" }
     });
     expect(summaries.find((summary) => summary.endpointId === second.id)).toEqual({
       endpointId: second.id,

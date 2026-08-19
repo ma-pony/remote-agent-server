@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type Database from "better-sqlite3";
 
 import { migrate, openDatabase } from "../src/db.js";
@@ -14,45 +12,41 @@ import type {
   RuntimeTurnResult
 } from "../src/runtime/agent-runtime.js";
 
-let nextId = 0;
-
-const id = (prefix: string): string => `${prefix}-${++nextId}`;
 const now = (): string => "2026-08-12T00:00:00.000Z";
 
 export const createTestDatabase = (databasePath = ":memory:"): {
   db: Database.Database;
   seed: {
-    projectEnvironment: { id: string; revisionId: string; workspacePath: string };
-    agent: { id: string };
-    session: () => { id: string };
-    run: (sessionId: string, status: "queued" | "running" | "succeeded" | "failed" | "cancelled") => void;
+    projectEnvironment: { id: number; revisionId: number; workspacePath: string };
+    agent: { id: number };
+    session: () => { id: number };
+    run: (sessionId: number, status: "queued" | "running" | "succeeded" | "failed" | "cancelled") => void;
   };
 } => {
   const db = openDatabase(databasePath);
   migrate(db);
+  let sessionSequence = 0;
 
-  const projectEnvironmentId = randomUUID();
-  const projectEnvironmentRevisionId = randomUUID();
-  const projectEnvironmentWorkspacePath = `/tmp/${projectEnvironmentRevisionId}/workspace`;
-  db.prepare(
-    "INSERT INTO project_environments (id, name, current_revision_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
-  ).run(projectEnvironmentId, "Test environment", projectEnvironmentRevisionId, now(), now());
-  db.prepare(`
+  const projectEnvironmentId = Number(db.prepare(
+    "INSERT INTO project_environments (name, created_at, updated_at) VALUES (?, ?, ?)"
+  ).run("Test environment", now(), now()).lastInsertRowid);
+  const projectEnvironmentRevisionId = Number(db.prepare(`
     INSERT INTO project_environment_revisions
-      (id, project_environment_id, status, workspace_path, input_fingerprint, created_at, finished_at)
-    VALUES (?, ?, 'ready', ?, ?, ?, ?)
+      (project_environment_id, status, workspace_path, input_fingerprint, created_at, finished_at)
+    VALUES (?, 'ready', ?, ?, ?, ?)
   `).run(
-    projectEnvironmentRevisionId,
     projectEnvironmentId,
-    projectEnvironmentWorkspacePath,
+    `/tmp/${projectEnvironmentId}/workspace`,
     "test-input",
     now(),
     now()
-  );
-  const agentId = id("agent");
-  db.prepare(
-    "INSERT INTO agents (id, name, provider, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
-  ).run(agentId, "Test agent", "codex", projectEnvironmentId, now(), now());
+  ).lastInsertRowid);
+  const projectEnvironmentWorkspacePath = `/tmp/${projectEnvironmentId}/workspace`;
+  db.prepare("UPDATE project_environments SET current_revision_id = ? WHERE id = ?")
+    .run(projectEnvironmentRevisionId, projectEnvironmentId);
+  const agentId = Number(db.prepare(
+    "INSERT INTO agents (name, provider, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
+  ).run("Test agent", "codex", projectEnvironmentId, now(), now()).lastInsertRowid);
 
   return {
     db,
@@ -64,16 +58,15 @@ export const createTestDatabase = (databasePath = ":memory:"): {
       },
       agent: { id: agentId },
       session: () => {
-        const sessionId = id("session");
-        db.prepare(
-          "INSERT INTO sessions (id, agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-        ).run(sessionId, agentId, "Test session", "idle", `/tmp/${sessionId}`, now(), now());
+        const sessionId = Number(db.prepare(
+          "INSERT INTO sessions (agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+        ).run(agentId, "Test session", "idle", `/tmp/session-${++sessionSequence}`, now(), now()).lastInsertRowid);
         return { id: sessionId };
       },
       run: (sessionId, status) => {
         db.prepare(
-          "INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)"
-        ).run(id("run"), sessionId, status, "test input", now());
+          "INSERT INTO runs (session_id, status, input, created_at) VALUES (?, ?, ?, ?)"
+        ).run(sessionId, status, "test input", now());
       }
     }
   };
@@ -112,7 +105,7 @@ export const createFakeRuntime = (options: FakeRuntimeOptions = {}): AgentRuntim
       closeEvents: async (): Promise<void> => undefined
     };
   },
-  cancel: async (_sessionId: string): Promise<void> => undefined,
+  cancel: async (_sessionId: number): Promise<void> => undefined,
   reset: async (_input: RuntimeSessionInput): Promise<void> => undefined,
   doctor: async (): Promise<RuntimeDoctor> => options.doctor ?? ({ ok: true, message: "ready", details: [] }),
   shutdown: async (): Promise<void> => undefined

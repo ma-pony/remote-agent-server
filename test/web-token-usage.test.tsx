@@ -92,6 +92,18 @@ it("在 Session 累计区展示执行器上报的精确累计用量", async () =
   const cumulative = await screen.findByRole("heading", { name: "累计 Token 用量" });
   const cumulativeCard = cumulative.closest("div[data-slot='card']")!;
   expect(within(cumulativeCard).getByText("总计 1.4万")).toBeInTheDocument();
+  const expectedDetails = [
+    ["输入", "1.2万"],
+    ["输出", "2000"],
+    ["缓存读取", "8000"],
+    ["缓存写入", "—"],
+    ["思考", "600"],
+    ["总计", "1.4万"]
+  ] as const;
+  for (const [label, value] of expectedDetails) {
+    const term = within(cumulativeCard).getByText(label, { selector: "dt" });
+    expect(within(term.closest("div")!).getByRole("definition")).toHaveTextContent(value);
+  }
   expect(within(cumulativeCard).getByText("已统计 1 / 1 个会话")).toBeInTheDocument();
   expect(screen.queryByText("输入 1.2万 · 输出 2000 · 缓存读取 8000 · 思考 600 · 总计 1.4万")).not.toBeInTheDocument();
 });

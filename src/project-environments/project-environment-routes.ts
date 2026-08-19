@@ -19,6 +19,10 @@ const repositoryUpdateSchema = z.object({
   gitUrl: z.string().trim().min(1).max(2_000).optional(),
   prepareCommand: z.string().trim().max(4_000).nullable().optional()
 }).strict().refine((value) => Object.keys(value).length > 0);
+const parseId = (value: string): number | undefined => {
+  const parsed = z.coerce.number().int().positive().safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+};
 
 const sendError = (reply: FastifyReply, status: number, code: string, message: string) =>
   reply.code(status).send({ error: { code, message } });
@@ -65,7 +69,8 @@ export const registerProjectEnvironmentRoutes = (
   });
 
   app.get<{ Params: { id: string } }>("/project-environments/:id", (request, reply) => {
-    const environment = store.get(request.params.id);
+    const id = parseId(request.params.id);
+    const environment = id === undefined ? undefined : store.get(id);
     return environment === undefined
       ? sendError(reply, 404, "not_found", "Project environment not found")
       : presentEnvironment(environment);
@@ -75,7 +80,9 @@ export const registerProjectEnvironmentRoutes = (
     const parsed = environmentSchema.safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid project environment update");
     try {
-      return store.update(request.params.id, parsed.data)
+      const id = parseId(request.params.id);
+      if (id === undefined) return sendError(reply, 404, "not_found", "Project environment not found");
+      return store.update(id, parsed.data)
         ?? sendError(reply, 404, "not_found", "Project environment not found");
     } catch (error) {
       return storeFailure(reply, error);
@@ -83,14 +90,15 @@ export const registerProjectEnvironmentRoutes = (
   });
 
   app.post<{ Params: { id: string } }>("/project-environments/:id/repositories", (request, reply) => {
-    if (store.get(request.params.id) === undefined) {
+    const id = parseId(request.params.id);
+    if (id === undefined || store.get(id) === undefined) {
       return sendError(reply, 404, "not_found", "Project environment not found");
     }
     const parsed = repositorySchema.safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid repository input");
     try {
-      const repository = store.addRepository(request.params.id, parsed.data);
-      void scheduler.requestCheck(request.params.id).catch(() => undefined);
+      const repository = store.addRepository(id, parsed.data);
+      void scheduler.requestCheck(id).catch(() => undefined);
       return reply.code(201).send(repository);
     } catch (error) {
       return storeFailure(reply, error);
@@ -103,9 +111,12 @@ export const registerProjectEnvironmentRoutes = (
       const parsed = repositoryUpdateSchema.safeParse(request.body);
       if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid repository update");
       try {
-        const repository = store.updateRepository(request.params.id, request.params.repositoryId, parsed.data);
+        const id = parseId(request.params.id);
+        const repositoryId = parseId(request.params.repositoryId);
+        if (id === undefined || repositoryId === undefined) return sendError(reply, 404, "not_found", "Repository not found");
+        const repository = store.updateRepository(id, repositoryId, parsed.data);
         if (repository === undefined) return sendError(reply, 404, "not_found", "Repository not found");
-        void scheduler.requestCheck(request.params.id).catch(() => undefined);
+        void scheduler.requestCheck(id).catch(() => undefined);
         return repository;
       } catch (error) {
         return storeFailure(reply, error);
@@ -117,10 +128,12 @@ export const registerProjectEnvironmentRoutes = (
     "/project-environments/:id/repositories/:repositoryId",
     (request, reply) => {
       try {
-        if (!store.removeRepository(request.params.id, request.params.repositoryId)) {
+        const id = parseId(request.params.id);
+        const repositoryId = parseId(request.params.repositoryId);
+        if (id === undefined || repositoryId === undefined || !store.removeRepository(id, repositoryId)) {
           return sendError(reply, 404, "not_found", "Repository not found");
         }
-        void scheduler.requestCheck(request.params.id).catch(() => undefined);
+        void scheduler.requestCheck(id).catch(() => undefined);
         return reply.code(204).send();
       } catch (error) {
         return storeFailure(reply, error);
@@ -129,10 +142,11 @@ export const registerProjectEnvironmentRoutes = (
   );
 
   app.post<{ Params: { id: string } }>("/project-environments/:id/sync", (request, reply) => {
-    if (store.get(request.params.id) === undefined) {
+    const id = parseId(request.params.id);
+    if (id === undefined || store.get(id) === undefined) {
       return sendError(reply, 404, "not_found", "Project environment not found");
     }
-    void scheduler.requestCheck(request.params.id).catch(() => undefined);
+    void scheduler.requestCheck(id).catch(() => undefined);
     return reply.code(202).send({ accepted: true });
   });
 };

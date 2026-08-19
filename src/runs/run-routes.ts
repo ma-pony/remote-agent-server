@@ -30,6 +30,10 @@ const createRunSchema = z.object({ input: z.string().trim().min(1) }).strict();
 const eventQuerySchema = z.object({
   afterSeq: z.coerce.number().int().nonnegative().default(0)
 });
+const parseId = (value: string): number | undefined => {
+  const parsed = z.coerce.number().int().positive().safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+};
 
 const sendError = (reply: FastifyReply, statusCode: number, code: string, message: string) =>
   reply.code(statusCode).send({ error: { code, message } });
@@ -107,7 +111,7 @@ export const writeChunkWithDrain = async (writer: SseWriter, chunk: string): Pro
  */
 export const streamRunEvents = async (
   eventStore: EventStore,
-  runId: string,
+  runId: number,
   afterSeq: number,
   writer: SseWriter,
   options: RunEventStreamOptions = {}
@@ -251,12 +255,13 @@ export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependenci
   app.post<{ Params: { id: string } }>("/sessions/:id/runs", (request, reply) => {
     const parsed = createRunSchema.safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Run input");
-    if (deps.sessionManager.get(request.params.id) === undefined) {
+    const sessionId = parseId(request.params.id);
+    if (sessionId === undefined || deps.sessionManager.get(sessionId) === undefined) {
       return sendError(reply, 404, "not_found", "Session not found");
     }
 
     try {
-      const run = deps.runRepository.create({ sessionId: request.params.id, input: parsed.data.input });
+      const run = deps.runRepository.create({ sessionId, input: parsed.data.input });
       deps.scheduler.enqueue(run.id);
       return reply.code(201).send(run);
     } catch (error) {
@@ -265,13 +270,16 @@ export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependenci
   });
 
   app.get<{ Params: { id: string } }>("/runs/:id", (request, reply) => {
-    const run = deps.runRepository.get(request.params.id);
+    const id = parseId(request.params.id);
+    const run = id === undefined ? undefined : deps.runRepository.get(id);
     return run === undefined ? sendError(reply, 404, "not_found", "Run not found") : run;
   });
 
   app.post<{ Params: { id: string } }>("/runs/:id/cancel", async (request, reply) => {
     try {
-      return await deps.executor.cancel(request.params.id);
+      const id = parseId(request.params.id);
+      if (id === undefined) return sendError(reply, 404, "not_found", "Run not found");
+      return await deps.executor.cancel(id);
     } catch (error) {
       return handleRunError(reply, error);
     }
@@ -280,16 +288,18 @@ export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependenci
   app.get<{ Params: { id: string }; Querystring: { afterSeq?: string } }>("/runs/:id/events", (request, reply) => {
     const parsed = eventQuerySchema.safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Event cursor");
-    if (deps.runRepository.get(request.params.id) === undefined) {
+    const id = parseId(request.params.id);
+    if (id === undefined || deps.runRepository.get(id) === undefined) {
       return sendError(reply, 404, "not_found", "Run not found");
     }
-    return deps.eventStore.list(request.params.id, parsed.data.afterSeq);
+    return deps.eventStore.list(id, parsed.data.afterSeq);
   });
 
   app.get<{ Params: { id: string }; Querystring: { afterSeq?: string } }>("/runs/:id/events/stream", (request, reply) => {
     const parsed = eventQuerySchema.safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Event cursor");
-    if (deps.runRepository.get(request.params.id) === undefined) {
+    const id = parseId(request.params.id);
+    if (id === undefined || deps.runRepository.get(id) === undefined) {
       return sendError(reply, 404, "not_found", "Run not found");
     }
 
@@ -301,7 +311,7 @@ export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependenci
     });
     reply.raw.flushHeaders();
 
-    void streamRunEvents(deps.eventStore, request.params.id, parsed.data.afterSeq, reply.raw);
+    void streamRunEvents(deps.eventStore, id, parsed.data.afterSeq, reply.raw);
     return reply;
   });
 };

@@ -1,13 +1,12 @@
-import { randomUUID } from "node:crypto";
-
 import type Database from "better-sqlite3";
 
+import { insertedId } from "../db.js";
 import type { Run, RunStatus, TokenUsage, TokenUsageSummary } from "../domain.js";
 import { assertSynchronousTransactionHook } from "../transaction-hook.js";
 
 type RunRow = {
-  id: string;
-  session_id: string;
+  id: number;
+  session_id: number;
   status: RunStatus;
   input: string;
   result: string | null;
@@ -56,7 +55,7 @@ const isTerminalStatus = (status: RunStatus): status is "succeeded" | "failed" |
   status === "succeeded" || status === "failed" || status === "cancelled";
 
 export type CreateRunInput = {
-  sessionId: string;
+  sessionId: number;
   input: string;
 };
 
@@ -108,7 +107,7 @@ const noOpRunStateProjection: RunStateProjection = {
 export type RunRepositoryDependencies = {
   db: Database.Database;
   projection?: RunStateProjection;
-  onPostCommitError?: (runId: string, transition: RunPostCommitTransition) => undefined;
+  onPostCommitError?: (runId: number, transition: RunPostCommitTransition) => undefined;
 };
 
 export class RunRepositoryError extends Error {
@@ -123,7 +122,7 @@ export class RunRepositoryError extends Error {
 export class RunRepository {
   private readonly db: Database.Database;
   private readonly projection: RunStateProjection;
-  private readonly onPostCommitError: (runId: string, transition: RunPostCommitTransition) => undefined;
+  private readonly onPostCommitError: (runId: number, transition: RunPostCommitTransition) => undefined;
 
   constructor({
     db,
@@ -139,30 +138,29 @@ export class RunRepository {
    * Creates a queued Run and marks its Session active in one transaction.
    */
   create(input: CreateRunInput, options?: { afterInsert?(run: Run): undefined }): Run {
-    const id = randomUUID();
     const createdAt = new Date().toISOString();
-    const run: Run = {
-      id,
-      sessionId: input.sessionId,
-      status: "queued",
-      input: input.input,
-      result: null,
-      error: null,
-      createdAt,
-      startedAt: null,
-      finishedAt: null,
-      usage: null
-    };
 
     try {
       return this.inImmediateTransaction(() => {
         const claimed = this.db
           .prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
-          .run("running", createdAt, run.sessionId, "idle");
+          .run("running", createdAt, input.sessionId, "idle");
         if (claimed.changes !== 1) throw new RunRepositoryError("session_busy");
-        this.db
-          .prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
-          .run(run.id, run.sessionId, run.status, run.input, run.createdAt);
+        const id = insertedId(this.db
+          .prepare("INSERT INTO runs (session_id, status, input, created_at) VALUES (?, ?, ?, ?)")
+          .run(input.sessionId, "queued", input.input, createdAt));
+        const run: Run = {
+          id,
+          sessionId: input.sessionId,
+          status: "queued",
+          input: input.input,
+          result: null,
+          error: null,
+          createdAt,
+          startedAt: null,
+          finishedAt: null,
+          usage: null
+        };
         assertSynchronousTransactionHook(options?.afterInsert?.(run));
         return run;
       });
@@ -177,7 +175,7 @@ export class RunRepository {
   /**
    * Finds one Run.
    */
-  get(id: string): Run | undefined {
+  get(id: number): Run | undefined {
     const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as RunRow | undefined;
     return row === undefined ? undefined : toRun(row);
   }
@@ -185,7 +183,7 @@ export class RunRepository {
   /**
    * Lists a Session's Runs in creation order.
    */
-  listBySession(sessionId: string): Run[] {
+  listBySession(sessionId: number): Run[] {
     const rows = this.db
       .prepare("SELECT * FROM runs WHERE session_id = ? ORDER BY created_at ASC, id ASC")
       .all(sessionId) as RunRow[];
@@ -203,7 +201,7 @@ export class RunRepository {
   }
 
   /** Returns the exact cumulative usage stored for one Session. */
-  summarizeBySession(sessionId: string): TokenUsageSummary {
+  summarizeBySession(sessionId: number): TokenUsageSummary {
     return toUsageSummary(this.db.prepare(`
       SELECT
         COUNT(*) AS session_count,
@@ -223,7 +221,7 @@ export class RunRepository {
   }
 
   /** Sums the latest cumulative usage of every Session owned by one Agent. */
-  summarizeByAgent(agentId: string): TokenUsageSummary {
+  summarizeByAgent(agentId: number): TokenUsageSummary {
     return toUsageSummary(this.db.prepare(`
       SELECT
         COUNT(*) AS session_count,
@@ -245,7 +243,7 @@ export class RunRepository {
   /**
    * Transitions a queued Run to running before an external execution starts.
    */
-  markRunning(id: string): Run {
+  markRunning(id: number): Run {
     const started = this.inImmediateTransaction(() => {
       const run = this.requireRun(id);
       if (run.status !== "queued") throw new RunRepositoryError("invalid_run_state");
@@ -263,7 +261,7 @@ export class RunRepository {
   /**
    * Completes a running Run and releases its Session in one transaction.
    */
-  finish(id: string, input: FinishRunInput): Run {
+  finish(id: number, input: FinishRunInput): Run {
     if (!isTerminalStatus(input.status)) throw new RunRepositoryError("invalid_finish_status");
 
     const finished = this.inImmediateTransaction(() => {
@@ -309,7 +307,7 @@ export class RunRepository {
   /**
    * Cancels a queued Run and releases its Session in one transaction.
    */
-  cancelQueued(id: string): Run {
+  cancelQueued(id: number): Run {
     const cancelled = this.inImmediateTransaction(() => {
       const run = this.requireRun(id);
       if (run.status !== "queued") throw new RunRepositoryError("invalid_run_state");
@@ -326,7 +324,7 @@ export class RunRepository {
   }
 
   /** Fails a queued Run after the scheduler has exhausted its recovery attempts. */
-  failQueued(id: string, error: string): Run {
+  failQueued(id: number, error: string): Run {
     const failed = this.inImmediateTransaction(() => {
       const run = this.requireRun(id);
       if (run.status !== "queued") throw new RunRepositoryError("invalid_run_state");
@@ -351,16 +349,15 @@ export class RunRepository {
     const now = new Date().toISOString();
     this.inImmediateTransaction(() => {
       const interruptedRuns = this.db.prepare("SELECT id FROM runs WHERE status = 'running' ORDER BY created_at, id")
-        .all() as Array<{ id: string }>;
+        .all() as Array<{ id: number }>;
       for (const run of interruptedRuns) {
         const nextSeq = (this.db.prepare(
           "SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE run_id = ?"
         ).get(run.id) as { seq: number }).seq;
         this.db.prepare(`
-          INSERT INTO events (id, run_id, seq, type, content_json, created_at)
-          VALUES (?, ?, ?, 'error', ?, ?)
+          INSERT INTO events (run_id, seq, type, content_json, created_at)
+          VALUES (?, ?, 'error', ?, ?)
         `).run(
-          randomUUID(),
           run.id,
           nextSeq,
           JSON.stringify({ code: "server_restarted", message: "Run interrupted by server restart" }),
@@ -371,12 +368,12 @@ export class RunRepository {
         .prepare("UPDATE runs SET status = 'failed', error = 'server_restarted', finished_at = ? WHERE status = 'running'")
         .run(now);
       this.db
-        .prepare("UPDATE sessions SET status = 'idle', updated_at = ? WHERE id NOT IN (SELECT session_id FROM runs WHERE status = 'queued')")
+        .prepare("UPDATE sessions SET status = 'idle', updated_at = ? WHERE workspace_path NOT LIKE 'pending:%' AND id NOT IN (SELECT session_id FROM runs WHERE status = 'queued')")
         .run(now);
     });
   }
 
-  private requireRun(id: string): Run {
+  private requireRun(id: number): Run {
     const run = this.get(id);
     if (run === undefined) throw new RunRepositoryError("run_not_found");
     return run;

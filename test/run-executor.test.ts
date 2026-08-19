@@ -21,6 +21,7 @@ import { BtrfsWorkspaceManager } from "../src/workspaces/btrfs-workspace.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const tempDirectories: string[] = [];
+const TEST_SESSION_ID = 1;
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
@@ -38,7 +39,7 @@ const setup = (
   tempDirectories.push(root);
   const { db, seed } = createTestDatabase();
   const dataDir = join(root, "data");
-  const workspacePath = join(root, "sessions", "session-1", "workspace");
+  const workspacePath = join(root, "sessions", String(TEST_SESSION_ID), "workspace");
   mkdirSync(workspacePath, { recursive: true });
   mkdirSync(join(dirname(workspacePath), "browser"), { recursive: true });
   const agentManager = new AgentManager({ db, dataDir, runtime });
@@ -50,7 +51,7 @@ const setup = (
   const createdAt = "2026-08-12T00:00:00.000Z";
   db.prepare(
     "INSERT INTO sessions (id, agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-  ).run("session-1", agent.id, "Test session", "idle", workspacePath, createdAt, createdAt);
+  ).run(TEST_SESSION_ID, agent.id, "Test session", "idle", workspacePath, createdAt, createdAt);
   const workspaceManager = new BtrfsWorkspaceManager({
     projectEnvironmentsRoot: join(root, "environments"),
     sessionsRoot: join(root, "sessions"),
@@ -59,7 +60,7 @@ const setup = (
   const sessionManager = new SessionManager({ db, dataDir, agentManager, runtime, workspaceManager });
   const runRepository = new RunRepository({ db, ...runRepositoryOptions });
   const eventStore = new EventStore({ db });
-  const run = runRepository.create({ sessionId: "session-1", input: "修复问题" });
+  const run = runRepository.create({ sessionId: TEST_SESSION_ID, input: "修复问题" });
   const skillProjector = { prepare };
   const executor = new RunExecutor({
     runtime,
@@ -96,7 +97,7 @@ describe("RunExecutor", () => {
 
     expect(result).toMatchObject({ status: "succeeded" });
     expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({ status: "succeeded" });
-    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
     expect(onPostCommitError).toHaveBeenCalledWith(setupResult.run.id, "finished");
     setupResult.db.close();
   });
@@ -110,7 +111,7 @@ describe("RunExecutor", () => {
     const setupResult = setup(runtime, prepare, mcpPrepare);
     setupResult.db.prepare(`
       UPDATE agents SET enabled = 0
-      WHERE id = (SELECT agent_id FROM sessions WHERE id = 'session-1')
+      WHERE id = (SELECT agent_id FROM sessions WHERE id = 1)
     `).run();
 
     await setupResult.executor.execute(setupResult.run.id);
@@ -125,7 +126,7 @@ describe("RunExecutor", () => {
     });
     expect(setupResult.eventStore.list(setupResult.run.id, 0).map((event) => JSON.parse(event.contentJson)))
       .toContainEqual({ status: "failed", publicNoticeCode: "agent_disabled" });
-    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
     setupResult.db.close();
   });
 
@@ -140,8 +141,8 @@ describe("RunExecutor", () => {
     await setupResult.executor.execute(setupResult.run.id);
 
     expect(mcpPrepare).toHaveBeenCalledWith(expect.objectContaining({
-      agentId: expect.any(String),
-      sessionId: "session-1",
+      agentId: expect.any(Number),
+      sessionId: TEST_SESSION_ID,
       runId: setupResult.run.id,
       workspacePath: setupResult.workspacePath,
       browserProfilePath: join(dirname(setupResult.workspacePath), "browser")
@@ -177,16 +178,16 @@ describe("RunExecutor", () => {
     ensured.resolve({ providerSessionId: "provider-session-1" });
     await firstExecution;
 
-    expect(runtime.cancel).toHaveBeenCalledWith("session-1");
+    expect(runtime.cancel).toHaveBeenCalledWith(TEST_SESSION_ID);
     expect(runtime.startTurn).not.toHaveBeenCalled();
     expect(setupResult.runRepository.get(setupResult.run.id)?.status).toBe("cancelled");
 
-    const nextRun = setupResult.runRepository.create({ sessionId: "session-1", input: "继续执行" });
+    const nextRun = setupResult.runRepository.create({ sessionId: TEST_SESSION_ID, input: "继续执行" });
     await setupResult.executor.execute(nextRun.id);
 
     expect(runtime.startTurn).toHaveBeenCalledTimes(1);
     expect(runtime.startTurn).toHaveBeenCalledWith({
-      sessionId: "session-1",
+      sessionId: TEST_SESSION_ID,
       requestId: nextRun.id,
       text: "继续执行"
     });
@@ -242,7 +243,7 @@ describe("RunExecutor", () => {
         status: "failed",
         error: "event append failed"
       });
-      expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+      expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
       expect(vi.getTimerCount()).toBe(0);
       setupResult.db.close();
     } finally {
@@ -294,7 +295,7 @@ describe("RunExecutor", () => {
         status: "succeeded",
         result: "final answer"
       });
-      expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+      expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
       expect(vi.getTimerCount()).toBe(0);
       setupResult.db.close();
     } finally {
@@ -358,7 +359,7 @@ describe("RunExecutor", () => {
     setupResult = setup(runtime, prepare);
     const startTurn = runtime.startTurn.bind(runtime);
     runtime.startTurn = (input): RuntimeTurn => {
-      expect(setupResult.sessionManager.get("session-1")?.providerSessionId).toBe("provider-session-1");
+      expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.providerSessionId).toBe("provider-session-1");
       return startTurn(input);
     };
 
@@ -378,12 +379,12 @@ describe("RunExecutor", () => {
       result: "最终回复",
       error: null
     });
-    expect(setupResult.sessionManager.get("session-1")).toMatchObject({
+    expect(setupResult.sessionManager.get(TEST_SESSION_ID)).toMatchObject({
       providerSessionId: "provider-session-1",
       status: "idle"
     });
     expect(prepare).toHaveBeenCalledWith(
-      expect.objectContaining({ id: expect.any(String), provider: "codex" }),
+      expect.objectContaining({ id: expect.any(Number), provider: "codex" }),
       expect.objectContaining({ workspacePath: setupResult.workspacePath })
     );
     setupResult.db.close();
@@ -439,7 +440,7 @@ describe("RunExecutor", () => {
 
     await setupResult.executor.execute(setupResult.run.id);
 
-    expect(setupResult.sessionManager.get("session-1")).toMatchObject({
+    expect(setupResult.sessionManager.get(TEST_SESSION_ID)).toMatchObject({
       usage: {
         inputTokens: 897,
         outputTokens: 17,
@@ -492,7 +493,7 @@ describe("RunExecutor", () => {
       { type: "error", content: { message: "result exploded" } },
       { type: "status", content: { status: "failed" } }
     ]);
-    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
     setupResult.db.close();
   });
 
@@ -511,7 +512,7 @@ describe("RunExecutor", () => {
     });
     expect(terminalEvents).toHaveLength(1);
     expect(JSON.parse(terminalEvents[0]!.contentJson)).toEqual({ status });
-    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
     setupResult.db.close();
   });
 
@@ -543,7 +544,7 @@ describe("RunExecutor", () => {
       { type: "error", content: { message: "stream exploded" } },
       { type: "status", content: { status: "failed" } }
     ]);
-    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
     setupResult.db.close();
   });
 
@@ -563,7 +564,7 @@ describe("RunExecutor", () => {
     expect(appendSpy.mock.calls.filter(([, type, content]) =>
       type === "status" && (content as { status?: string }).status !== undefined
     )).toHaveLength(1);
-    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
     setupResult.db.close();
   });
 
@@ -593,7 +594,7 @@ describe("RunExecutor", () => {
         status: "failed",
         error: "stream exploded"
       });
-      expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+      expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
       setupResult.db.close();
     } finally {
       vi.useRealTimers();
@@ -613,7 +614,7 @@ describe("RunExecutor", () => {
     const run = await setupResult.executor.cancel(setupResult.run.id);
 
     expect(run.status).toBe("running");
-    expect(runtime.cancel).toHaveBeenCalledWith("session-1");
+    expect(runtime.cancel).toHaveBeenCalledWith(TEST_SESSION_ID);
     setupResult.runRepository.finish(run.id, { status: "cancelled" });
     setupResult.db.close();
   });
@@ -638,9 +639,9 @@ describe("RunExecutor", () => {
     await setupResult.executor.cancel(setupResult.run.id);
     await execution;
 
-    expect(cancel).toHaveBeenCalledWith("session-1");
+    expect(cancel).toHaveBeenCalledWith(TEST_SESSION_ID);
     expect(setupResult.runRepository.get(setupResult.run.id)?.status).toBe("cancelled");
-    expect(setupResult.sessionManager.get("session-1")?.status).toBe("idle");
+    expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
     setupResult.db.close();
   });
 });

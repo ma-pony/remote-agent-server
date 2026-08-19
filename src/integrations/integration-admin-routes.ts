@@ -52,7 +52,7 @@ const parameterMappings = z.array(z.discriminatedUnion("source", [
 const createEndpointSchema = z.object({
   name: z.string().trim().min(1),
   slug,
-  agentId: z.string().min(1),
+  agentId: z.number().int().positive(),
   enabled: z.boolean(),
   promptPrefix: z.string(),
   parameterMappings
@@ -61,7 +61,7 @@ const createEndpointSchema = z.object({
 const updateEndpointSchema = z.object({
   name: z.string().trim().min(1),
   slug,
-  agentId: z.string().min(1),
+  agentId: z.number().int().positive(),
   enabled: z.boolean(),
   promptPrefix: z.string(),
   parameterMappings: z.array(z.discriminatedUnion("source", [
@@ -109,6 +109,7 @@ const updateWebhookSchema = webhookSchema.partial().strict().refine(
 
 const invalidRequest = (reply: FastifyReply, message: string) =>
   reply.code(400).send({ error: { code: "invalid_request", message } });
+const numericId = (value: string): number => Number(value);
 
 const endpointNotFound = (reply: FastifyReply) =>
   reply.code(404).send({ error: { code: "endpoint_not_found", message: "Integration endpoint not found" } });
@@ -251,7 +252,7 @@ export const registerIntegrationAdminRoutes = (
   });
 
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id", (request, reply) => {
-    const endpoint = manager.get(request.params.id);
+    const endpoint = manager.get(numericId(request.params.id));
     return endpoint === undefined ? endpointNotFound(reply) : endpoint;
   });
 
@@ -269,7 +270,7 @@ export const registerIntegrationAdminRoutes = (
     const parsed = updateEndpointSchema.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, "Invalid Integration Endpoint update");
     try {
-      return manager.update(request.params.id, parsed.data);
+      return manager.update(numericId(request.params.id), parsed.data);
     } catch (error) {
       return handleManagerError(reply, error);
     }
@@ -279,7 +280,7 @@ export const registerIntegrationAdminRoutes = (
     const parsed = rotateTokenSchema.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, "Invalid Integration Endpoint token rotation");
     try {
-      return manager.rotateToken(request.params.id);
+      return manager.rotateToken(numericId(request.params.id));
     } catch (error) {
       return handleManagerError(reply, error);
     }
@@ -287,7 +288,7 @@ export const registerIntegrationAdminRoutes = (
 
   app.delete<{ Params: { id: string } }>("/integration-endpoints/:id", (request, reply) => {
     try {
-      manager.delete(request.params.id);
+      manager.delete(numericId(request.params.id));
       return reply.code(204).send();
     } catch (error) {
       return handleManagerError(reply, error);
@@ -295,17 +296,19 @@ export const registerIntegrationAdminRoutes = (
   });
 
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id/conversations", (request, reply) => {
-    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
-    return store.listConversations(request.params.id);
+    const endpointId = numericId(request.params.id);
+    if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
+    return store.listConversations(endpointId);
   });
 
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id/tasks", (request, reply) => {
-    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
-    return store.listTasks(request.params.id).map(publicTask);
+    const endpointId = numericId(request.params.id);
+    if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
+    return store.listTasks(endpointId).map(publicTask);
   });
 
   app.post<{ Params: { id: string } }>("/integration-endpoints/:id/test-tasks", async (request, reply) => {
-    const endpoint = manager.get(request.params.id);
+    const endpoint = manager.get(numericId(request.params.id));
     if (endpoint === undefined) return endpointNotFound(reply);
     const parsed = testTaskSchema.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, "测试任务参数无效");
@@ -323,7 +326,7 @@ export const registerIntegrationAdminRoutes = (
   });
 
   app.get<{ Params: { id: string } }>("/integration-tasks/:id", (request, reply) => {
-    const task = store.getTask(request.params.id);
+    const task = store.getTask(numericId(request.params.id));
     if (task === undefined) {
       return reply.code(404).send({ error: { code: "task_not_found", message: "Integration task not found" } });
     }
@@ -331,7 +334,7 @@ export const registerIntegrationAdminRoutes = (
   });
 
   app.post<{ Params: { id: string } }>("/integration-tasks/:id/cancel", async (request, reply) => {
-    let task = store.getTask(request.params.id);
+    let task = store.getTask(numericId(request.params.id));
     if (task === undefined) {
       return reply.code(404).send({ error: { code: "task_not_found", message: "Integration task not found" } });
     }
@@ -358,17 +361,19 @@ export const registerIntegrationAdminRoutes = (
   });
 
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id/webhooks", (request, reply) => {
-    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
-    return store.listSubscriptions(request.params.id).map((subscription) => publicWebhook(subscription, secrets));
+    const endpointId = numericId(request.params.id);
+    if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
+    return store.listSubscriptions(endpointId).map((subscription) => publicWebhook(subscription, secrets));
   });
 
   app.post<{ Params: { id: string } }>("/integration-endpoints/:id/webhooks", (request, reply) => {
-    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
+    const endpointId = numericId(request.params.id);
+    if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
     const parsed = webhookSchema.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, "Invalid Webhook input");
     const signingSecret = `whsec_${randomBytes(32).toString("base64url")}`;
     const subscription = store.createSubscription({
-      endpointId: request.params.id,
+      endpointId,
       name: parsed.data.name,
       url: parsed.data.url,
       enabled: parsed.data.enabled,
@@ -385,8 +390,9 @@ export const registerIntegrationAdminRoutes = (
   app.patch<{ Params: { id: string; webhookId: string } }>(
     "/integration-endpoints/:id/webhooks/:webhookId",
     (request, reply) => {
-      if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
-      const existing = store.getSubscriptionForEndpoint(request.params.webhookId, request.params.id);
+      const endpointId = numericId(request.params.id);
+      if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
+      const existing = store.getSubscriptionForEndpoint(numericId(request.params.webhookId), endpointId);
       if (existing === undefined) return webhookNotFound(reply);
       const parsed = updateWebhookSchema.safeParse(request.body);
       if (!parsed.success) return invalidRequest(reply, "Invalid Webhook update");
@@ -409,8 +415,9 @@ export const registerIntegrationAdminRoutes = (
   app.delete<{ Params: { id: string; webhookId: string } }>(
     "/integration-endpoints/:id/webhooks/:webhookId",
     (request, reply) => {
-      if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
-      const existing = store.getSubscriptionForEndpoint(request.params.webhookId, request.params.id);
+      const endpointId = numericId(request.params.id);
+      if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
+      const existing = store.getSubscriptionForEndpoint(numericId(request.params.webhookId), endpointId);
       if (existing === undefined) return webhookNotFound(reply);
       store.deleteSubscription(existing.id);
       return reply.code(204).send();
@@ -420,8 +427,9 @@ export const registerIntegrationAdminRoutes = (
   app.post<{ Params: { id: string; webhookId: string } }>(
     "/integration-endpoints/:id/webhooks/:webhookId/test",
     (request, reply) => {
-      if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
-      const subscription = store.getSubscriptionForEndpoint(request.params.webhookId, request.params.id);
+      const endpointId = numericId(request.params.id);
+      if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
+      const subscription = store.getSubscriptionForEndpoint(numericId(request.params.webhookId), endpointId);
       if (subscription === undefined) return webhookNotFound(reply);
       if (!subscription.enabled) {
         return reply.code(409).send({
@@ -431,8 +439,8 @@ export const registerIntegrationAdminRoutes = (
       const eventId = randomUUID();
       const occurredAt = new Date().toISOString();
       const eventKey = `webhook.test:${eventId}`;
-      const publicEventId = webhookEventId(request.params.id, eventKey);
-      const endpoint = manager.get(request.params.id)!;
+      const publicEventId = webhookEventId(endpointId, eventKey);
+      const endpoint = manager.get(endpointId)!;
       const delivery = store.createDelivery({
         eventId: publicEventId,
         eventKey,
@@ -456,12 +464,13 @@ export const registerIntegrationAdminRoutes = (
   );
 
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id/webhook-deliveries", (request, reply) => {
-    if (manager.get(request.params.id) === undefined) return endpointNotFound(reply);
-    return store.listDeliveriesForEndpoint(request.params.id).map(publicDelivery);
+    const endpointId = numericId(request.params.id);
+    if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
+    return store.listDeliveriesForEndpoint(endpointId).map(publicDelivery);
   });
 
   app.post<{ Params: { id: string } }>("/webhook-deliveries/:id/retry", (request, reply) => {
-    const existing = store.getDelivery(request.params.id);
+    const existing = store.getDelivery(numericId(request.params.id));
     if (existing === undefined) return deliveryNotFound(reply);
     if (existing.status !== "failed") {
       return reply.code(409).send({

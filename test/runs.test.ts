@@ -57,9 +57,9 @@ const createApiTestApp = async (options: { runtime?: AgentRuntime; maxConcurrent
   return { app, db, root };
 };
 
-const seedSession = (db: ReturnType<typeof createTestDatabase>["db"], root: string, id: string): void => {
-  const agent = db.prepare("SELECT id FROM agents ORDER BY created_at LIMIT 1").get() as { id: string };
-  const workspacePath = join(root, "sessions", id, "workspace");
+const seedSession = (db: ReturnType<typeof createTestDatabase>["db"], root: string, id: number): void => {
+  const agent = db.prepare("SELECT id FROM agents ORDER BY created_at LIMIT 1").get() as { id: number };
+  const workspacePath = join(root, "sessions", String(id), "workspace");
   mkdirSync(workspacePath, { recursive: true });
   mkdirSync(join(dirname(workspacePath), "browser"), { recursive: true });
   const createdAt = new Date().toISOString();
@@ -68,7 +68,7 @@ const seedSession = (db: ReturnType<typeof createTestDatabase>["db"], root: stri
   ).run(id, agent.id, `Session ${id}`, "idle", workspacePath, createdAt, createdAt);
 };
 
-const postRun = (app: FastifyInstance, sessionId: string, input: string) => app.inject({
+const postRun = (app: FastifyInstance, sessionId: number, input: string) => app.inject({
   method: "POST",
   url: `/api/sessions/${sessionId}/runs`,
   headers: authHeaders(),
@@ -284,6 +284,22 @@ describe("RunRepository", () => {
     expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(runningSession.id)).toEqual({ status: "idle" });
     expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(queuedSession.id)).toEqual({ status: "running" });
     expect(repository.listQueued()).toMatchObject([{ sessionId: queuedSession.id, status: "queued" }]);
+    db.close();
+  });
+
+  it("重启恢复不会把创建中的 Session 变为可运行", () => {
+    const { db, seed } = createTestDatabase();
+    const inserted = db.prepare(
+      "INSERT INTO sessions (agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, 'running', ?, ?, ?)"
+    ).run(seed.agent.id, "Incomplete", "pending:create", "2026-08-19", "2026-08-19");
+    const id = Number(inserted.lastInsertRowid);
+
+    new RunRepository({ db }).recoverAfterRestart();
+
+    expect(db.prepare("SELECT status, workspace_path FROM sessions WHERE id = ?").get(id)).toEqual({
+      status: "running",
+      workspace_path: "pending:create"
+    });
     db.close();
   });
 
@@ -604,11 +620,11 @@ describe("Run API", () => {
     });
     runtime.cancel = async () => result.resolve({ status: "cancelled" });
     const { app, db, root } = await createApiTestApp({ runtime, maxConcurrentRuns: 1 });
-    seedSession(db, root, "session-1");
+    seedSession(db, root, 1);
 
-    const created = await postRun(app, "session-1", "first");
+    const created = await postRun(app, 1, "first");
     const run = created.json() as Run;
-    const busy = await postRun(app, "session-1", "second");
+    const busy = await postRun(app, 1, "second");
     const detail = await app.inject({ method: "GET", url: `/api/runs/${run.id}`, headers: authHeaders() });
 
     expect(created.statusCode).toBe(201);
@@ -632,10 +648,10 @@ describe("Run API", () => {
     });
     runtime.cancel = cancel;
     const { app, db, root } = await createApiTestApp({ runtime, maxConcurrentRuns: 1 });
-    seedSession(db, root, "session-1");
-    seedSession(db, root, "session-2");
-    const running = (await postRun(app, "session-1", "first")).json() as Run;
-    const queued = (await postRun(app, "session-2", "second")).json() as Run;
+    seedSession(db, root, 1);
+    seedSession(db, root, 2);
+    const running = (await postRun(app, 1, "first")).json() as Run;
+    const queued = (await postRun(app, 2, "second")).json() as Run;
 
     const queuedCancel = await app.inject({ method: "POST", url: `/api/runs/${queued.id}/cancel`, headers: authHeaders() });
     expect(queuedCancel.statusCode).toBe(200);
@@ -644,25 +660,25 @@ describe("Run API", () => {
 
     const runningCancel = await app.inject({ method: "POST", url: `/api/runs/${running.id}/cancel`, headers: authHeaders() });
     expect(runningCancel.statusCode).toBe(200);
-    expect(cancel).toHaveBeenCalledWith("session-1");
+    expect(cancel).toHaveBeenCalledWith(1);
     await vi.waitFor(() => expect(new RunRepository({ db }).get(running.id)?.status).toBe("cancelled"));
   });
 
   it("Session detail 返回按创建时间升序排列的完整 Run 历史", async () => {
     const { app, db, root } = await createApiTestApp();
-    seedSession(db, root, "session-1");
-    const first = (await postRun(app, "session-1", "first")).json() as Run;
+    seedSession(db, root, 1);
+    const first = (await postRun(app, 1, "first")).json() as Run;
     await vi.waitFor(() => expect(new RunRepository({ db }).get(first.id)?.status).toBe("succeeded"));
-    const second = (await postRun(app, "session-1", "second")).json() as Run;
+    const second = (await postRun(app, 1, "second")).json() as Run;
     await vi.waitFor(() => expect(new RunRepository({ db }).get(second.id)?.status).toBe("succeeded"));
     db.prepare("UPDATE sessions SET input_tokens = 100, output_tokens = 20, total_tokens = 120 WHERE id = ?")
-      .run("session-1");
+      .run(1);
 
-    const response = await app.inject({ method: "GET", url: "/api/sessions/session-1", headers: authHeaders() });
+    const response = await app.inject({ method: "GET", url: "/api/sessions/1", headers: authHeaders() });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      id: "session-1",
+      id: 1,
       runs: [
         {
           id: first.id,
@@ -682,54 +698,62 @@ describe("Run API", () => {
 });
 
 describe("Server startup and shutdown", () => {
+  const OLD_SESSION_ID = 1;
+  const QUEUED_SESSION_ID = 2;
+  const OLD_RUN_ID = 1;
+  const QUEUED_RUN_ID = 2;
+  const ENDPOINT_ID = 1;
+  const OLD_TASK_ID = 1;
+  const WEBHOOK_ID = 1;
+  const DELIVERY_ID = 1;
   const seedRestartDatabase = (databasePath: string, root: string, includeRunning: boolean) => {
     const db = openDatabase(databasePath);
     migrate(db);
     const timestamp = "2026-08-12T00:00:00.000Z";
     db.prepare("INSERT INTO agents (id, name, provider, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-      .run("agent-1", "Codex", "codex", timestamp, timestamp);
-    for (const sessionId of includeRunning ? ["old-session", "queued-session"] : ["queued-session"]) {
-      const workspacePath = join(root, "sessions", sessionId, "workspace");
+      .run(1, "Codex", "codex", timestamp, timestamp);
+    for (const sessionId of includeRunning ? [OLD_SESSION_ID, QUEUED_SESSION_ID] : [QUEUED_SESSION_ID]) {
+      const workspacePath = join(root, "sessions", String(sessionId), "workspace");
       mkdirSync(workspacePath, { recursive: true });
       mkdirSync(join(dirname(workspacePath), "browser"), { recursive: true });
       db.prepare(
         "INSERT INTO sessions (id, agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
-      ).run(sessionId, "agent-1", sessionId, "running", workspacePath, timestamp, timestamp);
+      ).run(sessionId, 1, `session-${sessionId}`, "running", workspacePath, timestamp, timestamp);
     }
     if (includeRunning) {
       db.prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
-        .run("old-run", "old-session", "running", "do not replay", timestamp);
+        .run(OLD_RUN_ID, OLD_SESSION_ID, "running", "do not replay", timestamp);
       db.prepare(`
         INSERT INTO integration_endpoints
           (id, name, slug, agent_id, enabled, token_hash, prompt_prefix, parameter_mappings_json,
            next_delivery_order, created_at, updated_at)
-        VALUES ('endpoint-1', 'Endpoint', 'endpoint-1', 'agent-1', 1, 'token-hash', '', '[]', 1, ?, ?)
-      `).run(timestamp, timestamp);
+        VALUES (?, 'Endpoint', 'endpoint-1', 1, 1, 'token-hash', '', '[]', 1, ?, ?)
+      `).run(ENDPOINT_ID, timestamp, timestamp);
       db.prepare(`
         INSERT INTO integration_tasks
           (id, endpoint_id, conversation_id, session_id, run_id, request_id, request_fingerprint, message,
            effective_prompt, status, created_at)
-        VALUES ('old-task', 'endpoint-1', NULL, 'old-session', 'old-run', 'request-1', 'fingerprint-1',
+        VALUES (?, ?, NULL, ?, ?, 'request-1', 'fingerprint-1',
                 'old message', 'do not replay', 'running', ?)
-      `).run(timestamp);
+      `).run(OLD_TASK_ID, ENDPOINT_ID, OLD_SESSION_ID, OLD_RUN_ID, timestamp);
       const secrets = SecretStore.open({ dataDir: join(root, "data") });
       db.prepare(`
         INSERT INTO webhook_subscriptions
           (id, endpoint_id, name, url, enabled, events_json, encrypted_signing_secret, timeout_seconds, created_at, updated_at)
-        VALUES ('restart-webhook', 'endpoint-1', 'Restart webhook', 'https://receiver.test/restart', 1, '[]', ?, 10, ?, ?)
-      `).run(secrets.encrypt("restart-signing-secret"), timestamp, timestamp);
+        VALUES (?, ?, 'Restart webhook', 'https://receiver.test/restart', 1, '[]', ?, 10, ?, ?)
+      `).run(WEBHOOK_ID, ENDPOINT_ID, secrets.encrypt("restart-signing-secret"), timestamp, timestamp);
       const restartPayload = JSON.stringify({
         eventId: "restart-event",
         eventType: "task.started",
         sequence: 1,
         occurredAt: timestamp,
-        endpoint: { id: "endpoint-1", slug: "endpoint-1" },
+        endpoint: { id: ENDPOINT_ID, slug: "endpoint-1" },
         task: {
-          id: "old-task",
+          id: OLD_TASK_ID,
           requestId: "request-1",
           conversationKey: null,
-          sessionId: "old-session",
-          runId: "old-run",
+          sessionId: OLD_SESSION_ID,
+          runId: OLD_RUN_ID,
           status: "running"
         }
       });
@@ -737,13 +761,13 @@ describe("Server startup and shutdown", () => {
         INSERT INTO webhook_deliveries
           (id, event_id, event_key, sequence, dispatch_order, subscription_id, task_id, event_type, payload_json, status,
            attempt_count, next_attempt_at, created_at, updated_at)
-        VALUES ('restart-delivery', 'restart-event', 'restart:event', 1, 1, 'restart-webhook', 'old-task',
+        VALUES (?, 'restart-event', 'restart:event', 1, 1, ?, ?,
                 'task.started', ?,
                 'delivering', 1, ?, ?, ?)
-      `).run(restartPayload, timestamp, timestamp, timestamp);
+      `).run(DELIVERY_ID, WEBHOOK_ID, OLD_TASK_ID, restartPayload, timestamp, timestamp, timestamp);
     }
     db.prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run("queued-run", "queued-session", "queued", "resume queued", timestamp);
+      .run(QUEUED_RUN_ID, QUEUED_SESSION_ID, "queued", "resume queued", timestamp);
     db.close();
   };
 
@@ -774,11 +798,11 @@ describe("Server startup and shutdown", () => {
     const ensureSession = vi.fn(async () => {
       order.push("runtime");
       const observer = openDatabase(databasePath);
-      expect(observer.prepare("SELECT status, error FROM runs WHERE id = 'old-run'").get()).toEqual({
+      expect(observer.prepare("SELECT status, error FROM runs WHERE id = 1").get()).toEqual({
         status: "failed",
         error: "server_restarted"
       });
-      expect(observer.prepare("SELECT status, error FROM integration_tasks WHERE id = 'old-task'").get()).toEqual({
+      expect(observer.prepare("SELECT status, error FROM integration_tasks WHERE id = 1").get()).toEqual({
         status: "failed",
         error: "server_restarted"
       });
@@ -792,7 +816,7 @@ describe("Server startup and shutdown", () => {
       run: vi.fn(async () => {
         order.push("check");
         const observer = openDatabase(databasePath);
-        expect(observer.prepare("SELECT status FROM runs WHERE id = 'old-run'").get()).toEqual({ status: "running" });
+        expect(observer.prepare("SELECT status FROM runs WHERE id = 1").get()).toEqual({ status: "running" });
         observer.close();
         return { stdout: "", stderr: "" };
       })
@@ -805,10 +829,10 @@ describe("Server startup and shutdown", () => {
 
     const webhookFetch = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
     const server = await startServer({ ...options, platform: "linux", webhookFetch });
-    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+    await vi.waitFor(() => expect(server.runRepository.get(QUEUED_RUN_ID)?.status).toBe("succeeded"));
     await vi.waitFor(() => {
       const observer = openDatabase(databasePath);
-      const delivery = observer.prepare("SELECT status FROM webhook_deliveries WHERE id = 'restart-delivery'").get();
+      const delivery = observer.prepare("SELECT status FROM webhook_deliveries WHERE id = 1").get();
       observer.close();
       expect(delivery).toEqual({ status: "succeeded" });
     });
@@ -821,11 +845,11 @@ describe("Server startup and shutdown", () => {
     expect(runtime.startTurn).toHaveBeenCalledTimes(1);
     expect(webhookFetch).toHaveBeenCalledTimes(1);
     expect(runtime.startTurn).toHaveBeenCalledWith({
-      sessionId: "queued-session",
-      requestId: "queued-run",
+      sessionId: QUEUED_SESSION_ID,
+      requestId: QUEUED_RUN_ID,
       text: "resume queued"
     });
-    expect(server.runRepository.get("old-run")).toMatchObject({ status: "failed", error: "server_restarted" });
+    expect(server.runRepository.get(OLD_RUN_ID)).toMatchObject({ status: "failed", error: "server_restarted" });
     await server.close();
   });
 
@@ -843,18 +867,18 @@ describe("Server startup and shutdown", () => {
         run: async () => Promise.reject(new Error("not a btrfs subvolume"))
       }),
       platform: "linux"
-    })).rejects.toThrow("Linux workspace requires environments and sessions on the same Btrfs filesystem");
+    })).rejects.toThrow("Linux workspace root is not on Btrfs or is not accessible");
 
     const observer = openDatabase(databasePath);
-    expect(observer.prepare("SELECT status, error FROM runs WHERE id = 'old-run'").get()).toEqual({
+    expect(observer.prepare("SELECT status, error FROM runs WHERE id = ?").get(OLD_RUN_ID)).toEqual({
       status: "running",
       error: null
     });
-    expect(observer.prepare("SELECT status, error FROM integration_tasks WHERE id = 'old-task'").get()).toEqual({
+    expect(observer.prepare("SELECT status, error FROM integration_tasks WHERE id = ?").get(OLD_TASK_ID)).toEqual({
       status: "running",
       error: null
     });
-    expect(observer.prepare("SELECT status FROM runs WHERE id = 'queued-run'").get()).toEqual({ status: "queued" });
+    expect(observer.prepare("SELECT status FROM runs WHERE id = 2").get()).toEqual({ status: "queued" });
     expect(runtime.ensureSession).not.toHaveBeenCalled();
     expect(runtime.startTurn).not.toHaveBeenCalled();
     observer.close();
@@ -886,7 +910,7 @@ describe("Server startup and shutdown", () => {
       platform: "darwin",
       fileSystemInspector
     });
-    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+    await vi.waitFor(() => expect(server.runRepository.get(QUEUED_RUN_ID)?.status).toBe("succeeded"));
 
     expect(fileSystemCalls).toEqual([
       { operation: "statfs", path: join(root, "environments") },
@@ -914,20 +938,20 @@ describe("Server startup and shutdown", () => {
     runtime.cancel = vi.fn(async () => {
       const duringClose = await server.app.inject({ method: "GET", url: "/api/health" });
       expect(duringClose.statusCode).toBe(503);
-      expect(server.runRepository.get("queued-run")?.status).toBe("running");
+      expect(server.runRepository.get(QUEUED_RUN_ID)?.status).toBe("running");
       result.resolve({ status: "cancelled" });
     });
     runtime.shutdown = vi.fn(async () => {
-      expect(server.runRepository.get("queued-run")?.status).toBe("running");
+      expect(server.runRepository.get(QUEUED_RUN_ID)?.status).toBe("running");
     });
     server = await startServer(startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) }));
-    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("running"));
+    await vi.waitFor(() => expect(server.runRepository.get(QUEUED_RUN_ID)?.status).toBe("running"));
 
     await server.close();
 
-    expect(runtime.cancel).toHaveBeenCalledWith("queued-session");
+    expect(runtime.cancel).toHaveBeenCalledWith(QUEUED_SESSION_ID);
     expect(runtime.shutdown).toHaveBeenCalledTimes(1);
-    expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
+    expect(() => server.runRepository.get(QUEUED_RUN_ID)).toThrow(/database connection is not open/i);
   });
 
   it("programmatic close 在 Runtime shutdown 失败时完成 server/DB 关闭后 reject", async () => {
@@ -940,13 +964,13 @@ describe("Server startup and shutdown", () => {
     const options = startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) });
     options.listen = async (app) => app.listen({ host: "127.0.0.1", port: 0 });
     const server = await startServer(options);
-    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+    await vi.waitFor(() => expect(server.runRepository.get(QUEUED_RUN_ID)?.status).toBe("succeeded"));
     expect(server.app.server.listening).toBe(true);
 
     await expect(server.close()).rejects.toBe(shutdownError);
 
     expect(server.app.server.listening).toBe(false);
-    expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
+    expect(() => server.runRepository.get(QUEUED_RUN_ID)).toThrow(/database connection is not open/i);
   });
 
   it("SIGTERM 在有界 graceful close 后显式退出进程以兜底残留 Provider 资源", async () => {
@@ -961,7 +985,7 @@ describe("Server startup and shutdown", () => {
     options.installSignalHandlers = true;
     options.listen = async (app) => app.listen({ host: "127.0.0.1", port: 0 });
     const server = await startServer({ ...options, exitProcess });
-    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+    await vi.waitFor(() => expect(server.runRepository.get(QUEUED_RUN_ID)?.status).toBe("succeeded"));
     expect(server.app.server.listening).toBe(true);
 
     process.emit("SIGTERM", "SIGTERM");
@@ -972,7 +996,7 @@ describe("Server startup and shutdown", () => {
 
     await vi.waitFor(() => expect(exitProcess).toHaveBeenCalledWith(0));
     expect(exitProcess).toHaveBeenCalledTimes(1);
-    expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
+    expect(() => server.runRepository.get(QUEUED_RUN_ID)).toThrow(/database connection is not open/i);
   });
 
   it("SIGTERM shutdown 失败时完成关闭并以 exit code 1 退出", async () => {
@@ -987,7 +1011,7 @@ describe("Server startup and shutdown", () => {
     options.installSignalHandlers = true;
     options.listen = async (app) => app.listen({ host: "127.0.0.1", port: 0 });
     const server = await startServer({ ...options, exitProcess });
-    await vi.waitFor(() => expect(server.runRepository.get("queued-run")?.status).toBe("succeeded"));
+    await vi.waitFor(() => expect(server.runRepository.get(QUEUED_RUN_ID)?.status).toBe("succeeded"));
     expect(server.app.server.listening).toBe(true);
 
     process.emit("SIGTERM", "SIGTERM");
@@ -999,6 +1023,6 @@ describe("Server startup and shutdown", () => {
     await vi.waitFor(() => expect(exitProcess).toHaveBeenCalledWith(1));
     expect(exitProcess).toHaveBeenCalledTimes(1);
     expect(server.app.server.listening).toBe(false);
-    expect(() => server.runRepository.get("queued-run")).toThrow(/database connection is not open/i);
+    expect(() => server.runRepository.get(QUEUED_RUN_ID)).toThrow(/database connection is not open/i);
   });
 });

@@ -1,13 +1,12 @@
-import { randomUUID } from "node:crypto";
-
 import type Database from "better-sqlite3";
 
+import { insertedId } from "../db.js";
 import type { Event, EventType } from "../domain.js";
 import { assertSynchronousTransactionHook } from "../transaction-hook.js";
 
 type EventRow = {
-  id: string;
-  run_id: string;
+  id: number;
+  run_id: number;
   seq: number;
   type: EventType;
   content_json: string;
@@ -43,7 +42,7 @@ const noOpRunEventProjection: RunEventProjection = {
 export class EventStore {
   private readonly db: Database.Database;
   private readonly projection: RunEventProjection;
-  private readonly listeners = new Map<string, Set<(event: Event) => unknown>>();
+  private readonly listeners = new Map<number, Set<(event: Event) => unknown>>();
 
   constructor({ db, projection = noOpRunEventProjection }: EventStoreDependencies) {
     this.db = db;
@@ -53,23 +52,17 @@ export class EventStore {
   /**
    * Appends an Event with the next sequence number for its Run.
    */
-  append(runId: string, type: EventType, content: unknown): Event {
+  append(runId: number, type: EventType, content: unknown): Event {
     this.db.exec("BEGIN IMMEDIATE");
     let event: Event;
     try {
       const nextSeq = (this.db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE run_id = ?").get(runId) as { seq: number }).seq;
       const createdAt = new Date().toISOString();
-      const row: EventRow = {
-        id: randomUUID(),
-        run_id: runId,
-        seq: nextSeq,
-        type,
-        content_json: JSON.stringify(content) ?? "null",
-        created_at: createdAt
-      };
-      this.db
-        .prepare("INSERT INTO events (id, run_id, seq, type, content_json, created_at) VALUES (?, ?, ?, ?, ?, ?)")
-        .run(row.id, row.run_id, row.seq, row.type, row.content_json, row.created_at);
+      const contentJson = JSON.stringify(content) ?? "null";
+      const id = insertedId(this.db
+        .prepare("INSERT INTO events (run_id, seq, type, content_json, created_at) VALUES (?, ?, ?, ?, ?)")
+        .run(runId, nextSeq, type, contentJson, createdAt));
+      const row: EventRow = { id, run_id: runId, seq: nextSeq, type, content_json: contentJson, created_at: createdAt };
       event = toEvent(row);
       assertSynchronousTransactionHook(this.projection.onAppended(event));
       this.db.exec("COMMIT");
@@ -96,7 +89,7 @@ export class EventStore {
   /**
    * Lists persisted Events after the supplied sequence number.
    */
-  list(runId: string, afterSeq: number): Event[] {
+  list(runId: number, afterSeq: number): Event[] {
     const rows = this.db
       .prepare("SELECT * FROM events WHERE run_id = ? AND seq > ? ORDER BY seq ASC")
       .all(runId, afterSeq) as EventRow[];
@@ -106,7 +99,7 @@ export class EventStore {
   /**
    * Reads a bounded Event page for streaming history without unbounded memory use.
    */
-  listBatch(runId: string, afterSeq: number, throughSeq: number, limit: number): Event[] {
+  listBatch(runId: number, afterSeq: number, throughSeq: number, limit: number): Event[] {
     const rows = this.db
       .prepare("SELECT * FROM events WHERE run_id = ? AND seq > ? AND seq <= ? ORDER BY seq ASC LIMIT ?")
       .all(runId, afterSeq, throughSeq, limit) as EventRow[];
@@ -116,14 +109,14 @@ export class EventStore {
   /**
    * Returns the latest committed sequence number for a Run.
    */
-  latestSeq(runId: string): number {
+  latestSeq(runId: number): number {
     return (this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE run_id = ?").get(runId) as { seq: number }).seq;
   }
 
   /**
    * Subscribes to Events appended to a Run in this process.
    */
-  subscribe(runId: string, listener: (event: Event) => unknown): () => void {
+  subscribe(runId: number, listener: (event: Event) => unknown): () => void {
     let listeners = this.listeners.get(runId);
     if (listeners === undefined) {
       listeners = new Set();

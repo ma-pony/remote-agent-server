@@ -55,6 +55,7 @@ External system -> Integration endpoint -> Task -> Session -> Run -> Agent
 - Git
 - At least one installed and authenticated provider CLI
 - APFS on macOS, or Btrfs that the service user can operate on Linux
+- `btrfs-progs` on Linux, with the service user able to run `btrfs subvolume create/snapshot/delete`
 - A real desktop/X display for headed browser automation
 
 Project environments and session workspaces use APFS clones or Btrfs snapshots. There is no ordinary directory-copy fallback. Prepare the filesystem with the [deployment guide](docs/deployment.md) on a new host.
@@ -80,6 +81,23 @@ Put the generated value in `.env` as `API_TOKEN`, then replace the storage paths
 set -a
 source ./.env
 set +a
+```
+
+On Linux, prepare Btrfs with the [deployment guide](docs/deployment.md#linuxbtrfs-原生部署) first. After the roots exist, run the same preflight checks used by the service:
+
+```bash
+command -v btrfs
+btrfs filesystem show "$PROJECT_ENVIRONMENTS_ROOT"
+btrfs filesystem show "$SESSIONS_ROOT"
+test "$(stat -c %d "$PROJECT_ENVIRONMENTS_ROOT")" = \
+     "$(stat -c %d "$SESSIONS_ROOT")"
+```
+
+Do not start after a failed preflight. A non-Btrfs host must be prepared first; the service does not fall back to ordinary directory copies. `WorkspaceCheckError` normally means the `btrfs` command is missing, a root is not on accessible Btrfs storage, or the two roots are on different filesystems.
+
+Start the service:
+
+```bash
 pnpm start
 ```
 
@@ -107,16 +125,25 @@ This starts the watched API server and Vite development server together. The API
 
 ### 1. Prepare a provider
 
-Install and authenticate the provider CLI as the same operating-system user that runs the server:
+Install and authenticate the provider CLI as the same operating-system user that runs the server. Follow the provider's official instructions:
+
+- [Claude Code](https://code.claude.com/docs/en/getting-started)
+- [Codex CLI](https://developers.openai.com/codex/cli)
+- [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/)
 
 ```bash
-claude login
+claude auth login
 codex login
+claude auth status
+codex login status
 claude --version
 codex --version
+hermes --version
 ```
 
-At startup, the server reads the login-shell PATH and merges it with the current Node directory and process PATH. Each agent has its own provider home. Required native login state is reused, but host Skills are not inherited automatically.
+Authenticate and configure models only for the providers you intend to use, under the operating-system user that runs the service.
+
+At startup, the server reads the login-shell PATH and merges it with the current Node directory and process PATH. Each agent has its own provider home. When Codex, Claude Code, or Hermes starts, the server copies the service user's configuration, authentication, models, plugins, and Skills while excluding session history, caches, logs, and temporary runtime data.
 
 ### 2. Create a project environment
 

@@ -23,7 +23,7 @@ const queuedTaskResponseKeys = [
   "status",
   "taskId"
 ].sort();
-const validEndpointInput = (agentId: string, slug = "support-bot") => ({
+const validEndpointInput = (agentId: number, slug = "support-bot") => ({
   name: "Support Bot",
   slug,
   agentId,
@@ -45,7 +45,7 @@ const createTestApp = async (
   configureIntegrationStore?: (store: IntegrationStore) => void
 ): Promise<{
   app: FastifyInstance;
-  agentId: string;
+  agentId: number;
   db: ReturnType<typeof createTestDatabase>["db"];
   integrationStore: IntegrationStore;
 }> => {
@@ -56,9 +56,9 @@ const createTestApp = async (
   const workspaceManager: WorkspaceManager = {
     check: async () => undefined,
     createSession: async (id) => ({
-      workspacePath: join(dataDir, "sessions", id, "workspace"),
-      runtimePath: join(dataDir, "sessions", id, "runtime"),
-      browserProfilePath: join(dataDir, "sessions", id, "browser")
+      workspacePath: join(dataDir, "sessions", String(id), "workspace"),
+      runtimePath: join(dataDir, "sessions", String(id), "runtime"),
+      browserProfilePath: join(dataDir, "sessions", String(id), "browser")
     }),
     deleteSession: async () => undefined,
     createRevision: async () => undefined,
@@ -116,7 +116,7 @@ describe("Integration endpoint API", () => {
     expect(unauthenticated.statusCode).toBe(401);
     expect(unauthenticated.json()).toEqual({ error: { code: "unauthorized", message: "Invalid API token" } });
     expect(created.statusCode).toBe(201);
-    const createdBody = created.json() as { endpoint: { id: string; slug: string }; token: string };
+    const createdBody = created.json() as { endpoint: { id: number; slug: string }; token: string };
     expect(createdBody.token).toMatch(/^ras_/);
 
     const list = await app.inject({ method: "GET", url: "/api/integration-endpoints", headers: authHeaders() });
@@ -159,8 +159,8 @@ describe("Integration endpoint API", () => {
     const { app, agentId, db } = await createTestApp();
     db.prepare(`
       INSERT INTO agent_session_parameters
-        (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('integration-secret-parameter', ?, 'callback_token', 'Callback Token', NULL, 0, 1, ?, ?)
+        (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'callback_token', 'Callback Token', NULL, 0, 1, ?, ?)
     `).run(agentId, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
     const created = await app.inject({
       method: "POST",
@@ -171,7 +171,7 @@ describe("Integration endpoint API", () => {
         parameterMappings: [{ parameterKey: "callback_token", source: "fixed", value: "private-callback-token" }]
       }
     });
-    const endpointId = (created.json() as { endpoint: { id: string } }).endpoint.id;
+    const endpointId = (created.json() as { endpoint: { id: number } }).endpoint.id;
 
     const updated = await app.inject({
       method: "PATCH",
@@ -253,7 +253,7 @@ describe("Integration endpoint API", () => {
       headers: authHeaders(),
       payload: validEndpointInput(agentId)
     });
-    const endpoint = created.json() as { endpoint: { id: string; slug: string }; token: string };
+    const endpoint = created.json() as { endpoint: { id: number; slug: string }; token: string };
     const payload = {
       requestId: "request-1",
       conversationKey: "ticket/1332",
@@ -274,11 +274,11 @@ describe("Integration endpoint API", () => {
       payload
     });
     const firstTask = first.json() as {
-      taskId: string;
+      taskId: number;
       requestId: string;
       conversationKey: string | null;
-      sessionId: string;
-      runId: string | null;
+      sessionId: number;
+      runId: number | null;
       status: string;
     };
     const queried = await app.inject({
@@ -327,7 +327,7 @@ describe("Integration endpoint API", () => {
       headers: authHeaders(),
       payload: validEndpointInput(agentId)
     });
-    const endpoint = created.json() as { endpoint: { id: string; slug: string }; token: string };
+    const endpoint = created.json() as { endpoint: { id: number; slug: string }; token: string };
     const submitted = await app.inject({
       method: "POST",
       url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
@@ -339,7 +339,7 @@ describe("Integration endpoint API", () => {
         parameters: {}
       }
     });
-    const taskId = (submitted.json() as { taskId: string }).taskId;
+    const taskId = (submitted.json() as { taskId: number }).taskId;
 
     const summaries = await app.inject({ method: "GET", url: "/api/integration-endpoints", headers: authHeaders() });
     const conversations = await app.inject({
@@ -373,8 +373,8 @@ describe("Integration endpoint API", () => {
     const { app, agentId, db } = await createTestApp();
     db.prepare(`
       INSERT INTO agent_session_parameters
-        (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('integration-test-parameter', ?, 'project_code', '项目编号', '外部系统中的项目编号', 1, 0, ?, ?)
+        (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'project_code', '项目编号', '外部系统中的项目编号', 1, 0, ?, ?)
     `).run(agentId, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
     const created = await app.inject({
       method: "POST",
@@ -385,7 +385,7 @@ describe("Integration endpoint API", () => {
         parameterMappings: [{ parameterKey: "project_code", source: "request", requestKey: "project" }]
       }
     });
-    const endpointId = (created.json() as { endpoint: { id: string } }).endpoint.id;
+    const endpointId = (created.json() as { endpoint: { id: number } }).endpoint.id;
 
     const tested = await app.inject({
       method: "POST",
@@ -401,8 +401,8 @@ describe("Integration endpoint API", () => {
     expect(tested.statusCode).toBe(202);
     expect(tested.json()).toMatchObject({
       endpointId,
-      conversationId: expect.any(String),
-      sessionId: expect.any(String),
+      conversationId: expect.any(Number),
+      sessionId: expect.any(Number),
       requestId: expect.stringMatching(/^test-/),
       message: "检查项目当前状态",
       status: "queued"
@@ -423,7 +423,7 @@ describe("Integration endpoint API", () => {
       headers: authHeaders(),
       payload: { ...validEndpointInput(agentId), enabled: false }
     });
-    const endpointId = (created.json() as { endpoint: { id: string } }).endpoint.id;
+    const endpointId = (created.json() as { endpoint: { id: number } }).endpoint.id;
 
     const tested = await app.inject({
       method: "POST",
@@ -443,8 +443,8 @@ describe("Integration endpoint API", () => {
     const { app, agentId, db } = await createTestApp();
     db.prepare(`
       INSERT INTO agent_session_parameters
-        (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('integration-required-parameter', ?, 'project_code', '项目编号', NULL, 1, 0, ?, ?)
+        (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'project_code', '项目编号', NULL, 1, 0, ?, ?)
     `).run(agentId, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
     const created = await app.inject({
       method: "POST",
@@ -455,7 +455,7 @@ describe("Integration endpoint API", () => {
         parameterMappings: [{ parameterKey: "project_code", source: "request", requestKey: "project" }]
       }
     });
-    const endpointId = (created.json() as { endpoint: { id: string } }).endpoint.id;
+    const endpointId = (created.json() as { endpoint: { id: number } }).endpoint.id;
 
     const tested = await app.inject({
       method: "POST",
@@ -519,14 +519,14 @@ describe("Integration endpoint API", () => {
     });
 
     const first = await submit("request-before-disable");
-    const firstTask = first.json() as { taskId: string };
+    const firstTask = first.json() as { taskId: number };
     await vi.waitFor(() => expect(
       db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(firstTask.taskId)
     ).toEqual({ status: "succeeded" }));
     db.prepare("UPDATE agents SET enabled = 0 WHERE id = ?").run(agentId);
 
     const second = await submit("request-after-disable");
-    const secondTask = second.json() as { taskId: string };
+    const secondTask = second.json() as { taskId: number };
     await vi.waitFor(() => expect(
       db.prepare("SELECT status, error FROM integration_tasks WHERE id = ?").get(secondTask.taskId)
     ).toEqual({ status: "failed", error: "agent_disabled" }));
@@ -605,7 +605,7 @@ describe("Integration endpoint API", () => {
       headers: authHeaders(),
       payload: validEndpointInput(agentId)
     });
-    const endpoint = created.json() as { endpoint: { id: string; slug: string }; token: string };
+    const endpoint = created.json() as { endpoint: { id: number; slug: string }; token: string };
     const taskUrl = `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`;
     const first = await app.inject({
       method: "POST",
@@ -613,7 +613,7 @@ describe("Integration endpoint API", () => {
       headers: endpointHeaders(endpoint.token),
       payload: { requestId: "request-1", conversationKey: "ticket-1332", message: "first", parameters: {} }
     });
-    const firstTask = first.json() as { sessionId: string };
+    const firstTask = first.json() as { sessionId: number };
     db.prepare("UPDATE integration_tasks SET status = 'succeeded', finished_at = ?").run(new Date().toISOString());
 
     const ended = await app.inject({
@@ -658,7 +658,7 @@ describe("Integration endpoint API", () => {
       headers: endpointHeaders(firstEndpoint.token),
       payload: { requestId: "request-1", message: "work", parameters: {} }
     });
-    const task = createdTask.json() as { taskId: string };
+    const task = createdTask.json() as { taskId: number };
 
     const invalidTokenRead = await app.inject({
       method: "GET",
@@ -727,7 +727,7 @@ describe("Integration endpoint API", () => {
       headers: endpointHeaders(firstEndpoint.token),
       payload: { requestId: "event-request", message: "work", parameters: {} }
     });
-    const task = submitted.json() as { taskId: string };
+    const task = submitted.json() as { taskId: number };
     await vi.waitFor(() => expect(
       db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(task.taskId)
     ).toEqual({ status: "succeeded" }));
@@ -797,7 +797,7 @@ describe("Integration endpoint API", () => {
       headers: endpointHeaders(endpoint.token),
       payload: { requestId: "public-event-request", message: "work", parameters: {} }
     });
-    const taskId = (submitted.json() as { taskId: string }).taskId;
+    const taskId = (submitted.json() as { taskId: number }).taskId;
     await vi.waitFor(() => expect(
       db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(taskId)
     ).toEqual({ status: "succeeded" }));
@@ -870,7 +870,7 @@ describe("Integration endpoint API", () => {
         parameters: {}
       }
     });
-    const task = submitted.json() as { taskId: string; sessionId: string };
+    const task = submitted.json() as { taskId: number; sessionId: number };
     await vi.waitFor(() => expect(
       db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(task.taskId)
     ).toEqual({ status: "running" }));
@@ -885,7 +885,7 @@ describe("Integration endpoint API", () => {
         parameters: {}
       }
     });
-    const nextTask = nextSubmitted.json() as { taskId: string; sessionId: string };
+    const nextTask = nextSubmitted.json() as { taskId: number; sessionId: number };
     expect(nextTask.sessionId).toBe(task.sessionId);
     expect(db.prepare("SELECT status, run_id FROM integration_tasks WHERE id = ?").get(nextTask.taskId))
       .toEqual({ status: "queued", run_id: null });
@@ -933,7 +933,7 @@ describe("Integration endpoint API", () => {
       headers: endpointHeaders(endpoint.token),
       payload: { requestId: "queued-cancel-request", message: "cancel me", parameters: {} }
     });
-    const task = submitted.json() as { taskId: string };
+    const task = submitted.json() as { taskId: number };
 
     const cancelled = await app.inject({
       method: "POST",
@@ -969,7 +969,7 @@ describe("Integration endpoint API", () => {
       headers: authHeaders(),
       payload: validEndpointInput(agentId, "first-endpoint")
     });
-    const secondId = (second.json() as { endpoint: { id: string } }).endpoint.id;
+    const secondId = (second.json() as { endpoint: { id: number } }).endpoint.id;
     const duplicateUpdate = await app.inject({
       method: "PATCH",
       url: `/api/integration-endpoints/${secondId}`,
@@ -1004,7 +1004,7 @@ describe("Integration endpoint API", () => {
       headers: authHeaders(),
       payload: validEndpointInput(agentId)
     });
-    const endpoint = created.json() as { endpoint: { id: string; slug: string }; token: string };
+    const endpoint = created.json() as { endpoint: { id: number; slug: string }; token: string };
     const invalidRotation = await app.inject({
       method: "POST",
       url: `/api/integration-endpoints/${endpoint.endpoint.id}/rotate-token`,

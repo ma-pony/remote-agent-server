@@ -44,7 +44,7 @@ export class WebhookDispatcher {
   private notifiedWhileDraining = false;
   private deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   private unsubscribe: (() => void) | undefined;
-  private readonly active = new Map<string, { deliveryId: string; promise: Promise<void>; controller: AbortController }>();
+  private readonly active = new Map<number, { deliveryId: number; promise: Promise<void>; controller: AbortController }>();
 
   constructor(private readonly dependencies: WebhookDispatcherDependencies) {
     this.fetch = dependencies.fetch ?? globalThis.fetch;
@@ -79,7 +79,7 @@ export class WebhookDispatcher {
     }
   }
 
-  async deliver(id: string): Promise<void> {
+  async deliver(id: number): Promise<void> {
     const current = this.dependencies.store.getDelivery(id);
     if (current === undefined || this.active.has(current.subscriptionId)) return;
     const controller = new AbortController();
@@ -124,7 +124,7 @@ export class WebhookDispatcher {
     this.active.set(delivery.subscriptionId, { deliveryId: delivery.id, promise, controller });
   }
 
-  private async runDelivery(id: string, controller: AbortController): Promise<void> {
+  private async runDelivery(id: number, controller: AbortController): Promise<void> {
     try {
       await this.deliverClaimed(id, controller);
     } catch (_error) {
@@ -136,7 +136,7 @@ export class WebhookDispatcher {
     }
   }
 
-  private async deliverClaimed(id: string, stopController: AbortController): Promise<void> {
+  private async deliverClaimed(id: number, stopController: AbortController): Promise<void> {
     const claimed = this.dependencies.store.claimDelivery(id);
     if (claimed === undefined) return;
     const subscription = this.dependencies.store.getSubscription(claimed.subscriptionId);

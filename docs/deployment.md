@@ -53,10 +53,10 @@ MAX_CONCURRENT_RUNS=4
 
 `DATA_DIR/secret.key` 是 MCP 固定敏感值和 Session 敏感参数的 AES-256-GCM 主密钥。服务首次启动会自动创建，权限为 `0600`。该文件必须与 SQLite 数据库一起持久化和备份；丢失后，数据库中已有密文无法恢复。不要把该密钥写入镜像、日志或源码仓库。
 
-使用同一个 macOS 用户完成 Provider 登录并确认命令可执行：
+使用同一个 macOS 用户完成 Provider 登录并确认命令可执行。安装方式见 [Claude Code](https://code.claude.com/docs/en/getting-started)、[Codex CLI](https://developers.openai.com/codex/cli) 和 [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/) 官方文档：
 
 ```bash
-claude login
+claude auth login
 codex login
 claude --version && codex --version && hermes --version
 ```
@@ -142,7 +142,7 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.remote-agent-
 
 ## 1. 创建专用用户和 Btrfs 目录
 
-先由管理员确认 `/srv/remote-agent` 位于一个已挂载的 Btrfs 文件系统，再创建不能拥有 sudo 权限的服务用户：
+先安装 `btrfs-progs`（Debian/Ubuntu 可执行 `sudo apt install btrfs-progs`，其他发行版使用对应包管理器），再由管理员确认 `/srv/remote-agent` 位于一个已挂载的 Btrfs 文件系统，并创建不能拥有 sudo 权限的服务用户：
 
 ```bash
 sudo useradd --create-home --shell /bin/bash remote-agent
@@ -207,7 +207,7 @@ sudo -u remote-agent -H env DISPLAY=:0 XAUTHORITY=/home/remote-agent/.Xauthority
 
 ```bash
 sudo -u remote-agent -H bash -lc 'node --version && pnpm --version && claude --version && codex --version && hermes --version'
-sudo -u remote-agent -H bash -lc 'claude login'
+sudo -u remote-agent -H bash -lc 'claude auth login'
 sudo -u remote-agent -H bash -lc 'codex login'
 ```
 
@@ -335,28 +335,21 @@ sudo journalctl -u remote-agent -n 100 --no-pager
 
 只有存在 ready 项目环境时，smoke 才会创建 Agent。脚本按名称和 ID 稳定选择第一个 ready 环境，并让三种 Provider 共用它。
 
-先用 `--prepare` 创建或复用三个固定名称的 Agent。该模式只确保并打印 Agent ID，**不会**创建 Session/Run，也不会调用 doctor，因此可以先获得 Hermes 的专用 home。匹配 0 条时创建、1 条时复用或重新启用；同名同 Provider 多于 1 条时会以非零退出并打印所有冲突 ID，必须人工清理后再继续，不能任选一条。
+先在运行服务的系统用户下完成 Hermes 模型配置和 ACP 检查。服务启动 Provider 时会把这些静态配置复制到 Agent 的独立 Provider Home：
 
 ```bash
-HERMES_AGENT_ID="$(sudo -u remote-agent -H bash -lc '
+sudo -u remote-agent -H hermes model
+sudo -u remote-agent -H hermes acp --check
+```
+
+然后用 `--prepare` 创建或复用三个固定名称的 Agent。该模式只确保并打印 Agent ID，**不会**创建 Session/Run，也不会调用 doctor。匹配 0 条时创建、1 条时复用或重新启用；同名同 Provider 多于 1 条时会以非零退出并打印所有冲突 ID，必须人工清理后再继续，不能任选一条。
+
+```bash
+sudo -u remote-agent -H bash -lc '
   cd /opt/remote-agent-server
   set -a; . ./.env; set +a
   pnpm --silent smoke:providers --prepare
-' | jq -er 'select(.provider == "hermes" and .outcome == "prepared") | .agentId')" || exit 1
-test -n "$HERMES_AGENT_ID" || exit 1
-```
-
-该命令需要 `jq`；不安装它时直接运行其中的 `pnpm smoke:providers --prepare` 并从 JSON 输出中手动记录 Hermes `agentId`。不要继续使用无条件 `POST /api/agents`，因为当前 API 没有 Agent 名称唯一约束。
-
-Hermes 必须使用刚才 `remote-agent-smoke-hermes` 返回的 `id` 配置模型并通过 ACP 检查：
-
-```bash
-sudo -u remote-agent -H env \
-  HERMES_HOME=/srv/remote-agent/data/agents/$HERMES_AGENT_ID/provider-home/hermes \
-  hermes model
-sudo -u remote-agent -H env \
-  HERMES_HOME=/srv/remote-agent/data/agents/$HERMES_AGENT_ID/provider-home/hermes \
-  hermes acp --check
+'
 ```
 
 `hermes model` 是交互式模型配置；按组织许可完成后再进行真实 smoke。

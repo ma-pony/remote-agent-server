@@ -129,7 +129,7 @@ export class SkillManager {
     this.roots = roots;
   }
 
-  list(agentId: string): SkillCatalogItem[] {
+  list(agentId: number): SkillCatalogItem[] {
     const catalog = this.availableCatalog(agentId);
     const availableIds = new Set(catalog.map((skill) => skill.id));
     const result: SkillCatalogItem[] = catalog.map(({ directory: _directory, ...skill }) => ({
@@ -142,7 +142,7 @@ export class SkillManager {
     return result.sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
   }
 
-  setEnabled(agentId: string, id: string, enabled: boolean): SkillCatalogItem | undefined {
+  setEnabled(agentId: number, id: string, enabled: boolean): SkillCatalogItem | undefined {
     const available = this.availableCatalog(agentId).find((skill) => skill.id === id);
     const current = this.list(agentId).find((skill) => skill.id === id);
     if (enabled) {
@@ -156,7 +156,7 @@ export class SkillManager {
     return { ...current, enabled: false };
   }
 
-  upload(agentId: string, fileName: string, archive: Uint8Array): SkillCatalogItem {
+  upload(agentId: number, fileName: string, archive: Uint8Array): SkillCatalogItem {
     if (!fileName.toLowerCase().endsWith(".zip")) throw new SkillManagerError("invalid_skill_archive");
     if (archive.byteLength > maxArchiveBytes) throw new SkillManagerError("skill_archive_too_large");
     let extractedBytes = 0;
@@ -189,7 +189,7 @@ export class SkillManager {
     const prefix = manifests[0]!.slice(0, -"SKILL.md".length);
     if (names.some((name) => !name.startsWith(prefix))) throw new SkillManagerError("invalid_skill_archive");
 
-    const libraryRoot = join(this.dataDir, "agents", agentId, "skill-library");
+    const libraryRoot = join(this.dataDir, "agents", String(agentId), "skill-library");
     const temporary = join(libraryRoot, `.upload-${randomUUID()}`);
     mkdirSync(temporary, { recursive: true });
     try {
@@ -267,12 +267,12 @@ export class SkillManager {
     return result;
   }
 
-  private availableCatalog(agentId: string): AvailableSkill[] {
+  private availableCatalog(agentId: number): AvailableSkill[] {
     return [...this.catalog(), ...this.uploadedCatalog(agentId)];
   }
 
-  private uploadedCatalog(agentId: string): AvailableSkill[] {
-    const root = join(this.dataDir, "agents", agentId, "skill-library");
+  private uploadedCatalog(agentId: number): AvailableSkill[] {
+    const root = join(this.dataDir, "agents", String(agentId), "skill-library");
     if (!existsSync(root)) return [];
     return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
       if (!entry.isDirectory() || entry.name.startsWith(".")) return [];
@@ -293,8 +293,8 @@ export class SkillManager {
     });
   }
 
-  private installed(agentId: string): SkillCatalogItem[] {
-    const root = join(this.dataDir, "agents", agentId, "skills");
+  private installed(agentId: number): SkillCatalogItem[] {
+    const root = join(this.dataDir, "agents", String(agentId), "skills");
     if (!existsSync(root)) return [];
     return readdirSync(root, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
@@ -315,8 +315,8 @@ export class SkillManager {
       });
   }
 
-  private install(agentId: string, skill: AvailableSkill): void {
-    const root = join(this.dataDir, "agents", agentId, "skills");
+  private install(agentId: number, skill: AvailableSkill): void {
+    const root = join(this.dataDir, "agents", String(agentId), "skills");
     const destination = this.destination(agentId, skill.id);
     const token = randomUUID();
     const temporary = join(root, `.${skill.id}.tmp-${token}`);
@@ -368,8 +368,8 @@ export class SkillManager {
     ) throw new SkillManagerError("invalid_skill_archive");
   }
 
-  private destination(agentId: string, id: string): string {
-    return join(this.dataDir, "agents", agentId, "skills", id);
+  private destination(agentId: number, id: string): string {
+    return join(this.dataDir, "agents", String(agentId), "skills", id);
   }
 }
 

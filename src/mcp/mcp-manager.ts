@@ -1,8 +1,8 @@
-import { randomUUID } from "node:crypto";
 import { accessSync, constants } from "node:fs";
 import { isAbsolute, delimiter, join } from "node:path";
 
 import type Database from "better-sqlite3";
+import { insertedId } from "../db.js";
 
 import type { SecretStore } from "./secret-store.js";
 import type {
@@ -44,8 +44,8 @@ export class McpManagerError extends Error {
 }
 
 type McpServerRow = {
-  id: string;
-  agent_id: string;
+  id: number;
+  agent_id: number;
   name: string;
   transport: "http" | "stdio";
   enabled: 0 | 1;
@@ -61,8 +61,8 @@ type McpServerRow = {
 };
 
 type McpValueRow = {
-  id: string;
-  mcp_server_id: string;
+  id: number;
+  mcp_server_id: number;
   kind: "argument" | "header" | "environment";
   position: number;
   target_name: string | null;
@@ -70,15 +70,15 @@ type McpValueRow = {
   plain_value: string | null;
   encrypted_value: string | null;
   secret: 0 | 1;
-  session_parameter_id: string | null;
+  session_parameter_id: number | null;
   parameter_key: string | null;
   parameter_secret: 0 | 1 | null;
   runtime_key: RuntimeMcpKey | null;
 };
 
 type SessionParameterRow = {
-  id: string;
-  agent_id: string;
+  id: number;
+  agent_id: number;
   key: string;
   label: string;
   description: string | null;
@@ -89,7 +89,7 @@ type SessionParameterRow = {
 };
 
 type SessionValueRow = {
-  parameter_id: string;
+  parameter_id: number;
   plain_value: string | null;
   encrypted_value: string | null;
 };
@@ -149,14 +149,14 @@ export class McpManager {
     return this.dependencies.secrets;
   }
 
-  listServers(agentId: string): AgentMcpServerSummary[] {
+  listServers(agentId: number): AgentMcpServerSummary[] {
     this.requireAgent(agentId);
     return (this.db.prepare(
       "SELECT * FROM agent_mcp_servers WHERE agent_id = ? ORDER BY created_at ASC, id ASC"
     ).all(agentId) as McpServerRow[]).map(toSummary);
   }
 
-  getServer(agentId: string, id: string): AgentMcpServerDetail | undefined {
+  getServer(agentId: number, id: number): AgentMcpServerDetail | undefined {
     const row = this.getServerRow(agentId, id);
     if (row === undefined) return undefined;
     const summary = toSummary(row);
@@ -173,19 +173,18 @@ export class McpManager {
     };
   }
 
-  createServer(agentId: string, input: McpServerWriteInput): AgentMcpServerDetail {
+  createServer(agentId: number, input: McpServerWriteInput): AgentMcpServerDetail {
     this.requireAgent(agentId);
     this.validateServerInput(agentId, input);
-    const id = randomUUID();
+    let id = 0;
     const now = new Date().toISOString();
     try {
       this.db.transaction(() => {
-        this.db.prepare(`
+        id = insertedId(this.db.prepare(`
           INSERT INTO agent_mcp_servers
-            (id, agent_id, name, transport, enabled, url, command, check_timeout_seconds, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (agent_id, name, transport, enabled, url, command, check_timeout_seconds, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-          id,
           agentId,
           input.name,
           input.transport,
@@ -195,7 +194,7 @@ export class McpManager {
           input.checkTimeoutSeconds,
           now,
           now
-        );
+        ));
         this.insertValues(agentId, id, input, new Map());
       }).immediate();
     } catch (error) {
@@ -207,7 +206,7 @@ export class McpManager {
     return this.getServer(agentId, id)!;
   }
 
-  updateServer(agentId: string, id: string, input: McpServerWriteInput): AgentMcpServerDetail | undefined {
+  updateServer(agentId: number, id: number, input: McpServerWriteInput): AgentMcpServerDetail | undefined {
     const existing = this.getServerRow(agentId, id);
     if (existing === undefined) return undefined;
     if (existing.transport !== input.transport) throw new McpManagerError("invalid_mcp_server");
@@ -244,28 +243,28 @@ export class McpManager {
     return this.getServer(agentId, id)!;
   }
 
-  deleteServer(agentId: string, id: string): boolean {
+  deleteServer(agentId: number, id: number): boolean {
     return this.db.prepare("DELETE FROM agent_mcp_servers WHERE id = ? AND agent_id = ?").run(id, agentId).changes === 1;
   }
 
-  listParameterDefinitions(agentId: string): AgentSessionParameter[] {
+  listParameterDefinitions(agentId: number): AgentSessionParameter[] {
     this.requireAgent(agentId);
     return (this.db.prepare(
       "SELECT * FROM agent_session_parameters WHERE agent_id = ? ORDER BY created_at ASC, id ASC"
     ).all(agentId) as SessionParameterRow[]).map(toParameter);
   }
 
-  createParameterDefinition(agentId: string, input: CreateSessionParameterInput): AgentSessionParameter {
+  createParameterDefinition(agentId: number, input: CreateSessionParameterInput): AgentSessionParameter {
     this.requireAgent(agentId);
     this.validateParameterInput(input.key, input.label);
-    const id = randomUUID();
     const now = new Date().toISOString();
+    let id = 0;
     try {
-      this.db.prepare(`
+      id = insertedId(this.db.prepare(`
         INSERT INTO agent_session_parameters
-          (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, agentId, input.key, input.label.trim(), input.description, input.required ? 1 : 0, input.secret ? 1 : 0, now, now);
+          (agent_id, key, label, description, required, secret, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(agentId, input.key, input.label.trim(), input.description, input.required ? 1 : 0, input.secret ? 1 : 0, now, now));
     } catch (error) {
       if (error instanceof Error && error.message.includes("agent_session_parameters.agent_id, agent_session_parameters.key")) {
         throw new McpManagerError("duplicate_mcp_parameter");
@@ -276,8 +275,8 @@ export class McpManager {
   }
 
   updateParameterDefinition(
-    agentId: string,
-    id: string,
+    agentId: number,
+    id: number,
     input: UpdateSessionParameterInput
   ): AgentSessionParameter | undefined {
     if (!nonEmpty(input.label)) throw new McpManagerError("invalid_mcp_value");
@@ -290,7 +289,7 @@ export class McpManager {
     return toParameter(this.requireParameterRow(agentId, id));
   }
 
-  deleteParameterDefinition(agentId: string, id: string): boolean {
+  deleteParameterDefinition(agentId: number, id: number): boolean {
     const used = this.db.prepare(`
       SELECT 1 FROM agent_mcp_values WHERE session_parameter_id = ?
       UNION ALL
@@ -302,7 +301,7 @@ export class McpManager {
   }
 
   normalizeSessionValues(
-    agentId: string,
+    agentId: number,
     values: Record<string, string | null>,
     requireAll: boolean
   ): NormalizedSessionMcpValue[] {
@@ -332,7 +331,7 @@ export class McpManager {
     });
   }
 
-  insertSessionValuesInTransaction(sessionId: string, values: NormalizedSessionMcpValue[]): void {
+  insertSessionValuesInTransaction(sessionId: number, values: NormalizedSessionMcpValue[]): void {
     const now = new Date().toISOString();
     const insert = this.db.prepare(`
       INSERT INTO session_mcp_parameter_values
@@ -352,7 +351,7 @@ export class McpManager {
     }
   }
 
-  applySessionValuePatchInTransaction(sessionId: string, values: NormalizedSessionMcpValue[]): void {
+  applySessionValuePatchInTransaction(sessionId: number, values: NormalizedSessionMcpValue[]): void {
     const now = new Date().toISOString();
     for (const value of values) {
       if (value.value === null) {
@@ -380,8 +379,8 @@ export class McpManager {
     }
   }
 
-  getSessionStatus(sessionId: string): SessionMcpStatus {
-    const session = this.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: string } | undefined;
+  getSessionStatus(sessionId: number): SessionMcpStatus {
+    const session = this.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: number } | undefined;
     if (session === undefined) throw new McpManagerError("missing_session_mcp_parameters");
     const definitions = this.listParameterDefinitions(session.agent_id);
     const rows = this.db.prepare(
@@ -414,7 +413,7 @@ export class McpManager {
   }
 
   resolveEnabledForRun(context: ResolveMcpContext): ResolvedMcpServer[] {
-    const session = this.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(context.sessionId) as { agent_id: string } | undefined;
+    const session = this.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(context.sessionId) as { agent_id: number } | undefined;
     if (session?.agent_id !== context.agentId) throw new McpManagerError("missing_session_mcp_parameters");
     const values = this.sessionValues(context.sessionId);
     const rows = this.db.prepare(
@@ -423,7 +422,7 @@ export class McpManager {
     return rows.map((row) => this.resolveServer(row, context, values));
   }
 
-  resolveOneForCheck(agentId: string, serverId: string, sessionId?: string): ResolvedMcpServer | undefined {
+  resolveOneForCheck(agentId: number, serverId: number, sessionId?: number): ResolvedMcpServer | undefined {
     const row = this.getServerRow(agentId, serverId);
     if (row === undefined) return undefined;
     const valueRows = this.listValueRows(serverId);
@@ -437,20 +436,20 @@ export class McpManager {
     const session = sessionId === undefined
       ? undefined
       : this.db.prepare("SELECT agent_id, workspace_path FROM sessions WHERE id = ?").get(sessionId) as
-        | { agent_id: string; workspace_path: string }
+        | { agent_id: number; workspace_path: string }
         | undefined;
     if (sessionId !== undefined && session?.agent_id !== agentId) throw new McpManagerError("missing_session_mcp_parameters");
     const workspacePath = session?.workspace_path ?? "";
     return this.resolveServer(row, {
       agentId,
-      sessionId: sessionId ?? "",
-      runId: randomUUID(),
+      sessionId: sessionId ?? 0,
+      runId: 0,
       workspacePath,
       browserProfilePath: workspacePath === "" ? "" : join(workspacePath, "..", "browser")
     }, sessionId === undefined ? new Map() : this.sessionValues(sessionId));
   }
 
-  recordCheckResult(serverId: string, result: McpCheckResult): void {
+  recordCheckResult(serverId: number, result: McpCheckResult): void {
     this.db.prepare(`
       UPDATE agent_mcp_servers SET
         last_checked_at = ?, last_check_status = ?, last_check_message = ?, last_tool_count = ?, updated_at = ?
@@ -465,19 +464,19 @@ export class McpManager {
     );
   }
 
-  private requireAgent(agentId: string): void {
+  private requireAgent(agentId: number): void {
     if (this.db.prepare("SELECT 1 FROM agents WHERE id = ?").get(agentId) === undefined) {
       throw new McpManagerError("agent_not_found");
     }
   }
 
-  private getServerRow(agentId: string, id: string): McpServerRow | undefined {
+  private getServerRow(agentId: number, id: number): McpServerRow | undefined {
     return this.db.prepare("SELECT * FROM agent_mcp_servers WHERE id = ? AND agent_id = ?").get(id, agentId) as
       | McpServerRow
       | undefined;
   }
 
-  private requireParameterRow(agentId: string, id: string): SessionParameterRow {
+  private requireParameterRow(agentId: number, id: number): SessionParameterRow {
     const row = this.db.prepare("SELECT * FROM agent_session_parameters WHERE id = ? AND agent_id = ?").get(id, agentId) as
       | SessionParameterRow
       | undefined;
@@ -485,7 +484,7 @@ export class McpManager {
     return row;
   }
 
-  private listValueRows(serverId: string): McpValueRow[] {
+  private listValueRows(serverId: number): McpValueRow[] {
     return this.db.prepare(`
       SELECT mcp_value.*, parameters.key AS parameter_key, parameters.secret AS parameter_secret
       FROM agent_mcp_values mcp_value
@@ -510,7 +509,7 @@ export class McpManager {
     return { ...base, runtimeKey: row.runtime_key! };
   }
 
-  private validateServerInput(agentId: string, input: McpServerWriteInput): void {
+  private validateServerInput(agentId: number, input: McpServerWriteInput): void {
     if (!MCP_NAME_PATTERN.test(input.name) || !Number.isInteger(input.checkTimeoutSeconds)
       || input.checkTimeoutSeconds < 1 || input.checkTimeoutSeconds > 300) {
       throw new McpManagerError("invalid_mcp_server");
@@ -547,7 +546,7 @@ export class McpManager {
     }
   }
 
-  private validateValueInput(input: McpValueInput, kind: McpValueRow["kind"], agentId: string): void {
+  private validateValueInput(input: McpValueInput, kind: McpValueRow["kind"], agentId: number): void {
     if (input.source === "fixed") {
       if (!nonEmpty(input.value) && input.id === undefined) throw new McpManagerError("invalid_mcp_value");
       if (kind === "argument" && input.secret === true) throw new McpManagerError("invalid_mcp_value");
@@ -569,10 +568,10 @@ export class McpManager {
   }
 
   private insertValues(
-    agentId: string,
-    serverId: string,
+    agentId: number,
+    serverId: number,
     input: McpServerWriteInput,
-    existing: Map<string, McpValueRow>
+    existing: Map<number, McpValueRow>
   ): void {
     const groups = input.transport === "http"
       ? [{ kind: "header" as const, values: input.headers }]
@@ -586,12 +585,12 @@ export class McpManager {
   }
 
   private insertValue(
-    agentId: string,
-    serverId: string,
+    agentId: number,
+    serverId: number,
     kind: McpValueRow["kind"],
     position: number,
     input: McpValueInput | McpNamedValueInput,
-    existing: Map<string, McpValueRow>
+    existing: Map<number, McpValueRow>
   ): void {
     const previous = input.id === undefined ? undefined : existing.get(input.id);
     const parameter = input.source === "session_parameter"
@@ -611,11 +610,10 @@ export class McpManager {
     }
     this.db.prepare(`
       INSERT INTO agent_mcp_values
-        (id, mcp_server_id, kind, position, target_name, source_type, plain_value,
+        (mcp_server_id, kind, position, target_name, source_type, plain_value,
          encrypted_value, secret, session_parameter_id, runtime_key)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      randomUUID(),
       serverId,
       kind,
       position,
@@ -629,7 +627,7 @@ export class McpManager {
     );
   }
 
-  private sessionValues(sessionId: string): Map<string, SessionValueRow> {
+  private sessionValues(sessionId: number): Map<number, SessionValueRow> {
     const rows = this.db.prepare(
       "SELECT parameter_id, plain_value, encrypted_value FROM session_mcp_parameter_values WHERE session_id = ?"
     ).all(sessionId) as SessionValueRow[];
@@ -639,7 +637,7 @@ export class McpManager {
   private resolveServer(
     row: McpServerRow,
     context: ResolveMcpContext,
-    sessionValues: Map<string, SessionValueRow>
+    sessionValues: Map<number, SessionValueRow>
   ): ResolvedMcpServer {
     const values = this.listValueRows(row.id);
     if (row.transport === "http") {
@@ -677,7 +675,7 @@ export class McpManager {
   private resolveValue(
     row: McpValueRow,
     context: ResolveMcpContext,
-    sessionValues: Map<string, SessionValueRow>
+    sessionValues: Map<number, SessionValueRow>
   ): string {
     if (row.source_type === "fixed") {
       if (row.secret === 1 && row.encrypted_value !== null) return this.secrets.decrypt(row.encrypted_value);
@@ -686,9 +684,9 @@ export class McpManager {
     }
     if (row.source_type === "runtime") {
       const values: Record<RuntimeMcpKey, string> = {
-        agent_id: context.agentId,
-        session_id: context.sessionId,
-        run_id: context.runId,
+        agent_id: String(context.agentId),
+        session_id: String(context.sessionId),
+        run_id: String(context.runId),
         workspace_path: context.workspacePath,
         browser_profile_path: context.browserProfilePath
       };

@@ -106,7 +106,7 @@ export const AgentCreatePage = () => {
     void api<ProjectEnvironment[]>("/project-environments", { signal: controller.signal }).then((items) => {
       const ready = items.filter((item) => item.currentRevisionId !== null);
       setEnvironments(ready);
-      setProjectEnvironmentId(ready[0]?.id ?? "");
+      setProjectEnvironmentId(ready[0] === undefined ? "" : String(ready[0].id));
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, []);
@@ -117,7 +117,7 @@ export const AgentCreatePage = () => {
     setBusy(true); setError("");
     try {
       const created = await api<Agent>("/agents", { method: "POST", body: JSON.stringify({
-        name: name.trim(), provider, projectEnvironmentId,
+        name: name.trim(), provider, projectEnvironmentId: Number(projectEnvironmentId),
         instructions: provider === "hermes" ? "" : instructions
       }) });
       navigate(`/agents/${created.id}`);

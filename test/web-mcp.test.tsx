@@ -9,17 +9,17 @@ import { App } from "../src/web/app.js";
 
 const now = "2026-08-13T00:00:00.000Z";
 const agent = {
-  id: "agent-1", name: "主力 Codex", provider: "codex", enabled: true,
-  projectEnvironmentId: "environment-1", createdAt: now, updatedAt: now
+  id: 1, name: "主力 Codex", provider: "codex", enabled: true,
+  projectEnvironmentId: 1, createdAt: now, updatedAt: now
 };
 const server = {
-  id: "mcp-1", agentId: agent.id, name: "example_mcp", transport: "http", enabled: true,
+  id: 1, agentId: agent.id, name: "example_mcp", transport: "http", enabled: true,
   checkTimeoutSeconds: 30, lastCheckedAt: null, lastCheckStatus: null, lastCheckMessage: null,
   lastToolCount: null, createdAt: now, updatedAt: now
 };
 const session = {
-  id: "session-1", agentId: agent.id, title: "租户 A", status: "idle", providerSessionId: null,
-  workspacePath: "/workspace", projectEnvironmentRevisionId: "revision-1", createdAt: now, updatedAt: now
+  id: 1, agentId: agent.id, title: "租户 A", status: "idle", providerSessionId: null,
+  workspacePath: "/workspace", projectEnvironmentRevisionId: 1, createdAt: now, updatedAt: now
 };
 const response = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), {
   status, headers: { "content-type": "application/json" }
@@ -43,7 +43,7 @@ it("Agent MCP 独立页面展示服务器、连接检查和 Session 参数", asy
     if (url === "/api/sessions") return response([session]);
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
-      id: "parameter-1", agentId: agent.id, key: "tenant", label: "租户", description: null,
+      id: 1, agentId: agent.id, key: "tenant", label: "租户", description: null,
       required: true, secret: false, createdAt: now, updatedAt: now
     }]);
     if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
@@ -80,7 +80,7 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
 
   render(<App />);
   await screen.findByRole("option", { name: session.title });
-  fireEvent.change(await screen.findByLabelText("检查使用的会话"), { target: { value: session.id } });
+  fireEvent.change(await screen.findByLabelText("检查使用的会话"), { target: { value: String(session.id) } });
   fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
   await waitFor(() => expect(checkBody).toEqual({ sessionId: session.id }));
 });
@@ -150,7 +150,7 @@ it("HTTP Header 可引用 Session 参数", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
-      id: "parameter-1", agentId: agent.id, key: "tenant_token", label: "租户 Token",
+      id: 1, agentId: agent.id, key: "tenant_token", label: "租户 Token",
       description: null, required: true, secret: true, createdAt: now, updatedAt: now
     }]);
     if (url === `/api/agents/${agent.id}/mcp-servers` && init?.method === "POST") {
@@ -182,7 +182,7 @@ it("stdio Argument 和 Environment 支持 runtime 与 Session 参数", async () 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
-      id: "parameter-1", agentId: agent.id, key: "tenant", label: "租户",
+      id: 1, agentId: agent.id, key: "tenant", label: "租户",
       description: null, required: true, secret: false, createdAt: now, updatedAt: now
     }]);
     if (url === `/api/agents/${agent.id}/mcp-servers` && init?.method === "POST") {

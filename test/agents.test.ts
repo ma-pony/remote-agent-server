@@ -82,7 +82,7 @@ describe("Agent API", () => {
       headers: authHeaders(),
       payload: { name: "Codex Detail", provider: "codex", projectEnvironmentId }
     });
-    const agent = created.json() as { id: string };
+    const agent = created.json() as { id: number };
 
     const detail = await app.inject({
       method: "GET",
@@ -91,11 +91,12 @@ describe("Agent API", () => {
     });
     const missing = await app.inject({
       method: "GET",
-      url: "/api/agents/00000000-0000-4000-8000-000000000000",
+      url: "/api/agents/999999",
       headers: authHeaders()
     });
 
     expect(detail.statusCode).toBe(200);
+    expect(agent.id).toEqual(expect.any(Number));
     expect(detail.json()).toMatchObject({ id: agent.id, name: "Codex Detail", provider: "codex" });
     expect(missing.statusCode).toBe(404);
     expect(missing.json()).toEqual({ error: { code: "not_found", message: "Agent not found" } });
@@ -136,8 +137,8 @@ describe("Agent API", () => {
     });
     expect(missingEnvironment.statusCode).toBe(400);
 
-    const agent = response.json() as { id: string };
-    const agentDir = join(dataDir, "agents", agent.id);
+    const agent = response.json() as { id: number };
+    const agentDir = join(dataDir, "agents", String(agent.id));
     expect(existsSync(join(agentDir, "skills"))).toBe(true);
     expect(readFileSync(join(agentDir, "MEMORY.md"), "utf8")).toBe("");
     for (const providerHome of ["claude", "codex", "hermes"]) {
@@ -179,7 +180,7 @@ describe("Agent API", () => {
       headers: authHeaders(),
       payload: { name: "Hermes", provider: "hermes", projectEnvironmentId }
     });
-    const { id } = created.json() as { id: string };
+    const { id } = created.json() as { id: number };
 
     const disabled = await app.inject({
       method: "PATCH",
@@ -202,24 +203,24 @@ describe("Agent API", () => {
 
   it("可以修改名称和项目环境，但不能修改 Provider", async () => {
     const { app, db, projectEnvironmentId } = await createTestApp();
-    const secondEnvironmentId = "22222222-2222-4222-8222-222222222222";
-    const secondRevisionId = "33333333-3333-4333-8333-333333333333";
     const timestamp = "2026-08-13T00:00:00.000Z";
-    db.prepare(
-      "INSERT INTO project_environments (id, name, current_revision_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
-    ).run(secondEnvironmentId, "Second environment", secondRevisionId, timestamp, timestamp);
-    db.prepare(`
+    const secondEnvironmentId = Number(db.prepare(
+      "INSERT INTO project_environments (name, created_at, updated_at) VALUES (?, ?, ?)"
+    ).run("Second environment", timestamp, timestamp).lastInsertRowid);
+    const secondRevisionId = Number(db.prepare(`
       INSERT INTO project_environment_revisions
-        (id, project_environment_id, status, workspace_path, input_fingerprint, created_at, finished_at)
-      VALUES (?, ?, 'ready', ?, ?, ?, ?)
-    `).run(secondRevisionId, secondEnvironmentId, "/tmp/second/workspace", "second-input", timestamp, timestamp);
+        (project_environment_id, status, workspace_path, input_fingerprint, created_at, finished_at)
+      VALUES (?, 'ready', ?, ?, ?, ?)
+    `).run(secondEnvironmentId, "/tmp/second/workspace", "second-input", timestamp, timestamp).lastInsertRowid);
+    db.prepare("UPDATE project_environments SET current_revision_id = ? WHERE id = ?")
+      .run(secondRevisionId, secondEnvironmentId);
     const created = await app.inject({
       method: "POST",
       url: "/api/agents",
       headers: authHeaders(),
       payload: { name: "Codex", provider: "codex", projectEnvironmentId }
     });
-    const { id } = created.json() as { id: string };
+    const { id } = created.json() as { id: number };
 
     const updated = await app.inject({
       method: "PATCH",
@@ -260,7 +261,7 @@ describe("Agent API", () => {
 
     expect(created.statusCode).toBe(201);
     expect(created.json()).toMatchObject({ instructions: "只报告有证据的问题。" });
-    const { id } = created.json() as { id: string };
+    const { id } = created.json() as { id: number };
 
     const updated = await app.inject({
       method: "PATCH",
@@ -303,8 +304,8 @@ describe("Agent API", () => {
       headers: authHeaders(),
       payload: { name: "Disposable", provider: "codex", projectEnvironmentId }
     });
-    const { id } = created.json() as { id: string };
-    const agentDirectory = join(dataDir, "agents", id);
+    const { id } = created.json() as { id: number };
+    const agentDirectory = join(dataDir, "agents", String(id));
 
     const deleted = await app.inject({ method: "DELETE", url: `/api/agents/${id}`, headers: authHeaders() });
     const missing = await app.inject({ method: "DELETE", url: `/api/agents/${id}`, headers: authHeaders() });
@@ -322,12 +323,12 @@ describe("Agent API", () => {
       headers: authHeaders(),
       payload: { name: "In use", provider: "hermes", projectEnvironmentId }
     });
-    const { id } = created.json() as { id: string };
+    const { id } = created.json() as { id: number };
     const timestamp = "2026-08-13T00:00:00.000Z";
     db.prepare(`
-      INSERT INTO sessions (id, agent_id, title, status, workspace_path, created_at, updated_at)
-      VALUES (?, ?, ?, 'idle', ?, ?, ?)
-    `).run("session-with-agent", id, "History", "/tmp/session-with-agent", timestamp, timestamp);
+      INSERT INTO sessions (agent_id, title, status, workspace_path, created_at, updated_at)
+      VALUES (?, ?, 'idle', ?, ?, ?)
+    `).run(id, "History", "/tmp/session-with-agent", timestamp, timestamp);
 
     const response = await app.inject({ method: "DELETE", url: `/api/agents/${id}`, headers: authHeaders() });
 
@@ -349,13 +350,13 @@ describe("Agent API", () => {
       headers: authHeaders(),
       payload: { name: "Integration owner", provider: "codex", projectEnvironmentId }
     });
-    const { id } = created.json() as { id: string };
+    const { id } = created.json() as { id: number };
     const timestamp = "2026-08-13T00:00:00.000Z";
     db.prepare(`
       INSERT INTO integration_endpoints
-        (id, name, slug, agent_id, enabled, token_hash, prompt_prefix, parameter_mappings_json, encrypted_fixed_values, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 1, ?, '', '[]', NULL, ?, ?)
-    `).run("endpoint-with-agent", "Integration", "integration-owner", id, "a".repeat(64), timestamp, timestamp);
+        (name, slug, agent_id, enabled, token_hash, prompt_prefix, parameter_mappings_json, encrypted_fixed_values, created_at, updated_at)
+      VALUES (?, ?, ?, 1, ?, '', '[]', NULL, ?, ?)
+    `).run("Integration", "integration-owner", id, "a".repeat(64), timestamp, timestamp);
 
     const response = await app.inject({ method: "DELETE", url: `/api/agents/${id}`, headers: authHeaders() });
 
@@ -377,7 +378,7 @@ describe("Agent API", () => {
       headers: authHeaders(),
       payload: { name: "Claude", provider: "claude_code", projectEnvironmentId }
     });
-    const { id } = created.json() as { id: string };
+    const { id } = created.json() as { id: number };
 
     const response = await app.inject({
       method: "GET",
@@ -391,7 +392,7 @@ describe("Agent API", () => {
       projectEnvironment: {
         ok: true,
         message: "Project environment is ready",
-        revisionId: expect.any(String)
+        revisionId: expect.any(Number)
       }
     });
   });
@@ -404,16 +405,16 @@ describe("Agent API", () => {
       headers: authHeaders(),
       payload: { name: "Usage Agent", provider: "codex", projectEnvironmentId }
     });
-    const { id: agentId } = created.json() as { id: string };
+    const { id: agentId } = created.json() as { id: number };
     const recent = new Date().toISOString();
     const insert = db.prepare(`
       INSERT INTO sessions (
-        id, agent_id, title, status, workspace_path, input_tokens, output_tokens,
+        agent_id, title, status, workspace_path, input_tokens, output_tokens,
         cached_read_tokens, thought_tokens, total_tokens, created_at, updated_at
-      ) VALUES (?, ?, ?, 'idle', ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, 'idle', ?, ?, ?, ?, ?, ?, ?, ?)
     `);
-    insert.run("usage-session", agentId, "Usage", "/tmp/usage-session", 100, 20, 30, 5, 120, recent, recent);
-    insert.run("unknown-session", agentId, "Unknown", "/tmp/unknown-session", null, null, null, null, null, recent, recent);
+    insert.run(agentId, "Usage", "/tmp/usage-session", 100, 20, 30, 5, 120, recent, recent);
+    insert.run(agentId, "Unknown", "/tmp/unknown-session", null, null, null, null, null, recent, recent);
 
     const response = await app.inject({
       method: "GET",
@@ -422,7 +423,7 @@ describe("Agent API", () => {
     });
     const missing = await app.inject({
       method: "GET",
-      url: "/api/agents/00000000-0000-4000-8000-000000000000/usage",
+      url: "/api/agents/999999/usage",
       headers: authHeaders()
     });
 

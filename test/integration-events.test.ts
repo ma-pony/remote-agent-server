@@ -41,7 +41,6 @@ const setup = () => {
   const session = seed.session();
   const store = new IntegrationStore({ db });
   const endpoint = store.createEndpoint({
-    id: "endpoint-1",
     name: "Endpoint",
     slug: "endpoint",
     agentId: seed.agent.id,
@@ -52,7 +51,6 @@ const setup = () => {
     encryptedFixedValues: null
   });
   const task = store.createTask({
-    id: "task-1",
     endpointId: endpoint.id,
     conversationId: null,
     sessionId: session.id,
@@ -66,21 +64,20 @@ const setup = () => {
   return { db, endpoint, eventStore, session, store, task };
 };
 
-const linkRun = (context: ReturnType<typeof setup>): string => {
-  const runId = "run-1";
+const linkRun = (context: ReturnType<typeof setup>): number => {
   context.db.exec("BEGIN IMMEDIATE");
   try {
-    context.db.prepare(
-      "INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, 'queued', ?, ?)"
-    ).run(runId, context.session.id, "hello", new Date().toISOString());
+    const runId = Number(context.db.prepare(
+      "INSERT INTO runs (session_id, status, input, created_at) VALUES (?, 'queued', ?, ?)"
+    ).run(context.session.id, "hello", new Date().toISOString()).lastInsertRowid);
     context.store.linkTaskRunInTransaction(context.task.id, runId);
     context.db.exec("COMMIT");
+    context.store.notifyTaskChanged(context.task.id);
+    return runId;
   } catch (error) {
     context.db.exec("ROLLBACK");
     throw error;
   }
-  context.store.notifyTaskChanged(context.task.id);
-  return runId;
 };
 
 const parsedEvents = (writer: FakeSseWriter): Event[] => writer.chunks.flatMap((chunk) => {
@@ -376,7 +373,7 @@ describe("Integration Task events", () => {
     rollback.db.exec(`
       CREATE TRIGGER reject_task_cancel
       BEFORE UPDATE ON integration_tasks
-      WHEN NEW.id = 'task-1' AND NEW.status = 'cancelled'
+      WHEN NEW.id = ${rollback.task.id} AND NEW.status = 'cancelled'
       BEGIN
         SELECT RAISE(ABORT, 'cancel rejected');
       END;

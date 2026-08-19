@@ -219,7 +219,7 @@ describe("ProjectEnvironmentBuilder", () => {
 
     const result = await builder.checkAndBuild(environment.id);
 
-    expect(result).toMatchObject({ outcome: "published", revisionId: expect.any(String) });
+    expect(result).toMatchObject({ outcome: "published", revisionId: expect.any(Number) });
     expect(calls).toEqual(["clone:api", "prepare:api", "clone:web", "prepare:web"]);
     expect(store.get(environment.id)?.currentRevisionId).toBe(result.revisionId);
     expect(store.getCurrentRevision(environment.id)?.workspacePath).toSatisfy((path: string) => existsSync(path));
@@ -254,7 +254,7 @@ describe("ProjectEnvironmentBuilder", () => {
 
     const rebuilt = await builder.checkAndBuild(environment.id);
 
-    expect(rebuilt).toMatchObject({ outcome: "published", revisionId: expect.any(String) });
+    expect(rebuilt).toMatchObject({ outcome: "published", revisionId: expect.any(Number) });
     expect(calls).toEqual(["clone:api", "prepare:api"]);
     expect(existsSync(join(store.getCurrentRevision(environment.id)!.workspacePath!, "api", ".git", "HEAD"))).toBe(true);
     db.close();
@@ -287,7 +287,7 @@ describe("ProjectEnvironmentBuilder", () => {
     expect(store.get(environment.id)?.currentRevisionId).toBe(first.revisionId);
     const failed = store.listRevisions(environment.id)[0]!;
     expect(failed).toMatchObject({ status: "failed", failureStage: "prepare:api", workspacePath: null });
-    expect(existsSync(join(root, environment.id, "revisions", failed.id, "workspace"))).toBe(false);
+    expect(existsSync(join(root, String(environment.id), "revisions", String(failed.id), "workspace"))).toBe(false);
     db.close();
   });
 });
@@ -433,11 +433,11 @@ describe("ProjectEnvironmentScheduler", () => {
 describe("Project environment API", () => {
   it("鉴权后管理多项目环境，并在项目变化时自动请求构建", async () => {
     const fixture = createBuilderFixture();
-    const checks: string[] = [];
+    const checks: number[] = [];
     const scheduler = {
       start: () => undefined,
       stop: async () => undefined,
-      requestCheck: async (id: string) => { checks.push(id); },
+      requestCheck: async (id: number) => { checks.push(id); },
       getState: () => ({
         status: "idle" as const,
         automatic: true as const,
@@ -477,7 +477,7 @@ describe("Project environment API", () => {
     const created = await app.inject({
       method: "POST", url: "/api/project-environments", headers, payload: { name: "研发环境" }
     });
-    const environmentId = (created.json() as { id: string }).id;
+    const environmentId = (created.json() as { id: number }).id;
     const invalid = await app.inject({
       method: "POST",
       url: `/api/project-environments/${environmentId}/repositories`,
@@ -494,9 +494,9 @@ describe("Project environment API", () => {
     const revision = fixture.store.beginRevision({
       projectEnvironmentId: environmentId,
       configurationFingerprint,
-      inputFingerprint: "input-v1",
-      workspacePath: `/environments/${environmentId}/revisions/revision-1/workspace`
+      inputFingerprint: "input-v1"
     });
+    fixture.store.setRevisionWorkspacePath(revision.id, `/environments/${environmentId}/revisions/${revision.id}/workspace`);
     fixture.store.publishRevision(revision.id);
     const accepted = await app.inject({ method: "POST", url: `/api/project-environments/${environmentId}/sync`, headers });
     const detail = await app.inject({
@@ -511,7 +511,7 @@ describe("Project environment API", () => {
     expect(detail.json()).toMatchObject({
       id: environmentId,
       name: "研发环境",
-      workspacePath: `/environments/${environmentId}/revisions/revision-1/workspace`,
+      workspacePath: `/environments/${environmentId}/revisions/${revision.id}/workspace`,
       sync: {
         status: "idle",
         automatic: true,
@@ -522,7 +522,7 @@ describe("Project environment API", () => {
         name: "api",
         gitUrl: "git:api",
         prepareCommand: "bundle install",
-        workspacePath: `/environments/${environmentId}/revisions/revision-1/workspace/api`
+        workspacePath: `/environments/${environmentId}/revisions/${revision.id}/workspace/api`
       }]
     });
     expect(checks).toEqual([environmentId, environmentId]);

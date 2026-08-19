@@ -9,11 +9,11 @@ import { App } from "../src/web/app.js";
 
 const now = "2026-08-13T00:00:00.000Z";
 const environment = {
-  id: "environment-1", name: "示例平台", currentRevisionId: "revision-1", lastCheckedAt: now,
+  id: 1, name: "示例平台", currentRevisionId: 1, lastCheckedAt: now,
   repositories: [], currentRevision: null, latestRevision: null, createdAt: now, updatedAt: now
 };
 const agent = {
-  id: "agent-1", name: "主力 Codex", provider: "codex", enabled: true,
+  id: 1, name: "主力 Codex", provider: "codex", enabled: true,
   instructions: "先运行测试再给出结论。",
   projectEnvironmentId: environment.id, createdAt: now, updatedAt: now
 };

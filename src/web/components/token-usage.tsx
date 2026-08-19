@@ -46,13 +46,24 @@ export const TokenUsageSummaryCard = ({
 }) => {
   const { locale, text } = useI18n();
   const Heading = headingLevel === 2 ? "h2" : "h3";
+  const details = [
+    ["input", text("输入", "Input"), summary.usage.inputTokens],
+    ["output", text("输出", "Output"), summary.usage.outputTokens],
+    ["cache-read", text("缓存读取", "Cache read"), summary.usage.cachedReadTokens],
+    ["cache-write", text("缓存写入", "Cache write"), summary.usage.cachedWriteTokens],
+    ["thought", text("思考", "Thought"), summary.usage.thoughtTokens],
+    ["total", text("总计", "Total"), summary.usage.totalTokens]
+  ] as const;
   return <Card>
     <CardHeader><Heading className="font-heading text-base font-medium">{title}</Heading></CardHeader>
     <CardContent>
       <p className="text-2xl font-semibold tabular-nums">{text("总计", "Total")} {compactToken(summary.usage.totalTokens, locale)}</p>
-      <p className="mt-2 text-sm text-muted-foreground">
-        {text("输入", "Input")} {compactToken(summary.usage.inputTokens, locale)} · {text("输出", "Output")} {compactToken(summary.usage.outputTokens, locale)}
-      </p>
+      <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
+        {details.map(([key, label, value]) => <div key={key} className="border-t border-border/70 pt-3">
+          <dt className="text-xs text-muted-foreground">{label}</dt>
+          <dd className="mt-1 font-mono text-base font-semibold tabular-nums">{compactToken(value, locale)}</dd>
+        </div>)}
+      </dl>
       <p className="mt-3 text-xs text-muted-foreground">{text(
         `已统计 ${summary.measuredSessionCount} / ${summary.sessionCount} 个会话`,
         `Measured ${summary.measuredSessionCount} / ${summary.sessionCount} sessions`

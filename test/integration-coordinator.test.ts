@@ -34,13 +34,13 @@ const createHarness = (options: { beforeWorkspaceCreate?: () => Promise<void> } 
   const runtime = createFakeRuntime();
   const agentManager = new AgentManager({ db, dataDir, runtime });
   const mcpManager = new McpManager({ db, secrets });
-  const createSession = vi.fn(async (id: string) => {
+  const createSession = vi.fn(async (id: number) => {
     expect(db.inTransaction).toBe(false);
     await options.beforeWorkspaceCreate?.();
     return {
-      workspacePath: join(dataDir, "sessions", id, "workspace"),
-      runtimePath: join(dataDir, "sessions", id, "runtime"),
-      browserProfilePath: join(dataDir, "sessions", id, "browser")
+      workspacePath: join(dataDir, "sessions", String(id), "workspace"),
+      runtimePath: join(dataDir, "sessions", String(id), "runtime"),
+      browserProfilePath: join(dataDir, "sessions", String(id), "browser")
     };
   });
   const deleteSession = vi.fn(async () => {
@@ -62,14 +62,14 @@ const createHarness = (options: { beforeWorkspaceCreate?: () => Promise<void> } 
     mcpManager
   });
   const endpointManager = new IntegrationEndpointManager({ db, store, secrets });
-  mkdirSync(join(dataDir, "agents", seed.agent.id), { recursive: true });
-  writeFileSync(join(dataDir, "agents", seed.agent.id, "MEMORY.md"), "# Test memory\n");
+  mkdirSync(join(dataDir, "agents", String(seed.agent.id)), { recursive: true });
+  writeFileSync(join(dataDir, "agents", String(seed.agent.id), "MEMORY.md"), "# Test memory\n");
   const now = new Date().toISOString();
   db.prepare(`
     INSERT INTO agent_session_parameters
-      (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-    VALUES ('alpha-param', ?, 'alpha', 'Alpha', NULL, 0, 0, ?, ?),
-           ('beta-param', ?, 'beta', 'Beta', NULL, 0, 0, ?, ?)
+      (agent_id, key, label, description, required, secret, created_at, updated_at)
+    VALUES (?, 'alpha', 'Alpha', NULL, 0, 0, ?, ?),
+           (?, 'beta', 'Beta', NULL, 0, 0, ?, ?)
   `).run(seed.agent.id, now, now, seed.agent.id, now, now);
   const endpoint = endpointManager.create({
     name: "Ticket agent",
@@ -311,8 +311,8 @@ describe("IntegrationCoordinator", () => {
     const { db, endpoint, sessionManager } = createHarness();
     db.prepare(`
       INSERT INTO agent_session_parameters
-        (id, agent_id, key, label, description, required, secret, created_at, updated_at)
-      VALUES ('ticket-param', ?, 'ticket', 'Ticket', NULL, 1, 0, ?, ?)
+        (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'ticket', 'Ticket', NULL, 1, 0, ?, ?)
     `).run(endpoint.agentId, new Date().toISOString(), new Date().toISOString());
     const session = await sessionManager.create({
       agentId: endpoint.agentId,
@@ -323,8 +323,8 @@ describe("IntegrationCoordinator", () => {
     db.exec("BEGIN IMMEDIATE");
     db.prepare("UPDATE sessions SET status = 'running' WHERE id = ? AND status = 'idle'").run(session.id);
     db.prepare(`
-      INSERT INTO runs (id, session_id, status, input, created_at)
-      VALUES ('queued-run', ?, 'queued', 'new run', ?)
+      INSERT INTO runs (session_id, status, input, created_at)
+      VALUES (?, 'queued', 'new run', ?)
     `).run(session.id, new Date().toISOString());
     sessionManager.replaceMcpParametersInTransaction(session.id, { ticket: "new" });
     expect(db.prepare(`
@@ -336,7 +336,7 @@ describe("IntegrationCoordinator", () => {
       SELECT plain_value FROM session_mcp_parameter_values WHERE session_id = ?
     `).get(session.id)).toEqual({ plain_value: "old" });
     expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id)).toEqual({ status: "idle" });
-    expect(db.prepare("SELECT count(*) AS count FROM runs WHERE id = 'queued-run'").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 0 });
     db.close();
   });
 });

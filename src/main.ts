@@ -19,6 +19,7 @@ import { ProjectEnvironmentStore } from "./project-environments/project-environm
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { applyServicePath, removeServiceSecretsFromEnvironment } from "./runtime/service-path.js";
 import { RunRepository } from "./runs/run-repository.js";
+import { recoverIncompleteSessions } from "./sessions/session-manager.js";
 import { assertWebBuildAvailable } from "./web-build.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import { type FileSystemInspector } from "./workspaces/apfs-workspace.js";
@@ -60,7 +61,11 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
   let app: FastifyInstance | undefined;
 
   try {
-    migrate(db);
+    migrate(db, {
+      dataDir: config.dataDir,
+      projectEnvironmentsRoot: config.projectEnvironmentsRoot,
+      sessionsRoot: config.sessionsRoot
+    });
     const workspaceManager = createWorkspaceManager({
       platform: options.platform,
       projectEnvironmentsRoot: config.projectEnvironmentsRoot,
@@ -69,6 +74,7 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       fileSystemInspector: options.fileSystemInspector
     });
     await workspaceManager.check();
+    await recoverIncompleteSessions(db, workspaceManager);
 
     const projectEnvironmentStore = new ProjectEnvironmentStore({ db });
     const interruptedRevisions = projectEnvironmentStore.recoverPreparing();

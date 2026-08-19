@@ -19,9 +19,9 @@
 - Codex 使用 `data/agents/<id>/provider-home/codex` 作为 `CODEX_HOME`。
 - Claude Code 使用 `data/agents/<id>/provider-home/claude` 作为 `CLAUDE_CONFIG_DIR`。
 - Hermes 沿用 `data/agents/<id>/provider-home/hermes` 作为 `HERMES_HOME`。
-- Codex 只链接主机现有 `auth.json` 以复用登录，并在独立 `config.toml` 中禁用扫描到的主机 Skills；不复制全局配置、Session 历史或插件配置。
-- Claude Code 继续复用系统登录凭据，但不加载主机 `~/.claude` 下的项目配置。
-- Hermes 只链接主机现有 `config.yaml`、`auth.json` 和 `.env` 以复用模型及登录配置，不链接主机 Skills 或 Session 历史。
+- Codex、Claude Code 和 Hermes 统一从运行服务的系统用户 Provider Home 复制静态内容，包括配置、认证、模型、插件和 Skills。
+- 复制时排除 Session 历史、缓存、日志、锁文件、临时目录和运行状态数据库。
+- Codex 复制完成后仅覆盖 Remote Agent Server 管理的 `developer_instructions` 和 Skills 配置，保留其他 Provider 与模型配置。
 - 已有 Provider Session 的下一次 Run 会先关闭进程 Handle，再以原 `provider_session_id` 恢复 ACP Session；这样重新扫描 Skills，同时保留多轮对话上下文。
 
 ## API 与界面

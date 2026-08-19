@@ -143,20 +143,20 @@ describe("EventStore", () => {
     const databasePath = join(directory, "events.sqlite3");
     const db = openDatabase(databasePath);
     migrate(db);
-    db.prepare("INSERT INTO agents (id, name, provider, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-      .run("agent-1", "Test agent", "codex", "2026-08-12T00:00:00.000Z", "2026-08-12T00:00:00.000Z");
-    db.prepare("INSERT INTO sessions (id, agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run("session-1", "agent-1", "Test session", "idle", "/tmp/session-1", "2026-08-12T00:00:00.000Z", "2026-08-12T00:00:00.000Z");
-    db.prepare("INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run("run-1", "session-1", "queued", "test input", "2026-08-12T00:00:00.000Z");
+    const agentId = Number(db.prepare("INSERT INTO agents (name, provider, created_at, updated_at) VALUES (?, ?, ?, ?)")
+      .run("Test agent", "codex", "2026-08-12T00:00:00.000Z", "2026-08-12T00:00:00.000Z").lastInsertRowid);
+    const sessionId = Number(db.prepare("INSERT INTO sessions (agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(agentId, "Test session", "idle", "/tmp/session-1", "2026-08-12T00:00:00.000Z", "2026-08-12T00:00:00.000Z").lastInsertRowid);
+    const runId = Number(db.prepare("INSERT INTO runs (session_id, status, input, created_at) VALUES (?, ?, ?, ?)")
+      .run(sessionId, "queued", "test input", "2026-08-12T00:00:00.000Z").lastInsertRowid);
     const observerDb = openDatabase(databasePath);
     const store = new EventStore({ db });
     let observedCount: number | undefined;
 
-    const unsubscribe = store.subscribe("run-1", () => {
-      observedCount = (observerDb.prepare("SELECT count(*) AS count FROM events WHERE run_id = ?").get("run-1") as { count: number }).count;
+    const unsubscribe = store.subscribe(runId, () => {
+      observedCount = (observerDb.prepare("SELECT count(*) AS count FROM events WHERE run_id = ?").get(runId) as { count: number }).count;
     });
-    store.append("run-1", "status", { text: "persisted" });
+    store.append(runId, "status", { text: "persisted" });
 
     expect(observedCount).toBe(1);
     unsubscribe();
@@ -168,7 +168,7 @@ describe("EventStore", () => {
     const { db, seed } = createTestDatabase();
     const session = seed.session();
     seed.run(session.id, "queued");
-    const run = db.prepare("SELECT id FROM runs").get() as { id: string };
+    const run = db.prepare("SELECT id FROM runs").get() as { id: number };
     const listener = vi.fn();
     const projection = {
       onAppended: vi.fn(() => {

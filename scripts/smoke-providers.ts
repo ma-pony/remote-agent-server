@@ -2,22 +2,22 @@ type Provider = "claude_code" | "codex" | "hermes";
 type HttpMethod = "GET" | "POST" | "PATCH";
 
 export type Agent = {
-  id: string;
+  id: number;
   name: string;
   provider: Provider;
   enabled: boolean;
-  projectEnvironmentId: string | null;
+  projectEnvironmentId: number | null;
 };
 
 type Doctor = { ok: boolean; message: string; details: string[] };
 type AgentDoctor = {
   provider: Doctor;
-  projectEnvironment: { ok: boolean; message: string; revisionId: string | null };
+  projectEnvironment: { ok: boolean; message: string; revisionId: number | null };
 };
-type ProjectEnvironment = { id: string; name: string; currentRevisionId: string | null };
-type Session = { id: string };
-type Run = { id: string; status: string; result: string | null; error: string | null };
-type RunEvent = { id: string; seq: number; type: "message" | "tool" | "status" | "error" };
+type ProjectEnvironment = { id: number; name: string; currentRevisionId: number | null };
+type Session = { id: number };
+type Run = { id: number; status: string; result: string | null; error: string | null };
+type RunEvent = { id: number; seq: number; type: "message" | "tool" | "status" | "error" };
 
 export type SmokeConfig = {
   apiToken: string;
@@ -32,7 +32,7 @@ export type SmokeApi = {
 
 type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
 type FetchImplementation = (url: string, init: RequestInit) => Promise<FetchResponse>;
-type SmokeTrace = { provider: Provider; agentId?: string; sessionId?: string; runIds: string[] };
+type SmokeTrace = { provider: Provider; agentId?: number; sessionId?: number; runIds: number[] };
 export type MainDependencies = { args?: string[]; api?: SmokeApi };
 
 const PROVIDERS = ["claude_code", "codex", "hermes"] as const;
@@ -154,7 +154,7 @@ const smokeAgentName = (provider: Provider): string => `remote-agent-smoke-${pro
 export const ensureAgent = async (
   api: SmokeApi,
   provider: Provider,
-  projectEnvironmentId: string
+  projectEnvironmentId: number
 ): Promise<Agent> => {
   const agents = await api.request<Agent[]>("/agents");
   const matches = agents.filter((agent) => agent.name === smokeAgentName(provider) && agent.provider === provider);
@@ -179,7 +179,7 @@ export const ensureReadyProjectEnvironment = async (api: SmokeApi): Promise<Proj
   const environments = await api.request<ProjectEnvironment[]>("/project-environments");
   const ready = environments
     .filter((environment) => environment.currentRevisionId !== null)
-    .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+    .sort((left, right) => left.name.localeCompare(right.name) || left.id - right.id);
   if (ready.length === 0) {
     throw new Error("No ready project environment exists; create and prepare one before Provider smoke");
   }
@@ -206,7 +206,7 @@ const createSession = async (api: SmokeApi, agent: Agent, trace: SmokeTrace): Pr
 };
 
 /** Polls a Run without ever allowing one request or body read to exceed the Run deadline. */
-export const waitForTerminalRun = async (api: SmokeApi, config: SmokeConfig, runId: string): Promise<Run> => {
+export const waitForTerminalRun = async (api: SmokeApi, config: SmokeConfig, runId: number): Promise<Run> => {
   const deadline = Date.now() + config.runTimeoutMs;
   while (true) {
     const remainingMs = deadline - Date.now();
@@ -233,7 +233,7 @@ const run = async (api: SmokeApi, config: SmokeConfig, session: Session, input: 
 };
 
 /** Ensures second-turn history starts at one and contains no order, duplicate, or gap errors. */
-export const assertEventHistory = async (api: SmokeApi, runId: string): Promise<void> => {
+export const assertEventHistory = async (api: SmokeApi, runId: number): Promise<void> => {
   const events = await api.request<RunEvent[]>(`/runs/${runId}/events?afterSeq=0`);
   if (events.length === 0) throw new Error(`Run ${runId} succeeded without persisted event history`);
   if (events.some((event, index) => !Number.isInteger(event.seq) || event.seq !== index + 1)) {
@@ -245,7 +245,7 @@ const verifyProvider = async (
   api: SmokeApi,
   config: SmokeConfig,
   provider: Provider,
-  projectEnvironmentId: string
+  projectEnvironmentId: number
 ): Promise<void> => {
   const trace: SmokeTrace = { provider, runIds: [] };
   try {

@@ -7,11 +7,11 @@ export type RunSchedulerDependencies = {
   runRepository: Pick<RunRepository, "get" | "listQueued" | "failQueued">;
   executor: Pick<RunExecutor, "execute" | "cancel">;
   maxConcurrentRuns: number;
-  onExecutionError?: (error: unknown, runId: string) => void;
+  onExecutionError?: (error: unknown, runId: number) => void;
   retryDelayMs?: number;
 };
 
-const defaultExecutionErrorReporter = (_error: unknown, runId: string): void => {
+const defaultExecutionErrorReporter = (_error: unknown, runId: number): void => {
   console.error(`Run execution failed (${runId})`);
 };
 
@@ -27,16 +27,16 @@ export class RunSchedulerError extends Error {
  * Applies the process-wide Run concurrency limit without polling SQLite.
  */
 export class RunScheduler {
-  private readonly pending: string[] = [];
-  private readonly active = new Set<string>();
+  private readonly pending: number[] = [];
+  private readonly active = new Set<number>();
   private readonly runRepository: Pick<RunRepository, "get" | "listQueued" | "failQueued">;
   private readonly executor: Pick<RunExecutor, "execute" | "cancel">;
   private readonly maxConcurrentRuns: number;
-  private readonly onExecutionError: (error: unknown, runId: string) => void;
+  private readonly onExecutionError: (error: unknown, runId: number) => void;
   private readonly retryDelayMs: number;
-  private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly retryAttempts = new Map<string, number>();
-  private readonly exhaustedRuns = new Set<string>();
+  private readonly retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly retryAttempts = new Map<number, number>();
+  private readonly exhaustedRuns = new Set<number>();
   private started = false;
   private loadedQueued = false;
 
@@ -70,7 +70,7 @@ export class RunScheduler {
   /**
    * Adds a newly-created Run to the in-memory queue.
    */
-  enqueue(runId: string): void {
+  enqueue(runId: number): void {
     this.addPending(runId);
     this.drain();
   }
@@ -90,7 +90,7 @@ export class RunScheduler {
     }));
   }
 
-  private addPending(runId: string): void {
+  private addPending(runId: number): void {
     if (!this.exhaustedRuns.has(runId) && !this.pending.includes(runId) && !this.active.has(runId)) {
       this.pending.push(runId);
     }
@@ -113,7 +113,7 @@ export class RunScheduler {
     }
   }
 
-  private handleExecutionError(error: unknown, runId: string): void {
+  private handleExecutionError(error: unknown, runId: number): void {
     this.reportExecutionError(error, runId);
 
     let run: Run | undefined;
@@ -145,7 +145,7 @@ export class RunScheduler {
     this.retryTimers.set(runId, timer);
   }
 
-  private finalizeExhaustedRun(runId: string): void {
+  private finalizeExhaustedRun(runId: number): void {
     try {
       const run = this.runRepository.get(runId);
       if (run?.status === "queued") this.runRepository.failQueued(runId, "run_retry_exhausted");
@@ -166,11 +166,11 @@ export class RunScheduler {
     this.retryTimers.set(runId, timer);
   }
 
-  private handleExecutionSuccess(runId: string, run: Run): void {
+  private handleExecutionSuccess(runId: number, run: Run): void {
     if (run.status !== "queued") this.clearRunRetry(runId);
   }
 
-  private clearRunRetry(runId: string): void {
+  private clearRunRetry(runId: number): void {
     const timer = this.retryTimers.get(runId);
     if (timer !== undefined) clearTimeout(timer);
     this.retryTimers.delete(runId);
@@ -178,7 +178,7 @@ export class RunScheduler {
     this.exhaustedRuns.delete(runId);
   }
 
-  private reportExecutionError(error: unknown, runId: string): void {
+  private reportExecutionError(error: unknown, runId: number): void {
     try {
       const result = this.onExecutionError(error, runId) as unknown;
       if (result !== null && (typeof result === "object" || typeof result === "function")

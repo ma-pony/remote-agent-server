@@ -61,11 +61,45 @@ afterEach(() => {
 });
 
 describe("BtrfsWorkspaceManager", () => {
-  it("Btrfs 检查失败时返回明确的文件系统错误", async () => {
+  it("btrfs 命令不存在时提示安装 btrfs-progs", async () => {
+    const missingCommand = Object.assign(new Error("spawn btrfs ENOENT"), { code: "ENOENT" });
+    const manager: WorkspaceManager = new BtrfsWorkspaceManager({
+      projectEnvironmentsRoot: "/environments",
+      sessionsRoot: "/sessions",
+      commandRunner: { run: async () => Promise.reject(missingCommand) }
+    });
+
+    await expect(manager.check()).rejects.toEqual(
+      new WorkspaceCheckError("btrfs command not found; install btrfs-progs")
+    );
+  });
+
+  it("目录不是可访问的 Btrfs 时提示具体目录", async () => {
     const manager: WorkspaceManager = new BtrfsWorkspaceManager({
       projectEnvironmentsRoot: "/environments",
       sessionsRoot: "/sessions",
       commandRunner: { run: async () => Promise.reject(new Error("not btrfs")) }
+    });
+
+    await expect(manager.check()).rejects.toEqual(
+      new WorkspaceCheckError("Linux workspace root is not on Btrfs or is not accessible: /environments")
+    );
+  });
+
+  it("项目环境和 Session 根目录跨文件系统时给出独立错误", async () => {
+    const root = createTempDir();
+    const projectEnvironmentsRoot = join(root, "environments");
+    const sessionsRoot = join(root, "sessions");
+    mkdirSync(projectEnvironmentsRoot);
+    mkdirSync(sessionsRoot);
+    const { runner } = createRunner();
+    const manager: WorkspaceManager = new BtrfsWorkspaceManager({
+      projectEnvironmentsRoot,
+      sessionsRoot,
+      commandRunner: runner,
+      fileSystemInspector: {
+        stat: async (path: string) => ({ dev: path === projectEnvironmentsRoot ? 1 : 2 })
+      }
     });
 
     await expect(manager.check()).rejects.toEqual(

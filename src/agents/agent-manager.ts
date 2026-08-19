@@ -1,20 +1,20 @@
-import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type Database from "better-sqlite3";
 
 import type { Agent, Provider } from "../domain.js";
+import { insertedId } from "../db.js";
 import { ProjectEnvironmentStore } from "../project-environments/project-environment-store.js";
 import type { AgentRuntime, RuntimeDoctor } from "../runtime/agent-runtime.js";
 
 type AgentRow = {
-  id: string;
+  id: number;
   name: string;
   provider: Provider;
   enabled: number;
   instructions: string;
-  project_environment_id: string | null;
+  project_environment_id: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -22,14 +22,14 @@ type AgentRow = {
 export type CreateAgentInput = {
   name: string;
   provider: Provider;
-  projectEnvironmentId: string;
+  projectEnvironmentId: number;
   instructions?: string;
 };
 
 export type UpdateAgentInput = {
   name?: string;
   enabled?: boolean;
-  projectEnvironmentId?: string;
+  projectEnvironmentId?: number;
   instructions?: string;
 };
 
@@ -71,20 +71,23 @@ export class AgentManager {
     const instructions = input.instructions ?? "";
     this.requireSupportedInstructions(input.provider, instructions);
     this.requireReadyEnvironment(input.projectEnvironmentId);
-    const id = randomUUID();
     const createdAt = new Date().toISOString();
-    const agentDir = join(this.dataDir, "agents", id);
-
-    mkdirSync(join(agentDir, "skills"), { recursive: true });
-    for (const providerHome of ["claude", "codex", "hermes"]) {
-      mkdirSync(join(agentDir, "provider-home", providerHome), { recursive: true });
-    }
-    writeFileSync(join(agentDir, "MEMORY.md"), "", { flag: "a" });
-    this.db
+    const id = insertedId(this.db
       .prepare(
-        "INSERT INTO agents (id, name, provider, enabled, instructions, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO agents (name, provider, enabled, instructions, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
       )
-      .run(id, input.name, input.provider, 1, instructions, input.projectEnvironmentId, createdAt, createdAt);
+      .run(input.name, input.provider, 1, instructions, input.projectEnvironmentId, createdAt, createdAt));
+    const agentDir = join(this.dataDir, "agents", String(id));
+    try {
+      mkdirSync(join(agentDir, "skills"), { recursive: true });
+      for (const providerHome of ["claude", "codex", "hermes"]) {
+        mkdirSync(join(agentDir, "provider-home", providerHome), { recursive: true });
+      }
+      writeFileSync(join(agentDir, "MEMORY.md"), "", { flag: "a" });
+    } catch (error) {
+      this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+      throw error;
+    }
 
     return {
       id,
@@ -103,12 +106,12 @@ export class AgentManager {
     return rows.map(toAgent);
   }
 
-  get(id: string): Agent | undefined {
+  get(id: number): Agent | undefined {
     const row = this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as AgentRow | undefined;
     return row === undefined ? undefined : toAgent(row);
   }
 
-  update(id: string, input: UpdateAgentInput): Agent | undefined {
+  update(id: number, input: UpdateAgentInput): Agent | undefined {
     const agent = this.get(id);
     if (agent === undefined) return undefined;
 
@@ -127,7 +130,7 @@ export class AgentManager {
     return { ...agent, name, enabled, instructions, projectEnvironmentId, updatedAt };
   }
 
-  delete(id: string): "deleted" | "not_found" {
+  delete(id: number): "deleted" | "not_found" {
     if (this.get(id) === undefined) return "not_found";
     const session = this.db.prepare("SELECT 1 FROM sessions WHERE agent_id = ? LIMIT 1").get(id);
     if (session !== undefined) throw new AgentManagerError("agent_has_sessions");
@@ -135,13 +138,13 @@ export class AgentManager {
     if (endpoint !== undefined) throw new AgentManagerError("agent_has_integration_endpoints");
 
     this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
-    rmSync(join(this.dataDir, "agents", id), { recursive: true, force: true });
+    rmSync(join(this.dataDir, "agents", String(id)), { recursive: true, force: true });
     return "deleted";
   }
 
-  async doctor(id: string): Promise<{
+  async doctor(id: number): Promise<{
     provider: RuntimeDoctor;
-    projectEnvironment: { ok: boolean; message: string; revisionId: string | null };
+    projectEnvironment: { ok: boolean; message: string; revisionId: number | null };
   } | undefined> {
     const agent = this.get(id);
     if (agent === undefined) return undefined;
@@ -156,7 +159,7 @@ export class AgentManager {
     };
   }
 
-  private requireReadyEnvironment(id: string): void {
+  private requireReadyEnvironment(id: number): void {
     const revision = this.projectEnvironmentStore.getCurrentRevision(id);
     if (revision?.status !== "ready" || revision.workspacePath === null) {
       throw new AgentManagerError("project_environment_unavailable");

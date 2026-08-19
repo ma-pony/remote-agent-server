@@ -30,11 +30,11 @@ describe("integration smoke configuration", () => {
     expect(loadSmokeConfig({
       SMOKE_BASE_URL: "http://127.0.0.1:3000/api/",
       SMOKE_API_TOKEN: "management-token",
-      SMOKE_AGENT_ID: "agent-1"
+      SMOKE_AGENT_ID: "1"
     })).toMatchObject({
       baseUrl: "http://127.0.0.1:3000",
       apiToken: "management-token",
-      agentId: "agent-1",
+      agentId: 1,
       pollIntervalMs: 1_000,
       taskTimeoutMs: 300_000,
       requestTimeoutMs: 30_000
@@ -42,7 +42,7 @@ describe("integration smoke configuration", () => {
   });
 
   it("rejects invalid URLs and non-positive deadlines", () => {
-    const required = { SMOKE_API_TOKEN: "token", SMOKE_AGENT_ID: "agent" };
+    const required = { SMOKE_API_TOKEN: "token", SMOKE_AGENT_ID: "1" };
     expect(() => loadSmokeConfig({ ...required, SMOKE_BASE_URL: "file:///tmp/server" })).toThrow(/HTTP/);
     expect(() => loadSmokeConfig({
       ...required,
@@ -74,8 +74,8 @@ describe("integration smoke HTTP helpers", () => {
 
   it("repeating requestId must return the same taskId and runId", async () => {
     const task: ExternalTask = {
-      taskId: "task-1", requestId: "request-1", conversationKey: "conversation-1",
-      sessionId: "session-1", runId: "run-1", status: "succeeded"
+      taskId: 1, requestId: "request-1", conversationKey: "conversation-1",
+      sessionId: 1, runId: 1, status: "succeeded"
     };
     const client: JsonClient = { request: vi.fn(async () => task) };
     const request = {
@@ -103,21 +103,21 @@ describe("integration smoke HTTP helpers", () => {
   it("rejects reply deliveries that do not follow first, second and third Task order", () => {
     const deliveries = [
       {
-        id: "delivery-second", eventId: "event-second", dispatchOrder: 10, taskId: "task-second",
+        id: 2, eventId: "event-second", dispatchOrder: 10, taskId: 2,
         eventType: "message.agent.reply", status: "succeeded", attemptCount: 1
       },
       {
-        id: "delivery-third", eventId: "event-third", dispatchOrder: 20, taskId: "task-third",
+        id: 3, eventId: "event-third", dispatchOrder: 20, taskId: 3,
         eventType: "message.agent.reply", status: "succeeded", attemptCount: 1
       },
       {
-        id: "delivery-first", eventId: "event-first", dispatchOrder: 30, taskId: "task-first",
+        id: 1, eventId: "event-first", dispatchOrder: 30, taskId: 1,
         eventType: "message.agent.reply", status: "succeeded", attemptCount: 2
       }
     ] as const;
 
     expect(() => assertReplyDeliveryOrder(
-      ["task-first", "task-second", "task-third"],
+      [1, 2, 3],
       [...deliveries],
       ["event-second", "event-third", "event-first"]
     )).toThrow(/Task submission order/);
@@ -126,21 +126,21 @@ describe("integration smoke HTTP helpers", () => {
   it("rejects receiver requests whose event IDs do not follow the Delivery order", () => {
     const deliveries = [
       {
-        id: "delivery-first", eventId: "event-first", dispatchOrder: 10, taskId: "task-first",
+        id: 1, eventId: "event-first", dispatchOrder: 10, taskId: 1,
         eventType: "message.agent.reply", status: "succeeded", attemptCount: 2
       },
       {
-        id: "delivery-second", eventId: "event-second", dispatchOrder: 20, taskId: "task-second",
+        id: 2, eventId: "event-second", dispatchOrder: 20, taskId: 2,
         eventType: "message.agent.reply", status: "succeeded", attemptCount: 1
       },
       {
-        id: "delivery-third", eventId: "event-third", dispatchOrder: 30, taskId: "task-third",
+        id: 3, eventId: "event-third", dispatchOrder: 30, taskId: 3,
         eventType: "message.agent.reply", status: "succeeded", attemptCount: 1
       }
     ] as const;
 
     expect(() => assertReplyDeliveryOrder(
-      ["task-first", "task-second", "task-third"],
+      [1, 2, 3],
       [...deliveries],
       ["event-first", "event-second", "event-first", "event-third"]
     )).toThrow(/receiver order/);
@@ -148,30 +148,30 @@ describe("integration smoke HTTP helpers", () => {
 
   it("refreshes late Session, Run and Delivery IDs for known Tasks after a failure", async () => {
     const trace = {
-      endpointId: "endpoint-1",
-      taskIds: ["task-1"],
-      sessionIds: ["session-1"],
+      endpointId: 1,
+      taskIds: [1],
+      sessionIds: [1],
       runIds: [],
       deliveryIds: []
     };
     const client: JsonClient = {
       request: vi.fn(async (path: string) => {
-        if (path === "/api/integration-tasks/task-1") {
+        if (path === "/api/integration-tasks/1") {
           return {
-            id: "task-1", sessionId: "session-1", runId: "run-linked-after-submit"
+            id: 1, sessionId: 1, runId: 2
           };
         }
-        return [{ id: "delivery-1" }];
+        return [{ id: 1 }];
       }) as JsonClient["request"]
     };
 
     await refreshFailureTrace(client, trace);
 
     expect(trace).toMatchObject({
-      taskIds: ["task-1"],
-      sessionIds: ["session-1"],
-      runIds: ["run-linked-after-submit"],
-      deliveryIds: ["delivery-1"]
+      taskIds: [1],
+      sessionIds: [1],
+      runIds: [2],
+      deliveryIds: [1]
     });
   });
 });

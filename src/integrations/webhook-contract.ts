@@ -37,8 +37,10 @@ const hasExactKeys = (value: RecordValue, required: string[], optional: string[]
 
 const nonEmptyString = (value: unknown): value is string => typeof value === "string" && value.length > 0;
 const nullableString = (value: unknown): boolean => value === null || typeof value === "string";
+const positiveInteger = (value: unknown): value is number => Number.isInteger(value) && Number(value) > 0;
+const nullablePositiveInteger = (value: unknown): boolean => value === null || positiveInteger(value);
 
-const validEndpoint = (value: unknown, endpointId: string): boolean => {
+const validEndpoint = (value: unknown, endpointId: number): boolean => {
   const endpoint = record(value);
   return endpoint !== undefined
     && hasExactKeys(endpoint, ["id", "slug"])
@@ -50,11 +52,11 @@ const validTask = (value: unknown): boolean => {
   const task = record(value);
   return task !== undefined
     && hasExactKeys(task, ["id", "requestId", "conversationKey", "sessionId", "runId", "status"])
-    && nonEmptyString(task.id)
+    && positiveInteger(task.id)
     && nonEmptyString(task.requestId)
     && nullableString(task.conversationKey)
-    && nonEmptyString(task.sessionId)
-    && nullableString(task.runId)
+    && positiveInteger(task.sessionId)
+    && nullablePositiveInteger(task.runId)
     && typeof task.status === "string"
     && taskStatuses.has(task.status);
 };
@@ -95,7 +97,7 @@ export const isManagedWebhookHeader = (name: string): boolean => {
 
 export const isCurrentWebhookPayload = (
   serialized: string,
-  expected: { eventId: string; eventType: string; sequence: number; endpointId: string }
+  expected: { eventId: string; eventType: string; sequence: number; endpointId: number }
 ): boolean => {
   let payload: RecordValue | undefined;
   try {

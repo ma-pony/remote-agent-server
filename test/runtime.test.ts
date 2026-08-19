@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -31,10 +31,12 @@ import { BEST_EFFORT_TIMEOUT_MS, settleBestEffort } from "../src/runtime/bounded
 import { SkillProjector } from "../src/runtime/skill-projector.js";
 import { SkillManager } from "../src/skills/skill-manager.js";
 
-const AGENT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-const SECOND_AGENT_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-const SESSION_ID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-const REQUEST_ID = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const AGENT_ID = 1;
+const SECOND_AGENT_ID = 2;
+const SESSION_ID = 1;
+const REQUEST_ID = 1;
+const AGENT_PATH_ID = String(AGENT_ID);
+const SESSION_PATH_ID = String(SESSION_ID);
 
 const tempDirs: string[] = [];
 
@@ -142,6 +144,16 @@ const runtimeStub = (overrides: {
 beforeEach(() => {
   acpxMocks.createAcpRuntime.mockReset();
   acpxMocks.createRuntimeStore.mockClear();
+  const providerHomes = makeRoot();
+  for (const [name, directory] of [
+    ["CODEX_HOME", "codex"],
+    ["CLAUDE_CONFIG_DIR", "claude"],
+    ["HERMES_HOME", "hermes"]
+  ] as const) {
+    const path = join(providerHomes, directory);
+    mkdirSync(path, { recursive: true });
+    vi.stubEnv(name, path);
+  }
 });
 
 afterEach(() => {
@@ -183,17 +195,17 @@ describe("SkillProjector", () => {
   it.each([
     ["claude_code", [".claude", "skills"]],
     ["codex", [".agents", "skills"]],
-    ["hermes", ["data", "agents", AGENT_ID, "provider-home", "hermes", "skills"]]
+    ["hermes", ["data", "agents", AGENT_PATH_ID, "provider-home", "hermes", "skills"]]
   ] as const)("为 %s 投影托管 Skills 并保留已有 Skill", (provider, destinationParts) => {
     const root = makeRoot();
     const config = makeConfig(root);
-    const source = join(config.dataDir, "agents", AGENT_ID, "skills", "ticket-workflow");
+    const source = join(config.dataDir, "agents", AGENT_PATH_ID, "skills", "ticket-workflow");
     const destination = join(root, ...destinationParts);
     mkdirSync(source, { recursive: true });
     mkdirSync(join(destination, "template-skill"), { recursive: true });
     writeFileSync(join(source, "SKILL.md"), "new skill");
     writeFileSync(join(destination, "template-skill", "SKILL.md"), "keep me");
-    const memoryPath = join(config.dataDir, "agents", AGENT_ID, "MEMORY.md");
+    const memoryPath = join(config.dataDir, "agents", AGENT_PATH_ID, "MEMORY.md");
     writeFileSync(memoryPath, "remember this");
 
     const memory = new SkillProjector(config.dataDir).prepare(
@@ -224,7 +236,7 @@ describe("SkillProjector", () => {
     const managed = join(root, ".agents", "skills", "_remote-agent-managed-old-skill");
     mkdirSync(managed, { recursive: true });
     writeFileSync(join(managed, "SKILL.md"), "old skill");
-    mkdirSync(join(config.dataDir, "agents", AGENT_ID, "MEMORY.md"), { recursive: true });
+    mkdirSync(join(config.dataDir, "agents", AGENT_PATH_ID, "MEMORY.md"), { recursive: true });
 
     expect(() => new SkillProjector(config.dataDir).prepare(
       { id: AGENT_ID, provider: "codex" },
@@ -239,7 +251,7 @@ describe("SkillProjector", () => {
     const config = makeConfig(root);
     const skillsRoot = join(root, ".agents", "skills");
     const managed = join(skillsRoot, "_remote-agent-managed-old-skill");
-    mkdirSync(join(config.dataDir, "agents", AGENT_ID, "skills", "new-skill"), { recursive: true });
+    mkdirSync(join(config.dataDir, "agents", AGENT_PATH_ID, "skills", "new-skill"), { recursive: true });
     mkdirSync(managed, { recursive: true });
     writeFileSync(join(managed, "SKILL.md"), "old skill");
     const projector = new SkillProjector(config.dataDir, {
@@ -277,17 +289,17 @@ describe("AcpxAgentRuntime", () => {
     expect(command).toContain("REMOTE_AGENT_BROWSER_PROFILE='" + input.browserProfilePath.replaceAll("'", "'\\''") + "'");
     expect(command).toContain(providerCommand);
     if (provider === "hermes") {
-      expect(command).toContain(`HERMES_HOME='${join(config.dataDir, "agents", AGENT_ID, "provider-home", "hermes")}'`);
+      expect(command).toContain(`HERMES_HOME='${join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "hermes")}'`);
       expect(command).not.toContain("CODEX_HOME=");
       expect(command).not.toContain("CLAUDE_CONFIG_DIR=");
     } else if (provider === "codex") {
       expect(command).toContain(`CODEX_HOME='${join(
-        config.dataDir, "agents", AGENT_ID, "provider-home", "codex", "sessions", SESSION_ID
+        config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", SESSION_PATH_ID
       )}'`);
       expect(command).not.toContain("HERMES_HOME=");
       expect(command).not.toContain("CLAUDE_CONFIG_DIR=");
     } else {
-      expect(command).toContain(`CLAUDE_CONFIG_DIR='${join(config.dataDir, "agents", AGENT_ID, "provider-home", "claude")}'`);
+      expect(command).toContain(`CLAUDE_CONFIG_DIR='${join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "claude")}'`);
       expect(command).not.toContain("HERMES_HOME=");
       expect(command).not.toContain("CODEX_HOME=");
     }
@@ -299,65 +311,89 @@ describe("AcpxAgentRuntime", () => {
     acpxMocks.createAcpRuntime.mockReturnValue(runtimeStub());
     const runtime = new AcpxAgentRuntime(makeConfig(root));
 
-    await expect(runtime.ensureSession(sessionInput(root, { agentId: "bad:id; touch /tmp/pwned" })))
+    await expect(runtime.ensureSession(sessionInput(root, { agentId: 0 })))
       .rejects.toMatchObject({ code: "invalid_runtime_target" });
-    await expect(runtime.ensureSession(sessionInput(root, { sessionId: "not-a-uuid" })))
+    await expect(runtime.ensureSession(sessionInput(root, { sessionId: -1 })))
       .rejects.toMatchObject({ code: "invalid_runtime_target" });
   });
 
-  it("Codex Provider Home 只链接登录文件并禁用主机 Skills，不复制全局插件配置", async () => {
+  it.each([
+    ["codex", "CODEX_HOME"],
+    ["claude_code", "CLAUDE_CONFIG_DIR"],
+    ["hermes", "HERMES_HOME"]
+  ] as const)("%s Provider Home 复制主机静态内容并排除运行态数据", async (provider, environmentName) => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const hostHome = join(root, `host-${provider}`);
+    mkdirSync(join(hostHome, "plugins", "example"), { recursive: true });
+    mkdirSync(join(hostHome, "skills", "global-skill"), { recursive: true });
+    mkdirSync(join(hostHome, "sessions", "old-session"), { recursive: true });
+    mkdirSync(join(hostHome, "cache"), { recursive: true });
+    mkdirSync(join(hostHome, "logs"), { recursive: true });
+    writeFileSync(join(hostHome, "auth.json"), "secret auth");
+    writeFileSync(join(hostHome, "provider-settings.json"), "provider settings");
+    writeFileSync(join(hostHome, "plugins", "example", "plugin.json"), "plugin");
+    writeFileSync(join(hostHome, "skills", "global-skill", "SKILL.md"), "global skill");
+    writeFileSync(join(hostHome, "sessions", "old-session", "session.json"), "history");
+    writeFileSync(join(hostHome, "cache", "models.json"), "cache");
+    writeFileSync(join(hostHome, "logs", "provider.log"), "log");
+    writeFileSync(join(hostHome, "history.jsonl"), "history");
+    writeFileSync(join(hostHome, "state.db"), "state");
+    vi.stubEnv(environmentName, hostHome);
+    acpxMocks.createAcpRuntime.mockReturnValue(runtimeStub());
+    const runtime = new AcpxAgentRuntime(config);
+
+    await runtime.ensureSession(sessionInput(root, { provider }));
+
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    options.agentRegistry.resolve(`remote:${provider}:${AGENT_ID}:${SESSION_ID}`);
+    const providerName = provider === "claude_code" ? "claude" : provider;
+    const providerHome = join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", providerName);
+    const home = provider === "codex" ? join(providerHome, "sessions", SESSION_PATH_ID) : providerHome;
+
+    expect(readFileSync(join(home, "auth.json"), "utf8")).toBe("secret auth");
+    expect(readFileSync(join(home, "provider-settings.json"), "utf8")).toBe("provider settings");
+    expect(readFileSync(join(home, "plugins", "example", "plugin.json"), "utf8")).toBe("plugin");
+    expect(readFileSync(join(home, "skills", "global-skill", "SKILL.md"), "utf8")).toBe("global skill");
+    expect(existsSync(join(home, "sessions", "old-session"))).toBe(false);
+    expect(existsSync(join(home, "cache"))).toBe(false);
+    expect(existsSync(join(home, "logs"))).toBe(false);
+    expect(existsSync(join(home, "history.jsonl"))).toBe(false);
+    expect(existsSync(join(home, "state.db"))).toBe(false);
+  });
+
+  it("Codex 保留主机 Provider 和模型配置并覆盖智能体指令", async () => {
     const root = makeRoot();
     const config = makeConfig(root);
     const hostCodexHome = join(root, "host-codex");
     mkdirSync(hostCodexHome, { recursive: true });
-    writeFileSync(join(hostCodexHome, "auth.json"), "secret auth");
-    writeFileSync(join(hostCodexHome, "config.toml"), "[plugins]\n");
-    const hostSkill = join(root, "host-agents", "skills", "review");
-    mkdirSync(hostSkill, { recursive: true });
-    writeFileSync(join(hostSkill, "SKILL.md"), "---\nname: review\ndescription: Review code\n---\n");
+    writeFileSync(join(hostCodexHome, "config.toml"), [
+      'developer_instructions = "host instructions"',
+      'model = "deepseek-v4-flash"',
+      'model_provider = "deepseek"',
+      "[model_providers.deepseek]",
+      'base_url = "https://api.deepseek.com"',
+      ""
+    ].join("\n"));
+    writeFileSync(join(hostCodexHome, "models.json"), '{"models":["deepseek-v4-flash"]}');
     vi.stubEnv("CODEX_HOME", hostCodexHome);
-    acpxMocks.createAcpRuntime.mockReturnValue(runtimeStub());
-    const runtime = new AcpxAgentRuntime(config, new SkillManager({
-      dataDir: config.dataDir,
-      roots: [{ path: join(root, "host-agents", "skills"), source: "agents" }]
-    }));
-
-    await runtime.ensureSession(sessionInput(root));
-
-    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
-    options.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`);
-    const sessionHome = join(
-      config.dataDir, "agents", AGENT_ID, "provider-home", "codex", "sessions", SESSION_ID
-    );
-    expect(readlinkSync(join(sessionHome, "auth.json"))).toBe(join(hostCodexHome, "auth.json"));
-    const isolatedConfig = readFileSync(join(sessionHome, "config.toml"), "utf8");
-    expect(isolatedConfig).toContain(`path = ${JSON.stringify(join(hostSkill, "SKILL.md"))}`);
-    expect(isolatedConfig).toContain("enabled = false");
-    expect(isolatedConfig).not.toContain("[plugins]");
-  });
-
-  it("Hermes Provider Home 复用主机模型和登录配置但不链接主机 Skills", async () => {
-    const root = makeRoot();
-    const config = makeConfig(root);
-    const hostHermesHome = join(root, "host-hermes");
-    mkdirSync(join(hostHermesHome, "skills", "global-skill"), { recursive: true });
-    writeFileSync(join(hostHermesHome, "config.yaml"), "model:\n  default: test-model\n");
-    writeFileSync(join(hostHermesHome, "auth.json"), "secret auth");
-    writeFileSync(join(hostHermesHome, ".env"), "SECRET=value\n");
-    writeFileSync(join(hostHermesHome, "skills", "global-skill", "SKILL.md"), "global skill");
-    vi.stubEnv("HERMES_HOME", hostHermesHome);
     acpxMocks.createAcpRuntime.mockReturnValue(runtimeStub());
     const runtime = new AcpxAgentRuntime(config);
 
-    await runtime.ensureSession(sessionInput(root, { provider: "hermes" }));
+    await runtime.ensureSession(sessionInput(root, { provider: "codex", instructions: "agent instructions" }));
 
     const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
-    options.agentRegistry.resolve(`remote:hermes:${AGENT_ID}:${SESSION_ID}`);
-    const agentHome = join(config.dataDir, "agents", AGENT_ID, "provider-home", "hermes");
-    for (const file of ["config.yaml", "auth.json", ".env"]) {
-      expect(readlinkSync(join(agentHome, file))).toBe(join(hostHermesHome, file));
-    }
-    expect(existsSync(join(agentHome, "skills", "global-skill"))).toBe(false);
+    options.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`);
+    const home = join(
+      config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", SESSION_PATH_ID
+    );
+    const configToml = readFileSync(join(home, "config.toml"), "utf8");
+    expect(configToml).toContain('developer_instructions = "agent instructions"');
+    expect(configToml).not.toContain('developer_instructions = "host instructions"');
+    expect(configToml).toContain('model = "deepseek-v4-flash"');
+    expect(configToml).toContain('model_provider = "deepseek"');
+    expect(configToml).toContain("[model_providers.deepseek]");
+    expect(readFileSync(join(home, "models.json"), "utf8")).toBe('{"models":["deepseek-v4-flash"]}');
   });
 
   it("使用固定 Runtime 配置、稳定 sessionKey 和首次 system prompt", async () => {
@@ -408,7 +444,7 @@ describe("AcpxAgentRuntime", () => {
     const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
     const command = options.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`);
     const sessionHome = join(
-      config.dataDir, "agents", AGENT_ID, "provider-home", "codex", "sessions", SESSION_ID
+      config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", SESSION_PATH_ID
     );
     expect(command).toContain(`CODEX_HOME='${sessionHome}'`);
     expect(readFileSync(join(sessionHome, "config.toml"), "utf8")).toContain(
@@ -943,7 +979,7 @@ describe("AcpxAgentRuntime", () => {
         : false;
       let arrayMutationError: unknown;
       try {
-        snapshot.push({ stage: "tampered", sessionId: "tampered", message: "tampered failure" });
+        snapshot.push({ stage: "tampered", sessionId: -999, message: "tampered failure" });
       } catch (error) {
         arrayMutationError = error;
       }

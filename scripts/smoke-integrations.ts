@@ -7,7 +7,7 @@ type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type SmokeConfig = {
   baseUrl: string;
   apiToken: string;
-  agentId: string;
+  agentId: number;
   pollIntervalMs: number;
   taskTimeoutMs: number;
   requestTimeoutMs: number;
@@ -18,11 +18,11 @@ export type JsonClient = {
 };
 
 export type ExternalTask = {
-  taskId: string;
+  taskId: number;
   requestId: string;
   conversationKey: string | null;
-  sessionId: string;
-  runId: string | null;
+  sessionId: number;
+  runId: number | null;
   status: TaskStatus;
 };
 
@@ -34,21 +34,21 @@ type SubmitTaskInput = {
 };
 
 type EndpointCreation = {
-  endpoint: { id: string; slug: string };
+  endpoint: { id: number; slug: string };
   token: string;
 };
 
 type WebhookCreation = {
-  webhook: { id: string };
+  webhook: { id: number };
   signingSecret: string;
 };
 
-type RunEvent = { id: string; seq: number; type: string };
+type RunEvent = { id: number; seq: number; type: string };
 export type WebhookDelivery = {
-  id: string;
+  id: number;
   eventId: string;
   dispatchOrder: number;
-  taskId: string | null;
+  taskId: number | null;
   eventType: string;
   status: "pending" | "delivering" | "succeeded" | "failed";
   attemptCount: number;
@@ -63,12 +63,12 @@ type WebhookRequest = {
 };
 
 export type SmokeTrace = {
-  endpointId?: string;
-  webhookId?: string;
-  taskIds: string[];
-  sessionIds: string[];
-  runIds: string[];
-  deliveryIds: string[];
+  endpointId?: number;
+  webhookId?: number;
+  taskIds: number[];
+  sessionIds: number[];
+  runIds: number[];
+  deliveryIds: number[];
 };
 
 type FetchResponse = { ok: boolean; status: number; text(): Promise<string> };
@@ -103,7 +103,7 @@ const positiveInteger = (name: string, value: string | undefined, fallback: numb
 export const loadSmokeConfig = (env: Record<string, string | undefined>): SmokeConfig => {
   const rawBaseUrl = required(env, "SMOKE_BASE_URL");
   const apiToken = required(env, "SMOKE_API_TOKEN");
-  const agentId = required(env, "SMOKE_AGENT_ID");
+  const agentId = positiveInteger("SMOKE_AGENT_ID", required(env, "SMOKE_AGENT_ID"), 0);
   let parsed: URL;
   try {
     parsed = new URL(rawBaseUrl);
@@ -223,7 +223,7 @@ const remaining = (deadline: number, label: string): number => {
 const waitForTask = async (
   client: JsonClient,
   config: SmokeConfig,
-  taskId: string
+  taskId: number
 ): Promise<ExternalTask> => {
   const deadline = Date.now() + config.taskTimeoutMs;
   while (true) {
@@ -252,7 +252,7 @@ const assertContiguousEvents = (events: RunEvent[], firstSeq = 1): void => {
 const readSseSuffix = async (
   config: SmokeConfig,
   endpointToken: string,
-  taskId: string,
+  taskId: number,
   afterSeq: number
 ): Promise<RunEvent[]> => {
   const controller = new AbortController();
@@ -274,7 +274,7 @@ const readSseSuffix = async (
       const data = frame.split("\n").find((line) => line.startsWith("data: "))?.slice(6);
       if (data === undefined) continue;
       const parsed = JSON.parse(data) as Partial<RunEvent>;
-      if (typeof parsed.id === "string" && typeof parsed.seq === "number" && typeof parsed.type === "string") {
+      if (typeof parsed.id === "number" && typeof parsed.seq === "number" && typeof parsed.type === "string") {
         events.push(parsed as RunEvent);
       }
     }
@@ -336,8 +336,8 @@ const stopReceiver = async (server: Server): Promise<void> => {
 const waitForReplyDeliveries = async (
   management: JsonClient,
   config: SmokeConfig,
-  endpointId: string,
-  taskIds: string[]
+  endpointId: number,
+  taskIds: number[]
 ): Promise<WebhookDelivery[]> => {
   const deadline = Date.now() + config.taskTimeoutMs;
   while (true) {
@@ -361,7 +361,7 @@ const waitForReplyDeliveries = async (
 
 /** Validates durable Delivery order and the order observed by the local receiver against Task submission order. */
 export const assertReplyDeliveryOrder = (
-  taskIds: string[],
+  taskIds: number[],
   deliveries: WebhookDelivery[],
   receivedEventIds: string[]
 ): WebhookDelivery[] => {
@@ -405,7 +405,7 @@ const recordTaskIdentity = (trace: SmokeTrace, task: ExternalTask): void => {
   if (task.runId !== null && !trace.runIds.includes(task.runId)) trace.runIds.push(task.runId);
 };
 
-type ManagementTaskIdentity = { id: string; sessionId: string; runId: string | null };
+type ManagementTaskIdentity = { id: number; sessionId: number; runId: number | null };
 
 /** Best-effort refreshes durable IDs without including credentials or message contents in diagnostics. */
 export const refreshFailureTrace = async (management: JsonClient, trace: SmokeTrace): Promise<void> => {

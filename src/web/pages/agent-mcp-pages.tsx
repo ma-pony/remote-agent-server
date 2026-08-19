@@ -48,7 +48,7 @@ export const AgentMcpPage = () => {
     api<AgentSessionParameter[]>(`/agents/${id}/session-parameters`),
     api<Session[]>("/sessions")
   ]).then(([serverItems, parameterItems, sessionItems]) => {
-    setServers(serverItems); setParameters(parameterItems); setSessions(sessionItems.filter((item) => item.agentId === id));
+    setServers(serverItems); setParameters(parameterItems); setSessions(sessionItems.filter((item) => item.agentId === Number(id)));
   });
   useEffect(() => {
     const controller = new AbortController();
@@ -57,7 +57,7 @@ export const AgentMcpPage = () => {
       api<AgentSessionParameter[]>(`/agents/${id}/session-parameters`, { signal: controller.signal }),
       api<Session[]>("/sessions", { signal: controller.signal })
     ]).then(([serverItems, parameterItems, sessionItems]) => {
-      setServers(serverItems); setParameters(parameterItems); setSessions(sessionItems.filter((item) => item.agentId === id));
+      setServers(serverItems); setParameters(parameterItems); setSessions(sessionItems.filter((item) => item.agentId === Number(id)));
     })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
@@ -65,7 +65,7 @@ export const AgentMcpPage = () => {
 
   const probe = (server: AgentMcpServerSummary) => api<McpCheckResponse>(
     `/agents/${id}/mcp-servers/${server.id}/check`, {
-      method: "POST", body: checkSessionId === "" ? undefined : JSON.stringify({ sessionId: checkSessionId })
+      method: "POST", body: checkSessionId === "" ? undefined : JSON.stringify({ sessionId: Number(checkSessionId) })
     }
   );
   const check = async (server: AgentMcpServerSummary) => {
@@ -98,7 +98,7 @@ export const AgentMcpPage = () => {
       setKey(""); setLabel(""); setRequired(false); setSecret(false);
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
-  const removeParameter = async (parameterId: string) => {
+  const removeParameter = async (parameterId: number) => {
     setBusy(`parameter-${parameterId}`); setError("");
     try {
       await api(`/agents/${id}/session-parameters/${parameterId}`, { method: "DELETE" });
@@ -121,7 +121,7 @@ export const AgentMcpPage = () => {
 
 type ValueSource = "fixed" | "session_parameter" | "runtime";
 type ValueDraft = {
-  id?: string; name?: string; source: ValueSource; value: string; secret: boolean;
+  id?: number; name?: string; source: ValueSource; value: string; secret: boolean;
   parameterKey: string; runtimeKey: NonNullable<McpValueView["runtimeKey"]>;
 };
 const emptyValue = (named: boolean): ValueDraft => ({

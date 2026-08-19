@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Provider } from "../domain.js";
 
 export type SkillProjectionAgent = {
-  id: string;
+  id: number;
   provider: Provider;
 };
 
@@ -46,7 +46,7 @@ export class SkillProjector {
   }
 
   prepare(agent: SkillProjectionAgent, session: SkillProjectionSession): string {
-    const agentDirectory = join(this.dataDir, "agents", agent.id);
+    const agentDirectory = join(this.dataDir, "agents", String(agent.id));
     const memoryPath = join(agentDirectory, "MEMORY.md");
     const memory = this.fileSystem.exists(memoryPath) ? this.fileSystem.read(memoryPath) : "";
     const source = join(agentDirectory, "skills");
@@ -97,6 +97,6 @@ export class SkillProjector {
   private skillsRoot(agent: SkillProjectionAgent, session: SkillProjectionSession): string {
     if (agent.provider === "claude_code") return join(session.workspacePath, ".claude", "skills");
     if (agent.provider === "codex") return join(session.workspacePath, ".agents", "skills");
-    return join(this.dataDir, "agents", agent.id, "provider-home", "hermes", "skills");
+    return join(this.dataDir, "agents", String(agent.id), "provider-home", "hermes", "skills");
   }
 }

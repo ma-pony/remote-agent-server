@@ -9,22 +9,22 @@ import { App } from "../src/web/app.js";
 
 const now = "2026-08-13T10:00:00.000Z";
 const agent = {
-  id: "agent-1", name: "主力 Codex", provider: "codex", enabled: true,
-  projectEnvironmentId: "environment-1", createdAt: now, updatedAt: now
+  id: 1, name: "主力 Codex", provider: "codex", enabled: true,
+  projectEnvironmentId: 1, createdAt: now, updatedAt: now
 };
 const endpoint = {
-  id: "endpoint-1", name: "示例工单", slug: "example-ticket", agentId: agent.id,
+  id: 1, name: "示例工单", slug: "example-ticket", agentId: agent.id,
   enabled: true, promptPrefix: "处理工单：", parameterMappings: [{
     parameterKey: "ticket_id", source: "request", requestKey: "ticket_id"
   }], createdAt: now, updatedAt: now
 };
 const task = {
-  id: "task-1", endpointId: endpoint.id, conversationId: "conversation-1", sessionId: "session-1",
-  runId: "run-1", requestId: "ticket-event-123", message: "分析并处理这个工单", status: "succeeded",
+  id: 1, endpointId: endpoint.id, conversationId: 1, sessionId: 1,
+  runId: 1, requestId: "ticket-event-123", message: "分析并处理这个工单", status: "succeeded",
   result: "问题已经修复，测试通过。", error: null, createdAt: now, startedAt: now, finishedAt: now
 };
 const conversation = {
-  id: "conversation-1", endpointId: endpoint.id, conversationKey: "ticket-1332", sessionId: "session-1",
+  id: 1, endpointId: endpoint.id, conversationKey: "ticket-1332", sessionId: 1,
   status: "active", createdAt: now, endedAt: null
 };
 const jsonResponse = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), {
@@ -36,13 +36,13 @@ const flushPromises = async () => {
   await Promise.resolve();
 };
 const webhook = {
-  id: "webhook-1", endpointId: endpoint.id, name: "工单回调",
+  id: 1, endpointId: endpoint.id, name: "工单回调",
   url: "https://receiver.example.com/webhook", enabled: true,
   events: ["task.succeeded", "message.agent.reply"], headers: [], signingSecretConfigured: true,
   timeoutSeconds: 10, createdAt: now, updatedAt: now
 };
 const delivery = (status: "pending" | "delivering" | "succeeded" | "failed", overrides: Record<string, unknown> = {}) => ({
-  id: "delivery-1", eventId: "event-1", sequence: 1, dispatchOrder: 1,
+  id: 1, eventId: "event-1", sequence: 1, dispatchOrder: 1,
   subscriptionId: webhook.id, taskId: task.id, eventType: "task.succeeded", status,
   attemptCount: status === "pending" ? 0 : 1, nextAttemptAt: now,
   lastStatusCode: status === "succeeded" ? 204 : null,
@@ -71,7 +71,7 @@ it("创建 Endpoint、一次复制 Token、配置 Webhook 并查看 Task", async
     if (url === "/api/integration-endpoints" && method === "GET") return jsonResponse([]);
     if (url === "/api/agents" && method === "GET") return jsonResponse([agent]);
     if (url === `/api/agents/${agent.id}/session-parameters` && method === "GET") return jsonResponse([{
-      id: "parameter-1", agentId: agent.id, key: "ticket_id", label: "工单 ID", description: null,
+      id: 1, agentId: agent.id, key: "ticket_id", label: "工单 ID", description: null,
       required: true, secret: false, createdAt: now, updatedAt: now
     }]);
     if (url === "/api/integration-endpoints" && method === "POST") {
@@ -93,7 +93,7 @@ it("创建 Endpoint、一次复制 Token、配置 Webhook 并查看 Task", async
       });
       return jsonResponse({
         webhook: {
-          id: "webhook-1", endpointId: endpoint.id, name: "工单回调",
+          id: 1, endpointId: endpoint.id, name: "工单回调",
           url: "https://receiver.example.com/webhook", enabled: true,
           events: ["task.succeeded", "message.agent.reply"], headers: [], signingSecretConfigured: true,
           timeoutSeconds: 10, createdAt: now, updatedAt: now
@@ -103,7 +103,7 @@ it("创建 Endpoint、一次复制 Token、配置 Webhook 并查看 Task", async
     }
     if (url === `/api/integration-tasks/${task.id}` && method === "GET") return jsonResponse(task);
     if (url === `/api/runs/${task.runId}/events?afterSeq=0` && method === "GET") return jsonResponse([{
-      id: "event-1", runId: task.runId, seq: 1, type: "message",
+      id: 1, runId: task.runId, seq: 1, type: "message",
       contentJson: JSON.stringify({ stream: "output", text: task.result }), createdAt: now
     }]);
     throw new Error(`Unexpected request: ${method} ${url}`);
@@ -117,7 +117,7 @@ it("创建 Endpoint、一次复制 Token、配置 Webhook 并查看 Task", async
   expect(slugInput).toHaveValue("");
   expect(slugInput).not.toHaveAttribute("placeholder");
   fireEvent.change(slugInput, { target: { value: endpoint.slug } });
-  fireEvent.change(screen.getByLabelText("智能体"), { target: { value: agent.id } });
+  fireEvent.change(screen.getByLabelText("智能体"), { target: { value: String(agent.id) } });
   fireEvent.change(await screen.findByLabelText("工单 ID 来源"), { target: { value: "request" } });
   fireEvent.change(screen.getByLabelText("工单 ID 请求参数名"), { target: { value: "ticket_id" } });
   fireEvent.click(screen.getByRole("button", { name: "创建接入端点" }));
@@ -141,7 +141,7 @@ it("创建 Endpoint、一次复制 Token、配置 Webhook 并查看 Task", async
 
   fireEvent.click(screen.getByRole("tab", { name: "任务" }));
   fireEvent.click(await screen.findByRole("link", { name: "ticket-event-123" }));
-  expect(await screen.findByRole("link", { name: "进入智能体会话" })).toHaveAttribute("href", "/sessions/session-1");
+  expect(await screen.findByRole("link", { name: "进入智能体会话" })).toHaveAttribute("href", "/sessions/1");
   expect(screen.getByText("问题已经修复，测试通过。")).toBeVisible();
   expect(screen.queryByText("ras_one_time_token")).not.toBeInTheDocument();
   expect(screen.queryByText("whsec_one_time_secret")).not.toBeInTheDocument();
@@ -178,18 +178,18 @@ it("调用说明展示动态参数和安全示例，并可发送真实测试任�
   };
   const parameters = [
     {
-      id: "parameter-project", agentId: agent.id, key: "project_code", label: "项目编号",
+      id: 1, agentId: agent.id, key: "project_code", label: "项目编号",
       description: "外部系统中的项目编号", required: true, secret: false, createdAt: now, updatedAt: now
     },
     {
-      id: "parameter-token", agentId: agent.id, key: "private_token", label: "内部访问令牌",
+      id: 2, agentId: agent.id, key: "private_token", label: "内部访问令牌",
       description: "由管理员预先配置", required: true, secret: true, createdAt: now, updatedAt: now
     }
   ];
   const testTask = {
     ...task,
-    id: "task-test", requestId: "test-generated", conversationId: "conversation-test",
-    sessionId: "session-test", runId: null, message: "检查项目当前状态", status: "queued",
+    id: 2, requestId: "test-generated", conversationId: 2,
+    sessionId: 2, runId: null, message: "检查项目当前状态", status: "queued",
     result: null, startedAt: null, finishedAt: null
   };
   window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/usage`);
@@ -325,7 +325,7 @@ it("运行中的 Task 自动刷新完整详情并在终态后停止", async () =
     if (url === `/api/runs/${task.runId}/events?afterSeq=0`) {
       eventReads += 1;
       return jsonResponse(eventReads === 1 ? [] : [{
-        id: "event-final", runId: task.runId, seq: 2, type: "status",
+        id: 2, runId: task.runId, seq: 2, type: "status",
         contentJson: JSON.stringify({ title: "最终状态已写入" }), createdAt: now
       }]);
     }
@@ -379,8 +379,8 @@ it("取消 Task 后仍刷新到确定终态", async () => {
 
 it("Task 路由切换会清空旧详情、中止请求且忽略迟到响应", async () => {
   vi.useFakeTimers();
-  const taskA = { ...task, id: "task-a", requestId: "request-a", status: "running", result: null, finishedAt: null };
-  const taskB = { ...task, id: "task-b", requestId: "request-b" };
+  const taskA = { ...task, id: 2, requestId: "request-a", status: "running", result: null, finishedAt: null };
+  const taskB = { ...task, id: 3, requestId: "request-b" };
   window.history.replaceState({}, "", `/integration-tasks/${taskA.id}`);
   let taskAReads = 0;
   let pollSignal: AbortSignal | undefined;

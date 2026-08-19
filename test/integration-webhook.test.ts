@@ -69,7 +69,7 @@ const createHarness = (fetchImpl: typeof fetch = vi.fn(async () => new Response(
   });
 
   const createDelivery = (
-    subscriptionId: string,
+    subscriptionId: number,
     sequence: number,
     eventType = "task.succeeded",
     occurredAt = new Date().toISOString(),
@@ -82,10 +82,10 @@ const createHarness = (fetchImpl: typeof fetch = vi.fn(async () => new Response(
       occurredAt,
       endpoint: { id: endpoint.id, slug: endpoint.slug },
       task: {
-        id: `task-${subscriptionId}-${sequence}`,
+        id: sequence,
         requestId: `request-${subscriptionId}-${sequence}`,
         conversationKey: null,
-        sessionId: `session-${subscriptionId}-${sequence}`,
+        sessionId: sequence,
         runId: null,
         status: "succeeded"
       }
@@ -1070,7 +1070,7 @@ describe("Webhook management API", () => {
         parameterMappings: []
       }
     });
-    const endpointId = (endpointResponse.json() as { endpoint: { id: string } }).endpoint.id;
+    const endpointId = (endpointResponse.json() as { endpoint: { id: number } }).endpoint.id;
     const unauthorized = await app.inject({ method: "GET", url: `/api/integration-endpoints/${endpointId}/webhooks` });
     const reservedHeader = await app.inject({
       method: "POST",
@@ -1099,7 +1099,7 @@ describe("Webhook management API", () => {
       }
     });
     const createdBody = created.json() as {
-      webhook: { id: string; headers: Array<{ name: string; configured: boolean }>; signingSecretConfigured: boolean };
+      webhook: { id: number; headers: Array<{ name: string; configured: boolean }>; signingSecretConfigured: boolean };
       signingSecret: string;
     };
 
@@ -1148,7 +1148,7 @@ describe("Webhook management API", () => {
       url: `/api/integration-endpoints/${endpointId}/webhook-deliveries`,
       headers: authHeaders
     });
-    const delivery = (deliveries.json() as Array<{ id: string; eventId: string; taskId: string | null }>)[0]!;
+    const delivery = (deliveries.json() as Array<{ id: number; eventId: string; taskId: number | null }>)[0]!;
     expect(delivery.taskId).toBeNull();
     expect(JSON.stringify(deliveries.json())).not.toContain("payloadJson");
 
@@ -1170,10 +1170,10 @@ describe("Webhook management API", () => {
         occurredAt: oldOccurredAt,
         endpoint: { id: endpointId, slug: "webhook-api" },
         task: {
-          id: "audit-task",
+          id: 999,
           requestId: "audit-request",
           conversationKey: null,
-          sessionId: "audit-session",
+          sessionId: 999,
           runId: null,
           status: "succeeded"
         }

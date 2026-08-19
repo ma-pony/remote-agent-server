@@ -93,8 +93,8 @@ const closeWriter = (writer: SseWriter): void => {
 export const listIntegrationTaskEvents = (
   store: IntegrationStore,
   eventStore: EventStore,
-  taskId: string,
-  endpointId: string,
+  taskId: number,
+  endpointId: number,
   afterSeq: number
 ): PublicIntegrationEvent[] => {
   const task = store.getTaskForEndpoint(taskId, endpointId);
@@ -105,8 +105,8 @@ export const listIntegrationTaskEvents = (
 
 const waitForLinkedRun = async (
   store: IntegrationStore,
-  taskId: string,
-  endpointId: string,
+  taskId: number,
+  endpointId: number,
   writer: SseWriter
 ): Promise<IntegrationTask | undefined> => {
   let closed = false;
@@ -157,8 +157,8 @@ const waitForLinkedRun = async (
 export const streamIntegrationTaskEvents = async (input: {
   store: IntegrationStore;
   eventStore: EventStore;
-  taskId: string;
-  endpointId: string;
+  taskId: number;
+  endpointId: number;
   afterSeq: number;
   writer: SseWriter;
 }): Promise<void> => {
@@ -230,7 +230,7 @@ export const registerIntegrationRoutes = (
     if (endpoint === undefined) {
       return sendError(reply, 401, "invalid_endpoint_token", "Invalid integration endpoint token");
     }
-    const task = coordinator.getTaskForEndpoint(request.params.taskId, endpoint.id);
+    const task = coordinator.getTaskForEndpoint(Number(request.params.taskId), endpoint.id);
     return task === undefined
       ? sendError(reply, 404, "task_not_found", "Integration Task not found")
       : coordinator.toExternalTask(task);
@@ -244,7 +244,7 @@ export const registerIntegrationRoutes = (
       if (endpoint === undefined) {
         return sendError(reply, 401, "invalid_endpoint_token", "Invalid integration endpoint token");
       }
-      const task = store.getTaskForEndpoint(request.params.taskId, endpoint.id);
+      const task = store.getTaskForEndpoint(Number(request.params.taskId), endpoint.id);
       if (task === undefined) return sendError(reply, 404, "task_not_found", "Integration Task not found");
       const parsed = eventQuerySchema.safeParse(request.query);
       if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Event cursor");
@@ -262,7 +262,8 @@ export const registerIntegrationRoutes = (
       if (endpoint === undefined) {
         return sendError(reply, 401, "invalid_endpoint_token", "Invalid integration endpoint token");
       }
-      if (store.getTaskForEndpoint(request.params.taskId, endpoint.id) === undefined) {
+      const taskId = Number(request.params.taskId);
+      if (store.getTaskForEndpoint(taskId, endpoint.id) === undefined) {
         return sendError(reply, 404, "task_not_found", "Integration Task not found");
       }
       const parsed = eventQuerySchema.safeParse(request.query);
@@ -278,7 +279,7 @@ export const registerIntegrationRoutes = (
       void streamIntegrationTaskEvents({
         store,
         eventStore,
-        taskId: request.params.taskId,
+        taskId,
         endpointId: endpoint.id,
         afterSeq: parsed.data.afterSeq,
         writer: reply.raw
@@ -293,7 +294,7 @@ export const registerIntegrationRoutes = (
     if (endpoint === undefined) {
       return sendError(reply, 401, "invalid_endpoint_token", "Invalid integration endpoint token");
     }
-    let task = store.getTaskForEndpoint(request.params.taskId, endpoint.id);
+    let task = store.getTaskForEndpoint(Number(request.params.taskId), endpoint.id);
     if (task === undefined) return sendError(reply, 404, "task_not_found", "Integration Task not found");
     if (isTerminalTask(task)) return coordinator.toExternalTask(task);
 

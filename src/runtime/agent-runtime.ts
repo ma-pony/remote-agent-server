@@ -2,8 +2,8 @@ import type { Provider, TokenUsage, TokenUsageTotals } from "../domain.js";
 import type { RuntimeMcpServer } from "../mcp/mcp-types.js";
 
 export type RuntimeSessionInput = {
-  sessionId: string;
-  agentId: string;
+  sessionId: number;
+  agentId: number;
   provider: Provider;
   workspacePath: string;
   browserProfilePath: string;
@@ -14,7 +14,7 @@ export type RuntimeSessionInput = {
 };
 
 export type RuntimeSession = { providerSessionId: string | null };
-export type RuntimeTurnInput = { sessionId: string; requestId: string; text: string };
+export type RuntimeTurnInput = { sessionId: number; requestId: number; text: string };
 export type RuntimeEvent =
   | { type: "message"; stream: "output" | "thought"; text: string }
   | { type: "tool"; content: Record<string, unknown> }
@@ -38,8 +38,8 @@ export type RuntimeTurn = {
 export interface AgentRuntime {
   ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession>;
   startTurn(input: RuntimeTurnInput): RuntimeTurn;
-  cancel(sessionId: string): Promise<void>;
+  cancel(sessionId: number): Promise<void>;
   reset(input: RuntimeSessionInput): Promise<void>;
-  doctor(provider: Provider, agentId: string): Promise<RuntimeDoctor>;
+  doctor(provider: Provider, agentId: number): Promise<RuntimeDoctor>;
   shutdown(): Promise<void>;
 }

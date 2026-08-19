@@ -138,7 +138,7 @@ export const IntegrationEndpointCreatePage = () => {
     const controller = new AbortController();
     void api<Agent[]>("/agents", { signal: controller.signal }).then((items) => {
       const active = items.filter((item) => item.enabled);
-      setAgents(active); setAgentId(active[0]?.id ?? "");
+      setAgents(active); setAgentId(active[0] === undefined ? "" : String(active[0].id));
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, []);
@@ -154,7 +154,7 @@ export const IntegrationEndpointCreatePage = () => {
     event.preventDefault(); setBusy(true); setError("");
     try {
       const created = await integrationApi.createEndpoint({
-        name: name.trim(), slug: slug.trim(), agentId, enabled, promptPrefix,
+        name: name.trim(), slug: slug.trim(), agentId: Number(agentId), enabled, promptPrefix,
         parameterMappings: mappingPayload(parameters, drafts).map((mapping): IntegrationParameterMappingInput =>
           mapping.source === "request" ? mapping : { ...mapping, value: mapping.value ?? "" }
         )
@@ -189,7 +189,7 @@ export const IntegrationEndpointDetailLayout = () => {
   }, [location.pathname, location.state]);
   useEffect(() => {
     const controller = new AbortController();
-    void Promise.all([integrationApi.getEndpoint(id, controller.signal), api<Agent[]>("/agents", { signal: controller.signal })])
+    void Promise.all([integrationApi.getEndpoint(Number(id), controller.signal), api<Agent[]>("/agents", { signal: controller.signal })])
       .then(([item, agentItems]) => { setEndpoint(item); setAgents(agentItems); })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
@@ -198,7 +198,7 @@ export const IntegrationEndpointDetailLayout = () => {
   const base = `/integration-endpoints/${id}`;
   const suffix = location.pathname.slice(base.length).replace(/^\//, "");
   const section = suffix === "" ? "overview" : suffix;
-  const agentName = agents.find((item) => item.id === endpoint.agentId)?.name ?? endpoint.agentId;
+  const agentName = agents.find((item) => item.id === endpoint.agentId)?.name ?? String(endpoint.agentId);
   return <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8"><Button asChild variant="ghost" className="mb-4"><Link to="/integration-endpoints"><ArrowLeft />{text("返回接入端点", "Back to endpoints")}</Link></Button><PageHeader title={endpoint.name} description={`/${endpoint.slug} · ${agentName}`} action={<Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge>} />{oneTimeToken === "" ? null : <div className="mb-6"><OneTimeSecret title={text("请立即保存，此访问令牌不会再次显示", "Save this access token now. It will not be shown again.")} value={oneTimeToken} onDismiss={() => setOneTimeToken("")} /></div>}<Tabs value={section}><TabsList variant="line" aria-label={text("接入端点管理", "Integration endpoint management")} className="max-w-full justify-start overflow-x-auto"><TabsTrigger value="overview" asChild><Link to={base}>{text("概览", "Overview")}</Link></TabsTrigger><TabsTrigger value="usage" asChild><Link to={`${base}/usage`}>{text("调用说明", "Usage")}</Link></TabsTrigger><TabsTrigger value="mappings" asChild><Link to={`${base}/mappings`}>{text("参数映射", "Mappings")}</Link></TabsTrigger><TabsTrigger value="webhooks" asChild><Link to={`${base}/webhooks`}>{text("事件回调", "Webhooks")}</Link></TabsTrigger><TabsTrigger value="conversations" asChild><Link to={`${base}/conversations`}>{text("业务对话", "Conversations")}</Link></TabsTrigger><TabsTrigger value="tasks" asChild><Link to={`${base}/tasks`}>{text("任务", "Tasks")}</Link></TabsTrigger><TabsTrigger value="settings" asChild><Link to={`${base}/settings`}>{text("设置", "Settings")}</Link></TabsTrigger></TabsList></Tabs><div className="mt-6"><Outlet context={{ endpoint, agentName, agents, setEndpoint } satisfies EndpointContext} /></div></div>;
 };
 
@@ -343,7 +343,7 @@ const DeliveryBadge = ({ status }: { status: WebhookDelivery["status"] }) => { c
 }>{status === "succeeded" ? text("成功", "Succeeded") : status === "failed" ? text("失败", "Failed") : status === "delivering" ? text("投递中", "Delivering") : text("等待投递", "Pending")}</Badge>; };
 
 const WebhookEditorDialog = ({ endpointId, onCreated, onError }: {
-  endpointId: string;
+  endpointId: number;
   onCreated(webhook: IntegrationWebhook, secret: string): void;
   onError(message: string): void;
 }) => {
@@ -378,7 +378,7 @@ export const IntegrationEndpointWebhooksPage = () => {
   const [webhooks, setWebhooks] = useState<IntegrationWebhook[] | null>(null);
   const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
   const [signingSecret, setSigningSecret] = useState("");
-  const [busyId, setBusyId] = useState("");
+  const [busyId, setBusyId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
   useEffect(() => {
@@ -413,9 +413,9 @@ export const IntegrationEndpointWebhooksPage = () => {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [endpoint.id, refreshKey]);
-  const act = async (id: string, action: () => Promise<unknown>) => {
+  const act = async (id: number, action: () => Promise<unknown>) => {
     setBusyId(id); setError("");
-    try { await action(); setRefreshKey((value) => value + 1); } catch (reason) { setError(errorMessage(reason)); } finally { setBusyId(""); }
+    try { await action(); setRefreshKey((value) => value + 1); } catch (reason) { setError(errorMessage(reason)); } finally { setBusyId(null); }
   };
   return <div className="flex flex-col gap-5"><ErrorAlert message={error} />{signingSecret === "" ? null : <OneTimeSecret title={text("请立即保存签名密钥，此后不会再次显示", "Save the signing secret now. It will not be shown again.")} value={signingSecret} onDismiss={() => setSigningSecret("")} />}<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">{text("事件回调订阅", "Webhook subscriptions")}</h2><p className="text-sm text-muted-foreground">{text("失败投递会自动重试；最终失败后可手动重发。", "Failed deliveries retry automatically and can be resent manually after final failure.")}</p></div><WebhookEditorDialog endpointId={endpoint.id} onError={setError} onCreated={(webhook, secret) => { setWebhooks((current) => [...(current ?? []), webhook]); setSigningSecret(secret); }} /></div>{webhooks === null ? <Skeleton className="h-40" /> : webhooks.length === 0 ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">{text("尚未配置事件回调。", "No webhooks configured.")}</CardContent></Card> : <div className="flex flex-col gap-4">{webhooks.map((webhook) => {
     const recent = deliveries.find((item) => item.subscriptionId === webhook.id);
@@ -451,13 +451,13 @@ export const IntegrationEndpointSettingsPage = () => {
   const navigate = useNavigate();
   const [name, setName] = useState(endpoint.name);
   const [slug, setSlug] = useState(endpoint.slug);
-  const [agentId, setAgentId] = useState(endpoint.agentId);
+  const [agentId, setAgentId] = useState(String(endpoint.agentId));
   const [enabled, setEnabled] = useState(endpoint.enabled);
   const [promptPrefix, setPromptPrefix] = useState(endpoint.promptPrefix);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const save = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(""); try { const updated = await integrationApi.updateEndpoint(endpoint.id, { name: name.trim(), slug: slug.trim(), agentId, enabled, promptPrefix }); setEndpoint(updated); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); } };
+  const save = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(""); try { const updated = await integrationApi.updateEndpoint(endpoint.id, { name: name.trim(), slug: slug.trim(), agentId: Number(agentId), enabled, promptPrefix }); setEndpoint(updated); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); } };
   const rotate = async () => { setBusy(true); setError(""); try { const rotated = await integrationApi.rotateEndpointToken(endpoint.id); setEndpoint(rotated.endpoint); setToken(rotated.token); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); } };
   const remove = async () => { setBusy(true); setError(""); try { await integrationApi.deleteEndpoint(endpoint.id); navigate("/integration-endpoints"); } catch (reason) { setError(endpointInUse(reason) ? text("已有业务对话或任务，请停用", "This endpoint has conversations or tasks; disable it instead") : errorMessage(reason)); setBusy(false); } };
   return <div className="flex flex-col gap-5"><ErrorAlert message={error} />{token === "" ? null : <OneTimeSecret title={text("请立即保存，新访问令牌不会再次显示", "Save the new access token now. It will not be shown again.")} value={token} onDismiss={() => setToken("")} />}<Card><CardHeader><CardTitle className="flex items-center gap-2"><Settings2 className="size-5" />{text("基础设置", "Basic settings")}</CardTitle><CardDescription>{text("更换智能体前必须先结束接续中的业务对话。", "End active conversations before changing the agent.")}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-5" onSubmit={save}><FieldGroup><Field><FieldLabel htmlFor="settings-endpoint-name">{text("端点名称", "Endpoint name")}</FieldLabel><Input id="settings-endpoint-name" value={name} onChange={(event) => setName(event.target.value)} /></Field><Field><FieldLabel htmlFor="settings-endpoint-slug">{text("路径标识", "Slug")}</FieldLabel><Input id="settings-endpoint-slug" value={slug} onChange={(event) => setSlug(event.target.value)} /></Field><Field><FieldLabel htmlFor="settings-endpoint-agent">{text("智能体", "Agent")}</FieldLabel><NativeSelect id="settings-endpoint-agent" value={agentId} onChange={(event) => setAgentId(event.target.value)}>{agents.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></Field><Field><FieldLabel htmlFor="settings-prompt-prefix">{text("固定提示", "Fixed prompt")}</FieldLabel><Textarea id="settings-prompt-prefix" value={promptPrefix} onChange={(event) => setPromptPrefix(event.target.value)} /></Field><label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{text("启用接入端点", "Enable endpoint")}</label></FieldGroup><div className="flex justify-end"><Button type="submit" disabled={busy}>{busy ? text("保存中…", "Saving…") : text("保存设置", "Save settings")}</Button></div></form></CardContent></Card><Card><CardHeader><CardTitle>{text("访问令牌", "Access token")}</CardTitle><CardDescription>{text("轮换后旧访问令牌立即失效；新访问令牌只展示一次。", "Rotation immediately invalidates the old token. The new token is shown once.")}</CardDescription></CardHeader><CardContent><AlertDialog><AlertDialogTrigger asChild><Button variant="outline"><RefreshCw />{text("轮换访问令牌", "Rotate access token")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text("轮换端点访问令牌？", "Rotate the endpoint access token?")}</AlertDialogTitle><AlertDialogDescription>{text("外部系统必须更新为新访问令牌，旧访问令牌将立即失效。", "External systems must switch to the new token. The old token becomes invalid immediately.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={() => void rotate()}>{text("确认轮换", "Rotate")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></CardContent></Card><Card className="border-destructive/40"><CardHeader><CardTitle className="text-destructive">{text("危险操作", "Danger zone")}</CardTitle><CardDescription>{text("有业务对话或任务历史的端点不能删除，请改为停用。", "Endpoints with conversation or task history cannot be deleted. Disable them instead.")}</CardDescription></CardHeader><CardContent><AlertDialog><AlertDialogTrigger asChild><Button variant="destructive">{text("删除接入端点", "Delete endpoint")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`永久删除“${endpoint.name}”？`, `Permanently delete “${endpoint.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("此操作无法撤销。存在历史数据时系统会拒绝删除。", "This cannot be undone. The server rejects deletion when history exists.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void remove()}>{text("确认删除", "Delete")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></CardContent></Card></div>;
@@ -500,7 +500,7 @@ export const IntegrationTaskDetailPage = () => {
     setError("");
     const refresh = async () => {
       try {
-        const item = await integrationApi.getTask(id, controller.signal);
+        const item = await integrationApi.getTask(Number(id), controller.signal);
         if (disposed || controller.signal.aborted) return;
         const [endpointItem, conversations, deliveryItems, eventItems] = await Promise.all([
           integrationApi.getEndpoint(item.endpointId, controller.signal),
@@ -556,7 +556,7 @@ export const IntegrationTaskDetailPage = () => {
     <Button asChild variant="ghost" className="mb-4"><Link to={`/integration-endpoints/${task.endpointId}/tasks`}><ArrowLeft />{text("返回任务", "Back to tasks")}</Link></Button>
     <PageHeader
       title={task.requestId}
-      description={endpoint === null ? task.endpointId : endpoint.name}
+      description={endpoint === null ? String(task.endpointId) : endpoint.name}
       action={<div className="flex items-center gap-2"><StatusBadge status={task.status} />{terminal ? null : <AlertDialog>
         <AlertDialogTrigger asChild><Button size="sm" variant="destructive" disabled={busy}>{text("取消任务", "Cancel task")}</Button></AlertDialogTrigger>
         <AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text("取消这个任务？", "Cancel this task?")}</AlertDialogTitle><AlertDialogDescription>{text("正在运行的智能体执行会停止；同一业务对话的后续任务仍可继续。", "The running agent execution will stop. Later tasks in this conversation can still continue.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("返回", "Back")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void cancel()}>{text("确认取消", "Cancel task")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent>

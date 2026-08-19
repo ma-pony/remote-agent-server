@@ -2,7 +2,7 @@ import type { ProjectEnvironmentBuilder } from "./project-environment-builder.js
 import type { ProjectEnvironmentStore } from "./project-environment-store.js";
 
 export interface ProjectEnvironmentBuilderLike {
-  checkAndBuild(environmentId: string): Promise<{ outcome: "unchanged" | "published"; revisionId?: string }>;
+  checkAndBuild(environmentId: number): Promise<{ outcome: "unchanged" | "published"; revisionId?: number }>;
   stop(): Promise<void>;
 }
 
@@ -15,13 +15,13 @@ export type ProjectEnvironmentSyncState = {
 
 export interface ProjectEnvironmentCheckScheduler {
   start(): void;
-  requestCheck(environmentId: string): Promise<void>;
-  getState(environmentId: string): ProjectEnvironmentSyncState;
+  requestCheck(environmentId: number): Promise<void>;
+  getState(environmentId: number): ProjectEnvironmentSyncState;
   stop(): Promise<void>;
 }
 
 type QueueEntry = {
-  id: string;
+  id: number;
   promise: Promise<void>;
   resolve(): void;
   reject(error: unknown): void;
@@ -32,9 +32,9 @@ export class ProjectEnvironmentScheduler implements ProjectEnvironmentCheckSched
   private timer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
   private queue: QueueEntry[] = [];
-  private pending = new Map<string, QueueEntry>();
+  private pending = new Map<number, QueueEntry>();
   private draining: Promise<void> | undefined;
-  private runningEnvironmentId: string | undefined;
+  private runningEnvironmentId: number | undefined;
   private nextScheduledAtMs: number;
 
   constructor(private readonly dependencies: {
@@ -60,7 +60,7 @@ export class ProjectEnvironmentScheduler implements ProjectEnvironmentCheckSched
     await Promise.allSettled(requests);
   }
 
-  requestCheck(environmentId: string): Promise<void> {
+  requestCheck(environmentId: number): Promise<void> {
     if (this.stopped) return Promise.reject(new Error("environment_scheduler_stopped"));
     const existing = this.pending.get(environmentId);
     if (existing !== undefined) return existing.promise;
@@ -77,7 +77,7 @@ export class ProjectEnvironmentScheduler implements ProjectEnvironmentCheckSched
     return promise;
   }
 
-  getState(environmentId: string): ProjectEnvironmentSyncState {
+  getState(environmentId: number): ProjectEnvironmentSyncState {
     const status = this.runningEnvironmentId === environmentId
       ? "running"
       : this.pending.has(environmentId) ? "queued" : "idle";

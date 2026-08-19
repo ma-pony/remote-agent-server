@@ -1,7 +1,6 @@
-import { randomUUID } from "node:crypto";
-import { existsSync, lstatSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 
 import {
   createAcpRuntime,
@@ -44,12 +43,10 @@ const ACP_COMMAND: Record<(typeof ACP_AGENT)[Provider], string> = {
 };
 
 const providers = new Set<Provider>(["claude_code", "codex", "hermes"]);
-const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
 type RuntimeTarget = {
   provider: Provider;
-  agentId: string;
-  sessionId: string;
+  agentId: number;
+  sessionId: number;
   browserProfilePath: string;
   instructions: string;
 };
@@ -63,22 +60,81 @@ export class AgentRuntimeError extends Error {
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 
-const pathEntryExists = (path: string): boolean => {
-  try {
-    lstatSync(path);
-    return true;
-  } catch {
-    return false;
+const runtimeProviderEntries = new Set([
+  "archived_sessions",
+  "attachments",
+  "browser",
+  "browser-profiles",
+  "daemon",
+  "debug",
+  "downloads",
+  "file-history",
+  "generated_images",
+  "ipc",
+  "jobs",
+  "node_repl",
+  "paste-cache",
+  "pastes",
+  "process_manager",
+  "projects",
+  "sandboxes",
+  "session-env",
+  "sessions",
+  "shell_snapshots",
+  "tasks",
+  "teams",
+  "transcripts",
+  "workspace",
+  "worktrees"
+]);
+
+const isRuntimeProviderEntry = (name: string): boolean => {
+  const normalized = name.toLowerCase();
+  return runtimeProviderEntries.has(normalized)
+    || /(^|[._-])(cache|history|log|logs|tmp|temp|lock|locks|state)([._-]|$)/i.test(normalized)
+    || /\.(db|sqlite)(-.+)?$/i.test(normalized);
+};
+
+const copyProviderHome = (source: string, destination: string): void => {
+  mkdirSync(destination, { recursive: true });
+  if (!existsSync(source)) return;
+
+  for (const entry of readdirSync(source)) {
+    if (isRuntimeProviderEntry(entry)) continue;
+    const sourcePath = join(source, entry);
+    const destinationPath = join(destination, entry);
+    rmSync(destinationPath, { force: true, recursive: true });
+    cpSync(sourcePath, destinationPath, {
+      recursive: true,
+      force: true,
+      mode: constants.COPYFILE_FICLONE,
+      filter: (path) => path === sourcePath
+        || !relative(sourcePath, path).split(sep).some(isRuntimeProviderEntry)
+    });
   }
 };
 
-const linkSharedFile = (source: string, destination: string): void => {
-  if (existsSync(source) && !pathEntryExists(destination)) symlinkSync(source, destination);
+const codexConfigWithManagedSettings = (
+  home: string,
+  instructions: string,
+  disabledSkills: string
+): string => {
+  const path = join(home, "config.toml");
+  const hostConfig = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const preservedConfig = hostConfig
+    .replace(/^\s*developer_instructions\s*=.*(?:\r?\n|$)/m, "")
+    .trim();
+  return [
+    instructions.trim() === "" ? "" : `developer_instructions = ${JSON.stringify(instructions)}`,
+    preservedConfig,
+    disabledSkills
+  ].filter((section) => section !== "").join("\n\n");
 };
 
-const assertTarget = (provider: Provider, agentId: string, sessionId: string): void => {
-  if (!providers.has(provider) || !uuidPattern.test(agentId) || !uuidPattern.test(sessionId)) {
-    throw new AgentRuntimeError("invalid_runtime_target", "Runtime target must contain a known Provider and UUID identifiers");
+const assertTarget = (provider: Provider, agentId: number, sessionId: number): void => {
+  if (!providers.has(provider) || !Number.isSafeInteger(agentId) || agentId <= 0
+    || !Number.isSafeInteger(sessionId) || sessionId < 0) {
+    throw new AgentRuntimeError("invalid_runtime_target", "Runtime target must contain a known Provider and numeric identifiers");
   }
 };
 
@@ -104,37 +160,30 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       throw new AgentRuntimeError("invalid_runtime_target", "Unknown Runtime target");
     }
 
-    const providerHome = join(this.dataDir, "agents", target.agentId, "provider-home");
+    const providerHome = join(this.dataDir, "agents", String(target.agentId), "provider-home");
     const environment = [`REMOTE_AGENT_BROWSER_PROFILE=${shellQuote(target.browserProfilePath)}`];
     if (target.provider === "hermes") {
       const home = join(providerHome, "hermes");
-      mkdirSync(home, { recursive: true });
       const hostHome = process.env.HERMES_HOME ?? join(homedir(), ".hermes");
-      for (const file of ["config.yaml", "auth.json", ".env"]) {
-        linkSharedFile(join(hostHome, file), join(home, file));
-      }
+      copyProviderHome(hostHome, home);
       environment.push(`HERMES_HOME=${shellQuote(home)}`);
     } else if (target.provider === "codex") {
       const agentHome = join(providerHome, "codex");
-      const home = join(agentHome, "sessions", target.sessionId);
-      mkdirSync(home, { recursive: true });
-      const hostAuth = join(process.env.CODEX_HOME ?? join(homedir(), ".codex"), "auth.json");
-      const agentAuth = join(home, "auth.json");
-      linkSharedFile(hostAuth, agentAuth);
+      const home = join(agentHome, "sessions", String(target.sessionId));
+      const hostHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+      copyProviderHome(hostHome, home);
       const disabledSkills = this.skillManager.hostSkillFiles().map((path) => [
         "[[skills.config]]",
         `path = ${JSON.stringify(path)}`,
         "enabled = false"
       ].join("\n")).join("\n\n");
-      const configSections = [
-        target.instructions.trim() === "" ? "" : `developer_instructions = ${JSON.stringify(target.instructions)}`,
-        disabledSkills
-      ].filter((section) => section !== "");
-      writeFileSync(join(home, "config.toml"), configSections.length === 0 ? "" : `${configSections.join("\n\n")}\n`, { mode: 0o600 });
+      const config = codexConfigWithManagedSettings(home, target.instructions, disabledSkills);
+      writeFileSync(join(home, "config.toml"), config === "" ? "" : `${config}\n`, { mode: 0o600 });
       environment.push(`CODEX_HOME=${shellQuote(home)}`);
     } else {
       const home = join(providerHome, "claude");
-      mkdirSync(home, { recursive: true });
+      const hostHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+      copyProviderHome(hostHome, home);
       environment.push(`CLAUDE_CONFIG_DIR=${shellQuote(home)}`);
     }
     return `env ${environment.join(" ")} ${ACP_COMMAND[ACP_AGENT[target.provider]]}`;
@@ -159,7 +208,7 @@ type ManagedSession = {
   handle: AcpRuntimeHandle;
   providerSessionId: string | null;
   provider: Provider;
-  agentId: string;
+  agentId: number;
   workspacePath: string;
   browserProfilePath: string;
   instructions: string;
@@ -179,7 +228,7 @@ type SessionOperation = {
 class RuntimeShutdownFailure extends Error {
   constructor(
     readonly stage: "active_cancel" | "session_operation" | "handle_close" | "late_handle_close",
-    readonly sessionId: string,
+    readonly sessionId: number,
     reason: unknown
   ) {
     super(`Runtime shutdown ${stage} failed for Session ${sessionId}`, { cause: reason });
@@ -189,7 +238,7 @@ class RuntimeShutdownFailure extends Error {
 
 type RuntimeShutdownFailureSnapshot = Readonly<{
   stage: RuntimeShutdownFailure["stage"];
-  sessionId: string;
+  sessionId: number;
   message: string;
 }>;
 
@@ -312,9 +361,9 @@ const systemPrompt = (input: RuntimeSessionInput): string => {
  * Adapts the embedded acpx API to the service's provider-neutral Runtime contract.
  */
 export class AcpxAgentRuntime implements AgentRuntime {
-  private readonly sessions = new Map<string, ManagedSession>();
-  private readonly activeTurns = new Map<string, ActiveTurn>();
-  private readonly sessionOperations = new Map<string, SessionOperation>();
+  private readonly sessions = new Map<number, ManagedSession>();
+  private readonly activeTurns = new Map<number, ActiveTurn>();
+  private readonly sessionOperations = new Map<number, SessionOperation>();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
   private readonly shutdownFailures: RuntimeShutdownFailure[] = [];
@@ -435,7 +484,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       handle: session.handle,
       text: input.text,
       mode: "prompt",
-      requestId: input.requestId
+      requestId: String(input.requestId)
     });
     const activeTurn = { handle: session.handle, turn };
     this.activeTurns.set(input.sessionId, activeTurn);
@@ -477,7 +526,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     };
   }
 
-  async cancel(sessionId: string): Promise<void> {
+  async cancel(sessionId: number): Promise<void> {
     const activeTurn = this.activeTurns.get(sessionId);
     if (activeTurn !== undefined) {
       await activeTurn.turn.cancel({ reason: "cancelled_by_request" });
@@ -508,16 +557,16 @@ export class AcpxAgentRuntime implements AgentRuntime {
     });
   }
 
-  async doctor(provider: Provider, agentId: string): Promise<RuntimeDoctor> {
+  async doctor(provider: Provider, agentId: number): Promise<RuntimeDoctor> {
     this.assertRunning();
-    const sessionId = randomUUID();
+    const sessionId = 0;
     assertTarget(provider, agentId, sessionId);
     const registry = new RemoteAgentRegistry(this.config.dataDir, this.skillManager);
     const probeAgent = registry.register({
       provider,
       agentId,
       sessionId,
-      browserProfilePath: join(this.config.dataDir, "agents", agentId, "doctor-browser"),
+      browserProfilePath: join(this.config.dataDir, "agents", String(agentId), "doctor-browser"),
       instructions: ""
     });
     const runtime = this.createRuntime(registry, probeAgent);
@@ -611,7 +660,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   private recordShutdownFailure(
     stage: RuntimeShutdownFailure["stage"],
-    sessionId: string,
+    sessionId: number,
     reason: unknown
   ): void {
     this.shutdownFailures.push(new RuntimeShutdownFailure(stage, sessionId, reason));
@@ -632,11 +681,11 @@ export class AcpxAgentRuntime implements AgentRuntime {
     }
   }
 
-  private clearActiveTurn(sessionId: string, activeTurn: ActiveTurn): void {
+  private clearActiveTurn(sessionId: number, activeTurn: ActiveTurn): void {
     if (this.activeTurns.get(sessionId) === activeTurn) this.activeTurns.delete(sessionId);
   }
 
-  private serializeSession<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
+  private serializeSession<T>(sessionId: number, operation: () => Promise<T>): Promise<T> {
     const previous = this.sessionOperations.get(sessionId)?.barrier ?? Promise.resolve();
     const run = previous.then(operation);
     const completion = run.then(() => undefined);

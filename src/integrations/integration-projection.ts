@@ -11,7 +11,7 @@ export type { RunEventProjection, RunStateProjection };
 export type IntegrationProjectionDependencies = {
   db: Database.Database;
   store: IntegrationStore;
-  listEvents(runId: string): Event[];
+  listEvents(runId: number): Event[];
   notify?: () => void;
 };
 
@@ -136,7 +136,7 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
     });
   }
 
-  private agentOutput(runId: string): string {
+  private agentOutput(runId: number): string {
     return this.dependencies.listEvents(runId).flatMap((event) => {
       if (event.type !== "message") return [];
       const content = record(JSON.parse(event.contentJson));

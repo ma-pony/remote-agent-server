@@ -46,7 +46,7 @@ const foldHistoricalStatus = (run: Run, events: RunEvent[]): Run => {
   return status === run.status ? run : { ...run, status };
 };
 
-const mergeEvent = (views: RunView[], runId: string, item: RunEvent, applyStatus = true): RunView[] => views.map((view) => {
+const mergeEvent = (views: RunView[], runId: number, item: RunEvent, applyStatus = true): RunView[] => views.map((view) => {
   if (view.run.id !== runId || view.events.some((event) => event.seq === item.seq)) return view;
   const status = applyStatus ? eventStatus(item) : undefined;
   return {
@@ -93,7 +93,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       ));
       if (controller.signal.aborted || generation !== loadGeneration.current) return;
       setSession(detail);
-      setAgentName(agents.find((agent) => agent.id === detail.agentId)?.name ?? detail.agentId);
+      setAgentName(agents.find((agent) => agent.id === detail.agentId)?.name ?? String(detail.agentId));
       setViews(detail.runs.map((run, index) => {
         const history = histories[index];
         if (history?.status === "fulfilled") {

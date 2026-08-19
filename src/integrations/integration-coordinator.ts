@@ -134,7 +134,7 @@ export class IntegrationCoordinator {
     });
   }
 
-  async endConversation(endpointId: string, conversationKey: string): Promise<IntegrationConversation> {
+  async endConversation(endpointId: number, conversationKey: string): Promise<IntegrationConversation> {
     return this.withKeyedLock(`${endpointId}:${conversationKey}`, async () => this.inImmediateTransaction(() => {
       const active = this.dependencies.store.getActiveConversation(endpointId, conversationKey);
       if (active === undefined) {
@@ -149,7 +149,7 @@ export class IntegrationCoordinator {
     }));
   }
 
-  getTaskForEndpoint(id: string, endpointId: string): IntegrationTask | undefined {
+  getTaskForEndpoint(id: number, endpointId: number): IntegrationTask | undefined {
     return this.dependencies.store.getTaskForEndpoint(id, endpointId);
   }
 
@@ -167,12 +167,12 @@ export class IntegrationCoordinator {
     };
   }
 
-  getConversation(endpointId: string, conversationKey: string): IntegrationConversation | undefined {
+  getConversation(endpointId: number, conversationKey: string): IntegrationConversation | undefined {
     return this.dependencies.store.getActiveConversation(endpointId, conversationKey)
       ?? this.dependencies.store.getLatestConversation(endpointId, conversationKey);
   }
 
-  private idempotentTask(endpointId: string, requestId: string, fingerprint: string): IntegrationTask | undefined {
+  private idempotentTask(endpointId: number, requestId: string, fingerprint: string): IntegrationTask | undefined {
     const task = this.dependencies.store.getTaskByRequestId(endpointId, requestId);
     if (task !== undefined && task.requestFingerprint !== fingerprint) {
       throw new IntegrationCoordinatorError("idempotency_conflict");
@@ -185,7 +185,7 @@ export class IntegrationCoordinator {
     return prefix === "" ? message : `${prefix}\n\n${message}`;
   }
 
-  private async deleteCreatedSession(id: string): Promise<void> {
+  private async deleteCreatedSession(id: number): Promise<void> {
     try {
       await this.dependencies.sessionManager.delete(id);
     } catch (_cleanupError) {

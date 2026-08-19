@@ -1,4 +1,4 @@
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, rm, stat as systemStat } from "node:fs/promises";
 import { dirname } from "node:path";
 import { join } from "node:path";
 
@@ -14,7 +14,12 @@ export type BtrfsWorkspaceManagerDependencies = {
   projectEnvironmentsRoot: string;
   sessionsRoot: string;
   commandRunner: CommandRunner;
+  fileSystemInspector?: {
+    stat(path: string): Promise<{ dev: number }>;
+  };
 };
+
+const systemFileSystemInspector = { stat: systemStat };
 
 /**
  * Creates isolated writable Btrfs workspace snapshots for Sessions.
@@ -23,33 +28,52 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
   private readonly projectEnvironmentsRoot: string;
   private readonly sessionsRoot: string;
   private readonly commandRunner: CommandRunner;
+  private readonly fileSystemInspector: NonNullable<BtrfsWorkspaceManagerDependencies["fileSystemInspector"]>;
 
-  constructor({ projectEnvironmentsRoot, sessionsRoot, commandRunner }: BtrfsWorkspaceManagerDependencies) {
+  constructor({
+    projectEnvironmentsRoot,
+    sessionsRoot,
+    commandRunner,
+    fileSystemInspector = systemFileSystemInspector
+  }: BtrfsWorkspaceManagerDependencies) {
     this.projectEnvironmentsRoot = projectEnvironmentsRoot;
     this.sessionsRoot = sessionsRoot;
     this.commandRunner = commandRunner;
+    this.fileSystemInspector = fileSystemInspector;
   }
 
   /**
    * Verifies that project environments and Sessions use one Btrfs filesystem.
    */
   async check(): Promise<void> {
+    for (const root of [this.projectEnvironmentsRoot, this.sessionsRoot]) {
+      try {
+        await this.commandRunner.run("btrfs", ["filesystem", "show", root]);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new WorkspaceCheckError("btrfs command not found; install btrfs-progs");
+        }
+        throw new WorkspaceCheckError(`Linux workspace root is not on Btrfs or is not accessible: ${root}`);
+      }
+    }
+
     try {
-      await this.commandRunner.run("btrfs", ["filesystem", "show", this.projectEnvironmentsRoot]);
-      await this.commandRunner.run("btrfs", ["filesystem", "show", this.sessionsRoot]);
-      const environmentsDevice = (await stat(this.projectEnvironmentsRoot)).dev;
-      const sessionsDevice = (await stat(this.sessionsRoot)).dev;
-      if (environmentsDevice !== sessionsDevice) throw new Error("different filesystems");
-    } catch (_error) {
-      throw new WorkspaceCheckError("Linux workspace requires environments and sessions on the same Btrfs filesystem");
+      const environmentsDevice = (await this.fileSystemInspector.stat(this.projectEnvironmentsRoot)).dev;
+      const sessionsDevice = (await this.fileSystemInspector.stat(this.sessionsRoot)).dev;
+      if (environmentsDevice !== sessionsDevice) {
+        throw new WorkspaceCheckError("Linux workspace requires environments and sessions on the same Btrfs filesystem");
+      }
+    } catch (error) {
+      if (error instanceof WorkspaceCheckError) throw error;
+      throw new WorkspaceCheckError("Linux workspace roots could not be inspected");
     }
   }
 
   /**
    * Creates a Session from one explicitly selected environment revision.
    */
-  async createSession(id: string, sourcePath: string): Promise<Workspace> {
-    const sessionPath = join(this.sessionsRoot, id);
+  async createSession(id: number, sourcePath: string): Promise<Workspace> {
+    const sessionPath = join(this.sessionsRoot, String(id));
     const workspacePath = join(sessionPath, "workspace");
     const runtimePath = join(sessionPath, "runtime");
     const browserProfilePath = join(sessionPath, "browser");
@@ -72,12 +96,12 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
   }
 
   /** Removes a newly-created Session snapshot and its runtime directories. */
-  async deleteSession(id: string): Promise<void> {
-    const sessionPath = join(this.sessionsRoot, id);
+  async deleteSession(id: number): Promise<void> {
+    const sessionPath = join(this.sessionsRoot, String(id));
     const workspacePath = join(sessionPath, "workspace");
 
     try {
-      await stat(workspacePath);
+      await systemStat(workspacePath);
       await this.commandRunner.run("btrfs", ["subvolume", "delete", workspacePath]);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

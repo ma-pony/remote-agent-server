@@ -71,7 +71,7 @@ export class IntegrationEndpointManager {
     }));
   }
 
-  get(id: string): IntegrationEndpointDetail | undefined {
+  get(id: number): IntegrationEndpointDetail | undefined {
     const endpoint = this.store.getEndpoint(id);
     return endpoint === undefined ? undefined : this.toDetail(endpoint);
   }
@@ -86,7 +86,7 @@ export class IntegrationEndpointManager {
     return { endpoint: this.get(endpoint.id)!, token };
   }
 
-  update(id: string, input: UpdateIntegrationEndpointInput): IntegrationEndpointDetail {
+  update(id: number, input: UpdateIntegrationEndpointInput): IntegrationEndpointDetail {
     const existing = this.store.getEndpoint(id);
     if (existing === undefined) throw new IntegrationEndpointManagerError("endpoint_not_found");
     const conflictingEndpoint = this.store.getEndpointBySlug((input.slug ?? existing.slug).trim());
@@ -120,14 +120,14 @@ export class IntegrationEndpointManager {
     return this.get(id)!;
   }
 
-  rotateToken(id: string): { endpoint: IntegrationEndpointDetail; token: string } {
+  rotateToken(id: number): { endpoint: IntegrationEndpointDetail; token: string } {
     if (this.store.getEndpoint(id) === undefined) throw new IntegrationEndpointManagerError("endpoint_not_found");
     const token = endpointToken();
     this.store.rotateEndpointToken(id, tokenHash(token));
     return { endpoint: this.get(id)!, token };
   }
 
-  delete(id: string): void {
+  delete(id: number): void {
     if (this.store.getEndpoint(id) === undefined) throw new IntegrationEndpointManagerError("endpoint_not_found");
     if (this.store.endpointHasHistory(id)) throw new IntegrationEndpointManagerError("endpoint_in_use");
     this.store.deleteEndpoint(id);
@@ -143,7 +143,7 @@ export class IntegrationEndpointManager {
     return this.store.getEndpointByTokenHash(tokenHash(token));
   }
 
-  resolveRequest(endpointId: string, parameters: Record<string, string>): ResolvedIntegrationParameters {
+  resolveRequest(endpointId: number, parameters: Record<string, string>): ResolvedIntegrationParameters {
     const endpoint = this.store.getEndpoint(endpointId);
     if (endpoint === undefined) throw new IntegrationEndpointManagerError("endpoint_not_found");
     const definitions = this.parameterDefinitions(endpoint.agentId);
@@ -224,7 +224,7 @@ export class IntegrationEndpointManager {
     }
   }
 
-  private parameterDefinitions(agentId: string): Map<string, { key: string; required: boolean }> {
+  private parameterDefinitions(agentId: number): Map<string, { key: string; required: boolean }> {
     const rows = this.db.prepare("SELECT key, required FROM agent_session_parameters WHERE agent_id = ?")
       .all(agentId) as ParameterDefinitionRow[];
     return new Map(rows.map((row) => [row.key, { key: row.key, required: row.required === 1 }]));
@@ -242,7 +242,7 @@ export class IntegrationEndpointManager {
       : []));
   }
 
-  private fixedValues(endpointId: string): Record<string, string> {
+  private fixedValues(endpointId: number): Record<string, string> {
     const encrypted = this.store.endpointEncryptedFixedValues(endpointId);
     return encrypted === null || encrypted === undefined ? {} : JSON.parse(this.secrets.decrypt(encrypted)) as Record<string, string>;
   }

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 
@@ -42,11 +42,11 @@ export type ProjectEnvironmentBuilderDependencies = {
 /** Builds immutable project-environment revisions and atomically publishes successful output. */
 export class ProjectEnvironmentBuilder {
   private activeAbortController: AbortController | undefined;
-  private activeBuild: Promise<{ outcome: "unchanged" | "published"; revisionId?: string }> | undefined;
+  private activeBuild: Promise<{ outcome: "unchanged" | "published"; revisionId?: number }> | undefined;
 
   constructor(private readonly dependencies: ProjectEnvironmentBuilderDependencies) {}
 
-  async checkAndBuild(environmentId: string): Promise<{ outcome: "unchanged" | "published"; revisionId?: string }> {
+  async checkAndBuild(environmentId: number): Promise<{ outcome: "unchanged" | "published"; revisionId?: number }> {
     if (this.activeAbortController !== undefined) throw new Error("environment_builder_busy");
     const controller = new AbortController();
     this.activeAbortController = controller;
@@ -70,9 +70,9 @@ export class ProjectEnvironmentBuilder {
   }
 
   private async build(
-    environmentId: string,
+    environmentId: number,
     signal: AbortSignal
-  ): Promise<{ outcome: "unchanged" | "published"; revisionId?: string }> {
+  ): Promise<{ outcome: "unchanged" | "published"; revisionId?: number }> {
     const environment = this.dependencies.store.get(environmentId);
     if (environment === undefined) throw new Error("environment_not_found");
     if (environment.repositories.length === 0) throw new Error("environment_has_no_repositories");
@@ -106,21 +106,20 @@ export class ProjectEnvironmentBuilder {
       return { outcome: "unchanged" };
     }
 
-    const revisionId = randomUUID();
-    const workspacePath = join(
-      this.dependencies.projectEnvironmentsRoot,
-      environmentId,
-      "revisions",
-      revisionId,
-      "workspace"
-    );
     const revision = this.dependencies.store.beginRevision({
-      id: revisionId,
       projectEnvironmentId: environmentId,
       configurationFingerprint,
-      inputFingerprint,
-      workspacePath
+      inputFingerprint
     });
+    const revisionId = revision.id;
+    const workspacePath = join(
+      this.dependencies.projectEnvironmentsRoot,
+      String(environmentId),
+      "revisions",
+      String(revisionId),
+      "workspace"
+    );
+    this.dependencies.store.setRevisionWorkspacePath(revisionId, workspacePath);
     let stage = "workspace";
     try {
       await this.dependencies.workspaceManager.createRevision(workspacePath, current?.workspacePath ?? null);
@@ -184,7 +183,7 @@ export class ProjectEnvironmentBuilder {
     }
   }
 
-  private async cleanupOldRevisions(environmentId: string): Promise<void> {
+  private async cleanupOldRevisions(environmentId: number): Promise<void> {
     const ready = this.dependencies.store.listRevisions(environmentId).filter((item) => item.status === "ready");
     for (const revision of ready.slice(2)) {
       if (revision.workspacePath === null) continue;

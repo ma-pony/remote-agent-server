@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import type Database from "better-sqlite3";
 
 import type { AgentManager } from "../agents/agent-manager.js";
+import { insertedId } from "../db.js";
 import type { Agent, Session, SessionStatus, TokenUsageTotals } from "../domain.js";
 import { McpManager } from "../mcp/mcp-manager.js";
 import { SecretStore } from "../mcp/secret-store.js";
@@ -14,13 +15,13 @@ import type { AgentRuntime } from "../runtime/agent-runtime.js";
 import { WorkspaceCreateError, type WorkspaceManager } from "../workspaces/workspace-manager.js";
 
 type SessionRow = {
-  id: string;
-  agent_id: string;
+  id: number;
+  agent_id: number;
   title: string;
   status: SessionStatus;
   provider_session_id: string | null;
   workspace_path: string;
-  project_environment_revision_id: string | null;
+  project_environment_revision_id: number | null;
   instructions_snapshot: string;
   input_tokens: number | null;
   output_tokens: number | null;
@@ -61,7 +62,7 @@ const toSession = (row: SessionRow): Session => ({
 });
 
 export type CreateSessionInput = {
-  agentId: string;
+  agentId: number;
   title: string;
   mcpParameters: Record<string, string | null>;
 };
@@ -85,6 +86,24 @@ export type SessionManagerDependencies = {
   workspaceManager: WorkspaceManager;
   projectEnvironmentStore?: ProjectEnvironmentStore;
   mcpManager?: McpManager;
+};
+
+/** Removes Session creations interrupted before their Workspace became ready. */
+export const recoverIncompleteSessions = async (
+  db: Database.Database,
+  workspaceManager: WorkspaceManager
+): Promise<void> => {
+  const incomplete = db.prepare(
+    "SELECT id FROM sessions WHERE workspace_path LIKE 'pending:%' ORDER BY id"
+  ).all() as Array<{ id: number }>;
+  for (const { id } of incomplete) {
+    try {
+      await workspaceManager.deleteSession(id);
+    } catch (_error) {
+      // The incomplete database record must not become runnable; leftover files are harmless.
+    }
+    db.prepare("DELETE FROM sessions WHERE id = ? AND workspace_path LIKE 'pending:%'").run(id);
+  }
 };
 
 /**
@@ -131,26 +150,38 @@ export class SessionManager {
     }
     const mcpValues = this.mcpManager.normalizeSessionValues(agent.id, input.mcpParameters, true);
 
-    const id = randomUUID();
+    const createdAt = new Date().toISOString();
+    const id = insertedId(this.db.prepare(
+      "INSERT INTO sessions (agent_id, title, status, provider_session_id, workspace_path, project_environment_revision_id, instructions_snapshot, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).run(
+      agent.id,
+      input.title,
+      "running",
+      null,
+      `pending:${randomUUID()}`,
+      revision.id,
+      agent.instructions,
+      createdAt,
+      createdAt
+    ));
     let workspace;
     try {
       workspace = await this.workspaceManager.createSession(id, revision.workspacePath);
     } catch (error) {
+      this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
       if (error instanceof WorkspaceCreateError) throw error;
       throw new WorkspaceCreateError();
     }
 
-    const createdAt = new Date().toISOString();
     try {
       this.inImmediateTransaction(() => {
-        this.db
-          .prepare(
-            "INSERT INTO sessions (id, agent_id, title, status, provider_session_id, workspace_path, project_environment_revision_id, instructions_snapshot, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-          )
-          .run(id, agent.id, input.title, "idle", null, workspace.workspacePath, revision.id, agent.instructions, createdAt, createdAt);
+        const updated = this.db.prepare("UPDATE sessions SET workspace_path = ?, status = 'idle', updated_at = ? WHERE id = ? AND status = 'running'")
+          .run(workspace.workspacePath, new Date().toISOString(), id);
+        if (updated.changes !== 1) throw new Error("session_create_claim_lost");
         this.mcpManager.insertSessionValuesInTransaction(id, mcpValues);
       });
     } catch (_error) {
+      this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
       try {
         await this.workspaceManager.deleteSession(id);
       } catch (_rollbackError) {
@@ -183,13 +214,13 @@ export class SessionManager {
   /**
    * Looks up a Session by its identifier.
    */
-  get(id: string): SessionWithMcpStatus | undefined {
+  get(id: number): SessionWithMcpStatus | undefined {
     const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
     return row === undefined ? undefined : this.withMcpStatus(toSession(row));
   }
 
   /** Replaces all MCP values after a caller claims a Session in its own transaction. */
-  replaceMcpParametersInTransaction(id: string, values: Record<string, string | null>): void {
+  replaceMcpParametersInTransaction(id: number, values: Record<string, string | null>): void {
     if (!this.db.inTransaction) throw new Error("session_mcp_transaction_required");
     const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
     if (row === undefined) throw new SessionManagerError("session_not_found");
@@ -201,7 +232,7 @@ export class SessionManager {
   }
 
   /** Updates only the supplied MCP parameter values while the Session is idle. */
-  updateMcpParameters(id: string, values: Record<string, string | null>): SessionWithMcpStatus {
+  updateMcpParameters(id: number, values: Record<string, string | null>): SessionWithMcpStatus {
     return this.inImmediateTransaction(() => {
       const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
       if (row === undefined) throw new SessionManagerError("session_not_found");
@@ -218,7 +249,7 @@ export class SessionManager {
   /**
    * Loads the persisted Session and its Agent for one Runtime turn.
    */
-  getRuntimeContext(id: string): SessionRuntimeContext {
+  getRuntimeContext(id: number): SessionRuntimeContext {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
     const agent = this.agentManager.get(session.agentId);
@@ -230,7 +261,7 @@ export class SessionManager {
   /**
    * Saves the Provider's durable Session identifier before a Turn starts.
    */
-  saveProviderSessionId(id: string, providerSessionId: string | null): Session {
+  saveProviderSessionId(id: number, providerSessionId: string | null): Session {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
 
@@ -242,7 +273,7 @@ export class SessionManager {
   }
 
   /** Replaces the exact cumulative usage reported for the Provider Session. */
-  saveTokenUsage(id: string, usage: Partial<TokenUsageTotals>): Session {
+  saveTokenUsage(id: number, usage: Partial<TokenUsageTotals>): Session {
     const updatedAt = new Date().toISOString();
     const updated = this.db.prepare(`
       UPDATE sessions SET
@@ -268,7 +299,7 @@ export class SessionManager {
   /**
    * Resets the Provider's persisted runtime state, then clears the recorded ID.
    */
-  async resetProviderSession(id: string): Promise<Session> {
+  async resetProviderSession(id: number): Promise<Session> {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
 
@@ -285,7 +316,7 @@ export class SessionManager {
         browserProfilePath: join(dirname(session.workspacePath), "browser"),
         providerSessionId: session.providerSessionId,
         instructions: session.instructionsSnapshot,
-        memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8"),
+        memory: readFileSync(join(this.dataDir, "agents", String(agent.id), "MEMORY.md"), "utf8"),
         mcpServers: []
       });
     } catch (error) {
@@ -307,7 +338,7 @@ export class SessionManager {
   }
 
   /** Permanently removes an idle Session and every resource it owns. */
-  async delete(id: string): Promise<void> {
+  async delete(id: number): Promise<void> {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
     const agent = this.agentManager.get(session.agentId);
@@ -322,7 +353,7 @@ export class SessionManager {
       browserProfilePath: join(dirname(session.workspacePath), "browser"),
       providerSessionId: session.providerSessionId,
       instructions: session.instructionsSnapshot,
-      memory: readFileSync(join(this.dataDir, "agents", agent.id, "MEMORY.md"), "utf8"),
+      memory: readFileSync(join(this.dataDir, "agents", String(agent.id), "MEMORY.md"), "utf8"),
       mcpServers: []
     };
 
@@ -355,7 +386,7 @@ export class SessionManager {
     }
   }
 
-  private claimForDelete(id: string): void {
+  private claimForDelete(id: number): void {
     this.inImmediateTransaction(() => {
       const updatedAt = new Date().toISOString();
       const result = this.db.prepare(`
@@ -372,7 +403,7 @@ export class SessionManager {
     });
   }
 
-  private releaseDeleteClaim(id: string, clearProviderSessionId: boolean, cause: unknown): never {
+  private releaseDeleteClaim(id: number, clearProviderSessionId: boolean, cause: unknown): never {
     try {
       this.inImmediateTransaction(() => {
         const providerAssignment = clearProviderSessionId ? "provider_session_id = NULL," : "";
@@ -394,7 +425,7 @@ export class SessionManager {
     throw new SessionManagerError("session_delete_failed", { cause });
   }
 
-  private claimForReset(id: string): void {
+  private claimForReset(id: number): void {
     this.inImmediateTransaction(() => {
       const updatedAt = new Date().toISOString();
       const result = this.db
@@ -404,7 +435,7 @@ export class SessionManager {
     });
   }
 
-  private releaseResetClaim(id: string, clearProviderSessionId: boolean): Session {
+  private releaseResetClaim(id: number, clearProviderSessionId: boolean): Session {
     return this.inImmediateTransaction(() => {
       const updatedAt = new Date().toISOString();
       const providerAssignment = clearProviderSessionId

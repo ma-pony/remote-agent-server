@@ -8,14 +8,14 @@ import { SkillManagerError, type SkillManager } from "../skills/skill-manager.js
 const createAgentSchema = z.object({
   name: z.string().trim().min(1),
   provider: z.enum(["claude_code", "codex", "hermes"]),
-  projectEnvironmentId: z.string().uuid(),
+  projectEnvironmentId: z.number().int().positive(),
   instructions: z.string().max(20_000).default("")
 }).strict();
 
 const updateAgentSchema = z.object({
   name: z.string().trim().min(1).optional(),
   enabled: z.boolean().optional(),
-  projectEnvironmentId: z.string().uuid().optional(),
+  projectEnvironmentId: z.number().int().positive().optional(),
   instructions: z.string().max(20_000).optional()
 }).strict().refine(
   (input) => input.name !== undefined || input.enabled !== undefined
@@ -30,6 +30,10 @@ const uploadSkillSchema = z.object({
   fileName: z.string().trim().min(1).max(255).regex(/\.zip$/i),
   contentBase64: z.string().min(1).max(14_000_000).regex(/^[A-Za-z0-9+/]*={0,2}$/)
 }).strict();
+const parseId = (value: string): number | undefined => {
+  const parsed = z.coerce.number().int().positive().safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+};
 
 const badRequest = (reply: FastifyReply, message: string) =>
   reply.code(400).send({ error: { code: "invalid_request", message } });
@@ -73,7 +77,9 @@ export const registerAgentRoutes = (
   app.get("/agents", () => agentManager.list());
 
   app.get<{ Params: { id: string } }>("/agents/:id", (request, reply) => {
-    const agent = agentManager.get(request.params.id);
+    const id = parseId(request.params.id);
+    if (id === undefined) return notFound(reply);
+    const agent = agentManager.get(id);
     return agent === undefined ? notFound(reply) : agent;
   });
 
@@ -93,7 +99,9 @@ export const registerAgentRoutes = (
     if (!parsed.success) return badRequest(reply, "Invalid Agent update");
 
     try {
-      const agent = agentManager.update(request.params.id, parsed.data);
+      const id = parseId(request.params.id);
+      if (id === undefined) return notFound(reply);
+      const agent = agentManager.update(id, parsed.data);
       return agent === undefined ? notFound(reply) : agent;
     } catch (error) {
       return handleAgentError(reply, error);
@@ -102,7 +110,9 @@ export const registerAgentRoutes = (
 
   app.delete<{ Params: { id: string } }>("/agents/:id", (request, reply) => {
     try {
-      const result = agentManager.delete(request.params.id);
+      const id = parseId(request.params.id);
+      if (id === undefined) return notFound(reply);
+      const result = agentManager.delete(id);
       return result === "not_found" ? notFound(reply) : reply.code(204).send();
     } catch (error) {
       return handleAgentError(reply, error);
@@ -110,25 +120,30 @@ export const registerAgentRoutes = (
   });
 
   app.get<{ Params: { id: string } }>("/agents/:id/doctor", async (request, reply) => {
-    const result = await agentManager.doctor(request.params.id);
+    const id = parseId(request.params.id);
+    if (id === undefined) return notFound(reply);
+    const result = await agentManager.doctor(id);
     return result === undefined ? notFound(reply) : result;
   });
 
   app.get<{ Params: { id: string } }>("/agents/:id/usage", (request, reply) => {
-    if (agentManager.get(request.params.id) === undefined) return notFound(reply);
-    return runRepository.summarizeByAgent(request.params.id);
+    const id = parseId(request.params.id);
+    if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
+    return runRepository.summarizeByAgent(id);
   });
 
   app.get<{ Params: { id: string } }>("/agents/:id/skills", (request, reply) => {
-    if (agentManager.get(request.params.id) === undefined) return notFound(reply);
-    return skillManager.list(request.params.id);
+    const id = parseId(request.params.id);
+    if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
+    return skillManager.list(id);
   });
 
   app.put<{ Params: { id: string; skillId: string } }>("/agents/:id/skills/:skillId", (request, reply) => {
-    if (agentManager.get(request.params.id) === undefined) return notFound(reply);
+    const id = parseId(request.params.id);
+    if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
     const parsed = updateSkillSchema.safeParse(request.body);
     if (!parsed.success) return badRequest(reply, "Invalid Skill update");
-    const skill = skillManager.setEnabled(request.params.id, request.params.skillId, parsed.data.enabled);
+    const skill = skillManager.setEnabled(id, request.params.skillId, parsed.data.enabled);
     return skill === undefined
       ? reply.code(404).send({ error: { code: "skill_not_found", message: "Skill not found" } })
       : skill;
@@ -138,12 +153,13 @@ export const registerAgentRoutes = (
     "/agents/:id/skills/upload",
     { bodyLimit: 14 * 1024 * 1024 },
     (request, reply) => {
-      if (agentManager.get(request.params.id) === undefined) return notFound(reply);
+      const id = parseId(request.params.id);
+      if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
       const parsed = uploadSkillSchema.safeParse(request.body);
       if (!parsed.success) return badRequest(reply, "Invalid Skill ZIP upload");
       try {
         const skill = skillManager.upload(
-          request.params.id,
+          id,
           parsed.data.fileName,
           Buffer.from(parsed.data.contentBase64, "base64")
         );

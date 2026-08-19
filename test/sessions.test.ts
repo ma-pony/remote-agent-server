@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { AgentManager } from "../src/agents/agent-manager.js";
-import { SessionManager } from "../src/sessions/session-manager.js";
+import { recoverIncompleteSessions, SessionManager } from "../src/sessions/session-manager.js";
 import { BtrfsWorkspaceManager } from "../src/workspaces/btrfs-workspace.js";
 import type { CommandRunner } from "../src/workspaces/workspace-manager.js";
 import type { AgentRuntime, RuntimeDoctor, RuntimeSession, RuntimeSessionInput, RuntimeTurn, RuntimeTurnInput } from "../src/runtime/agent-runtime.js";
@@ -31,9 +31,9 @@ const createFakeRuntime = (reset = async (_input: RuntimeSessionInput): Promise<
   startTurn: (_input: RuntimeTurnInput): RuntimeTurn => {
     throw new Error("Fake Runtime does not start turns in Session API tests");
   },
-  cancel: async (_sessionId: string): Promise<void> => undefined,
+  cancel: async (_sessionId: number): Promise<void> => undefined,
   reset,
-  doctor: async (_provider: "claude_code" | "codex" | "hermes", _agentId: string): Promise<RuntimeDoctor> => ({
+  doctor: async (_provider: "claude_code" | "codex" | "hermes", _agentId: number): Promise<RuntimeDoctor> => ({
     ok: true,
     message: "ready",
     details: []
@@ -76,9 +76,9 @@ const createTestApp = async (options: {
   return { app, db, dataDir };
 };
 
-const createAgent = async (app: FastifyInstance): Promise<{ id: string }> => {
+const createAgent = async (app: FastifyInstance): Promise<{ id: number }> => {
   const environments = await app.inject({ method: "GET", url: "/api/project-environments", headers: authHeaders() });
-  const projectEnvironmentId = (environments.json() as Array<{ id: string }>)[0]!.id;
+  const projectEnvironmentId = (environments.json() as Array<{ id: number }>)[0]!.id;
   const response = await app.inject({
     method: "POST",
     url: "/api/agents",
@@ -86,10 +86,10 @@ const createAgent = async (app: FastifyInstance): Promise<{ id: string }> => {
     payload: { name: "Codex", provider: "codex", projectEnvironmentId }
   });
   expect(response.statusCode).toBe(201);
-  return response.json() as { id: string };
+  return response.json() as { id: number };
 };
 
-const createSession = async (app: FastifyInstance, agentId: string): Promise<{ id: string; workspacePath: string }> => {
+const createSession = async (app: FastifyInstance, agentId: number): Promise<{ id: number; workspacePath: string }> => {
   const response = await app.inject({
     method: "POST",
     url: "/api/sessions",
@@ -97,7 +97,7 @@ const createSession = async (app: FastifyInstance, agentId: string): Promise<{ i
     payload: { agentId, title: "修复工单 1332" }
   });
   expect(response.statusCode).toBe(201);
-  return response.json() as { id: string; workspacePath: string };
+  return response.json() as { id: number; workspacePath: string };
 };
 
 afterEach(async () => {
@@ -106,6 +106,27 @@ afterEach(async () => {
 });
 
 describe("Session API", () => {
+  it("启动时删除创建中断的 Session 和对应 Workspace", async () => {
+    const { db, seed } = createTestDatabase();
+    const inserted = db.prepare(
+      "INSERT INTO sessions (agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, ?, 'running', ?, ?, ?)"
+    ).run(seed.agent.id, "Incomplete", "pending:create", "2026-08-19", "2026-08-19");
+    const id = Number(inserted.lastInsertRowid);
+    const workspaceManager = {
+      check: vi.fn(async () => undefined),
+      createSession: vi.fn(),
+      deleteSession: vi.fn(async () => undefined),
+      createRevision: vi.fn(),
+      removeRevision: vi.fn()
+    };
+
+    await recoverIncompleteSessions(db, workspaceManager);
+
+    expect(workspaceManager.deleteSession).toHaveBeenCalledWith(id);
+    expect(db.prepare("SELECT id FROM sessions WHERE id = ?").get(id)).toBeUndefined();
+    db.close();
+  });
+
   it("列表按创建时间倒序返回最新会话", async () => {
     const { app, db } = await createTestApp();
     const agent = await createAgent(app);
@@ -117,7 +138,7 @@ describe("Session API", () => {
     const response = await app.inject({ method: "GET", url: "/api/sessions", headers: authHeaders() });
 
     expect(response.statusCode).toBe(200);
-    expect((response.json() as Array<{ id: string }>).map(({ id }) => id)).toEqual([newer.id, older.id]);
+    expect((response.json() as Array<{ id: number }>).map(({ id }) => id)).toEqual([newer.id, older.id]);
   });
 
   it("创建 Session 时保存 Agent 指令快照，之后修改 Agent 不影响已有 Session", async () => {
@@ -223,7 +244,7 @@ describe("Session API", () => {
       headers: authHeaders(),
       payload: { agentId: agent.id, title: "参数测试", mcpParameters: { tenant: "team-a", note: "old" } }
     });
-    const sessionId = (created.json() as { id: string }).id;
+    const sessionId = (created.json() as { id: number }).id;
 
     const updated = await app.inject({
       method: "PATCH",
@@ -241,8 +262,8 @@ describe("Session API", () => {
     });
 
     db.prepare(
-      "INSERT INTO runs (id, session_id, status, input, created_at) VALUES (?, ?, 'queued', ?, ?)"
-    ).run("busy-run", sessionId, "queued", "2026-08-13T00:00:00.000Z");
+      "INSERT INTO runs (session_id, status, input, created_at) VALUES (?, 'queued', ?, ?)"
+    ).run(sessionId, "queued", "2026-08-13T00:00:00.000Z");
     const busy = await app.inject({
       method: "PATCH",
       url: `/api/sessions/${sessionId}/mcp-parameters`,
@@ -288,7 +309,15 @@ describe("Session API", () => {
         expect(existsSync(sessionPath)).toBe(true);
         expect(existsSync(join(sessionPath, "runtime"))).toBe(true);
         expect(existsSync(join(sessionPath, "browser"))).toBe(true);
-        expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+        const pending = db.prepare("SELECT id, status FROM sessions").get() as { id: number; status: string };
+        expect(pending.status).toBe("running");
+        const runDuringSnapshot = await app.inject({
+          method: "POST",
+          url: `/api/sessions/${pending.id}/runs`,
+          headers: authHeaders(),
+          payload: { input: "must not start before workspace is ready" }
+        });
+        expect(runDuringSnapshot.statusCode).toBe(409);
         mkdirSync(workspacePath);
         snapshotCompleted = true;
         return { stdout: "", stderr: "" };
@@ -312,13 +341,13 @@ describe("Session API", () => {
       title: "修复工单 1332",
       status: "idle",
       providerSessionId: null,
-      projectEnvironmentRevisionId: expect.any(String)
+      projectEnvironmentRevisionId: expect.any(Number)
     });
-    const session = created.json() as { id: string; workspacePath: string };
+    const session = created.json() as { id: number; workspacePath: string };
     expect(existsSync(session.workspacePath)).toBe(true);
     expect(db.prepare("SELECT id, project_environment_revision_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
       id: session.id,
-      project_environment_revision_id: (created.json() as { projectEnvironmentRevisionId: string }).projectEnvironmentRevisionId
+      project_environment_revision_id: (created.json() as { projectEnvironmentRevisionId: number }).projectEnvironmentRevisionId
     });
 
     const detail = await app.inject({ method: "GET", url: `/api/sessions/${session.id}`, headers: authHeaders() });
@@ -359,7 +388,7 @@ describe("Session API", () => {
         calls.push({ command, args });
         if (args[1] === "snapshot") {
           expect(command).toBe("btrfs");
-          expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+          expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
           expect(existsSync(join(dirname(args[3]), "runtime"))).toBe(true);
           expect(existsSync(join(dirname(args[3]), "browser"))).toBe(true);
           mkdirSync(args[3]);
@@ -375,7 +404,7 @@ describe("Session API", () => {
     };
     const originalPrepare = db.prepare.bind(db);
     vi.spyOn(db, "prepare").mockImplementation(((sql: string) => {
-      if (sql.startsWith("INSERT INTO sessions")) {
+      if (sql.startsWith("UPDATE sessions SET workspace_path")) {
         return { run: () => { throw new Error("database write failed"); } } as never;
       }
       return originalPrepare(sql);
@@ -388,7 +417,7 @@ describe("Session API", () => {
       commandRunner
     });
     const manager = new SessionManager({ db, dataDir, agentManager, runtime, workspaceManager });
-    const agent = db.prepare("SELECT id FROM agents").get() as { id: string };
+    const agent = db.prepare("SELECT id FROM agents").get() as { id: number };
 
     await expect(manager.create({ agentId: agent.id, title: "修复工单 1332", mcpParameters: {} })).rejects.toMatchObject({
       code: "session_create_failed"
@@ -418,7 +447,7 @@ describe("Session API", () => {
     ({ app, db, dataDir } = await createTestApp({ runtime: createFakeRuntime(reset) }));
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
-    writeFileSync(join(dataDir, "agents", agent.id, "MEMORY.md"), "remember reset");
+    writeFileSync(join(dataDir, "agents", String(agent.id), "MEMORY.md"), "remember reset");
     db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
 
     const resetting = app.inject({ method: "POST", url: `/api/sessions/${session.id}/reset`, headers: authHeaders() });
@@ -542,16 +571,17 @@ describe("Session API", () => {
     });
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
-    writeFileSync(join(dataDir, "agents", agent.id, "MEMORY.md"), "remember delete");
+    writeFileSync(join(dataDir, "agents", String(agent.id), "MEMORY.md"), "remember delete");
     db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
     db.prepare(`
-      INSERT INTO runs (id, session_id, status, input, result, created_at, started_at, finished_at)
-      VALUES ('run-delete-1', ?, 'succeeded', 'question', 'answer', ?, ?, ?)
+      INSERT INTO runs (session_id, status, input, result, created_at, started_at, finished_at)
+      VALUES (?, 'succeeded', 'question', 'answer', ?, ?, ?)
     `).run(session.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:01.000Z", "2026-08-13T00:00:02.000Z");
+    const runId = Number(db.prepare("SELECT id FROM runs WHERE session_id = ?").pluck().get(session.id));
     db.prepare(`
-      INSERT INTO events (id, run_id, seq, type, content_json, created_at)
-      VALUES ('event-delete-1', 'run-delete-1', 1, 'message', '{"text":"answer"}', ?)
-    `).run("2026-08-13T00:00:01.000Z");
+      INSERT INTO events (run_id, seq, type, content_json, created_at)
+      VALUES (?, 1, 'message', '{"text":"answer"}', ?)
+    `).run(runId, "2026-08-13T00:00:01.000Z");
 
     const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
 
@@ -581,7 +611,7 @@ describe("Session API", () => {
     db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(session.id);
 
     const unauthorized = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}` });
-    const missing = await app.inject({ method: "DELETE", url: "/api/sessions/00000000-0000-0000-0000-000000000000", headers: authHeaders() });
+    const missing = await app.inject({ method: "DELETE", url: "/api/sessions/999999", headers: authHeaders() });
     const busy = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
 
     expect(unauthorized.statusCode).toBe(401);
@@ -624,7 +654,7 @@ describe("Session API", () => {
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
     db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
-    db.prepare(`INSERT INTO runs (id, session_id, status, input, created_at) VALUES ('run-preserved', ?, 'succeeded', 'question', ?)`)
+    db.prepare(`INSERT INTO runs (session_id, status, input, created_at) VALUES (?, 'succeeded', 'question', ?)`)
       .run(session.id, "2026-08-13T00:00:00.000Z");
 
     const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });

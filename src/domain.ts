@@ -26,17 +26,17 @@ export type TokenUsageSummary = {
 };
 
 export type ProjectEnvironment = {
-  id: string;
+  id: number;
   name: string;
-  currentRevisionId: string | null;
+  currentRevisionId: number | null;
   lastCheckedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
 
 export type EnvironmentRepository = {
-  id: string;
-  projectEnvironmentId: string;
+  id: number;
+  projectEnvironmentId: number;
   name: string;
   gitUrl: string;
   prepareCommand: string | null;
@@ -45,8 +45,8 @@ export type EnvironmentRepository = {
 };
 
 export type ProjectEnvironmentRevision = {
-  id: string;
-  projectEnvironmentId: string;
+  id: number;
+  projectEnvironmentId: number;
   status: ProjectEnvironmentRevisionStatus;
   workspacePath: string | null;
   inputFingerprint: string;
@@ -63,24 +63,24 @@ export type ProjectEnvironmentDetail = ProjectEnvironment & {
 };
 
 export type Agent = {
-  id: string;
+  id: number;
   name: string;
   provider: AgentProvider;
   enabled: boolean;
   instructions: string;
-  projectEnvironmentId: string | null;
+  projectEnvironmentId: number | null;
   createdAt: string;
   updatedAt: string;
 };
 
 export type Session = {
-  id: string;
-  agentId: string;
+  id: number;
+  agentId: number;
   title: string;
   status: SessionStatus;
   providerSessionId: string | null;
   workspacePath: string;
-  projectEnvironmentRevisionId: string | null;
+  projectEnvironmentRevisionId: number | null;
   instructionsSnapshot: string;
   usage: TokenUsageTotals | null;
   createdAt: string;
@@ -88,8 +88,8 @@ export type Session = {
 };
 
 export type Run = {
-  id: string;
-  sessionId: string;
+  id: number;
+  sessionId: number;
   status: RunStatus;
   input: string;
   result: string | null;
@@ -101,8 +101,8 @@ export type Run = {
 };
 
 export type Event = {
-  id: string;
-  runId: string;
+  id: number;
+  runId: number;
   seq: number;
   type: EventType;
   contentJson: string;

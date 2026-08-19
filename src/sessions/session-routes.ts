@@ -7,10 +7,14 @@ import { WorkspaceCreateError } from "../workspaces/workspace-manager.js";
 import { SessionManager, SessionManagerError } from "./session-manager.js";
 
 const createSessionSchema = z.object({
-  agentId: z.string().uuid(),
+  agentId: z.number().int().positive(),
   title: z.string().trim().min(1),
   mcpParameters: z.record(z.string(), z.string().nullable()).default({})
 }).strict();
+const parseId = (value: string): number | undefined => {
+  const parsed = z.coerce.number().int().positive().safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+};
 const updateMcpParametersSchema = z.object({
   values: z.record(z.string(), z.string().nullable())
 }).strict();
@@ -69,7 +73,8 @@ export const registerSessionRoutes = (
   });
 
   app.get<{ Params: { id: string } }>("/sessions/:id", (request, reply) => {
-    const session = sessionManager.get(request.params.id);
+    const id = parseId(request.params.id);
+    const session = id === undefined ? undefined : sessionManager.get(id);
     return session === undefined
       ? sendError(reply, 404, "not_found", "Session not found")
       : {
@@ -83,7 +88,9 @@ export const registerSessionRoutes = (
     const parsed = updateMcpParametersSchema.safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Session MCP parameters");
     try {
-      return sessionManager.updateMcpParameters(request.params.id, parsed.data.values);
+      const id = parseId(request.params.id);
+      if (id === undefined) return sendError(reply, 404, "not_found", "Session not found");
+      return sessionManager.updateMcpParameters(id, parsed.data.values);
     } catch (error) {
       return handleError(reply, error);
     }
@@ -91,7 +98,9 @@ export const registerSessionRoutes = (
 
   app.post<{ Params: { id: string } }>("/sessions/:id/reset", async (request, reply) => {
     try {
-      return await sessionManager.resetProviderSession(request.params.id);
+      const id = parseId(request.params.id);
+      if (id === undefined) return sendError(reply, 404, "not_found", "Session not found");
+      return await sessionManager.resetProviderSession(id);
     } catch (error) {
       return handleError(reply, error);
     }
@@ -99,7 +108,9 @@ export const registerSessionRoutes = (
 
   app.delete<{ Params: { id: string } }>("/sessions/:id", async (request, reply) => {
     try {
-      await sessionManager.delete(request.params.id);
+      const id = parseId(request.params.id);
+      if (id === undefined) return sendError(reply, 404, "not_found", "Session not found");
+      await sessionManager.delete(id);
       return reply.code(204).send();
     } catch (error) {
       return handleError(reply, error);

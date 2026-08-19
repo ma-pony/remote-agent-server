@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
+import { insertedId } from "../db.js";
 import type { Run, RunStatus } from "../domain.js";
 import type {
   IntegrationConversation,
@@ -16,10 +17,10 @@ import type {
 } from "./integration-types.js";
 
 type EndpointRow = {
-  id: string;
+  id: number;
   name: string;
   slug: string;
-  agent_id: string;
+  agent_id: number;
   enabled: 0 | 1;
   token_hash: string;
   prompt_prefix: string;
@@ -31,21 +32,21 @@ type EndpointRow = {
 };
 
 type ConversationRow = {
-  id: string;
-  endpoint_id: string;
+  id: number;
+  endpoint_id: number;
   conversation_key: string;
-  session_id: string;
+  session_id: number;
   status: IntegrationConversationStatus;
   created_at: string;
   ended_at: string | null;
 };
 
 type TaskRow = {
-  id: string;
-  endpoint_id: string;
-  conversation_id: string | null;
-  session_id: string;
-  run_id: string | null;
+  id: number;
+  endpoint_id: number;
+  conversation_id: number | null;
+  session_id: number;
+  run_id: number | null;
   request_id: string;
   request_fingerprint: string;
   message: string;
@@ -66,8 +67,8 @@ type TaskRow = {
 };
 
 type SubscriptionRow = {
-  id: string;
-  endpoint_id: string;
+  id: number;
+  endpoint_id: number;
   name: string;
   url: string;
   enabled: 0 | 1;
@@ -80,13 +81,13 @@ type SubscriptionRow = {
 };
 
 type DeliveryRow = {
-  id: string;
+  id: number;
   event_id: string;
   event_key: string;
   sequence: number;
   dispatch_order: number;
-  subscription_id: string;
-  task_id: string | null;
+  subscription_id: number;
+  task_id: number | null;
   event_type: string;
   payload_json: string;
   status: WebhookDeliveryStatus;
@@ -100,8 +101,8 @@ type DeliveryRow = {
 };
 
 type LinkedRunRow = {
-  id: string;
-  session_id: string;
+  id: number;
+  session_id: number;
   status: RunStatus;
   input: string;
   result: string | null;
@@ -112,27 +113,26 @@ type LinkedRunRow = {
 };
 
 type EndpointManagementSummaryRow = {
-  endpoint_id: string;
+  endpoint_id: number;
   active_conversation_count: number;
   active_task_count: number;
-  latest_task_id: string | null;
+  latest_task_id: number | null;
   latest_task_request_id: string | null;
   latest_task_status: IntegrationTaskStatus | null;
   latest_task_created_at: string | null;
 };
 
 export type EndpointManagementSummary = {
-  endpointId: string;
+  endpointId: number;
   activeConversationCount: number;
   activeTaskCount: number;
   latestTask: Pick<IntegrationTask, "id" | "requestId" | "status" | "createdAt"> | null;
 };
 
 export type EndpointPersistenceInput = {
-  id?: string;
   name: string;
   slug: string;
-  agentId: string;
+  agentId: number;
   enabled: boolean;
   tokenHash: string;
   promptPrefix: string;
@@ -141,17 +141,15 @@ export type EndpointPersistenceInput = {
 };
 
 export type CreateIntegrationConversationInput = {
-  id?: string;
-  endpointId: string;
+  endpointId: number;
   conversationKey: string;
-  sessionId: string;
+  sessionId: number;
 };
 
 export type CreateIntegrationTaskInput = {
-  id?: string;
-  endpointId: string;
-  conversationId: string | null;
-  sessionId: string;
+  endpointId: number;
+  conversationId: number | null;
+  sessionId: number;
   requestId: string;
   requestFingerprint: string;
   message: string;
@@ -160,8 +158,7 @@ export type CreateIntegrationTaskInput = {
 };
 
 export type CreateWebhookSubscriptionInput = {
-  id?: string;
-  endpointId: string;
+  endpointId: number;
   name: string;
   url: string;
   enabled: boolean;
@@ -174,12 +171,11 @@ export type CreateWebhookSubscriptionInput = {
 export type UpdateWebhookSubscriptionInput = Omit<CreateWebhookSubscriptionInput, "id" | "endpointId">;
 
 export type CreateWebhookDeliveryInput = {
-  id?: string;
   eventId: string;
   eventKey: string;
   sequence: number;
-  subscriptionId: string;
-  taskId: string | null;
+  subscriptionId: number;
+  taskId: number | null;
   eventType: string;
   payloadJson: string;
   nextAttemptAt: string;
@@ -188,14 +184,14 @@ export type CreateWebhookDeliveryInput = {
 type PersistedWebhookDeliveryInput = CreateWebhookDeliveryInput & { dispatchOrder: number };
 
 export type AppendTaskEventInput = {
-  taskId: string;
+  taskId: number;
   eventType: string;
   eventKey?: string;
   occurredAt?: string;
   payload: Record<string, unknown>;
 };
 
-export const webhookEventId = (endpointId: string, eventKey: string): string =>
+export const webhookEventId = (endpointId: number, eventKey: string): string =>
   `evt_${createHash("sha256").update(`${endpointId}:${eventKey}`, "utf8").digest("hex").slice(0, 32)}`;
 
 const publicToolPayload = (eventType: string, input: Record<string, unknown>): Record<string, unknown> => {
@@ -301,7 +297,7 @@ const toRun = (row: LinkedRunRow): Run => ({
 
 /** Stores integration state; InTransaction methods join a caller-owned SQLite transaction. */
 export class IntegrationStore {
-  private readonly taskListeners = new Map<string, Set<() => unknown>>();
+  private readonly taskListeners = new Map<number, Set<() => unknown>>();
   private readonly deliveryListeners = new Set<() => unknown>();
 
   constructor(private readonly dependencies: { db: Database.Database }) {}
@@ -358,7 +354,7 @@ export class IntegrationStore {
     }));
   }
 
-  getEndpoint(id: string): IntegrationEndpoint | undefined {
+  getEndpoint(id: number): IntegrationEndpoint | undefined {
     const row = this.endpointRow(id);
     return row === undefined ? undefined : toEndpoint(row);
   }
@@ -368,7 +364,7 @@ export class IntegrationStore {
     return row === undefined ? undefined : toEndpoint(row);
   }
 
-  endpointTokenHash(id: string): string | undefined {
+  endpointTokenHash(id: number): string | undefined {
     return (this.db.prepare("SELECT token_hash FROM integration_endpoints WHERE id = ?").get(id) as { token_hash: string } | undefined)?.token_hash;
   }
 
@@ -384,7 +380,7 @@ export class IntegrationStore {
     return row === undefined ? undefined : toEndpoint(row);
   }
 
-  endpointEncryptedFixedValues(id: string): string | null | undefined {
+  endpointEncryptedFixedValues(id: number): string | null | undefined {
     const row = this.db.prepare("SELECT encrypted_fixed_values FROM integration_endpoints WHERE id = ?").get(id) as
       | { encrypted_fixed_values: string | null }
       | undefined;
@@ -396,24 +392,23 @@ export class IntegrationStore {
   }
 
   createEndpointInTransaction(input: EndpointPersistenceInput): IntegrationEndpoint {
-    const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare(`
+    const id = insertedId(this.db.prepare(`
       INSERT INTO integration_endpoints
-        (id, name, slug, agent_id, enabled, token_hash, prompt_prefix, parameter_mappings_json, encrypted_fixed_values, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (name, slug, agent_id, enabled, token_hash, prompt_prefix, parameter_mappings_json, encrypted_fixed_values, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      id, input.name, input.slug, input.agentId, input.enabled ? 1 : 0, input.tokenHash, input.promptPrefix,
+      input.name, input.slug, input.agentId, input.enabled ? 1 : 0, input.tokenHash, input.promptPrefix,
       JSON.stringify(input.parameterMappings), input.encryptedFixedValues, now, now
-    );
+    ));
     return this.getEndpoint(id)!;
   }
 
-  updateEndpoint(id: string, input: EndpointPersistenceInput): IntegrationEndpoint | undefined {
+  updateEndpoint(id: number, input: EndpointPersistenceInput): IntegrationEndpoint | undefined {
     return this.immediateTransaction(() => this.updateEndpointInTransaction(id, input));
   }
 
-  updateEndpointInTransaction(id: string, input: EndpointPersistenceInput): IntegrationEndpoint | undefined {
+  updateEndpointInTransaction(id: number, input: EndpointPersistenceInput): IntegrationEndpoint | undefined {
     const result = this.db.prepare(`
       UPDATE integration_endpoints SET
         name = ?, slug = ?, agent_id = ?, enabled = ?, token_hash = ?, prompt_prefix = ?,
@@ -426,31 +421,31 @@ export class IntegrationStore {
     return result.changes === 0 ? undefined : this.getEndpoint(id)!;
   }
 
-  rotateEndpointToken(id: string, tokenHash: string): IntegrationEndpoint | undefined {
+  rotateEndpointToken(id: number, tokenHash: string): IntegrationEndpoint | undefined {
     return this.immediateTransaction(() => this.rotateEndpointTokenInTransaction(id, tokenHash));
   }
 
-  rotateEndpointTokenInTransaction(id: string, tokenHash: string): IntegrationEndpoint | undefined {
+  rotateEndpointTokenInTransaction(id: number, tokenHash: string): IntegrationEndpoint | undefined {
     const result = this.db.prepare("UPDATE integration_endpoints SET token_hash = ?, updated_at = ? WHERE id = ?")
       .run(tokenHash, new Date().toISOString(), id);
     return result.changes === 0 ? undefined : this.getEndpoint(id)!;
   }
 
-  deleteEndpoint(id: string): boolean {
+  deleteEndpoint(id: number): boolean {
     return this.immediateTransaction(() => this.deleteEndpointInTransaction(id));
   }
 
-  deleteEndpointInTransaction(id: string): boolean {
+  deleteEndpointInTransaction(id: number): boolean {
     return this.db.prepare("DELETE FROM integration_endpoints WHERE id = ?").run(id).changes === 1;
   }
 
-  listConversations(endpointId: string): IntegrationConversation[] {
+  listConversations(endpointId: number): IntegrationConversation[] {
     return (this.db.prepare(`
       SELECT * FROM integration_conversations WHERE endpoint_id = ? ORDER BY created_at ASC, id ASC
     `).all(endpointId) as ConversationRow[]).map(toConversation);
   }
 
-  getActiveConversation(endpointId: string, conversationKey: string): IntegrationConversation | undefined {
+  getActiveConversation(endpointId: number, conversationKey: string): IntegrationConversation | undefined {
     const row = this.db.prepare(`
       SELECT * FROM integration_conversations
       WHERE endpoint_id = ? AND conversation_key = ? AND status = 'active'
@@ -458,7 +453,7 @@ export class IntegrationStore {
     return row === undefined ? undefined : toConversation(row);
   }
 
-  getLatestConversation(endpointId: string, conversationKey: string): IntegrationConversation | undefined {
+  getLatestConversation(endpointId: number, conversationKey: string): IntegrationConversation | undefined {
     const row = this.db.prepare(`
       SELECT * FROM integration_conversations
       WHERE endpoint_id = ? AND conversation_key = ?
@@ -468,7 +463,7 @@ export class IntegrationStore {
     return row === undefined ? undefined : toConversation(row);
   }
 
-  getConversation(id: string): IntegrationConversation | undefined {
+  getConversation(id: number): IntegrationConversation | undefined {
     const row = this.conversationRow(id);
     return row === undefined ? undefined : toConversation(row);
   }
@@ -478,52 +473,51 @@ export class IntegrationStore {
   }
 
   createConversationInTransaction(input: CreateIntegrationConversationInput): IntegrationConversation {
-    const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare(`
-      INSERT INTO integration_conversations (id, endpoint_id, conversation_key, session_id, status, created_at, ended_at)
-      VALUES (?, ?, ?, ?, 'active', ?, NULL)
-    `).run(id, input.endpointId, input.conversationKey, input.sessionId, now);
+    const id = insertedId(this.db.prepare(`
+      INSERT INTO integration_conversations (endpoint_id, conversation_key, session_id, status, created_at, ended_at)
+      VALUES (?, ?, ?, 'active', ?, NULL)
+    `).run(input.endpointId, input.conversationKey, input.sessionId, now));
     return toConversation(this.conversationRow(id)!);
   }
 
-  endConversationInTransaction(id: string): IntegrationConversation | undefined {
+  endConversationInTransaction(id: number): IntegrationConversation | undefined {
     const result = this.db.prepare(`
       UPDATE integration_conversations SET status = 'ended', ended_at = ? WHERE id = ? AND status = 'active'
     `).run(new Date().toISOString(), id);
     return result.changes === 0 ? undefined : toConversation(this.conversationRow(id)!);
   }
 
-  endConversation(id: string): IntegrationConversation | undefined {
+  endConversation(id: number): IntegrationConversation | undefined {
     return this.immediateTransaction(() => this.endConversationInTransaction(id));
   }
 
-  listTasks(endpointId: string): IntegrationTask[] {
+  listTasks(endpointId: number): IntegrationTask[] {
     return (this.db.prepare(`
       SELECT * FROM integration_tasks WHERE endpoint_id = ? ORDER BY created_at ASC, id ASC
     `).all(endpointId) as TaskRow[]).map(toTask);
   }
 
-  getTask(id: string): IntegrationTask | undefined {
+  getTask(id: number): IntegrationTask | undefined {
     const row = this.taskRow(id);
     return row === undefined ? undefined : toTask(row);
   }
 
-  getTaskByRequestId(endpointId: string, requestId: string): IntegrationTask | undefined {
+  getTaskByRequestId(endpointId: number, requestId: string): IntegrationTask | undefined {
     const row = this.db.prepare(`
       SELECT * FROM integration_tasks WHERE endpoint_id = ? AND request_id = ?
     `).get(endpointId, requestId) as TaskRow | undefined;
     return row === undefined ? undefined : toTask(row);
   }
 
-  getTaskForEndpoint(id: string, endpointId: string): IntegrationTask | undefined {
+  getTaskForEndpoint(id: number, endpointId: number): IntegrationTask | undefined {
     const row = this.db.prepare(`
       SELECT * FROM integration_tasks WHERE id = ? AND endpoint_id = ?
     `).get(id, endpointId) as TaskRow | undefined;
     return row === undefined ? undefined : toTask(row);
   }
 
-  getTaskByRun(runId: string): IntegrationTask | undefined {
+  getTaskByRun(runId: number): IntegrationTask | undefined {
     const row = this.db.prepare("SELECT * FROM integration_tasks WHERE run_id = ?").get(runId) as TaskRow | undefined;
     return row === undefined ? undefined : toTask(row);
   }
@@ -560,7 +554,7 @@ export class IntegrationStore {
   }
 
   /** Links an unclaimed queued Task to a newly-inserted Run in the caller's transaction. */
-  linkTaskRunInTransaction(taskId: string, runId: string): IntegrationTask {
+  linkTaskRunInTransaction(taskId: number, runId: number): IntegrationTask {
     const result = this.db.prepare(`
       UPDATE integration_tasks SET run_id = ?
       WHERE id = ? AND status = 'queued' AND run_id IS NULL
@@ -570,7 +564,7 @@ export class IntegrationStore {
   }
 
   /** Notifies in-process Task observers after the owning transaction has committed. */
-  notifyTaskChanged(taskId: string): void {
+  notifyTaskChanged(taskId: number): void {
     for (const listener of [...(this.taskListeners.get(taskId) ?? [])]) {
       try {
         void Promise.resolve(listener()).catch(() => undefined);
@@ -596,7 +590,7 @@ export class IntegrationStore {
     return () => this.deliveryListeners.delete(listener);
   }
 
-  subscribeTask(taskId: string, listener: () => unknown): () => void {
+  subscribeTask(taskId: number, listener: () => unknown): () => void {
     let listeners = this.taskListeners.get(taskId);
     if (listeners === undefined) {
       listeners = new Set();
@@ -609,7 +603,7 @@ export class IntegrationStore {
     };
   }
 
-  markTaskRunningInTransaction(runId: string, startedAt: string): IntegrationTask | undefined {
+  markTaskRunningInTransaction(runId: number, startedAt: string): IntegrationTask | undefined {
     const result = this.db.prepare(`
       UPDATE integration_tasks SET status = 'running', started_at = ?
       WHERE run_id = ? AND status = 'queued'
@@ -640,7 +634,7 @@ export class IntegrationStore {
   }
 
   /** Terminates a queued Task that cannot create a Run. */
-  failTaskBeforeRun(id: string, failure: { code: string; message: string }): IntegrationTask | undefined {
+  failTaskBeforeRun(id: number, failure: { code: string; message: string }): IntegrationTask | undefined {
     const failed = this.immediateTransaction(() => {
       const finishedAt = new Date().toISOString();
       const result = this.db.prepare(`
@@ -672,7 +666,7 @@ export class IntegrationStore {
   }
 
   /** Cancels only an unlinked queued Task and emits its Webhook event atomically. */
-  cancelUnlinkedQueuedTask(id: string, endpointId: string): IntegrationTask | undefined {
+  cancelUnlinkedQueuedTask(id: number, endpointId: number): IntegrationTask | undefined {
     const cancelled = this.immediateTransaction(() => {
       const finishedAt = new Date().toISOString();
       const result = this.db.prepare(`
@@ -726,21 +720,20 @@ export class IntegrationStore {
   }
 
   createTaskInTransaction(input: CreateIntegrationTaskInput): IntegrationTask {
-    const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare(`
+    const id = insertedId(this.db.prepare(`
       INSERT INTO integration_tasks
-        (id, endpoint_id, conversation_id, session_id, run_id, request_id, request_fingerprint, message, effective_prompt,
+        (endpoint_id, conversation_id, session_id, run_id, request_id, request_fingerprint, message, effective_prompt,
          encrypted_parameters, status, result, error, event_sequence, created_at, started_at, finished_at)
-      VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, 'queued', NULL, NULL, 0, ?, NULL, NULL)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, 'queued', NULL, NULL, 0, ?, NULL, NULL)
     `).run(
-      id, input.endpointId, input.conversationId, input.sessionId, input.requestId, input.requestFingerprint,
+      input.endpointId, input.conversationId, input.sessionId, input.requestId, input.requestFingerprint,
       input.message, input.effectivePrompt, input.encryptedParameters, now
-    );
+    ));
     return toTask(this.taskRow(id)!);
   }
 
-  conversationHasActiveTasks(conversationId: string): boolean {
+  conversationHasActiveTasks(conversationId: number): boolean {
     return this.db.prepare(`
       SELECT 1 FROM integration_tasks
       WHERE conversation_id = ? AND status IN ('queued', 'running')
@@ -748,18 +741,18 @@ export class IntegrationStore {
     `).get(conversationId) !== undefined;
   }
 
-  listSubscriptions(endpointId: string): WebhookSubscription[] {
+  listSubscriptions(endpointId: number): WebhookSubscription[] {
     return (this.db.prepare(`
       SELECT * FROM webhook_subscriptions WHERE endpoint_id = ? ORDER BY created_at ASC, id ASC
     `).all(endpointId) as SubscriptionRow[]).map(toSubscription);
   }
 
-  getSubscription(id: string): WebhookSubscription | undefined {
+  getSubscription(id: number): WebhookSubscription | undefined {
     const row = this.subscriptionRow(id);
     return row === undefined ? undefined : toSubscription(row);
   }
 
-  getSubscriptionForEndpoint(id: string, endpointId: string): WebhookSubscription | undefined {
+  getSubscriptionForEndpoint(id: number, endpointId: number): WebhookSubscription | undefined {
     const row = this.db.prepare(`
       SELECT * FROM webhook_subscriptions WHERE id = ? AND endpoint_id = ?
     `).get(id, endpointId) as SubscriptionRow | undefined;
@@ -771,20 +764,19 @@ export class IntegrationStore {
   }
 
   createSubscriptionInTransaction(input: CreateWebhookSubscriptionInput): WebhookSubscription {
-    const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare(`
+    const id = insertedId(this.db.prepare(`
       INSERT INTO webhook_subscriptions
-        (id, endpoint_id, name, url, enabled, events_json, encrypted_headers, encrypted_signing_secret, timeout_seconds, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (endpoint_id, name, url, enabled, events_json, encrypted_headers, encrypted_signing_secret, timeout_seconds, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
-      id, input.endpointId, input.name, input.url, input.enabled ? 1 : 0, input.eventsJson,
+      input.endpointId, input.name, input.url, input.enabled ? 1 : 0, input.eventsJson,
       input.encryptedHeaders, input.encryptedSigningSecret, input.timeoutSeconds, now, now
-    );
+    ));
     return toSubscription(this.subscriptionRow(id)!);
   }
 
-  updateSubscription(id: string, input: UpdateWebhookSubscriptionInput): WebhookSubscription | undefined {
+  updateSubscription(id: number, input: UpdateWebhookSubscriptionInput): WebhookSubscription | undefined {
     const subscription = this.immediateTransaction(() => {
       const result = this.db.prepare(`
         UPDATE webhook_subscriptions SET
@@ -808,22 +800,22 @@ export class IntegrationStore {
     return subscription;
   }
 
-  deleteSubscription(id: string): boolean {
+  deleteSubscription(id: number): boolean {
     return this.immediateTransaction(() => {
       this.db.prepare("DELETE FROM webhook_deliveries WHERE subscription_id = ?").run(id);
       return this.db.prepare("DELETE FROM webhook_subscriptions WHERE id = ?").run(id).changes === 1;
     });
   }
 
-  listDeliveries(subscriptionId: string): WebhookDelivery[] {
+  listDeliveries(subscriptionId: number): WebhookDelivery[] {
     return (this.db.prepare(`
       SELECT * FROM webhook_deliveries
       WHERE subscription_id = ?
-      ORDER BY dispatch_order ASC, rowid ASC
+      ORDER BY dispatch_order ASC, id ASC
     `).all(subscriptionId) as DeliveryRow[]).map(toDelivery);
   }
 
-  listDeliveriesForEndpoint(endpointId: string): WebhookDelivery[] {
+  listDeliveriesForEndpoint(endpointId: number): WebhookDelivery[] {
     return (this.db.prepare(`
       SELECT delivery.*
       FROM webhook_deliveries delivery
@@ -833,12 +825,12 @@ export class IntegrationStore {
     `).all(endpointId) as DeliveryRow[]).map(toDelivery);
   }
 
-  getDelivery(id: string): WebhookDelivery | undefined {
+  getDelivery(id: number): WebhookDelivery | undefined {
     const row = this.deliveryRow(id);
     return row === undefined ? undefined : toDelivery(row);
   }
 
-  findDeliveryByEventKey(subscriptionId: string, eventKey: string): WebhookDelivery | undefined {
+  findDeliveryByEventKey(subscriptionId: number, eventKey: string): WebhookDelivery | undefined {
     const row = this.db.prepare(`
       SELECT * FROM webhook_deliveries WHERE subscription_id = ? AND event_key = ?
     `).get(subscriptionId, eventKey) as DeliveryRow | undefined;
@@ -846,7 +838,7 @@ export class IntegrationStore {
   }
 
   /** Checks whether an enabled subscriber is missing all equivalent keys for one Task event. */
-  needsTaskEventDelivery(taskId: string, eventType: string, eventKeys: string[]): boolean {
+  needsTaskEventDelivery(taskId: number, eventType: string, eventKeys: string[]): boolean {
     const task = this.taskRow(taskId);
     if (task === undefined) return false;
     const subscriptions = this.db.prepare(`
@@ -872,7 +864,7 @@ export class IntegrationStore {
     const existing = this.db.prepare(`
         SELECT * FROM webhook_deliveries
         WHERE task_id = ? AND event_key = ?
-        ORDER BY rowid ASC
+        ORDER BY id ASC
       `).all(task.id, eventKey) as DeliveryRow[];
     const firstExisting = existing[0];
     const knownSequence = eventSequences[eventKey];
@@ -934,20 +926,19 @@ export class IntegrationStore {
   }
 
   createDeliveryInTransaction(input: PersistedWebhookDeliveryInput): WebhookDelivery {
-    const id = input.id ?? randomUUID();
     const now = new Date().toISOString();
-    this.db.prepare(`
+    const result = this.db.prepare(`
       INSERT INTO webhook_deliveries
-        (id, event_id, event_key, sequence, dispatch_order, subscription_id, task_id, event_type, payload_json,
+        (event_id, event_key, sequence, dispatch_order, subscription_id, task_id, event_type, payload_json,
          status, attempt_count,
          next_attempt_at, last_status_code, last_duration_ms, last_error, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, NULL, NULL, NULL, ?, ?)
       ON CONFLICT(subscription_id, event_key) DO NOTHING
     `).run(
-      id, input.eventId, input.eventKey, input.sequence, input.dispatchOrder, input.subscriptionId, input.taskId,
+      input.eventId, input.eventKey, input.sequence, input.dispatchOrder, input.subscriptionId, input.taskId,
       input.eventType, input.payloadJson, input.nextAttemptAt, now, now
     );
-    const row = this.deliveryRow(id) ?? this.db.prepare(`
+    const row = result.changes === 1 ? this.deliveryRow(insertedId(result)) : this.db.prepare(`
       SELECT * FROM webhook_deliveries WHERE subscription_id = ? AND event_key = ?
     `).get(input.subscriptionId, input.eventKey) as DeliveryRow | undefined;
     return toDelivery(row!);
@@ -962,15 +953,15 @@ export class IntegrationStore {
       WHERE delivery.status = 'pending'
         AND delivery.next_attempt_at <= ?
         AND subscription.enabled = 1
-        AND delivery.rowid = (
-          SELECT earlier.rowid
+        AND delivery.id = (
+          SELECT earlier.id
           FROM webhook_deliveries earlier
           WHERE earlier.subscription_id = delivery.subscription_id
             AND earlier.status IN ('pending', 'delivering')
-          ORDER BY earlier.dispatch_order ASC, earlier.rowid ASC
+          ORDER BY earlier.dispatch_order ASC, earlier.id ASC
           LIMIT 1
         )
-      ORDER BY delivery.dispatch_order ASC, delivery.rowid ASC
+      ORDER BY delivery.dispatch_order ASC, delivery.id ASC
     `).all(now) as DeliveryRow[];
     return rows.map(toDelivery);
   }
@@ -982,12 +973,12 @@ export class IntegrationStore {
       JOIN webhook_subscriptions subscription ON subscription.id = delivery.subscription_id
       WHERE delivery.status = 'pending'
         AND subscription.enabled = 1
-        AND delivery.rowid = (
-          SELECT earlier.rowid
+        AND delivery.id = (
+          SELECT earlier.id
           FROM webhook_deliveries earlier
           WHERE earlier.subscription_id = delivery.subscription_id
             AND earlier.status IN ('pending', 'delivering')
-          ORDER BY earlier.dispatch_order ASC, earlier.rowid ASC
+          ORDER BY earlier.dispatch_order ASC, earlier.id ASC
           LIMIT 1
         )
     `).get() as { next_attempt_at: string | null };
@@ -995,7 +986,7 @@ export class IntegrationStore {
   }
 
   /** Atomically claims a due head Delivery and increments its persisted attempt count. */
-  claimDelivery(id: string, now = new Date().toISOString()): WebhookDelivery | undefined {
+  claimDelivery(id: number, now = new Date().toISOString()): WebhookDelivery | undefined {
     return this.immediateTransaction(() => {
       const candidate = this.db.prepare(`
         SELECT delivery.id
@@ -1005,15 +996,15 @@ export class IntegrationStore {
           AND delivery.status = 'pending'
           AND delivery.next_attempt_at <= ?
           AND subscription.enabled = 1
-          AND delivery.rowid = (
-            SELECT earlier.rowid
+          AND delivery.id = (
+            SELECT earlier.id
             FROM webhook_deliveries earlier
             WHERE earlier.subscription_id = delivery.subscription_id
               AND earlier.status IN ('pending', 'delivering')
-            ORDER BY earlier.dispatch_order ASC, earlier.rowid ASC
+            ORDER BY earlier.dispatch_order ASC, earlier.id ASC
             LIMIT 1
           )
-      `).get(id, now) as { id: string } | undefined;
+      `).get(id, now) as { id: number } | undefined;
       if (candidate === undefined) return undefined;
       const result = this.db.prepare(`
         UPDATE webhook_deliveries
@@ -1024,7 +1015,7 @@ export class IntegrationStore {
     });
   }
 
-  markDeliverySucceeded(id: string, input: { statusCode: number; durationMs: number }): WebhookDelivery | undefined {
+  markDeliverySucceeded(id: number, input: { statusCode: number; durationMs: number }): WebhookDelivery | undefined {
     return this.immediateTransaction(() => {
       const result = this.db.prepare(`
         UPDATE webhook_deliveries
@@ -1035,7 +1026,7 @@ export class IntegrationStore {
     });
   }
 
-  markDeliveryFailed(id: string, input: {
+  markDeliveryFailed(id: number, input: {
     terminal: boolean;
     nextAttemptAt: string;
     statusCode: number | null;
@@ -1060,7 +1051,7 @@ export class IntegrationStore {
     });
   }
 
-  releaseDelivery(id: string, nextAttemptAt = new Date().toISOString()): WebhookDelivery | undefined {
+  releaseDelivery(id: number, nextAttemptAt = new Date().toISOString()): WebhookDelivery | undefined {
     return this.immediateTransaction(() => {
       const result = this.db.prepare(`
         UPDATE webhook_deliveries SET status = 'pending', next_attempt_at = ?, updated_at = ?
@@ -1070,7 +1061,7 @@ export class IntegrationStore {
     });
   }
 
-  retryDelivery(id: string): WebhookDelivery | undefined {
+  retryDelivery(id: number): WebhookDelivery | undefined {
     const delivery = this.immediateTransaction(() => {
       const now = new Date().toISOString();
       const result = this.db.prepare(`
@@ -1097,7 +1088,7 @@ export class IntegrationStore {
     return changes;
   }
 
-  endpointHasHistory(id: string): boolean {
+  endpointHasHistory(id: number): boolean {
     return this.db.prepare(`
       SELECT 1 FROM integration_conversations WHERE endpoint_id = ?
       UNION ALL
@@ -1108,7 +1099,7 @@ export class IntegrationStore {
     `).get(id, id, id) !== undefined;
   }
 
-  endpointHasActiveWork(id: string): boolean {
+  endpointHasActiveWork(id: number): boolean {
     return this.db.prepare(`
       SELECT 1 FROM integration_conversations WHERE endpoint_id = ? AND status = 'active'
       UNION ALL
@@ -1117,27 +1108,27 @@ export class IntegrationStore {
     `).get(id, id) !== undefined;
   }
 
-  private endpointRow(id: string): EndpointRow | undefined {
+  private endpointRow(id: number): EndpointRow | undefined {
     return this.db.prepare("SELECT * FROM integration_endpoints WHERE id = ?").get(id) as EndpointRow | undefined;
   }
 
-  private conversationRow(id: string): ConversationRow | undefined {
+  private conversationRow(id: number): ConversationRow | undefined {
     return this.db.prepare("SELECT * FROM integration_conversations WHERE id = ?").get(id) as ConversationRow | undefined;
   }
 
-  private taskRow(id: string): TaskRow | undefined {
+  private taskRow(id: number): TaskRow | undefined {
     return this.db.prepare("SELECT * FROM integration_tasks WHERE id = ?").get(id) as TaskRow | undefined;
   }
 
-  private subscriptionRow(id: string): SubscriptionRow | undefined {
+  private subscriptionRow(id: number): SubscriptionRow | undefined {
     return this.db.prepare("SELECT * FROM webhook_subscriptions WHERE id = ?").get(id) as SubscriptionRow | undefined;
   }
 
-  private deliveryRow(id: string): DeliveryRow | undefined {
+  private deliveryRow(id: number): DeliveryRow | undefined {
     return this.db.prepare("SELECT * FROM webhook_deliveries WHERE id = ?").get(id) as DeliveryRow | undefined;
   }
 
-  private allocateEndpointDeliveryOrderInTransaction(endpointId: string): number {
+  private allocateEndpointDeliveryOrderInTransaction(endpointId: number): number {
     const row = this.db.prepare(`
       UPDATE integration_endpoints
       SET next_delivery_order = next_delivery_order + 1

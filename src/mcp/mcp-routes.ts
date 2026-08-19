@@ -5,13 +5,13 @@ import type { McpChecker } from "./mcp-checker.js";
 import { McpManager, McpManagerError } from "./mcp-manager.js";
 
 const fixedSchema = z.object({
-  id: z.string().uuid().optional(), source: z.literal("fixed"), value: z.string().optional(), secret: z.boolean().optional()
+  id: z.number().int().positive().optional(), source: z.literal("fixed"), value: z.string().optional(), secret: z.boolean().optional()
 }).strict();
 const sessionSchema = z.object({
-  id: z.string().uuid().optional(), source: z.literal("session_parameter"), parameterKey: z.string().min(1)
+  id: z.number().int().positive().optional(), source: z.literal("session_parameter"), parameterKey: z.string().min(1)
 }).strict();
 const runtimeSchema = z.object({
-  id: z.string().uuid().optional(), source: z.literal("runtime"),
+  id: z.number().int().positive().optional(), source: z.literal("runtime"),
   runtimeKey: z.enum(["agent_id", "session_id", "run_id", "workspace_path", "browser_profile_path"])
 }).strict();
 const valueSchema = z.discriminatedUnion("source", [fixedSchema, sessionSchema, runtimeSchema]);
@@ -37,7 +37,11 @@ const createParameterSchema = z.object({
 const updateParameterSchema = z.object({
   label: z.string().min(1), description: z.string().nullable(), required: z.boolean()
 }).strict();
-const checkSchema = z.object({ sessionId: z.string().uuid().optional() }).strict().optional();
+const checkSchema = z.object({ sessionId: z.number().int().positive().optional() }).strict().optional();
+const parseId = (value: string): number | undefined => {
+  const parsed = z.coerce.number().int().positive().safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+};
 
 const invalidRequest = (reply: FastifyReply, message: string) =>
   reply.code(400).send({ error: { code: "invalid_request", message } });
@@ -67,37 +71,52 @@ export type McpRouteDependencies = { mcpManager: McpManager; mcpChecker: McpChec
 /** Registers Agent MCP and Agent Session parameter routes. */
 export const registerMcpRoutes = (app: FastifyInstance, { mcpManager, mcpChecker }: McpRouteDependencies): void => {
   app.get<{ Params: { agentId: string } }>("/agents/:agentId/mcp-servers", (request, reply) => {
-    try { return mcpManager.listServers(request.params.agentId); } catch (error) { return handleMcpError(reply, error); }
+    const agentId = parseId(request.params.agentId);
+    if (agentId === undefined) return notFound(reply, "Agent not found");
+    try { return mcpManager.listServers(agentId); } catch (error) { return handleMcpError(reply, error); }
   });
   app.post<{ Params: { agentId: string } }>("/agents/:agentId/mcp-servers", (request, reply) => {
     const parsed = serverSchema.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, "Invalid MCP server input");
-    try { return reply.code(201).send(mcpManager.createServer(request.params.agentId, parsed.data)); }
+    const agentId = parseId(request.params.agentId);
+    if (agentId === undefined) return notFound(reply, "Agent not found");
+    try { return reply.code(201).send(mcpManager.createServer(agentId, parsed.data)); }
     catch (error) { return handleMcpError(reply, error); }
   });
   app.get<{ Params: { agentId: string; id: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) => {
-    const server = mcpManager.getServer(request.params.agentId, request.params.id);
+    const agentId = parseId(request.params.agentId);
+    const id = parseId(request.params.id);
+    const server = agentId === undefined || id === undefined ? undefined : mcpManager.getServer(agentId, id);
     return server === undefined ? notFound(reply, "MCP server not found") : server;
   });
   app.patch<{ Params: { agentId: string; id: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) => {
     const parsed = serverSchema.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, "Invalid MCP server update");
     try {
-      const server = mcpManager.updateServer(request.params.agentId, request.params.id, parsed.data);
+      const agentId = parseId(request.params.agentId);
+      const id = parseId(request.params.id);
+      if (agentId === undefined || id === undefined) return notFound(reply, "MCP server not found");
+      const server = mcpManager.updateServer(agentId, id, parsed.data);
       return server === undefined ? notFound(reply, "MCP server not found") : server;
     } catch (error) { return handleMcpError(reply, error); }
   });
-  app.delete<{ Params: { agentId: string; id: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) =>
-    mcpManager.deleteServer(request.params.agentId, request.params.id)
+  app.delete<{ Params: { agentId: string; id: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) => {
+    const agentId = parseId(request.params.agentId);
+    const id = parseId(request.params.id);
+    return agentId !== undefined && id !== undefined && mcpManager.deleteServer(agentId, id)
       ? reply.code(204).send()
-      : notFound(reply, "MCP server not found"));
+      : notFound(reply, "MCP server not found");
+  });
   app.post<{ Params: { agentId: string; id: string } }>(
     "/agents/:agentId/mcp-servers/:id/check",
     async (request, reply) => {
       const parsed = checkSchema.safeParse(request.body);
       if (!parsed.success) return invalidRequest(reply, "Invalid MCP check input");
       try {
-        const resolved = mcpManager.resolveOneForCheck(request.params.agentId, request.params.id, parsed.data?.sessionId);
+        const agentId = parseId(request.params.agentId);
+        const id = parseId(request.params.id);
+        if (agentId === undefined || id === undefined) return notFound(reply, "MCP server not found");
+        const resolved = mcpManager.resolveOneForCheck(agentId, id, parsed.data?.sessionId);
         if (resolved === undefined) return notFound(reply, "MCP server not found");
         const result = await mcpChecker.check(resolved.server, resolved.checkTimeoutMs);
         mcpManager.recordCheckResult(resolved.id, result);
@@ -107,26 +126,35 @@ export const registerMcpRoutes = (app: FastifyInstance, { mcpManager, mcpChecker
   );
 
   app.get<{ Params: { agentId: string } }>("/agents/:agentId/session-parameters", (request, reply) => {
-    try { return mcpManager.listParameterDefinitions(request.params.agentId); }
+    const agentId = parseId(request.params.agentId);
+    if (agentId === undefined) return notFound(reply, "Agent not found");
+    try { return mcpManager.listParameterDefinitions(agentId); }
     catch (error) { return handleMcpError(reply, error); }
   });
   app.post<{ Params: { agentId: string } }>("/agents/:agentId/session-parameters", (request, reply) => {
     const parsed = createParameterSchema.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, "Invalid Session parameter input");
-    try { return reply.code(201).send(mcpManager.createParameterDefinition(request.params.agentId, parsed.data)); }
+    const agentId = parseId(request.params.agentId);
+    if (agentId === undefined) return notFound(reply, "Agent not found");
+    try { return reply.code(201).send(mcpManager.createParameterDefinition(agentId, parsed.data)); }
     catch (error) { return handleMcpError(reply, error); }
   });
   app.patch<{ Params: { agentId: string; id: string } }>("/agents/:agentId/session-parameters/:id", (request, reply) => {
     const parsed = updateParameterSchema.safeParse(request.body);
     if (!parsed.success) return invalidRequest(reply, "Invalid Session parameter update");
     try {
-      const parameter = mcpManager.updateParameterDefinition(request.params.agentId, request.params.id, parsed.data);
+      const agentId = parseId(request.params.agentId);
+      const id = parseId(request.params.id);
+      if (agentId === undefined || id === undefined) return notFound(reply, "Session parameter not found");
+      const parameter = mcpManager.updateParameterDefinition(agentId, id, parsed.data);
       return parameter === undefined ? notFound(reply, "Session parameter not found") : parameter;
     } catch (error) { return handleMcpError(reply, error); }
   });
   app.delete<{ Params: { agentId: string; id: string } }>("/agents/:agentId/session-parameters/:id", (request, reply) => {
     try {
-      return mcpManager.deleteParameterDefinition(request.params.agentId, request.params.id)
+      const agentId = parseId(request.params.agentId);
+      const id = parseId(request.params.id);
+      return agentId !== undefined && id !== undefined && mcpManager.deleteParameterDefinition(agentId, id)
         ? reply.code(204).send()
         : notFound(reply, "Session parameter not found");
     } catch (error) { return handleMcpError(reply, error); }

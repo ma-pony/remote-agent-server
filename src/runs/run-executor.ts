@@ -52,7 +52,7 @@ export class RunExecutor {
   private readonly eventStore: EventStore;
   private readonly sessionManager: SessionManager;
   private readonly mcpPreparer: Pick<RunMcpPreparer, "prepare">;
-  private readonly cancellationIntents = new Set<string>();
+  private readonly cancellationIntents = new Set<number>();
 
   constructor({ runtime, skillProjector, runRepository, eventStore, sessionManager, mcpPreparer }: RunExecutorDependencies) {
     this.runtime = runtime;
@@ -66,7 +66,7 @@ export class RunExecutor {
   /**
    * Marks the Run running before projecting files or touching the Runtime.
    */
-  async execute(runId: string): Promise<Run> {
+  async execute(runId: number): Promise<Run> {
     const run = this.runRepository.markRunning(runId);
     let liveTurn: RuntimeTurn | undefined;
     let liveIterator: AsyncIterator<RuntimeEvent> | undefined;
@@ -179,7 +179,7 @@ export class RunExecutor {
   /**
    * Cancels queued Runs locally and delegates running cancellation to the Runtime.
    */
-  async cancel(runId: string): Promise<Run> {
+  async cancel(runId: number): Promise<Run> {
     let run = this.requireRun(runId);
     if (run.status === "queued") {
       try {
@@ -197,7 +197,7 @@ export class RunExecutor {
   }
 
   private finishFromCanonicalResult(
-    runId: string,
+    runId: number,
     output: string,
     result: RuntimeTurnResult,
     usage: Partial<TokenUsage>
@@ -217,7 +217,7 @@ export class RunExecutor {
   }
 
   private finishRun(
-    runId: string,
+    runId: number,
     result: { status: "succeeded"; result: string } | { status: "failed"; error: string } | { status: "cancelled" },
     usage: Partial<TokenUsage> = {}
   ): Run {
@@ -228,7 +228,7 @@ export class RunExecutor {
     });
   }
 
-  private appendBestEffort(runId: string, type: EventType, content: unknown): void {
+  private appendBestEffort(runId: number, type: EventType, content: unknown): void {
     try {
       this.eventStore.append(runId, type, content);
     } catch (_error) {
@@ -255,7 +255,7 @@ export class RunExecutor {
     if (iterator !== undefined) await settleBestEffort(async () => iterator.return?.());
   }
 
-  private requireRun(id: string): Run {
+  private requireRun(id: number): Run {
     const run = this.runRepository.get(id);
     if (run === undefined) throw new RunRepositoryError("run_not_found");
     return run;

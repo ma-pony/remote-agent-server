@@ -23,34 +23,34 @@ export type RuntimeMcpServer =
     };
 
 export type ResolvedMcpServer = {
-  id: string;
+  id: number;
   checkTimeoutMs: number;
   server: RuntimeMcpServer;
 };
 
 export type ResolveMcpContext = {
-  agentId: string;
-  sessionId: string;
-  runId: string;
+  agentId: number;
+  sessionId: number;
+  runId: number;
   workspacePath: string;
   browserProfilePath: string;
 };
 
 type McpFixedValueInput = {
-  id?: string;
+  id?: number;
   source: "fixed";
   value?: string;
   secret?: boolean;
 };
 
 type McpSessionValueInput = {
-  id?: string;
+  id?: number;
   source: "session_parameter";
   parameterKey: string;
 };
 
 type McpRuntimeValueInput = {
-  id?: string;
+  id?: number;
   source: "runtime";
   runtimeKey: RuntimeMcpKey;
 };
@@ -78,7 +78,7 @@ export type McpServerWriteInput =
     });
 
 export type AgentMcpValueView = {
-  id: string;
+  id: number;
   source: McpSourceType;
   name?: string;
   value?: string;
@@ -89,8 +89,8 @@ export type AgentMcpValueView = {
 };
 
 export type AgentMcpServerSummary = {
-  id: string;
-  agentId: string;
+  id: number;
+  agentId: number;
   name: string;
   transport: McpTransport;
   enabled: boolean;
@@ -114,8 +114,8 @@ export type AgentMcpServerDetail = AgentMcpServerSummary & (
 );
 
 export type AgentSessionParameter = {
-  id: string;
-  agentId: string;
+  id: number;
+  agentId: number;
   key: string;
   label: string;
   description: string | null;
@@ -140,7 +140,7 @@ export type UpdateSessionParameterInput = {
 };
 
 export type NormalizedSessionMcpValue = {
-  parameterId: string;
+  parameterId: number;
   key: string;
   required: boolean;
   secret: boolean;

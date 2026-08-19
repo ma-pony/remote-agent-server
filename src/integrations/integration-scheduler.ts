@@ -7,7 +7,7 @@ import type { IntegrationStore } from "./integration-store.js";
 import type { IntegrationTask } from "./integration-types.js";
 
 export type IntegrationSchedulerFailure = {
-  taskId: string;
+  taskId: number;
   code: "integration_retry_exhausted";
 };
 
@@ -57,9 +57,9 @@ export class IntegrationTaskScheduler {
   private started = false;
   private draining = false;
   private notifiedWhileDraining = false;
-  private readonly retryAttempts = new Map<string, number>();
-  private readonly retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private readonly exhaustedTasks = new Set<string>();
+  private readonly retryAttempts = new Map<number, number>();
+  private readonly retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly exhaustedTasks = new Set<number>();
   private drainRetryAttempts = 0;
   private drainRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -150,7 +150,7 @@ export class IntegrationTaskScheduler {
     }
   }
 
-  private scheduleTaskRetry(taskId: string): void {
+  private scheduleTaskRetry(taskId: number): void {
     if (!this.started || this.exhaustedTasks.has(taskId) || this.retryTimers.has(taskId)) return;
     const attempts = this.retryAttempts.get(taskId) ?? 0;
     if (attempts >= MAX_AUTOMATIC_RETRIES) {
@@ -172,7 +172,7 @@ export class IntegrationTaskScheduler {
     this.retryTimers.set(taskId, timer);
   }
 
-  private finalizeExhaustedTask(taskId: string): void {
+  private finalizeExhaustedTask(taskId: number): void {
     try {
       const failed = this.dependencies.store.failTaskBeforeRun(taskId, DISPATCH_RETRY_EXHAUSTED);
       if (failed !== undefined || this.dependencies.store.getTask(taskId)?.status !== "queued") {
@@ -191,7 +191,7 @@ export class IntegrationTaskScheduler {
     this.retryTimers.set(taskId, timer);
   }
 
-  private clearTaskRetry(taskId: string): void {
+  private clearTaskRetry(taskId: number): void {
     const timer = this.retryTimers.get(taskId);
     if (timer !== undefined) clearTimeout(timer);
     this.retryTimers.delete(taskId);

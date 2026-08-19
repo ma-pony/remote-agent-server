@@ -4,12 +4,12 @@ export type Provider = "claude_code" | "codex" | "hermes";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export type Agent = {
-  id: string;
+  id: number;
   name: string;
   provider: Provider;
   enabled: boolean;
   instructions: string;
-  projectEnvironmentId: string | null;
+  projectEnvironmentId: number | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -17,7 +17,7 @@ export type Agent = {
 export type DoctorResult = { ok: boolean; message: string; details: string[] };
 export type AgentDoctorResult = {
   provider: DoctorResult;
-  projectEnvironment: { ok: boolean; message: string; revisionId: string | null };
+  projectEnvironment: { ok: boolean; message: string; revisionId: number | null };
 };
 
 export type AgentSkill = {
@@ -30,8 +30,8 @@ export type AgentSkill = {
 };
 
 export type EnvironmentRepository = {
-  id: string;
-  projectEnvironmentId: string;
+  id: number;
+  projectEnvironmentId: number;
   name: string;
   gitUrl: string;
   prepareCommand: string | null;
@@ -41,8 +41,8 @@ export type EnvironmentRepository = {
 };
 
 export type ProjectEnvironmentRevision = {
-  id: string;
-  projectEnvironmentId: string;
+  id: number;
+  projectEnvironmentId: number;
   status: "preparing" | "ready" | "failed";
   workspacePath: string | null;
   inputFingerprint: string;
@@ -53,9 +53,9 @@ export type ProjectEnvironmentRevision = {
 };
 
 export type ProjectEnvironment = {
-  id: string;
+  id: number;
   name: string;
-  currentRevisionId: string | null;
+  currentRevisionId: number | null;
   lastCheckedAt: string | null;
   workspacePath: string | null;
   sync: {
@@ -72,13 +72,13 @@ export type ProjectEnvironment = {
 };
 
 export type Session = {
-  id: string;
-  agentId: string;
+  id: number;
+  agentId: number;
   title: string;
   status: "idle" | "running";
   providerSessionId: string | null;
   workspacePath: string;
-  projectEnvironmentRevisionId: string | null;
+  projectEnvironmentRevisionId: number | null;
   instructionsSnapshot: string;
   createdAt: string;
   updatedAt: string;
@@ -98,8 +98,8 @@ export type SessionMcpParameterStatus = {
 };
 
 export type AgentSessionParameter = {
-  id: string;
-  agentId: string;
+  id: number;
+  agentId: number;
   key: string;
   label: string;
   description: string | null;
@@ -110,7 +110,7 @@ export type AgentSessionParameter = {
 };
 
 export type McpValueView = {
-  id: string;
+  id: number;
   source: "fixed" | "session_parameter" | "runtime";
   name?: string;
   value?: string;
@@ -121,8 +121,8 @@ export type McpValueView = {
 };
 
 export type AgentMcpServerSummary = {
-  id: string;
-  agentId: string;
+  id: number;
+  agentId: number;
   name: string;
   transport: "http" | "stdio";
   enabled: boolean;
@@ -141,8 +141,8 @@ export type AgentMcpServerDetail = AgentMcpServerSummary & (
 );
 
 export type Run = {
-  id: string;
-  sessionId: string;
+  id: number;
+  sessionId: number;
   status: RunStatus;
   input: string;
   result: string | null;
@@ -173,8 +173,8 @@ export type TokenUsageSummary = {
 export type SessionDetail = Session & { runs: Run[]; usageSummary?: TokenUsageSummary };
 
 export type RunEvent = {
-  id: string;
-  runId: string;
+  id: number;
+  runId: number;
   seq: number;
   type: "message" | "tool" | "status" | "error";
   contentJson: string;
@@ -192,11 +192,11 @@ export type IntegrationParameterMappingUpdateInput =
   | { parameterKey: string; source: "request"; requestKey: string }
   | { parameterKey: string; source: "fixed"; value?: string };
 export type IntegrationTask = {
-  id: string;
-  endpointId: string;
-  conversationId: string | null;
-  sessionId: string;
-  runId: string | null;
+  id: number;
+  endpointId: number;
+  conversationId: number | null;
+  sessionId: number;
+  runId: number | null;
   requestId: string;
   message: string;
   status: IntegrationTaskStatus;
@@ -207,10 +207,10 @@ export type IntegrationTask = {
   finishedAt: string | null;
 };
 export type IntegrationEndpointSummary = {
-  id: string;
+  id: number;
   name: string;
   slug: string;
-  agentId: string;
+  agentId: number;
   enabled: boolean;
   activeConversationCount: number;
   activeTaskCount: number;
@@ -226,7 +226,7 @@ export type IntegrationEndpoint = Omit<IntegrationEndpointSummary,
 export type IntegrationEndpointInput = {
   name: string;
   slug: string;
-  agentId: string;
+  agentId: number;
   enabled: boolean;
   promptPrefix: string;
   parameterMappings: IntegrationParameterMappingInput[];
@@ -235,10 +235,10 @@ export type IntegrationEndpointUpdateInput = Omit<Partial<IntegrationEndpointInp
   parameterMappings?: IntegrationParameterMappingUpdateInput[];
 };
 export type IntegrationConversation = {
-  id: string;
-  endpointId: string;
+  id: number;
+  endpointId: number;
   conversationKey: string;
-  sessionId: string;
+  sessionId: number;
   status: "active" | "ended";
   createdAt: string;
   endedAt: string | null;
@@ -248,8 +248,8 @@ export type WebhookEventType =
   | "message.user.received" | "message.agent.reply" | "message.system.notice"
   | "tool.started" | "tool.completed" | "tool.failed";
 export type IntegrationWebhook = {
-  id: string;
-  endpointId: string;
+  id: number;
+  endpointId: number;
   name: string;
   url: string;
   enabled: boolean;
@@ -269,12 +269,12 @@ export type IntegrationWebhookInput = {
   timeoutSeconds: number;
 };
 export type WebhookDelivery = {
-  id: string;
+  id: number;
   eventId: string;
   sequence: number;
   dispatchOrder: number;
-  subscriptionId: string;
-  taskId: string | null;
+  subscriptionId: number;
+  taskId: number | null;
   eventType: string;
   status: "pending" | "delivering" | "succeeded" | "failed";
   attemptCount: number;
@@ -312,7 +312,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 /** Opens an authenticated Event stream from the supplied sequence cursor. */
 export function streamRunEvents(
-  runId: string,
+  runId: number,
   afterSeq: number,
   onEvent: (event: RunEvent) => void,
   signal: AbortSignal
@@ -353,51 +353,51 @@ export const errorMessage = (error: unknown): string => {
 
 export const integrationApi = {
   listEndpoints: (signal?: AbortSignal) => api<IntegrationEndpointSummary[]>("/integration-endpoints", { signal }),
-  getEndpoint: (id: string, signal?: AbortSignal) => api<IntegrationEndpoint>(`/integration-endpoints/${id}`, { signal }),
+  getEndpoint: (id: number, signal?: AbortSignal) => api<IntegrationEndpoint>(`/integration-endpoints/${id}`, { signal }),
   createEndpoint: (input: IntegrationEndpointInput) => api<{ endpoint: IntegrationEndpoint; token: string }>(
     "/integration-endpoints", { method: "POST", body: JSON.stringify(input) }
   ),
-  updateEndpoint: (id: string, input: IntegrationEndpointUpdateInput) => api<IntegrationEndpoint>(
+  updateEndpoint: (id: number, input: IntegrationEndpointUpdateInput) => api<IntegrationEndpoint>(
     `/integration-endpoints/${id}`, { method: "PATCH", body: JSON.stringify(input) }
   ),
-  rotateEndpointToken: (id: string) => api<{ endpoint: IntegrationEndpoint; token: string }>(
+  rotateEndpointToken: (id: number) => api<{ endpoint: IntegrationEndpoint; token: string }>(
     `/integration-endpoints/${id}/rotate-token`, { method: "POST" }
   ),
-  deleteEndpoint: (id: string) => api<void>(`/integration-endpoints/${id}`, { method: "DELETE" }),
-  listConversations: (id: string, signal?: AbortSignal) => api<IntegrationConversation[]>(
+  deleteEndpoint: (id: number) => api<void>(`/integration-endpoints/${id}`, { method: "DELETE" }),
+  listConversations: (id: number, signal?: AbortSignal) => api<IntegrationConversation[]>(
     `/integration-endpoints/${id}/conversations`, { signal }
   ),
-  listTasks: (id: string, signal?: AbortSignal) => api<IntegrationTask[]>(
+  listTasks: (id: number, signal?: AbortSignal) => api<IntegrationTask[]>(
     `/integration-endpoints/${id}/tasks`, { signal }
   ),
-  createTestTask: (id: string, input: {
+  createTestTask: (id: number, input: {
     conversationKey?: string;
     message: string;
     parameters: Record<string, string>;
   }) => api<IntegrationTask>(`/integration-endpoints/${id}/test-tasks`, {
     method: "POST", body: JSON.stringify(input)
   }),
-  getTask: (id: string, signal?: AbortSignal) => api<IntegrationTask>(`/integration-tasks/${id}`, { signal }),
-  cancelTask: (id: string, signal?: AbortSignal) => api<IntegrationTask>(
+  getTask: (id: number, signal?: AbortSignal) => api<IntegrationTask>(`/integration-tasks/${id}`, { signal }),
+  cancelTask: (id: number, signal?: AbortSignal) => api<IntegrationTask>(
     `/integration-tasks/${id}/cancel`, { method: "POST", signal }
   ),
-  listWebhooks: (id: string, signal?: AbortSignal) => api<IntegrationWebhook[]>(
+  listWebhooks: (id: number, signal?: AbortSignal) => api<IntegrationWebhook[]>(
     `/integration-endpoints/${id}/webhooks`, { signal }
   ),
-  createWebhook: (id: string, input: IntegrationWebhookInput) => api<{
+  createWebhook: (id: number, input: IntegrationWebhookInput) => api<{
     webhook: IntegrationWebhook; signingSecret: string;
   }>(`/integration-endpoints/${id}/webhooks`, { method: "POST", body: JSON.stringify(input) }),
-  updateWebhook: (endpointId: string, id: string, input: Partial<IntegrationWebhookInput>) => api<IntegrationWebhook>(
+  updateWebhook: (endpointId: number, id: number, input: Partial<IntegrationWebhookInput>) => api<IntegrationWebhook>(
     `/integration-endpoints/${endpointId}/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(input) }
   ),
-  deleteWebhook: (endpointId: string, id: string) => api<void>(
+  deleteWebhook: (endpointId: number, id: number) => api<void>(
     `/integration-endpoints/${endpointId}/webhooks/${id}`, { method: "DELETE" }
   ),
-  testWebhook: (endpointId: string, id: string) => api<WebhookDelivery>(
+  testWebhook: (endpointId: number, id: number) => api<WebhookDelivery>(
     `/integration-endpoints/${endpointId}/webhooks/${id}/test`, { method: "POST" }
   ),
-  listDeliveries: (endpointId: string, signal?: AbortSignal) => api<WebhookDelivery[]>(
+  listDeliveries: (endpointId: number, signal?: AbortSignal) => api<WebhookDelivery[]>(
     `/integration-endpoints/${endpointId}/webhook-deliveries`, { signal }
   ),
-  retryDelivery: (id: string) => api<WebhookDelivery>(`/webhook-deliveries/${id}/retry`, { method: "POST" })
+  retryDelivery: (id: number) => api<WebhookDelivery>(`/webhook-deliveries/${id}/retry`, { method: "POST" })
 };
