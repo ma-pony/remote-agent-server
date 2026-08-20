@@ -200,7 +200,7 @@ export const AgentDetailLayout = () => {
     void api<Agent>(`/agents/${id}`, { signal: controller.signal }).then(setAgent).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [id]);
-  const section = pathname.endsWith("/skills") ? "skills" : pathname.endsWith("/mcp") ? "mcp" : pathname.endsWith("/settings") ? "settings" : "overview";
+  const section = pathname.endsWith("/skills") ? "skills" : pathname.endsWith("/parameters") ? "parameters" : pathname.endsWith("/mcp") ? "mcp" : pathname.endsWith("/settings") ? "settings" : "overview";
   if (error !== "") return <div className="mx-auto max-w-5xl p-8"><ErrorAlert message={error} /><Button asChild variant="outline" className="mt-4"><Link to="/agents">{text("返回智能体", "Back to agents")}</Link></Button></div>;
   if (agent === null) return <div className="mx-auto max-w-5xl p-8"><Skeleton className="h-10 w-72" /><Skeleton className="mt-8 h-64" /></div>;
 
@@ -208,7 +208,7 @@ export const AgentDetailLayout = () => {
     <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />{text("返回智能体", "Back to agents")}</Link></Button>
     <PageHeader eyebrow={providerNames[agent.provider]} title={agent.name} description={text("项目环境、运行检查和技能均在这个智能体范围内管理。", "Project environment, runtime checks, and skills are managed within this agent.")} action={<div className="flex items-center gap-2"><AgentCloneDialog key={agent.id} agent={agent} /><Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div>} />
     <Tabs value={section} onValueChange={(value) => navigate(value === "overview" ? `/agents/${id}` : `/agents/${id}/${value}`)}>
-      <TabsList variant="line" aria-label={text("智能体管理", "Agent management")}><TabsTrigger value="overview">{text("概览", "Overview")}</TabsTrigger><TabsTrigger value="skills">{text("技能", "Skills")}</TabsTrigger><TabsTrigger value="mcp">MCP</TabsTrigger><TabsTrigger value="settings">{text("设置", "Settings")}</TabsTrigger></TabsList>
+      <TabsList variant="line" aria-label={text("智能体管理", "Agent management")}><TabsTrigger value="overview">{text("概览", "Overview")}</TabsTrigger><TabsTrigger value="skills">{text("技能", "Skills")}</TabsTrigger><TabsTrigger value="parameters">{text("会话参数", "Session parameters")}</TabsTrigger><TabsTrigger value="mcp">MCP</TabsTrigger><TabsTrigger value="settings">{text("设置", "Settings")}</TabsTrigger></TabsList>
     </Tabs>
     <div className="mt-6"><Outlet context={{ agent, setAgent } satisfies AgentDetailContext} /></div>
   </div>;

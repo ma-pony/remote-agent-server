@@ -13,6 +13,7 @@ import {
   AgentSettingsPage, AgentSkillsPage
 } from "./pages/agent-pages.js";
 import { AgentMcpEditorPage, AgentMcpPage } from "./pages/agent-mcp-pages.js";
+import { AgentParameterPage } from "./pages/agent-parameter-page.js";
 import {
   ProjectEnvironmentCreatePage, ProjectEnvironmentDetailLayout, ProjectEnvironmentListPage,
   ProjectEnvironmentOverviewPage, ProjectEnvironmentRepositoriesPage
@@ -83,6 +84,7 @@ const Application = () => {
       <Route path="/agents/:id" element={<AgentDetailLayout />}>
         <Route index element={<AgentOverviewPage />} />
         <Route path="skills" element={<AgentSkillsPage />} />
+        <Route path="parameters" element={<AgentParameterPage />} />
         <Route path="mcp" element={<AgentMcpPage />} />
         <Route path="settings" element={<AgentSettingsPage />} />
       </Route>

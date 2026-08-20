@@ -36,7 +36,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-it("Agent MCP 独立页面展示服务器、连接检查和 Session 参数", async () => {
+it("Agent MCP 独立页面展示服务器和连接检查", async () => {
   let enabledBody: unknown;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
@@ -63,7 +63,6 @@ it("Agent MCP 独立页面展示服务器、连接检查和 Session 参数", asy
 
   expect(await screen.findByText("MCP 服务器")).toBeInTheDocument();
   expect(await screen.findByText("example_mcp")).toBeInTheDocument();
-  expect(screen.getByDisplayValue("租户")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "停用" }));
   await waitFor(() => expect(enabledBody).toEqual({ enabled: false }));
   expect(await screen.findByText("已停用")).toBeInTheDocument();

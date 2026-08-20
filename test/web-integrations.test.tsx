@@ -269,6 +269,48 @@ it("Webhook 测试投递异步完成后自动展示最终状态", async () => {
   expect(deliveryReads).toBe(3);
 });
 
+it("编辑事件回调并保留未重新填写的敏感请求头", async () => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/webhooks`);
+  const configuredWebhook = {
+    ...webhook,
+    headers: [{ name: "Authorization", configured: true as const }]
+  };
+  let updateBody: unknown;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    const method = init?.method ?? "GET";
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhooks` && method === "GET") return jsonResponse([configuredWebhook]);
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`) return jsonResponse([]);
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhooks/${webhook.id}` && method === "PATCH") {
+      updateBody = JSON.parse(String(init?.body));
+      return jsonResponse({ ...configuredWebhook, ...(updateBody as object), headers: configuredWebhook.headers });
+    }
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  }));
+
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "编辑 工单回调" }));
+  const dialog = await screen.findByRole("dialog");
+  expect(within(dialog).getByLabelText("回调名称")).toHaveValue("工单回调");
+  expect(within(dialog).getByText("Authorization 已配置")).toBeVisible();
+  fireEvent.change(within(dialog).getByLabelText("回调地址"), {
+    target: { value: "https://receiver.example.com/v2/webhook" }
+  });
+  fireEvent.click(within(dialog).getByLabelText("task.failed"));
+  fireEvent.click(within(dialog).getByRole("button", { name: "保存修改" }));
+
+  await waitFor(() => expect(updateBody).toEqual({
+    name: "工单回调",
+    url: "https://receiver.example.com/v2/webhook",
+    events: ["task.succeeded", "message.agent.reply", "task.failed"],
+    timeoutSeconds: 10
+  }));
+  expect(await screen.findByText("https://receiver.example.com/v2/webhook")).toBeVisible();
+});
+
 it("离开 Webhook 页面会清理待投递短轮询", async () => {
   vi.useFakeTimers();
   window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/webhooks`);

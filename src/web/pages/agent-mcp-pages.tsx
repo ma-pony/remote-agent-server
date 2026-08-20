@@ -32,13 +32,8 @@ export const AgentMcpPage = () => {
   const { id = "" } = useParams();
   const [servers, setServers] = useState<AgentMcpServerSummary[] | null>(null);
   const [catalog, setCatalog] = useState<SharedMcpServerSummary[] | null>(null);
-  const [parameters, setParameters] = useState<AgentSessionParameter[] | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [checkSessionId, setCheckSessionId] = useState("");
-  const [label, setLabel] = useState("");
-  const [key, setKey] = useState("");
-  const [required, setRequired] = useState(false);
-  const [secret, setSecret] = useState(false);
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -47,10 +42,9 @@ export const AgentMcpPage = () => {
   const load = () => Promise.all([
     api<AgentMcpServerSummary[]>(`/agents/${id}/mcp-servers`),
     api<SharedMcpServerSummary[]>(`/agents/${id}/mcp-catalog`),
-    api<AgentSessionParameter[]>(`/agents/${id}/session-parameters`),
     api<Session[]>("/sessions")
-  ]).then(([serverItems, catalogItems, parameterItems, sessionItems]) => {
-    setServers(serverItems); setCatalog(catalogItems); setParameters(parameterItems);
+  ]).then(([serverItems, catalogItems, sessionItems]) => {
+    setServers(serverItems); setCatalog(catalogItems);
     setSessions(sessionItems.filter((item) => item.agentId === Number(id)));
   });
   useEffect(() => {
@@ -58,10 +52,9 @@ export const AgentMcpPage = () => {
     void Promise.all([
       api<AgentMcpServerSummary[]>(`/agents/${id}/mcp-servers`, { signal: controller.signal }),
       api<SharedMcpServerSummary[]>(`/agents/${id}/mcp-catalog`, { signal: controller.signal }),
-      api<AgentSessionParameter[]>(`/agents/${id}/session-parameters`, { signal: controller.signal }),
       api<Session[]>("/sessions", { signal: controller.signal })
-    ]).then(([serverItems, catalogItems, parameterItems, sessionItems]) => {
-      setServers(serverItems); setCatalog(catalogItems); setParameters(parameterItems);
+    ]).then(([serverItems, catalogItems, sessionItems]) => {
+      setServers(serverItems); setCatalog(catalogItems);
       setSessions(sessionItems.filter((item) => item.agentId === Number(id)));
     })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
@@ -90,26 +83,6 @@ export const AgentMcpPage = () => {
       await load();
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
-  const createParameter = async (event: FormEvent) => {
-    event.preventDefault();
-    if (key.trim() === "" || label.trim() === "") return;
-    setBusy("parameter"); setError("");
-    try {
-      const created = await api<AgentSessionParameter>(`/agents/${id}/session-parameters`, {
-        method: "POST",
-        body: JSON.stringify({ key: key.trim(), label: label.trim(), description: null, required, secret })
-      });
-      setParameters((items) => [...(items ?? []), created]);
-      setKey(""); setLabel(""); setRequired(false); setSecret(false);
-    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
-  };
-  const removeParameter = async (parameterId: number) => {
-    setBusy(`parameter-${parameterId}`); setError("");
-    try {
-      await api(`/agents/${id}/session-parameters/${parameterId}`, { method: "DELETE" });
-      setParameters((items) => (items ?? []).filter((item) => item.id !== parameterId));
-    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
-  };
   const install = async (server: SharedMcpServerSummary) => {
     setBusy(`install-${server.id}`); setError("");
     try {
@@ -134,10 +107,6 @@ export const AgentMcpPage = () => {
       <CardContent className="flex flex-col gap-4"><Field><FieldLabel htmlFor="check-session">{text("检查使用的会话", "Session used for checks")}</FieldLabel><NativeSelect id="check-session" className="max-w-sm" value={checkSessionId} onChange={(event) => setCheckSessionId(event.target.value)}><NativeSelectOption value="">{text("不使用会话参数", "Do not use session parameters")}</NativeSelectOption>{sessions.map((session) => <NativeSelectOption key={session.id} value={session.id}>{session.title}</NativeSelectOption>)}</NativeSelect><FieldDescription>{text("只有 MCP 引用了会话参数时才需要选择。", "Select a session only when the MCP configuration references session parameters.")}</FieldDescription></Field>{servers === null ? <Skeleton className="h-36" /> : servers.length === 0 ? <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">{text("尚未配置 MCP。", "No MCP servers configured.")}</div> : <div className="divide-y rounded-lg border">{servers.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2"><Link className="font-medium hover:underline" to={`/agents/${id}/mcp/${server.id}`}>{server.name}</Link><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant={server.enabled ? "default" : "secondary"}>{server.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{server.lastCheckStatus === null ? text("尚未检查", "Not checked") : server.lastCheckStatus === "passed" ? <>{text("最近检查通过 · ", "Last check passed · ")}<button type="button" className="font-medium underline underline-offset-4 hover:text-foreground" aria-label={text(`查看 ${server.lastToolCount ?? 0} 个工具`, `View ${server.lastToolCount ?? 0} tools`)} disabled={busy !== ""} onClick={() => void showTools(server)}>{text(`${server.lastToolCount ?? 0} 个工具`, `${server.lastToolCount ?? 0} tools`)}</button></> : text("最近检查失败", "Last check failed")}</p></div><div className="flex gap-2"><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void toggle(server)}>{server.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void check(server)}><RefreshCw className={busy === `check-${server.id}` ? "animate-spin" : ""} />{text("检查连接", "Check connection")}</Button></div></div>)}</div>}</CardContent>
     </Card>
     <Card><CardHeader><CardTitle>{text("可添加的 MCP", "Available MCP servers")}</CardTitle><CardDescription>{text("其他智能体创建的 MCP。添加后配置独立，可单独编辑或停用。", "MCP servers created by other agents. Installed copies can be edited or disabled independently.")}</CardDescription></CardHeader><CardContent>{catalog === null ? <Skeleton className="h-24" /> : catalog.length === 0 ? <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">{text("所有共享 MCP 均已添加。", "All shared MCP servers are installed.")}</div> : <div className="divide-y rounded-lg border">{catalog.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2"><p className="font-medium">{server.name}</p><Badge variant="outline">{server.transport.toUpperCase()}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{text(`来自 ${server.sourceAgentName}`, `From ${server.sourceAgentName}`)}</p></div><Button size="sm" disabled={busy !== ""} aria-label={text(`添加并启用 ${server.name}`, `Install and enable ${server.name}`)} onClick={() => void install(server)}><Plus />{text("添加并启用", "Install and enable")}</Button></div>)}</div>}</CardContent></Card>
-    <Card><CardHeader><CardTitle>{text("会话参数", "Session parameters")}</CardTitle><CardDescription>{text("声明可由不同会话提供的值，再在 MCP 请求头、参数或环境变量中引用。", "Declare values supplied by each session, then reference them in MCP headers, arguments, or environment variables.")}</CardDescription></CardHeader><CardContent className="flex flex-col gap-5">
-      {parameters === null ? <Skeleton className="h-24" /> : parameters.length === 0 ? <p className="text-sm text-muted-foreground">{text("暂无会话参数。", "No session parameters.")}</p> : <div className="divide-y rounded-lg border">{parameters.map((parameter) => <div key={parameter.id} className="grid gap-3 p-4 sm:grid-cols-[1fr_1fr_auto] sm:items-end"><Field><FieldLabel htmlFor={`label-${parameter.id}`}>{text("显示名称", "Display name")}</FieldLabel><Input id={`label-${parameter.id}`} value={parameter.label} readOnly /></Field><div className="pb-2 text-sm"><code>{parameter.key}</code> · {parameter.required ? text("必填", "Required") : text("可选", "Optional")} · {parameter.secret ? text("敏感", "Secret") : text("普通", "Plain")}</div><Button aria-label={text(`删除参数 ${parameter.label}`, `Delete parameter ${parameter.label}`)} variant="ghost" size="icon-sm" disabled={busy !== ""} onClick={() => void removeParameter(parameter.id)}><Trash2 /></Button></div>)}</div>}
-      <form className="rounded-lg border bg-muted/20 p-4" onSubmit={createParameter}><FieldGroup><div className="grid gap-4 md:grid-cols-2"><Field><FieldLabel htmlFor="parameter-label">{text("显示名称", "Display name")}</FieldLabel><Input id="parameter-label" value={label} onChange={(event) => setLabel(event.target.value)} /></Field><Field><FieldLabel htmlFor="parameter-key">{text("参数键", "Parameter key")}</FieldLabel><Input id="parameter-key" value={key} onChange={(event) => setKey(event.target.value)} placeholder="tenant_id" /></Field></div><div className="flex flex-wrap gap-5 text-sm"><label className="flex items-center gap-2"><input type="checkbox" checked={required} onChange={(event) => setRequired(event.target.checked)} />{text("必填", "Required")}</label><label className="flex items-center gap-2"><input type="checkbox" checked={secret} onChange={(event) => setSecret(event.target.checked)} />{text("敏感值", "Secret value")}</label></div><Button type="submit" variant="outline" disabled={busy !== "" || key.trim() === "" || label.trim() === ""}>{text("添加会话参数", "Add session parameter")}</Button></FieldGroup></form>
-    </CardContent></Card>
   </div>;
 };
 
