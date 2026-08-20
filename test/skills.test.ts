@@ -121,6 +121,31 @@ describe("SkillManager", () => {
     expect(manager.list("agent-2")[0]).toMatchObject({ enabled: true });
   });
 
+  it("支持只删除当前 Agent 的 Skill 副本或删除全部上传副本", () => {
+    const root = makeRoot();
+    const dataDir = join(root, "data");
+    const manager = new SkillManager({ dataDir, roots: [] });
+    const archive = zipSync({
+      "shared-review/SKILL.md": strToU8("---\nname: shared-review\ndescription: Shared review workflow\n---\n")
+    });
+    const uploaded = manager.upload("agent-1", "shared-review.zip", archive);
+    manager.setEnabled("agent-2", uploaded.id, true);
+
+    expect(manager.remove("agent-1", uploaded.id, "current")).toBe("removed");
+    expect(manager.list("agent-1")).toEqual([
+      expect.objectContaining({ id: uploaded.id, enabled: false, available: true })
+    ]);
+    expect(manager.list("agent-2")).toEqual([
+      expect.objectContaining({ id: uploaded.id, enabled: true, available: true })
+    ]);
+
+    expect(manager.remove("agent-2", uploaded.id, "all")).toBe("removed");
+    expect(manager.list("agent-1")).toEqual([]);
+    expect(manager.list("agent-2")).toEqual([]);
+    expect(existsSync(join(dataDir, "skill-library", uploaded.id))).toBe(false);
+    expect(existsSync(join(dataDir, "agents", "agent-2", "skills", uploaded.id))).toBe(false);
+  });
+
   it("拒绝路径穿越和缺少 SKILL.md 的上传压缩包", () => {
     const root = makeRoot();
     const manager = new SkillManager({ dataDir: join(root, "data"), roots: [] });
@@ -138,6 +163,72 @@ describe("SkillManager", () => {
 });
 
 describe("Agent Skills API", () => {
+  it("通过删除范围只移除当前 Skill 副本或移除全部上传副本", async () => {
+    const root = makeRoot();
+    const dataDir = join(root, "data");
+    const { db, seed } = createTestDatabase();
+    const app = buildApp({
+      config: {
+        host: "127.0.0.1", port: 3000, apiToken, dataDir, databasePath: ":memory:",
+        projectEnvironmentsRoot: "/unused/environments", sessionsRoot: "/unused/sessions",
+        maxConcurrentRuns: 1, projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
+        projectPrepareTimeoutMs: 30 * 60 * 1000
+      },
+      db,
+      runtime: createFakeRuntime(),
+      skillManager: new SkillManager({ dataDir, roots: [] })
+    });
+    await app.ready();
+    try {
+      const createAgent = async (name: string) => (await app.inject({
+        method: "POST", url: "/api/agents", headers: { authorization: `Bearer ${apiToken}` },
+        payload: { name, provider: "codex", projectEnvironmentId: seed.projectEnvironment.id }
+      })).json() as { id: number };
+      const first = await createAgent("First");
+      const second = await createAgent("Second");
+      const archive = zipSync({
+        "shared-review/SKILL.md": strToU8("---\nname: shared-review\ndescription: Shared review workflow\n---\n")
+      });
+      const uploaded = await app.inject({
+        method: "POST", url: `/api/agents/${first.id}/skills/upload`,
+        headers: { authorization: `Bearer ${apiToken}` },
+        payload: { fileName: "shared-review.zip", contentBase64: Buffer.from(archive).toString("base64") }
+      });
+      const skillId = (uploaded.json() as { id: string }).id;
+      await app.inject({
+        method: "PUT", url: `/api/agents/${second.id}/skills/${skillId}`,
+        headers: { authorization: `Bearer ${apiToken}` }, payload: { enabled: true }
+      });
+
+      const currentOnly = await app.inject({
+        method: "DELETE", url: `/api/agents/${first.id}/skills/${skillId}?scope=current`,
+        headers: { authorization: `Bearer ${apiToken}` }
+      });
+      expect(currentOnly.statusCode).toBe(204);
+      expect((await app.inject({
+        method: "GET", url: `/api/agents/${first.id}/skills`, headers: { authorization: `Bearer ${apiToken}` }
+      })).json()).toEqual([expect.objectContaining({ id: skillId, enabled: false })]);
+      expect((await app.inject({
+        method: "GET", url: `/api/agents/${second.id}/skills`, headers: { authorization: `Bearer ${apiToken}` }
+      })).json()).toEqual([expect.objectContaining({ id: skillId, enabled: true })]);
+
+      const deleteAll = await app.inject({
+        method: "DELETE", url: `/api/agents/${second.id}/skills/${skillId}?scope=all`,
+        headers: { authorization: `Bearer ${apiToken}` }
+      });
+      expect(deleteAll.statusCode).toBe(204);
+      expect((await app.inject({
+        method: "GET", url: `/api/agents/${first.id}/skills`, headers: { authorization: `Bearer ${apiToken}` }
+      })).json()).toEqual([]);
+      expect((await app.inject({
+        method: "GET", url: `/api/agents/${second.id}/skills`, headers: { authorization: `Bearer ${apiToken}` }
+      })).json()).toEqual([]);
+    } finally {
+      await app.close();
+      db.close();
+    }
+  });
+
   it("经过鉴权列出和启停 Agent Skills，并拒绝未知 Agent 或 Skill", async () => {
     const root = makeRoot();
     writeSkill(join(root, "codex", "review"), "code-review", "Review changes");

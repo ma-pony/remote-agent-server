@@ -56,6 +56,53 @@ afterEach(async () => {
 });
 
 describe("Agent MCP API", () => {
+  it("支持只删除当前 Agent 的 MCP 副本或删除整个共享组", async () => {
+    const { app, agentId } = await createTestApp();
+    const target = await app.inject({
+      method: "POST", url: "/api/agents", headers: authHeaders(),
+      payload: { name: "Target", provider: "codex", projectEnvironmentId: 1 }
+    });
+    const targetAgentId = (target.json() as { id: number }).id;
+    const created = await app.inject({
+      method: "POST", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders(),
+      payload: {
+        name: "shared_mcp", transport: "http", enabled: true,
+        url: "https://example.test/mcp", checkTimeoutSeconds: 20, headers: []
+      }
+    });
+    const sourceId = (created.json() as { id: number }).id;
+    const installed = await app.inject({
+      method: "POST", url: `/api/agents/${targetAgentId}/mcp-catalog/${sourceId}/install`, headers: authHeaders()
+    });
+    const installedId = (installed.json() as { id: number }).id;
+
+    const currentOnly = await app.inject({
+      method: "DELETE",
+      url: `/api/agents/${targetAgentId}/mcp-servers/${installedId}?scope=current`,
+      headers: authHeaders()
+    });
+    expect(currentOnly.statusCode).toBe(204);
+    expect((await app.inject({
+      method: "GET", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders()
+    })).json()).toEqual([expect.objectContaining({ id: sourceId })]);
+
+    const reinstalled = await app.inject({
+      method: "POST", url: `/api/agents/${targetAgentId}/mcp-catalog/${sourceId}/install`, headers: authHeaders()
+    });
+    const deleteAll = await app.inject({
+      method: "DELETE",
+      url: `/api/agents/${targetAgentId}/mcp-servers/${(reinstalled.json() as { id: number }).id}?scope=all`,
+      headers: authHeaders()
+    });
+    expect(deleteAll.statusCode).toBe(204);
+    expect((await app.inject({
+      method: "GET", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders()
+    })).json()).toEqual([]);
+    expect((await app.inject({
+      method: "GET", url: `/api/agents/${targetAgentId}/mcp-servers`, headers: authHeaders()
+    })).json()).toEqual([]);
+  });
+
   it("列出其他 Agent 共享的 MCP，并复制配置、敏感值和会话参数定义", async () => {
     const { app, agentId, db } = await createTestApp();
     const target = await app.inject({

@@ -215,6 +215,41 @@ it("Skills 已启用项排在前面且描述单行省略并悬浮显示全文", 
   expect(description).toHaveAttribute("title", enabledDescription);
 });
 
+it("Skills 列表可选择只删除当前副本或删除所有上传副本", async () => {
+  window.history.replaceState({}, "", `/agents/${agent.id}/skills`);
+  const uploaded = {
+    id: "upload-review", name: "uploaded-review", description: "Uploaded review",
+    source: "upload", enabled: true, available: true
+  };
+  let skills = [uploaded];
+  const deletedScopes: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === `/api/agents/${agent.id}/skills` && (init?.method ?? "GET") === "GET") return response(skills);
+    if (url.startsWith(`/api/agents/${agent.id}/skills/${uploaded.id}?scope=`) && init?.method === "DELETE") {
+      const scope = new URL(url, "http://localhost").searchParams.get("scope")!;
+      deletedScopes.push(scope);
+      skills = scope === "all" ? [] : [{ ...uploaded, enabled: false }];
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }));
+
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "删除 uploaded-review" }));
+  expect(screen.getByRole("alertdialog")).toHaveTextContent("只影响当前智能体");
+  fireEvent.click(screen.getByRole("button", { name: "仅删除当前" }));
+  await waitFor(() => expect(deletedScopes).toEqual(["current"]));
+  expect(await screen.findByRole("button", { name: "启用" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "删除 uploaded-review" }));
+  fireEvent.click(screen.getByRole("button", { name: "从所有智能体删除" }));
+  await waitFor(() => expect(deletedScopes).toEqual(["current", "all"]));
+  expect(await screen.findByText("暂无匹配的技能。")).toBeInTheDocument();
+});
+
 it("新建支持的 Agent 时提交智能体指令，Hermes 明确禁用该配置", async () => {
   window.history.replaceState({}, "", "/agents/new");
   const requests: unknown[] = [];

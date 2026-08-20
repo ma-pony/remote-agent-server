@@ -29,6 +29,7 @@ const cloneAgentSchema = z.object({
 }).strict();
 
 const updateSkillSchema = z.object({ enabled: z.boolean() }).strict();
+const deleteSkillQuerySchema = z.object({ scope: z.enum(["current", "all"]).default("current") }).strict();
 const uploadSkillSchema = z.object({
   fileName: z.string().trim().min(1).max(255).regex(/\.zip$/i),
   contentBase64: z.string().min(1).max(14_000_000).regex(/^[A-Za-z0-9+/]*={0,2}$/)
@@ -164,6 +165,26 @@ export const registerAgentRoutes = (
       ? reply.code(404).send({ error: { code: "skill_not_found", message: "Skill not found" } })
       : skill;
   });
+
+  app.delete<{ Params: { id: string; skillId: string }; Querystring: { scope?: string } }>(
+    "/agents/:id/skills/:skillId",
+    (request, reply) => {
+      const id = parseId(request.params.id);
+      if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
+      const parsed = deleteSkillQuerySchema.safeParse(request.query);
+      if (!parsed.success) return badRequest(reply, "Invalid Skill delete scope");
+      const result = skillManager.remove(id, request.params.skillId, parsed.data.scope);
+      if (result === "not_found") {
+        return reply.code(404).send({ error: { code: "skill_not_found", message: "Skill not found" } });
+      }
+      if (result === "global_delete_unsupported") {
+        return reply.code(409).send({
+          error: { code: result, message: "Host Skills cannot be deleted globally" }
+        });
+      }
+      return reply.code(204).send();
+    }
+  );
 
   app.post<{ Params: { id: string } }>(
     "/agents/:id/skills/upload",

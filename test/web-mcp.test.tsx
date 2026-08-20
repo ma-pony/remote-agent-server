@@ -70,6 +70,34 @@ it("Agent MCP 独立页面展示服务器和连接检查", async () => {
   expect(await screen.findByText("4 个工具可用")).toBeInTheDocument();
 });
 
+it("MCP 列表可选择只删除当前配置或整个共享组", async () => {
+  let servers = [server];
+  const deletedScopes: string[] = [];
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/sessions") return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response(servers);
+    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
+    if (url.startsWith(`/api/agents/${agent.id}/mcp-servers/${server.id}?scope=`) && init?.method === "DELETE") {
+      deletedScopes.push(new URL(url, "http://localhost").searchParams.get("scope")!);
+      servers = [];
+      return new Response(null, { status: 204 });
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "删除 example_mcp" }));
+  expect(screen.getByRole("alertdialog")).toHaveTextContent("只影响当前智能体");
+  fireEvent.click(screen.getByRole("button", { name: "从所有智能体删除" }));
+  await waitFor(() => expect(deletedScopes).toEqual(["all"]));
+  expect(await screen.findByText("尚未配置 MCP。")).toBeInTheDocument();
+});
+
 it("使用指定 Session 检查引用动态参数的 MCP", async () => {
   let checkBody: unknown;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

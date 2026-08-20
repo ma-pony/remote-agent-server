@@ -39,6 +39,7 @@ const updateParameterSchema = z.object({
 }).strict();
 const checkSchema = z.object({ sessionId: z.number().int().positive().optional() }).strict().optional();
 const enabledSchema = z.object({ enabled: z.boolean() }).strict();
+const deleteScopeSchema = z.object({ scope: z.enum(["current", "all"]).default("current") }).strict();
 const parseId = (value: string): number | undefined => {
   const parsed = z.coerce.number().int().positive().safeParse(value);
   return parsed.success ? parsed.data : undefined;
@@ -132,10 +133,12 @@ export const registerMcpRoutes = (app: FastifyInstance, { mcpManager, mcpChecker
       return server === undefined ? notFound(reply, "MCP server not found") : server;
     }
   );
-  app.delete<{ Params: { agentId: string; id: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) => {
+  app.delete<{ Params: { agentId: string; id: string }; Querystring: { scope?: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) => {
+    const parsed = deleteScopeSchema.safeParse(request.query);
+    if (!parsed.success) return invalidRequest(reply, "Invalid MCP delete scope");
     const agentId = parseId(request.params.agentId);
     const id = parseId(request.params.id);
-    return agentId !== undefined && id !== undefined && mcpManager.deleteServer(agentId, id)
+    return agentId !== undefined && id !== undefined && mcpManager.deleteServer(agentId, id, parsed.data.scope)
       ? reply.code(204).send()
       : notFound(reply, "MCP server not found");
   });

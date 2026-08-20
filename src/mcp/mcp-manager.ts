@@ -353,8 +353,16 @@ export class McpManager {
     return this.getServer(agentId, id)!;
   }
 
-  deleteServer(agentId: number, id: number): boolean {
-    return this.db.prepare("DELETE FROM agent_mcp_servers WHERE id = ? AND agent_id = ?").run(id, agentId).changes === 1;
+  deleteServer(agentId: number, id: number, scope: "current" | "all" = "current"): boolean {
+    const existing = this.getServerRow(agentId, id);
+    if (existing === undefined) return false;
+    if (scope === "current") {
+      return this.db.prepare("DELETE FROM agent_mcp_servers WHERE id = ? AND agent_id = ?").run(id, agentId).changes === 1;
+    }
+    const sourceId = existing.source_mcp_server_id ?? existing.id;
+    return this.db.transaction(() => this.db.prepare(
+      "DELETE FROM agent_mcp_servers WHERE id = ? OR source_mcp_server_id = ?"
+    ).run(sourceId, sourceId).changes > 0).immediate();
   }
 
   listParameterDefinitions(agentId: number): AgentSessionParameter[] {

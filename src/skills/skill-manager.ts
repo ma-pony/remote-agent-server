@@ -38,6 +38,9 @@ export type SkillManagerOptions = {
   roots?: SkillRoot[];
 };
 
+export type SkillRemoveScope = "current" | "all";
+export type SkillRemoveResult = "removed" | "not_found" | "global_delete_unsupported";
+
 const maxArchiveBytes = 10 * 1024 * 1024;
 const maxExtractedBytes = 50 * 1024 * 1024;
 const maxArchiveFiles = 1_000;
@@ -154,6 +157,27 @@ export class SkillManager {
     if (current === undefined) return undefined;
     rmSync(this.destination(agentId, id), { force: true, recursive: true });
     return { ...current, enabled: false };
+  }
+
+  remove(agentId: number, id: string, scope: SkillRemoveScope): SkillRemoveResult {
+    const current = this.list(agentId).find((skill) => skill.id === id);
+    if (current === undefined) return "not_found";
+    if (scope === "current") {
+      rmSync(this.destination(agentId, id), { force: true, recursive: true });
+      return "removed";
+    }
+    if (current.source !== "upload") return "global_delete_unsupported";
+
+    rmSync(join(this.dataDir, "skill-library", id), { force: true, recursive: true });
+    const agentsRoot = join(this.dataDir, "agents");
+    if (existsSync(agentsRoot)) {
+      for (const agent of readdirSync(agentsRoot, { withFileTypes: true })) {
+        if (!agent.isDirectory()) continue;
+        rmSync(join(agentsRoot, agent.name, "skills", id), { force: true, recursive: true });
+        rmSync(join(agentsRoot, agent.name, "skill-library", id), { force: true, recursive: true });
+      }
+    }
+    return "removed";
   }
 
   upload(agentId: number, fileName: string, archive: Uint8Array): SkillCatalogItem {
