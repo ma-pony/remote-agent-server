@@ -20,6 +20,7 @@ import type {
   ResolveMcpContext,
   RuntimeMcpKey,
   SessionMcpStatus,
+  SharedMcpServerSummary,
   UpdateSessionParameterInput
 } from "./mcp-types.js";
 
@@ -46,6 +47,7 @@ export class McpManagerError extends Error {
 type McpServerRow = {
   id: number;
   agent_id: number;
+  source_mcp_server_id: number | null;
   name: string;
   transport: "http" | "stdio";
   enabled: 0 | 1;
@@ -154,6 +156,114 @@ export class McpManager {
     return (this.db.prepare(
       "SELECT * FROM agent_mcp_servers WHERE agent_id = ? ORDER BY created_at ASC, id ASC"
     ).all(agentId) as McpServerRow[]).map(toSummary);
+  }
+
+  listCatalog(agentId: number): SharedMcpServerSummary[] {
+    this.requireAgent(agentId);
+    return (this.db.prepare(`
+      SELECT server.id, server.name, server.transport, server.check_timeout_seconds,
+             server.agent_id AS source_agent_id, agent.name AS source_agent_name
+      FROM agent_mcp_servers server
+      JOIN agents agent ON agent.id = server.agent_id
+      WHERE server.source_mcp_server_id IS NULL
+        AND server.agent_id <> ?
+        AND NOT EXISTS (
+          SELECT 1 FROM agent_mcp_servers installed
+          WHERE installed.agent_id = ?
+            AND (installed.source_mcp_server_id = server.id OR installed.name = server.name)
+        )
+      ORDER BY server.created_at ASC, server.id ASC
+    `).all(agentId, agentId) as Array<{
+      id: number; name: string; transport: "http" | "stdio"; check_timeout_seconds: number;
+      source_agent_id: number; source_agent_name: string;
+    }>).map((row) => ({
+      id: row.id,
+      name: row.name,
+      transport: row.transport,
+      checkTimeoutSeconds: row.check_timeout_seconds,
+      sourceAgentId: row.source_agent_id,
+      sourceAgentName: row.source_agent_name
+    }));
+  }
+
+  installFromCatalog(agentId: number, sourceId: number): AgentMcpServerDetail | undefined {
+    this.requireAgent(agentId);
+    const source = this.db.prepare(
+      "SELECT * FROM agent_mcp_servers WHERE id = ? AND source_mcp_server_id IS NULL"
+    ).get(sourceId) as McpServerRow | undefined;
+    if (source === undefined || source.agent_id === agentId) return undefined;
+
+    let installedId = 0;
+    const now = new Date().toISOString();
+    try {
+      this.db.transaction(() => {
+        const parameterIds = new Map<number, number>();
+        const sourceParameters = this.db.prepare(`
+          SELECT DISTINCT parameter.*
+          FROM agent_session_parameters parameter
+          JOIN agent_mcp_values value ON value.session_parameter_id = parameter.id
+          WHERE value.mcp_server_id = ?
+          ORDER BY parameter.created_at ASC, parameter.id ASC
+        `).all(source.id) as SessionParameterRow[];
+        for (const parameter of sourceParameters) {
+          const existing = this.db.prepare(
+            "SELECT * FROM agent_session_parameters WHERE agent_id = ? AND key = ?"
+          ).get(agentId, parameter.key) as SessionParameterRow | undefined;
+          if (existing !== undefined) {
+            parameterIds.set(parameter.id, existing.id);
+            continue;
+          }
+          const parameterId = insertedId(this.db.prepare(`
+            INSERT INTO agent_session_parameters
+              (agent_id, key, label, description, required, secret, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            agentId, parameter.key, parameter.label, parameter.description,
+            parameter.required, parameter.secret, now, now
+          ));
+          parameterIds.set(parameter.id, parameterId);
+        }
+
+        installedId = insertedId(this.db.prepare(`
+          INSERT INTO agent_mcp_servers
+            (agent_id, source_mcp_server_id, name, transport, enabled, url, command,
+             check_timeout_seconds, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+        `).run(
+          agentId, source.id, source.name, source.transport, source.url, source.command,
+          source.check_timeout_seconds, now, now
+        ));
+        const values = this.listValueRows(source.id);
+        const insertValue = this.db.prepare(`
+          INSERT INTO agent_mcp_values
+            (mcp_server_id, kind, position, target_name, source_type, plain_value,
+             encrypted_value, secret, session_parameter_id, runtime_key)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        for (const value of values) {
+          insertValue.run(
+            installedId, value.kind, value.position, value.target_name, value.source_type,
+            value.plain_value, value.encrypted_value, value.secret,
+            value.session_parameter_id === null ? null : parameterIds.get(value.session_parameter_id),
+            value.runtime_key
+          );
+        }
+      }).immediate();
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("agent_mcp_servers.agent_id, agent_mcp_servers.name")) {
+        throw new McpManagerError("duplicate_mcp_name");
+      }
+      throw error;
+    }
+    return this.getServer(agentId, installedId)!;
+  }
+
+  setServerEnabled(agentId: number, id: number, enabled: boolean): AgentMcpServerSummary | undefined {
+    const result = this.db.prepare(`
+      UPDATE agent_mcp_servers SET enabled = ?, updated_at = ? WHERE id = ? AND agent_id = ?
+    `).run(enabled ? 1 : 0, new Date().toISOString(), id, agentId);
+    if (result.changes !== 1) return undefined;
+    return toSummary(this.getServerRow(agentId, id)!);
   }
 
   getServer(agentId: number, id: number): AgentMcpServerDetail | undefined {

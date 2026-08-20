@@ -103,6 +103,15 @@ export type AgentMcpServerSummary = {
   updatedAt: string;
 };
 
+export type SharedMcpServerSummary = {
+  id: number;
+  name: string;
+  transport: McpTransport;
+  checkTimeoutSeconds: number;
+  sourceAgentId: number;
+  sourceAgentName: string;
+};
+
 export type AgentMcpServerDetail = AgentMcpServerSummary & (
   | { transport: "http"; url: string; headers: AgentMcpValueView[] }
   | {

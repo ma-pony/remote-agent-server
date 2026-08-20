@@ -130,7 +130,7 @@ export class SkillManager {
   }
 
   list(agentId: number): SkillCatalogItem[] {
-    const catalog = this.availableCatalog(agentId);
+    const catalog = this.availableCatalog();
     const availableIds = new Set(catalog.map((skill) => skill.id));
     const result: SkillCatalogItem[] = catalog.map(({ directory: _directory, ...skill }) => ({
       ...skill,
@@ -143,7 +143,7 @@ export class SkillManager {
   }
 
   setEnabled(agentId: number, id: string, enabled: boolean): SkillCatalogItem | undefined {
-    const available = this.availableCatalog(agentId).find((skill) => skill.id === id);
+    const available = this.availableCatalog().find((skill) => skill.id === id);
     const current = this.list(agentId).find((skill) => skill.id === id);
     if (enabled) {
       if (available === undefined) return undefined;
@@ -189,7 +189,7 @@ export class SkillManager {
     const prefix = manifests[0]!.slice(0, -"SKILL.md".length);
     if (names.some((name) => !name.startsWith(prefix))) throw new SkillManagerError("invalid_skill_archive");
 
-    const libraryRoot = join(this.dataDir, "agents", String(agentId), "skill-library");
+    const libraryRoot = join(this.dataDir, "skill-library");
     const temporary = join(libraryRoot, `.upload-${randomUUID()}`);
     mkdirSync(temporary, { recursive: true });
     try {
@@ -204,7 +204,7 @@ export class SkillManager {
       if (details.name.trim() === "" || details.description.trim() === "") {
         throw new SkillManagerError("invalid_skill_archive");
       }
-      if (this.catalog().some((skill) => skill.name === details.name)) {
+      if (this.availableCatalog().some((skill) => skill.name === details.name)) {
         throw new SkillManagerError("skill_name_conflict");
       }
       const id = `upload-${createHash("sha256").update(details.name).digest("hex").slice(0, 20)}`;
@@ -267,30 +267,44 @@ export class SkillManager {
     return result;
   }
 
-  private availableCatalog(agentId: number): AvailableSkill[] {
-    return [...this.catalog(), ...this.uploadedCatalog(agentId)];
+  private availableCatalog(): AvailableSkill[] {
+    const byName = new Map<string, AvailableSkill>();
+    for (const skill of [...this.catalog(), ...this.uploadedCatalog()]) {
+      if (!byName.has(skill.name)) byName.set(skill.name, skill);
+    }
+    return [...byName.values()];
   }
 
-  private uploadedCatalog(agentId: number): AvailableSkill[] {
-    const root = join(this.dataDir, "agents", String(agentId), "skill-library");
-    if (!existsSync(root)) return [];
-    return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) return [];
-      const directory = join(root, entry.name);
-      if (!existsSync(join(directory, "SKILL.md"))) return [];
-      try {
-        return [{
-          id: entry.name,
-          ...metadata(directory),
-          source: "upload" as const,
-          enabled: false,
-          available: true,
-          directory
-        }];
-      } catch {
-        return [];
+  private uploadedCatalog(): AvailableSkill[] {
+    const roots = [join(this.dataDir, "skill-library")];
+    const agentsRoot = join(this.dataDir, "agents");
+    if (existsSync(agentsRoot)) {
+      for (const agent of readdirSync(agentsRoot, { withFileTypes: true })) {
+        if (agent.isDirectory()) roots.push(join(agentsRoot, agent.name, "skill-library"));
       }
-    });
+    }
+    const found = new Map<string, AvailableSkill>();
+    for (const root of roots) {
+      if (!existsSync(root)) continue;
+      for (const entry of readdirSync(root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name.startsWith(".") || found.has(entry.name)) continue;
+        const directory = join(root, entry.name);
+        if (!existsSync(join(directory, "SKILL.md"))) continue;
+        try {
+          found.set(entry.name, {
+            id: entry.name,
+            ...metadata(directory),
+            source: "upload",
+            enabled: false,
+            available: true,
+            directory
+          });
+        } catch {
+          // Invalid uploaded Skills are not offered to other Agents.
+        }
+      }
+    }
+    return [...found.values()];
   }
 
   private installed(agentId: number): SkillCatalogItem[] {

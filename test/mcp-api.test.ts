@@ -56,6 +56,90 @@ afterEach(async () => {
 });
 
 describe("Agent MCP API", () => {
+  it("列出其他 Agent 共享的 MCP，并复制配置、敏感值和会话参数定义", async () => {
+    const { app, agentId, db } = await createTestApp();
+    const target = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "Target", provider: "codex", projectEnvironmentId: 1 }
+    });
+    const targetAgentId = (target.json() as { id: number }).id;
+    await app.inject({
+      method: "POST",
+      url: `/api/agents/${agentId}/session-parameters`,
+      headers: authHeaders(),
+      payload: {
+        key: "tenant_token", label: "租户令牌", description: "每个会话单独填写",
+        required: true, secret: true
+      }
+    });
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agentId}/mcp-servers`,
+      headers: authHeaders(),
+      payload: {
+        name: "shared_mcp", transport: "http", enabled: true,
+        url: "https://example.test/mcp", checkTimeoutSeconds: 20,
+        headers: [
+          { name: "Authorization", source: "fixed", value: "Bearer shared-secret", secret: true },
+          { name: "X-Tenant", source: "session_parameter", parameterKey: "tenant_token" }
+        ]
+      }
+    });
+    const sourceServerId = (created.json() as { id: number }).id;
+
+    const catalog = await app.inject({
+      method: "GET",
+      url: `/api/agents/${targetAgentId}/mcp-catalog`,
+      headers: authHeaders()
+    });
+    expect(catalog.statusCode).toBe(200);
+    expect(catalog.json()).toEqual([
+      expect.objectContaining({ id: sourceServerId, name: "shared_mcp", sourceAgentName: "Test agent" })
+    ]);
+    expect(JSON.stringify(catalog.json())).not.toContain("shared-secret");
+
+    const installed = await app.inject({
+      method: "POST",
+      url: `/api/agents/${targetAgentId}/mcp-catalog/${sourceServerId}/install`,
+      headers: authHeaders()
+    });
+    expect(installed.statusCode).toBe(201);
+    expect(installed.json()).toMatchObject({ agentId: targetAgentId, name: "shared_mcp", enabled: true });
+    expect(JSON.stringify(installed.json())).not.toContain("shared-secret");
+
+    const disabled = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${targetAgentId}/mcp-servers/${(installed.json() as { id: number }).id}/enabled`,
+      headers: authHeaders(),
+      payload: { enabled: false }
+    });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.json()).toMatchObject({ enabled: false });
+
+    const targetParameters = await app.inject({
+      method: "GET",
+      url: `/api/agents/${targetAgentId}/session-parameters`,
+      headers: authHeaders()
+    });
+    expect(targetParameters.json()).toEqual([
+      expect.objectContaining({ key: "tenant_token", label: "租户令牌", required: true, secret: true })
+    ]);
+    const copiedSecret = db.prepare(`
+      SELECT encrypted_value FROM agent_mcp_values
+      WHERE mcp_server_id = ? AND encrypted_value IS NOT NULL
+    `).get((installed.json() as { id: number }).id) as { encrypted_value: string };
+    expect(copiedSecret.encrypted_value).not.toContain("shared-secret");
+
+    const catalogAfterInstall = await app.inject({
+      method: "GET",
+      url: `/api/agents/${targetAgentId}/mcp-catalog`,
+      headers: authHeaders()
+    });
+    expect(catalogAfterInstall.json()).toEqual([]);
+  });
+
   it("鉴权后完成参数与 HTTP MCP 管理，敏感值不出现在响应", async () => {
     const { app, agentId } = await createTestApp();
 

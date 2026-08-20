@@ -38,6 +38,7 @@ const updateParameterSchema = z.object({
   label: z.string().min(1), description: z.string().nullable(), required: z.boolean()
 }).strict();
 const checkSchema = z.object({ sessionId: z.number().int().positive().optional() }).strict().optional();
+const enabledSchema = z.object({ enabled: z.boolean() }).strict();
 const parseId = (value: string): number | undefined => {
   const parsed = z.coerce.number().int().positive().safeParse(value);
   return parsed.success ? parsed.data : undefined;
@@ -83,6 +84,24 @@ export const registerMcpRoutes = (app: FastifyInstance, { mcpManager, mcpChecker
     try { return reply.code(201).send(mcpManager.createServer(agentId, parsed.data)); }
     catch (error) { return handleMcpError(reply, error); }
   });
+  app.get<{ Params: { agentId: string } }>("/agents/:agentId/mcp-catalog", (request, reply) => {
+    const agentId = parseId(request.params.agentId);
+    if (agentId === undefined) return notFound(reply, "Agent not found");
+    try { return mcpManager.listCatalog(agentId); }
+    catch (error) { return handleMcpError(reply, error); }
+  });
+  app.post<{ Params: { agentId: string; sourceId: string } }>(
+    "/agents/:agentId/mcp-catalog/:sourceId/install",
+    (request, reply) => {
+      try {
+        const agentId = parseId(request.params.agentId);
+        const sourceId = parseId(request.params.sourceId);
+        if (agentId === undefined || sourceId === undefined) return notFound(reply, "MCP server not found");
+        const server = mcpManager.installFromCatalog(agentId, sourceId);
+        return server === undefined ? notFound(reply, "MCP server not found") : reply.code(201).send(server);
+      } catch (error) { return handleMcpError(reply, error); }
+    }
+  );
   app.get<{ Params: { agentId: string; id: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) => {
     const agentId = parseId(request.params.agentId);
     const id = parseId(request.params.id);
@@ -100,6 +119,19 @@ export const registerMcpRoutes = (app: FastifyInstance, { mcpManager, mcpChecker
       return server === undefined ? notFound(reply, "MCP server not found") : server;
     } catch (error) { return handleMcpError(reply, error); }
   });
+  app.patch<{ Params: { agentId: string; id: string } }>(
+    "/agents/:agentId/mcp-servers/:id/enabled",
+    (request, reply) => {
+      const parsed = enabledSchema.safeParse(request.body);
+      if (!parsed.success) return invalidRequest(reply, "Invalid MCP enabled state");
+      const agentId = parseId(request.params.agentId);
+      const id = parseId(request.params.id);
+      const server = agentId === undefined || id === undefined
+        ? undefined
+        : mcpManager.setServerEnabled(agentId, id, parsed.data.enabled);
+      return server === undefined ? notFound(reply, "MCP server not found") : server;
+    }
+  );
   app.delete<{ Params: { agentId: string; id: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) => {
     const agentId = parseId(request.params.agentId);
     const id = parseId(request.params.id);

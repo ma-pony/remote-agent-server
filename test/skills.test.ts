@@ -99,6 +99,28 @@ describe("SkillManager", () => {
     expect(manager.setEnabled("agent-1", uploaded.id, true)).toMatchObject({ enabled: true });
   });
 
+  it("上传的 Skill 对所有 Agent 可见，并由每个 Agent 独立启用", () => {
+    const root = makeRoot();
+    const dataDir = join(root, "data");
+    const manager = new SkillManager({ dataDir, roots: [] });
+    const archive = zipSync({
+      "shared-review/SKILL.md": strToU8("---\nname: shared-review\ndescription: Shared review workflow\n---\n")
+    });
+
+    const uploaded = manager.upload("agent-1", "shared-review.zip", archive);
+
+    expect(manager.list("agent-2")).toEqual([
+      expect.objectContaining({ id: uploaded.id, name: "shared-review", enabled: false, available: true })
+    ]);
+    expect(manager.setEnabled("agent-2", uploaded.id, true)).toMatchObject({ enabled: true });
+    expect(manager.list("agent-1")[0]).toMatchObject({ id: uploaded.id, enabled: true });
+    expect(manager.list("agent-2")[0]).toMatchObject({ id: uploaded.id, enabled: true });
+
+    manager.setEnabled("agent-1", uploaded.id, false);
+    expect(manager.list("agent-1")[0]).toMatchObject({ enabled: false });
+    expect(manager.list("agent-2")[0]).toMatchObject({ enabled: true });
+  });
+
   it("拒绝路径穿越和缺少 SKILL.md 的上传压缩包", () => {
     const root = makeRoot();
     const manager = new SkillManager({ dataDir: join(root, "data"), roots: [] });

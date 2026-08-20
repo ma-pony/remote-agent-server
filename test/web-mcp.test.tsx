@@ -37,17 +37,23 @@ afterEach(() => {
 });
 
 it("Agent MCP 独立页面展示服务器、连接检查和 Session 参数", async () => {
+  let enabledBody: unknown;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
     if (url === "/api/sessions") return response([session]);
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
       id: 1, agentId: agent.id, key: "tenant", label: "租户", description: null,
       required: true, secret: false, createdAt: now, updatedAt: now
     }]);
     if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
       return response({ status: "passed", toolCount: 4, message: "4 tools available" });
+    }
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/enabled` && init?.method === "PATCH") {
+      enabledBody = JSON.parse(String(init.body));
+      return response({ ...server, enabled: false });
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
@@ -58,6 +64,9 @@ it("Agent MCP 独立页面展示服务器、连接检查和 Session 参数", asy
   expect(await screen.findByText("MCP 服务器")).toBeInTheDocument();
   expect(await screen.findByText("example_mcp")).toBeInTheDocument();
   expect(screen.getByDisplayValue("租户")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "停用" }));
+  await waitFor(() => expect(enabledBody).toEqual({ enabled: false }));
+  expect(await screen.findByText("已停用")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
   expect(await screen.findByText("4 个工具可用")).toBeInTheDocument();
 });
@@ -69,6 +78,7 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
     if (url === `/api/agents/${agent.id}`) return response(agent);
     if (url === "/api/sessions") return response([session]);
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
     if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
       checkBody = JSON.parse(String(init.body));
@@ -92,6 +102,7 @@ it("点击工具数量后实时检查并展示全部工具", async () => {
     if (url === `/api/agents/${agent.id}`) return response(agent);
     if (url === "/api/sessions") return response([session]);
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([checkedServer]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
     if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
       return response({
@@ -111,6 +122,41 @@ it("点击工具数量后实时检查并展示全部工具", async () => {
   expect(screen.getByText("读取工单详情")).toBeInTheDocument();
   expect(screen.getByText("ticket_pause")).toBeInTheDocument();
   expect(screen.getByText("暂无说明")).toBeInTheDocument();
+});
+
+it("从共享 MCP 区域一键添加并启用", async () => {
+  const shared = {
+    id: 8, name: "mongodb", transport: "stdio", sourceAgentId: 2,
+    sourceAgentName: "数据智能体", checkTimeoutSeconds: 30
+  };
+  let installed = false;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/sessions") return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response(installed ? [{ ...server, id: 9, name: shared.name }] : []);
+    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response(installed ? [] : [shared]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog/${shared.id}/install` && init?.method === "POST") {
+      installed = true;
+      return response({ ...server, id: 9, name: shared.name }, 201);
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+
+  expect(await screen.findByText("可添加的 MCP")).toBeInTheDocument();
+  expect(screen.getByText("mongodb")).toBeInTheDocument();
+  expect(screen.getByText("来自 数据智能体")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "添加并启用 mongodb" }));
+
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+    `/api/agents/${agent.id}/mcp-catalog/${shared.id}/install`,
+    expect.objectContaining({ method: "POST" })
+  ));
+  await waitFor(() => expect(screen.getByText("所有共享 MCP 均已添加。")) .toBeInTheDocument());
 });
 
 it("从独立页面创建带敏感 Header 的 HTTP MCP", async () => {

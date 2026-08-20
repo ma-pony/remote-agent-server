@@ -359,6 +359,39 @@ describe("database migration", () => {
     db.close();
   });
 
+  it("已有 MCP 表迁移时原地增加共享来源列", () => {
+    const db = openDatabase(":memory:");
+    db.exec(`
+      CREATE TABLE agents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE agent_mcp_servers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agent_id INTEGER NOT NULL REFERENCES agents(id),
+        name TEXT NOT NULL,
+        transport TEXT NOT NULL,
+        enabled INTEGER NOT NULL,
+        url TEXT,
+        command TEXT,
+        check_timeout_seconds INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+
+    migrate(db);
+
+    const columns = db.prepare("PRAGMA table_info(agent_mcp_servers)").all()
+      .map((row) => (row as { name: string }).name);
+    expect(columns).toContain("source_mcp_server_id");
+    db.close();
+  });
+
   it("为新旧 runs 表增加可空 Token 用量列", () => {
     const expected = [
       "input_tokens",

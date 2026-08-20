@@ -186,7 +186,7 @@ const FOREIGN_ID_TABLES: Record<string, Record<string, string>> = {
   project_environment_revisions: { project_environment_id: "project_environments" },
   environment_repositories: { project_environment_id: "project_environments" },
   agents: { project_environment_id: "project_environments" },
-  agent_mcp_servers: { agent_id: "agents" },
+  agent_mcp_servers: { agent_id: "agents", source_mcp_server_id: "agent_mcp_servers" },
   agent_session_parameters: { agent_id: "agents" },
   agent_mcp_values: {
     mcp_server_id: "agent_mcp_servers",
@@ -407,6 +407,7 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
     CREATE TABLE IF NOT EXISTS agent_mcp_servers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      source_mcp_server_id INTEGER,
       name TEXT NOT NULL,
       transport TEXT NOT NULL CHECK (transport IN ('http', 'stdio')),
       enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
@@ -616,6 +617,9 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
   }
   if (!hasColumn("agents", "instructions")) {
     db.exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''");
+  }
+  if (!hasColumn("agent_mcp_servers", "source_mcp_server_id")) {
+    db.exec("ALTER TABLE agent_mcp_servers ADD COLUMN source_mcp_server_id INTEGER");
   }
   if (!hasColumn("sessions", "project_environment_revision_id")) {
     db.exec("ALTER TABLE sessions ADD COLUMN project_environment_revision_id INTEGER REFERENCES project_environment_revisions(id)");

@@ -135,6 +135,15 @@ export type AgentMcpServerSummary = {
   updatedAt: string;
 };
 
+export type SharedMcpServerSummary = {
+  id: number;
+  name: string;
+  transport: "http" | "stdio";
+  checkTimeoutSeconds: number;
+  sourceAgentId: number;
+  sourceAgentName: string;
+};
+
 export type AgentMcpServerDetail = AgentMcpServerSummary & (
   | { transport: "http"; url: string; headers: McpValueView[] }
   | { transport: "stdio"; command: string; arguments: McpValueView[]; environment: McpValueView[] }
