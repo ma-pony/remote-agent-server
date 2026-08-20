@@ -76,6 +76,26 @@ afterEach(async () => {
 });
 
 describe("Agent API", () => {
+  it("提供无副作用的 API Token 校验端点", async () => {
+    const { app } = await createTestApp();
+
+    const valid = await app.inject({
+      method: "GET",
+      url: "/api/auth/verify",
+      headers: authHeaders()
+    });
+    const invalid = await app.inject({
+      method: "GET",
+      url: "/api/auth/verify",
+      headers: { authorization: "Bearer wrong-token" }
+    });
+
+    expect(valid.statusCode).toBe(204);
+    expect(valid.body).toBe("");
+    expect(invalid.statusCode).toBe(401);
+    expect(invalid.json()).toEqual({ error: { code: "unauthorized", message: "Invalid API token" } });
+  });
+
   it("复制 Agent 配置但不复制会话、接入端点和执行器运行数据", async () => {
     const { app, dataDir, db, projectEnvironmentId } = await createTestApp();
     const created = await app.inject({

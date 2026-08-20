@@ -1,4 +1,4 @@
-import { Component, type ErrorInfo, type FormEvent, type ReactNode, useState } from "react";
+import { Component, type ErrorInfo, type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
 
 import { AppShellLayout } from "./components/app-shell.js";
@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./com
 import { Input } from "./components/ui/input.js";
 import { Field, FieldGroup, FieldLabel } from "./components/ui/field.js";
 import { I18nProvider, useI18n } from "./i18n.js";
+import { API_TOKEN_INVALID_EVENT, verifyApiToken } from "./api.js";
 import {
   AgentCreatePage, AgentDetailLayout, AgentListPage, AgentOverviewPage,
   AgentSettingsPage, AgentSkillsPage
@@ -58,6 +59,12 @@ export const App = () => <AppErrorBoundary><I18nProvider><Application /></I18nPr
 
 const Application = () => {
   const [token, setToken] = useState(() => sessionStorage.getItem("apiToken"));
+
+  useEffect(() => {
+    const disconnect = () => setToken(null);
+    window.addEventListener(API_TOKEN_INVALID_EVENT, disconnect);
+    return () => window.removeEventListener(API_TOKEN_INVALID_EVENT, disconnect);
+  }, []);
 
   if (token === null) {
     return <TokenGate onSave={(value) => {
@@ -115,12 +122,27 @@ const SessionRoute = () => {
 
 const TokenGate = ({ onSave }: { onSave(token: string): void }) => {
   const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const { locale, setLocale, text } = useI18n();
 
-  const submit = (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
     const token = value.trim();
-    if (token !== "") onSave(token);
+    if (token === "") return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (await verifyApiToken(token)) {
+        onSave(token);
+      } else {
+        setError(text("API 令牌无效", "Invalid API token"));
+      }
+    } catch {
+      setError(text("无法连接服务器", "Unable to connect to the server"));
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -132,8 +154,9 @@ const TokenGate = ({ onSave }: { onSave(token: string): void }) => {
           <CardDescription className="leading-6">{text("输入服务器 API 令牌。凭证仅保留在当前浏览器会话中。", "Enter the server API token. It is kept only for this browser session.")}</CardDescription>
         </CardHeader>
         <CardContent className="p-7 pt-4 sm:p-9 sm:pt-4"><form className="flex flex-col gap-4" onSubmit={submit} aria-labelledby="token-title"><FieldGroup>
-          <Field><FieldLabel htmlFor="api-token">{text("API 令牌", "API token")}</FieldLabel><Input id="api-token" type="password" autoComplete="off" value={value} onChange={(event) => setValue(event.target.value)} autoFocus /></Field>
-          <Button className="w-full" type="submit">{text("进入管理台", "Open console")}</Button>
+          <Field><FieldLabel htmlFor="api-token">{text("API 令牌", "API token")}</FieldLabel><Input id="api-token" type="password" autoComplete="off" value={value} aria-invalid={error === null ? undefined : true} onChange={(event) => setValue(event.target.value)} autoFocus /></Field>
+          {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+          <Button className="w-full" type="submit" disabled={busy}>{busy ? text("正在验证…", "Verifying…") : text("进入管理台", "Open console")}</Button>
         </FieldGroup></form></CardContent>
       </Card>
     </main>

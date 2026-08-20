@@ -297,6 +297,8 @@ export type WebhookDelivery = {
 
 export type ApiError = { error?: { code?: string; message?: string }; message?: string };
 
+export const API_TOKEN_INVALID_EVENT = "remote-agent-api-token-invalid";
+
 export class RunStreamPermanentError extends Error {
   constructor(message: string) {
     super(message);
@@ -307,6 +309,14 @@ export class RunStreamPermanentError extends Error {
 export const isRunStreamPermanentError = (error: unknown): error is RunStreamPermanentError =>
   error instanceof RunStreamPermanentError;
 
+/** Checks a candidate API token before it is persisted in the browser session. */
+export async function verifyApiToken(token: string): Promise<boolean> {
+  const response = await fetch("/api/auth/verify", {
+    headers: { authorization: `Bearer ${token}` }
+  });
+  return response.ok;
+}
+
 /** Sends one authenticated request to the server API. */
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = sessionStorage.getItem("apiToken");
@@ -314,6 +324,10 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body != null && !headers.has("content-type")) headers.set("content-type", "application/json");
   headers.set("authorization", `Bearer ${token}`);
   const response = await fetch(`/api${path}`, { ...init, headers });
+  if (response.status === 401) {
+    sessionStorage.removeItem("apiToken");
+    window.dispatchEvent(new Event(API_TOKEN_INVALID_EVENT));
+  }
   if (!response.ok) throw await response.json();
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;

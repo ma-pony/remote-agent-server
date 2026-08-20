@@ -165,6 +165,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   app.get("/api/health", () => ({ ok: true }));
   app.register((api) => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
+    api.get("/auth/verify", async (_request, reply) => reply.code(204).send());
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager, skillManager, runRepository);
     registerMcpRoutes(api, { mcpManager, mcpChecker });
