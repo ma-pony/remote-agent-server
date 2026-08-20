@@ -1203,6 +1203,7 @@ describe("Webhook management API", () => {
     expect(retried.statusCode).toBe(202);
     expect(retried.json()).toMatchObject({ id: delivery.id, eventId: delivery.eventId, status: "pending", attemptCount: 0 });
     expect(db.prepare("SELECT event_id, payload_json FROM webhook_deliveries WHERE id = ?").get(delivery.id)).toEqual(original);
+    await vi.waitFor(() => expect(requests).toHaveLength(2));
 
     const encryptedSigningSecret = persisted.encrypted_signing_secret;
     const updated = await app.inject({
@@ -1222,6 +1223,55 @@ describe("Webhook management API", () => {
     expect((db.prepare("SELECT encrypted_signing_secret FROM webhook_subscriptions WHERE id = ?")
       .get(createdBody.webhook.id) as { encrypted_signing_secret: string }).encrypted_signing_secret)
       .toBe(encryptedSigningSecret);
+
+    const rotated = await app.inject({
+      method: "POST",
+      url: `/api/integration-endpoints/${endpointId}/webhooks/${createdBody.webhook.id}/rotate-secret`,
+      headers: authHeaders
+    });
+    const rotatedBody = rotated.json() as {
+      webhook: { id: number; signingSecretConfigured: boolean };
+      signingSecret: string;
+    };
+    expect(rotated.statusCode).toBe(200);
+    expect(rotatedBody.webhook).toMatchObject({
+      id: createdBody.webhook.id,
+      signingSecretConfigured: true
+    });
+    expect(rotatedBody.signingSecret).toMatch(/^whsec_/);
+    expect(rotatedBody.signingSecret).not.toBe(createdBody.signingSecret);
+    const rotatedEncryptedSecret = (db.prepare(`
+      SELECT encrypted_signing_secret FROM webhook_subscriptions WHERE id = ?
+    `).get(createdBody.webhook.id) as { encrypted_signing_secret: string }).encrypted_signing_secret;
+    expect(rotatedEncryptedSecret).not.toBe(encryptedSigningSecret);
+    expect(rotatedEncryptedSecret).not.toContain(rotatedBody.signingSecret);
+
+    const relisted = await app.inject({
+      method: "GET",
+      url: `/api/integration-endpoints/${endpointId}/webhooks`,
+      headers: authHeaders
+    });
+    expect(JSON.stringify(relisted.json())).not.toContain(rotatedBody.signingSecret);
+
+    db.prepare("DELETE FROM webhook_deliveries WHERE id = ?").run(auditDelivery.id);
+    const requestCountBeforeRotationTest = requests.length;
+    const testedAfterRotation = await app.inject({
+      method: "POST",
+      url: `/api/integration-endpoints/${endpointId}/webhooks/${createdBody.webhook.id}/test`,
+      headers: authHeaders
+    });
+    expect(testedAfterRotation.statusCode).toBe(202);
+    await vi.waitFor(() => expect(requests).toHaveLength(requestCountBeforeRotationTest + 1));
+    const rotatedRequest = requests[requestCountBeforeRotationTest]!;
+    const timestamp = rotatedRequest.headers.get("x-remote-agent-timestamp")!;
+    const expectedNewSignature = createHmac("sha256", rotatedBody.signingSecret)
+      .update(`${timestamp}.${rotatedRequest.body}`)
+      .digest("hex");
+    const expectedOldSignature = createHmac("sha256", createdBody.signingSecret)
+      .update(`${timestamp}.${rotatedRequest.body}`)
+      .digest("hex");
+    expect(rotatedRequest.headers.get("x-remote-agent-signature")).toBe(`v1=${expectedNewSignature}`);
+    expect(rotatedRequest.headers.get("x-remote-agent-signature")).not.toBe(`v1=${expectedOldSignature}`);
 
     const deleted = await app.inject({
       method: "DELETE",

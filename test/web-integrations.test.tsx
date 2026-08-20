@@ -311,6 +311,44 @@ it("编辑事件回调并保留未重新填写的敏感请求头", async () => {
   expect(await screen.findByText("https://receiver.example.com/v2/webhook")).toBeVisible();
 });
 
+it("确认后轮换事件回调密钥并只展示新密钥一次", async () => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/webhooks`);
+  const rotatedSecret = "whsec_rotated_once";
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    const method = init?.method ?? "GET";
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhooks` && method === "GET") {
+      return jsonResponse([webhook]);
+    }
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`) return jsonResponse([]);
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhooks/${webhook.id}/rotate-secret` && method === "POST") {
+      return jsonResponse({ webhook: { ...webhook, updatedAt: "2026-08-13T10:05:00.000Z" }, signingSecret: rotatedSecret });
+    }
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "轮换 工单回调的签名密钥" }));
+  const dialog = await screen.findByRole("alertdialog");
+  expect(within(dialog).getByText("旧签名密钥将立即失效。接收方必须改用新密钥。"))
+    .toBeVisible();
+  fireEvent.click(within(dialog).getByRole("button", { name: "确认轮换" }));
+
+  expect(await screen.findByText(rotatedSecret)).toBeVisible();
+  expect(screen.getByText("请立即保存新签名密钥，此后不会再次显示")).toBeVisible();
+  expect(fetchMock).toHaveBeenCalledWith(
+    `/api/integration-endpoints/${endpoint.id}/webhooks/${webhook.id}/rotate-secret`,
+    expect.objectContaining({ method: "POST" })
+  );
+
+  fireEvent.click(screen.getByRole("button", { name: "我已保存" }));
+  expect(screen.queryByText(rotatedSecret)).not.toBeInTheDocument();
+});
+
 it("离开 Webhook 页面会清理待投递短轮询", async () => {
   vi.useFakeTimers();
   window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/webhooks`);

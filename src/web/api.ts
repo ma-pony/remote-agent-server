@@ -413,6 +413,9 @@ export const integrationApi = {
   updateWebhook: (endpointId: number, id: number, input: Partial<IntegrationWebhookInput>) => api<IntegrationWebhook>(
     `/integration-endpoints/${endpointId}/webhooks/${id}`, { method: "PATCH", body: JSON.stringify(input) }
   ),
+  rotateWebhookSecret: (endpointId: number, id: number) => api<{
+    webhook: IntegrationWebhook; signingSecret: string;
+  }>(`/integration-endpoints/${endpointId}/webhooks/${id}/rotate-secret`, { method: "POST" }),
   deleteWebhook: (endpointId: number, id: number) => api<void>(
     `/integration-endpoints/${endpointId}/webhooks/${id}`, { method: "DELETE" }
   ),

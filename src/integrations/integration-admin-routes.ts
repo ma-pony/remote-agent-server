@@ -412,6 +412,27 @@ export const registerIntegrationAdminRoutes = (
     }
   );
 
+  app.post<{ Params: { id: string; webhookId: string } }>(
+    "/integration-endpoints/:id/webhooks/:webhookId/rotate-secret",
+    (request, reply) => {
+      const endpointId = numericId(request.params.id);
+      if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
+      const existing = store.getSubscriptionForEndpoint(numericId(request.params.webhookId), endpointId);
+      if (existing === undefined) return webhookNotFound(reply);
+      const signingSecret = `whsec_${randomBytes(32).toString("base64url")}`;
+      const updated = store.updateSubscription(existing.id, {
+        name: existing.name,
+        url: existing.url,
+        enabled: existing.enabled,
+        eventsJson: existing.eventsJson,
+        encryptedHeaders: existing.encryptedHeaders,
+        encryptedSigningSecret: secrets.encrypt(signingSecret),
+        timeoutSeconds: existing.timeoutSeconds
+      })!;
+      return { webhook: publicWebhook(updated, secrets), signingSecret };
+    }
+  );
+
   app.delete<{ Params: { id: string; webhookId: string } }>(
     "/integration-endpoints/:id/webhooks/:webhookId",
     (request, reply) => {
