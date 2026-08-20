@@ -61,6 +61,33 @@ it("Agent 列表只负责浏览，并从独立页面创建 Agent", async () => {
   expect(screen.getByLabelText("智能体名称")).toBeInTheDocument();
 });
 
+it("在 Agent 列表页直接复制创建", async () => {
+  const cloned = { ...agent, id: 2, name: "主力 Codex 副本" };
+  let cloneBody: unknown;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === "/api/agents" && (init?.method ?? "GET") === "GET") return response([agent]);
+    if (url === "/api/project-environments") return response([environment]);
+    if (url === `/api/agents/${agent.id}/clone` && init?.method === "POST") {
+      cloneBody = JSON.parse(String(init.body));
+      return response(cloned);
+    }
+    if (url === `/api/agents/${cloned.id}`) return response(cloned);
+    if (url === `/api/agents/${cloned.id}/usage`) return response(usageSummary);
+    if (url === "/api/integration-endpoints") return response([]);
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  }));
+
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "复制创建" }));
+  expect(screen.getByLabelText("新智能体名称")).toHaveValue("主力 Codex 副本");
+  fireEvent.click(screen.getByRole("button", { name: "创建副本" }));
+
+  await waitFor(() => expect(cloneBody).toEqual({ name: "主力 Codex 副本" }));
+  await waitFor(() => expect(window.location.pathname).toBe(`/agents/${cloned.id}`));
+});
+
 it("在 Agent 详情页输入新名称并快捷复制配置", async () => {
   window.history.replaceState({}, "", `/agents/${agent.id}`);
   const cloned = { ...agent, id: 2, name: "主力 Codex 副本" };

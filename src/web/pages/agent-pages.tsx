@@ -88,7 +88,7 @@ export const AgentListPage = () => {
             <Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge>
           </div>
         </CardHeader>
-        <CardContent className="text-sm text-muted-foreground"><span className="font-medium text-foreground">{text("项目环境：", "Project environment: ")}</span>{agent.projectEnvironmentId === null ? text("未绑定", "Not assigned") : environmentNames.get(agent.projectEnvironmentId) ?? text("环境不可用", "Environment unavailable")}</CardContent>
+        <CardContent className="flex items-center justify-between gap-3 text-sm text-muted-foreground"><p className="min-w-0 truncate"><span className="font-medium text-foreground">{text("项目环境：", "Project environment: ")}</span>{agent.projectEnvironmentId === null ? text("未绑定", "Not assigned") : environmentNames.get(agent.projectEnvironmentId) ?? text("环境不可用", "Environment unavailable")}</p><AgentCloneDialog key={agent.id} agent={agent} /></CardContent>
       </Card>)}</div>}
   </div>;
 };
