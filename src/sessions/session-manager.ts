@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type Database from "better-sqlite3";
@@ -10,6 +11,10 @@ import type { Agent, Session, SessionStatus, TokenUsageTotals } from "../domain.
 import { McpManager } from "../mcp/mcp-manager.js";
 import { SecretStore } from "../mcp/secret-store.js";
 import type { SessionMcpStatus } from "../mcp/mcp-types.js";
+import {
+  SystemProjectEnvironmentCommands,
+  type ProjectEnvironmentCommands
+} from "../project-environments/project-environment-commands.js";
 import { ProjectEnvironmentStore } from "../project-environments/project-environment-store.js";
 import type { AgentRuntime } from "../runtime/agent-runtime.js";
 import { WorkspaceCreateError, type WorkspaceManager } from "../workspaces/workspace-manager.js";
@@ -85,8 +90,13 @@ export type SessionManagerDependencies = {
   runtime: AgentRuntime;
   workspaceManager: WorkspaceManager;
   projectEnvironmentStore?: ProjectEnvironmentStore;
+  projectEnvironmentCommands?: ProjectEnvironmentCommands;
+  projectPrepareTimeoutMs?: number;
   mcpManager?: McpManager;
 };
+
+const ENVIRONMENT_PREPARED_MARKER = ".project-environment-prepared-v1";
+const DEFAULT_PROJECT_PREPARE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Removes Session creations interrupted before their Workspace became ready. */
 export const recoverIncompleteSessions = async (
@@ -116,6 +126,8 @@ export class SessionManager {
   private readonly runtime: AgentRuntime;
   private readonly workspaceManager: WorkspaceManager;
   private readonly projectEnvironmentStore: ProjectEnvironmentStore;
+  private readonly projectEnvironmentCommands: ProjectEnvironmentCommands;
+  private readonly projectPrepareTimeoutMs: number;
   private readonly mcpManager: McpManager;
 
   constructor({
@@ -125,6 +137,8 @@ export class SessionManager {
     runtime,
     workspaceManager,
     projectEnvironmentStore,
+    projectEnvironmentCommands,
+    projectPrepareTimeoutMs,
     mcpManager
   }: SessionManagerDependencies) {
     this.db = db;
@@ -133,6 +147,8 @@ export class SessionManager {
     this.runtime = runtime;
     this.workspaceManager = workspaceManager;
     this.projectEnvironmentStore = projectEnvironmentStore ?? new ProjectEnvironmentStore({ db });
+    this.projectEnvironmentCommands = projectEnvironmentCommands ?? new SystemProjectEnvironmentCommands();
+    this.projectPrepareTimeoutMs = projectPrepareTimeoutMs ?? DEFAULT_PROJECT_PREPARE_TIMEOUT_MS;
     this.mcpManager = mcpManager ?? new McpManager({ db, secrets: SecretStore.open({ dataDir }) });
   }
 
@@ -170,6 +186,20 @@ export class SessionManager {
     } catch (error) {
       this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
       if (error instanceof WorkspaceCreateError) throw error;
+      throw new WorkspaceCreateError();
+    }
+
+    try {
+      if (await this.prepareWorkspaceRevision(workspace.workspacePath, revision.id)) {
+        await writeFile(join(workspace.runtimePath, ENVIRONMENT_PREPARED_MARKER), "ready\n", "utf8");
+      }
+    } catch (_error) {
+      this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+      try {
+        await this.workspaceManager.deleteSession(id);
+      } catch (_cleanupError) {
+        // The preparation failure remains authoritative.
+      }
       throw new WorkspaceCreateError();
     }
 
@@ -244,6 +274,22 @@ export class SessionManager {
       this.mcpManager.applySessionValuePatchInTransaction(id, normalized);
       return this.withMcpStatus(toSession(row));
     });
+  }
+
+  /** Repairs ignored generated files once when an older Session is first reused. */
+  async ensureWorkspacePrepared(id: number): Promise<void> {
+    const session = this.get(id);
+    if (session === undefined) throw new SessionManagerError("session_not_found");
+    if (session.projectEnvironmentRevisionId === null) return;
+    const markerPath = join(dirname(session.workspacePath), "runtime", ENVIRONMENT_PREPARED_MARKER);
+    try {
+      if (await readFile(markerPath, "utf8") === "ready\n") return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (await this.prepareWorkspaceRevision(session.workspacePath, session.projectEnvironmentRevisionId)) {
+      await writeFile(markerPath, "ready\n", "utf8");
+    }
   }
 
   /**
@@ -387,6 +433,26 @@ export class SessionManager {
       if (this.get(id) === undefined) throw new SessionManagerError("session_not_found");
       throw new SessionManagerError("session_busy");
     });
+  }
+
+  private async prepareWorkspaceRevision(workspacePath: string, revisionId: number | null): Promise<boolean> {
+    if (revisionId === null) return false;
+    const revision = this.projectEnvironmentStore.getRevision(revisionId);
+    if (revision === undefined) throw new SessionManagerError("project_environment_unavailable");
+    const repositories = this.projectEnvironmentStore.listRepositories(revision.projectEnvironmentId);
+    if (repositories.length === 0) return false;
+    const signal = new AbortController().signal;
+    for (const repository of repositories) {
+      const destination = join(workspacePath, repository.name);
+      await this.projectEnvironmentCommands.cleanIgnored(repository, destination, signal);
+      await this.projectEnvironmentCommands.prepare(
+        repository,
+        destination,
+        this.projectPrepareTimeoutMs,
+        signal
+      );
+    }
+    return true;
   }
 
   private releaseDeleteClaim(id: number, clearProviderSessionId: boolean, cause: unknown): never {

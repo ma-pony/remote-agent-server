@@ -78,6 +78,30 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("启动 Runtime 前确保旧 Session 的项目环境已经修复", async () => {
+    const runtime = createFakeRuntime({ result: { status: "completed" } });
+    runtime.startTurn = vi.fn(runtime.startTurn);
+    let prepared = false;
+    const mcpPrepare = vi.fn(async () => {
+      expect(prepared).toBe(true);
+      return [];
+    });
+    const setupResult = setup(runtime, undefined, mcpPrepare);
+    const revision = setupResult.db.prepare(
+      "SELECT current_revision_id AS id FROM project_environments LIMIT 1"
+    ).get() as { id: number };
+    setupResult.db.prepare("UPDATE sessions SET project_environment_revision_id = ? WHERE id = ?")
+      .run(revision.id, TEST_SESSION_ID);
+    const ensureWorkspacePrepared = vi.spyOn(setupResult.sessionManager, "ensureWorkspacePrepared")
+      .mockImplementation(async () => { prepared = true; });
+
+    await setupResult.executor.execute(setupResult.run.id);
+
+    expect(ensureWorkspacePrepared).toHaveBeenCalledWith(TEST_SESSION_ID);
+    expect(runtime.startTurn).toHaveBeenCalledTimes(1);
+    setupResult.db.close();
+  });
+
   it("terminal post-commit notifier 同步异常不改变成功 Run 或 Session", async () => {
     const runtime = createFakeRuntime({ result: { status: "completed" } });
     const onPostCommitError = vi.fn();

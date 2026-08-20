@@ -75,6 +75,9 @@ export class RunExecutor {
 
     try {
       const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
+      if (session.projectEnvironmentRevisionId !== null) {
+        await this.sessionManager.ensureWorkspacePrepared(session.id);
+      }
       const browserProfilePath = join(dirname(session.workspacePath), "browser");
       let mcpServers: Awaited<ReturnType<RunMcpPreparer["prepare"]>>;
       try {

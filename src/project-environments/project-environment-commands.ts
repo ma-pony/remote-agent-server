@@ -20,6 +20,7 @@ export interface ProjectEnvironmentCommands {
     defaultBranch: string,
     signal: AbortSignal
   ): Promise<void>;
+  cleanIgnored(repository: EnvironmentRepository, destination: string, signal: AbortSignal): Promise<void>;
   prepare(
     repository: EnvironmentRepository,
     destination: string,
@@ -142,6 +143,16 @@ export class SystemProjectEnvironmentCommands implements ProjectEnvironmentComma
       cwd: destination, environment: this.environment, signal
     });
     await runProcess("git", ["reset", "--hard", `origin/${defaultBranch}`], {
+      cwd: destination, environment: this.environment, signal
+    });
+  }
+
+  async cleanIgnored(
+    _repository: EnvironmentRepository,
+    destination: string,
+    signal: AbortSignal
+  ): Promise<void> {
+    await runProcess("git", ["clean", "-fdX"], {
       cwd: destination, environment: this.environment, signal
     });
   }

@@ -139,7 +139,6 @@ export class ProjectEnvironmentBuilder {
           || previous.gitUrl !== repository.gitUrl
           || invalidRepositories.has(repository.name);
         const sourceChanged = needsClone || previous.commit !== state.commit || previous.defaultBranch !== state.defaultBranch;
-        const prepareChanged = previous?.prepareCommand !== repository.prepareCommand;
         if (needsClone) {
           stage = `clone:${repository.name}`;
           await rm(destination, { recursive: true, force: true });
@@ -148,15 +147,15 @@ export class ProjectEnvironmentBuilder {
           stage = `update:${repository.name}`;
           await this.dependencies.commands.update(repository, destination, state.defaultBranch, signal);
         }
-        if (sourceChanged || prepareChanged) {
-          stage = `prepare:${repository.name}`;
-          await this.dependencies.commands.prepare(
-            repository,
-            destination,
-            this.dependencies.prepareTimeoutMs,
-            signal
-          );
-        }
+        stage = `clean:${repository.name}`;
+        await this.dependencies.commands.cleanIgnored(repository, destination, signal);
+        stage = `prepare:${repository.name}`;
+        await this.dependencies.commands.prepare(
+          repository,
+          destination,
+          this.dependencies.prepareTimeoutMs,
+          signal
+        );
       }
       stage = "manifest";
       await writeFile(join(workspacePath, MANIFEST_NAME), JSON.stringify(manifest, null, 2), "utf8");

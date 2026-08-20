@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { AgentManager } from "../src/agents/agent-manager.js";
+import type { ProjectEnvironmentCommands } from "../src/project-environments/project-environment-commands.js";
 import { recoverIncompleteSessions, SessionManager } from "../src/sessions/session-manager.js";
 import { BtrfsWorkspaceManager } from "../src/workspaces/btrfs-workspace.js";
 import type { CommandRunner } from "../src/workspaces/workspace-manager.js";
@@ -48,6 +49,7 @@ const createFakeRuntime = (
 const createTestApp = async (options: {
   runtime?: AgentRuntime;
   commandRunner?: CommandRunner;
+  projectEnvironmentCommands?: ProjectEnvironmentCommands;
 } = {}): Promise<{ app: FastifyInstance; db: ReturnType<typeof createTestDatabase>["db"]; dataDir: string }> => {
   const { db } = createTestDatabase();
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-sessions-"));
@@ -69,6 +71,7 @@ const createTestApp = async (options: {
     config,
     db,
     runtime: options.runtime ?? createFakeRuntime(),
+    projectEnvironmentCommands: options.projectEnvironmentCommands,
     workspaceManager: new BtrfsWorkspaceManager({
       projectEnvironmentsRoot: config.projectEnvironmentsRoot,
       sessionsRoot: config.sessionsRoot,
@@ -361,6 +364,122 @@ describe("Session API", () => {
     const list = await app.inject({ method: "GET", url: "/api/sessions", headers: authHeaders() });
     expect(list.statusCode).toBe(200);
     expect(list.json()).toMatchObject([{ id: session.id, title: "修复工单 1332" }]);
+  });
+
+  it("创建 Session 后按项目 gitignore 清理并重新准备环境", async () => {
+    let sessionWorkspace = "";
+    const cleanIgnored = vi.fn(async (_repository, destination: string) => {
+      expect(existsSync(join(destination, ".venv"))).toBe(true);
+      rmSync(join(destination, ".venv"), { recursive: true, force: true });
+    });
+    const prepare = vi.fn(async (_repository, destination: string) => {
+      expect(existsSync(join(destination, ".venv"))).toBe(false);
+      mkdirSync(join(destination, ".venv", "bin"), { recursive: true });
+      writeFileSync(join(destination, ".venv", "bin", "playwright"), `#!${destination}/.venv/bin/python\n`);
+    });
+    const projectEnvironmentCommands: ProjectEnvironmentCommands = {
+      inspect: async () => { throw new Error("unused"); },
+      isRepository: async () => true,
+      clone: async () => { throw new Error("unused"); },
+      update: async () => { throw new Error("unused"); },
+      cleanIgnored,
+      prepare
+    };
+    const { app, db } = await createTestApp({
+      projectEnvironmentCommands,
+      commandRunner: {
+        run: async (_command, args) => {
+          if (args[1] === "snapshot") {
+            sessionWorkspace = args[3];
+            const repositoryPath = join(sessionWorkspace, "bid-spiders");
+            mkdirSync(join(repositoryPath, ".git"), { recursive: true });
+            mkdirSync(join(repositoryPath, ".venv", "bin"), { recursive: true });
+            writeFileSync(join(repositoryPath, ".venv", "bin", "playwright"), "#!/old/revision/.venv/bin/python\n");
+            writeFileSync(join(repositoryPath, "local-notes.txt"), "keep me");
+          }
+          return { stdout: "", stderr: "" };
+        }
+      }
+    });
+    const projectEnvironment = db.prepare("SELECT id FROM project_environments LIMIT 1").get() as { id: number };
+    db.prepare(`
+      INSERT INTO environment_repositories
+        (project_environment_id, name, git_url, prepare_command, created_at, updated_at)
+      VALUES (?, 'bid-spiders', 'git:bid-spiders', 'uv sync', ?, ?)
+    `).run(projectEnvironment.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+    const agent = await createAgent(app);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/sessions",
+      headers: authHeaders(),
+      payload: { agentId: agent.id, title: "重建 Python 环境" }
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(cleanIgnored).toHaveBeenCalledTimes(1);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    const repositoryPath = join(sessionWorkspace, "bid-spiders");
+    expect(readFileSync(join(repositoryPath, ".venv", "bin", "playwright"), "utf8"))
+      .toBe(`#!${repositoryPath}/.venv/bin/python\n`);
+    expect(readFileSync(join(repositoryPath, "local-notes.txt"), "utf8")).toBe("keep me");
+  });
+
+  it("旧 Session 首次继续运行前只修复一次项目环境", async () => {
+    const { db, seed } = createTestDatabase();
+    const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-existing-session-"));
+    tempDirs.push(dataDir);
+    const workspacePath = join(dataDir, "sessions", "1", "workspace");
+    const repositoryPath = join(workspacePath, "bid-spiders");
+    mkdirSync(join(repositoryPath, ".venv", "bin"), { recursive: true });
+    mkdirSync(join(dirname(workspacePath), "runtime"), { recursive: true });
+    writeFileSync(join(repositoryPath, ".venv", "bin", "playwright"), "#!/removed/revision/.venv/bin/python\n");
+    db.prepare(`
+      INSERT INTO environment_repositories
+        (project_environment_id, name, git_url, prepare_command, created_at, updated_at)
+      VALUES (?, 'bid-spiders', 'git:bid-spiders', 'uv sync', ?, ?)
+    `).run(seed.projectEnvironment.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z");
+    const session = seed.session();
+    db.prepare("UPDATE sessions SET workspace_path = ?, project_environment_revision_id = ? WHERE id = ?")
+      .run(workspacePath, seed.projectEnvironment.revisionId, session.id);
+    const cleanIgnored = vi.fn(async (_repository, destination: string) => {
+      rmSync(join(destination, ".venv"), { recursive: true, force: true });
+    });
+    const prepare = vi.fn(async (_repository, destination: string) => {
+      mkdirSync(join(destination, ".venv", "bin"), { recursive: true });
+      writeFileSync(join(destination, ".venv", "bin", "playwright"), `#!${destination}/.venv/bin/python\n`);
+    });
+    const runtime = createFakeRuntime();
+    const manager = new SessionManager({
+      db,
+      dataDir,
+      agentManager: new AgentManager({ db, dataDir, runtime }),
+      runtime,
+      workspaceManager: {
+        check: async () => undefined,
+        createSession: async () => { throw new Error("unused"); },
+        deleteSession: async () => undefined,
+        createRevision: async () => undefined,
+        removeRevision: async () => undefined
+      },
+      projectEnvironmentCommands: {
+        inspect: async () => { throw new Error("unused"); },
+        isRepository: async () => true,
+        clone: async () => { throw new Error("unused"); },
+        update: async () => { throw new Error("unused"); },
+        cleanIgnored,
+        prepare
+      }
+    });
+
+    await manager.ensureWorkspacePrepared(session.id);
+    await manager.ensureWorkspacePrepared(session.id);
+
+    expect(cleanIgnored).toHaveBeenCalledTimes(1);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(readFileSync(join(repositoryPath, ".venv", "bin", "playwright"), "utf8"))
+      .toBe(`#!${repositoryPath}/.venv/bin/python\n`);
+    db.close();
   });
 
   it("快照失败时不写入 Session", async () => {

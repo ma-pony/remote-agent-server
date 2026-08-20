@@ -27,7 +27,10 @@ import { registerMcpRoutes } from "./mcp/mcp-routes.js";
 import { RunMcpPreparer } from "./mcp/run-mcp-preparer.js";
 import { SecretStore } from "./mcp/secret-store.js";
 import { ProjectEnvironmentBuilder } from "./project-environments/project-environment-builder.js";
-import { SystemProjectEnvironmentCommands } from "./project-environments/project-environment-commands.js";
+import {
+  SystemProjectEnvironmentCommands,
+  type ProjectEnvironmentCommands
+} from "./project-environments/project-environment-commands.js";
 import { registerProjectEnvironmentRoutes } from "./project-environments/project-environment-routes.js";
 import {
   ProjectEnvironmentScheduler,
@@ -58,6 +61,7 @@ export type AppDependencies = {
   skillProjector?: SkillProjector;
   skillManager?: SkillManager;
   projectEnvironmentStore?: ProjectEnvironmentStore;
+  projectEnvironmentCommands?: ProjectEnvironmentCommands;
   projectEnvironmentScheduler?: ProjectEnvironmentCheckScheduler;
   mcpManager?: McpManager;
   mcpChecker?: McpChecker;
@@ -83,6 +87,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const mcpPreparer = new RunMcpPreparer({ manager: mcpManager, checker: mcpChecker });
   const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config, skillManager);
   const projectEnvironmentStore = deps.projectEnvironmentStore ?? new ProjectEnvironmentStore({ db: deps.db });
+  const projectEnvironmentCommands = deps.projectEnvironmentCommands ?? new SystemProjectEnvironmentCommands();
   const agentManager = new AgentManager({
     db: deps.db,
     dataDir: deps.config.dataDir,
@@ -112,6 +117,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     runtime,
     workspaceManager,
     projectEnvironmentStore,
+    projectEnvironmentCommands,
+    projectPrepareTimeoutMs: deps.config.projectPrepareTimeoutMs,
     mcpManager
   });
   let eventStore = deps.eventStore;
@@ -128,7 +135,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     builder: new ProjectEnvironmentBuilder({
       store: projectEnvironmentStore,
       workspaceManager,
-      commands: new SystemProjectEnvironmentCommands(),
+      commands: projectEnvironmentCommands,
       projectEnvironmentsRoot: deps.config.projectEnvironmentsRoot,
       prepareTimeoutMs: deps.config.projectPrepareTimeoutMs
     }),

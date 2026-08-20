@@ -1,4 +1,5 @@
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -41,9 +42,19 @@ const createBuilderFixture = () => {
       calls.push(`update:${repository.name}`);
       expect(existsSync(destination)).toBe(true);
     },
-    prepare: async (repository) => {
+    cleanIgnored: async (repository, destination) => {
+      calls.push(`clean:${repository.name}`);
+      rmSync(join(destination, ".venv"), { recursive: true, force: true });
+      rmSync(join(destination, "node_modules"), { recursive: true, force: true });
+    },
+    prepare: async (repository, destination) => {
       calls.push(`prepare:${repository.name}`);
       if (repository.prepareCommand === "exit 1") throw new Error("prepare failed");
+      if (repository.prepareCommand === "rebuild-env") {
+        expect(existsSync(join(destination, ".venv"))).toBe(false);
+        mkdirSync(join(destination, ".venv", "bin"), { recursive: true });
+        writeFileSync(join(destination, ".venv", "bin", "project-tool"), `#!${destination}/.venv/bin/python\n`);
+      }
     }
   };
   const workspaceManager: WorkspaceManager = {
@@ -171,6 +182,31 @@ describe("ProjectEnvironmentStore", () => {
 });
 
 describe("SystemProjectEnvironmentCommands", () => {
+  it("只清理项目 .gitignore 已忽略的文件", async () => {
+    const repositoryPath = mkdtempSync(join(tmpdir(), "project-environment-clean-"));
+    tempDirectories.push(repositoryPath);
+    execFileSync("git", ["init", "--quiet"], { cwd: repositoryPath });
+    writeFileSync(join(repositoryPath, ".gitignore"), ".venv/\nnode_modules/\n");
+    mkdirSync(join(repositoryPath, ".venv", "bin"), { recursive: true });
+    mkdirSync(join(repositoryPath, "node_modules", "example"), { recursive: true });
+    writeFileSync(join(repositoryPath, "local-notes.txt"), "must stay");
+    const commands = new SystemProjectEnvironmentCommands();
+
+    await commands.cleanIgnored({
+      id: 1,
+      projectEnvironmentId: 1,
+      name: "api",
+      gitUrl: "git@example.test:api.git",
+      prepareCommand: "uv sync",
+      createdAt: "2026-08-13T00:00:00.000Z",
+      updatedAt: "2026-08-13T00:00:00.000Z"
+    }, repositoryPath, new AbortController().signal);
+
+    expect(existsSync(join(repositoryPath, ".venv"))).toBe(false);
+    expect(existsSync(join(repositoryPath, "node_modules"))).toBe(false);
+    expect(existsSync(join(repositoryPath, "local-notes.txt"))).toBe(true);
+  });
+
   it("项目准备命令可使用用户 local bin 中的工具", async () => {
     const home = mkdtempSync(join(tmpdir(), "project-environment-home-"));
     tempDirectories.push(home);
@@ -220,7 +256,14 @@ describe("ProjectEnvironmentBuilder", () => {
     const result = await builder.checkAndBuild(environment.id);
 
     expect(result).toMatchObject({ outcome: "published", revisionId: expect.any(Number) });
-    expect(calls).toEqual(["clone:api", "prepare:api", "clone:web", "prepare:web"]);
+    expect(calls).toEqual([
+      "clone:api",
+      "clean:api",
+      "prepare:api",
+      "clone:web",
+      "clean:web",
+      "prepare:web",
+    ]);
     expect(store.get(environment.id)?.currentRevisionId).toBe(result.revisionId);
     expect(store.getCurrentRevision(environment.id)?.workspacePath).toSatisfy((path: string) => existsSync(path));
     db.close();
@@ -255,12 +298,12 @@ describe("ProjectEnvironmentBuilder", () => {
     const rebuilt = await builder.checkAndBuild(environment.id);
 
     expect(rebuilt).toMatchObject({ outcome: "published", revisionId: expect.any(Number) });
-    expect(calls).toEqual(["clone:api", "prepare:api"]);
+    expect(calls).toEqual(["clone:api", "clean:api", "prepare:api"]);
     expect(existsSync(join(store.getCurrentRevision(environment.id)!.workspacePath!, "api", ".git", "HEAD"))).toBe(true);
     db.close();
   });
 
-  it("只有一个项目变化时只更新和准备该项目", async () => {
+  it("只有一个项目变化时只更新其源码，并为新修订重新准备所有项目", async () => {
     const { db, store, remoteCommits, calls, builder } = createBuilderFixture();
     const environment = store.create({ name: "研发环境" });
     store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" });
@@ -271,7 +314,27 @@ describe("ProjectEnvironmentBuilder", () => {
 
     await builder.checkAndBuild(environment.id);
 
-    expect(calls).toEqual(["update:web", "prepare:web"]);
+    expect(calls).toEqual(["clean:api", "prepare:api", "update:web", "clean:web", "prepare:web"]);
+    db.close();
+  });
+
+  it("新修订按各项目 gitignore 清理后重建环境", async () => {
+    const { db, store, remoteCommits, calls, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "rebuild-env" });
+    await builder.checkAndBuild(environment.id);
+    const firstWorkspace = store.getCurrentRevision(environment.id)!.workspacePath!;
+    writeFileSync(join(firstWorkspace, "api", "local-notes.txt"), "keep me");
+    calls.splice(0);
+    remoteCommits.set("api", "commit-2");
+
+    await builder.checkAndBuild(environment.id);
+
+    const nextWorkspace = store.getCurrentRevision(environment.id)!.workspacePath!;
+    expect(calls).toEqual(["update:api", "clean:api", "prepare:api"]);
+    expect(existsSync(join(nextWorkspace, "api", "local-notes.txt"))).toBe(true);
+    expect(readFileSync(join(nextWorkspace, "api", ".venv", "bin", "project-tool"), "utf8"))
+      .toBe(`#!${join(nextWorkspace, "api")}/.venv/bin/python\n`);
     db.close();
   });
 
