@@ -108,6 +108,9 @@ export class IntegrationEndpointManager {
     const parameterMappings = resolvedMappings === undefined
       ? existing.parameterMappings
       : this.publicMappings(resolvedMappings);
+    const validateParameterMappings = input.parameterMappings !== undefined
+      || nextAgentId !== existing.agentId
+      || (input.enabled === true && !existing.enabled);
     const record = this.toPersistenceInput({
       name: input.name ?? existing.name,
       slug: input.slug ?? existing.slug,
@@ -115,7 +118,7 @@ export class IntegrationEndpointManager {
       enabled: input.enabled ?? existing.enabled,
       promptPrefix: input.promptPrefix ?? existing.promptPrefix,
       parameterMappings: resolvedMappings ?? this.toInputMappings(existing.parameterMappings, fixedValues)
-    }, this.store.endpointTokenHash(id)!, parameterMappings, fixedValues);
+    }, this.store.endpointTokenHash(id)!, parameterMappings, fixedValues, validateParameterMappings);
     this.store.updateEndpoint(id, record);
     return this.get(id)!;
   }
@@ -179,9 +182,10 @@ export class IntegrationEndpointManager {
     input: CreateIntegrationEndpointInput,
     tokenHashValue: string,
     mappings = this.publicMappings(input.parameterMappings),
-    fixedValues = this.fixedValuesFromInput(input.parameterMappings)
+    fixedValues = this.fixedValuesFromInput(input.parameterMappings),
+    validateParameterMappings = true
   ): EndpointPersistenceInput {
-    this.validateInput(input, mappings);
+    this.validateInput(input, mappings, validateParameterMappings);
     return {
       name: input.name.trim(),
       slug: input.slug.trim(),
@@ -194,13 +198,18 @@ export class IntegrationEndpointManager {
     };
   }
 
-  private validateInput(input: CreateIntegrationEndpointInput, mappings: ParameterMapping[]): void {
+  private validateInput(
+    input: CreateIntegrationEndpointInput,
+    mappings: ParameterMapping[],
+    validateParameterMappings: boolean
+  ): void {
     if (input.name.trim() === "" || input.slug.trim() === "" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(input.slug)) {
       throw new IntegrationEndpointManagerError("invalid_endpoint");
     }
     if (this.db.prepare("SELECT 1 FROM agents WHERE id = ?").get(input.agentId) === undefined) {
       throw new IntegrationEndpointManagerError("agent_not_found");
     }
+    if (!validateParameterMappings) return;
     const definitions = this.parameterDefinitions(input.agentId);
     if (input.parameterMappings.some((mapping) =>
       mapping.source === "fixed" && definitions.get(mapping.parameterKey)?.required && mapping.value.trim() === ""

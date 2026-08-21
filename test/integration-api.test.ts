@@ -187,6 +187,45 @@ describe("Integration endpoint API", () => {
     expect(JSON.stringify(updated.json())).not.toContain("private-callback-token");
   });
 
+  it("基础设置修改不被后来新增的必填参数映射阻断", async () => {
+    const { app, agentId, db } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/integration-endpoints",
+      headers: authHeaders(),
+      payload: validEndpointInput(agentId, "legacy-endpoint")
+    });
+    const endpointId = (created.json() as { endpoint: { id: number } }).endpoint.id;
+    db.prepare(`
+      INSERT INTO agent_session_parameters
+        (agent_id, key, label, description, required, secret, created_at, updated_at)
+      VALUES (?, 'ticket_id', '工单 ID', NULL, 1, 0, ?, ?)
+    `).run(agentId, "2026-08-21T00:00:00.000Z", "2026-08-21T00:00:00.000Z");
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/api/integration-endpoints/${endpointId}`,
+      headers: authHeaders(),
+      payload: {
+        name: "grab-manager-spider-dev",
+        slug: "grab-impl",
+        agentId,
+        enabled: true,
+        promptPrefix: ""
+      }
+    });
+
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      id: endpointId,
+      name: "grab-manager-spider-dev",
+      slug: "grab-impl",
+      agentId,
+      enabled: true,
+      parameterMappings: []
+    });
+  });
+
   it("拒绝管理 Token 调用外部接口和端点 Token 跨 slug", async () => {
     const { app, agentId } = await createTestApp();
     const first = await app.inject({
