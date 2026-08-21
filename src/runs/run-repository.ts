@@ -190,6 +190,28 @@ export class RunRepository {
     return rows.map(toRun);
   }
 
+  /** Lists one newest-first cursor page, returned in chronological display order. */
+  listSessionPage(sessionId: number, beforeId: number | undefined, limit: number): { items: Run[]; hasMore: boolean } {
+    const cursor = beforeId === undefined ? undefined : this.db.prepare(`
+      SELECT created_at, id FROM runs WHERE id = ? AND session_id = ?
+    `).get(beforeId, sessionId) as { created_at: string; id: number } | undefined;
+    if (beforeId !== undefined && cursor === undefined) return { items: [], hasMore: false };
+    const rows = (cursor === undefined
+      ? this.db.prepare(`
+          SELECT * FROM runs WHERE session_id = ?
+          ORDER BY created_at DESC, id DESC LIMIT ?
+        `).all(sessionId, limit + 1)
+      : this.db.prepare(`
+          SELECT * FROM runs
+          WHERE session_id = ? AND (created_at < ? OR (created_at = ? AND id < ?))
+          ORDER BY created_at DESC, id DESC LIMIT ?
+        `).all(sessionId, cursor.created_at, cursor.created_at, cursor.id, limit + 1)) as RunRow[];
+    return {
+      items: rows.slice(0, limit).reverse().map(toRun),
+      hasMore: rows.length > limit
+    };
+  }
+
   /**
    * Lists queued Runs in creation order for scheduler recovery.
    */

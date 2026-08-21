@@ -210,18 +210,17 @@ export const IntegrationEndpointDetailLayout = () => {
 export const IntegrationEndpointOverviewPage = () => {
   const { text } = useI18n();
   const { endpoint, agentName } = useEndpoint();
-  const [conversations, setConversations] = useState<IntegrationConversation[]>([]);
-  const [tasks, setTasks] = useState<IntegrationTask[]>([]);
+  const [summary, setSummary] = useState<IntegrationEndpointSummary | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    void Promise.all([integrationApi.listConversations(endpoint.id, controller.signal), integrationApi.listTasks(endpoint.id, controller.signal)])
-      .then(([conversationItems, taskItems]) => { setConversations(conversationItems); setTasks(taskItems); })
+    void integrationApi.listEndpoints(controller.signal)
+      .then((items) => { setSummary(items.find((item) => item.id === endpoint.id) ?? null); })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [endpoint.id]);
-  const latest = tasks.at(-1);
-  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card><CardHeader><CardDescription>{text("绑定智能体", "Agent")}</CardDescription><CardTitle className="text-lg">{agentName}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("接续中的业务对话", "Active conversations")}</CardDescription><CardTitle className="font-mono text-3xl">{conversations.filter((item) => item.status === "active").length}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("排队 / 运行", "Queued / running")}</CardDescription><CardTitle className="font-mono text-3xl">{tasks.filter((item) => item.status === "queued" || item.status === "running").length}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("最近任务", "Latest task")}</CardDescription><CardTitle className="text-base">{latest === undefined ? text("暂无", "None") : <Link className="hover:underline" to={`/integration-tasks/${latest.id}`}>{latest.requestId}</Link>}</CardTitle></CardHeader></Card></div><Card><CardHeader><CardTitle className="flex items-center gap-2"><Cable className="size-5" />{text("调用入口", "Task endpoint")}</CardTitle><CardDescription>{text("外部系统使用独立访问令牌调用此地址。", "External systems call this URL with the endpoint access token.")}</CardDescription></CardHeader><CardContent><code className="block break-all rounded-md border bg-muted/30 p-4 text-xs">POST /integration/v1/endpoints/{endpoint.slug}/tasks</code></CardContent></Card><Card><CardHeader><CardTitle>{text("固定提示", "Fixed prompt")}</CardTitle></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{endpoint.promptPrefix === "" ? text("未配置", "Not configured") : endpoint.promptPrefix}</CardContent></Card></div>;
+  const latest = summary?.latestTask ?? null;
+  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card><CardHeader><CardDescription>{text("绑定智能体", "Agent")}</CardDescription><CardTitle className="text-lg">{agentName}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("接续中的业务对话", "Active conversations")}</CardDescription><CardTitle className="font-mono text-3xl">{summary?.activeConversationCount ?? 0}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("排队 / 运行", "Queued / running")}</CardDescription><CardTitle className="font-mono text-3xl">{summary?.activeTaskCount ?? 0}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("最近任务", "Latest task")}</CardDescription><CardTitle className="text-base">{latest === null ? text("暂无", "None") : <Link className="hover:underline" to={`/integration-tasks/${latest.id}`}>{latest.requestId}</Link>}</CardTitle></CardHeader></Card></div><Card><CardHeader><CardTitle className="flex items-center gap-2"><Cable className="size-5" />{text("调用入口", "Task endpoint")}</CardTitle><CardDescription>{text("外部系统使用独立访问令牌调用此地址。", "External systems call this URL with the endpoint access token.")}</CardDescription></CardHeader><CardContent><code className="block break-all rounded-md border bg-muted/30 p-4 text-xs">POST /integration/v1/endpoints/{endpoint.slug}/tasks</code></CardContent></Card><Card><CardHeader><CardTitle>{text("固定提示", "Fixed prompt")}</CardTitle></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{endpoint.promptPrefix === "" ? text("未配置", "Not configured") : endpoint.promptPrefix}</CardContent></Card></div>;
 };
 
 export const IntegrationEndpointUsagePage = () => {

@@ -1,4 +1,5 @@
-import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { constants } from "node:fs";
+import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 
@@ -95,32 +96,43 @@ const isRuntimeProviderEntry = (name: string): boolean => {
     || /\.(db|sqlite)(-.+)?$/i.test(normalized);
 };
 
-const copyProviderHome = (source: string, destination: string): void => {
-  mkdirSync(destination, { recursive: true });
-  if (!existsSync(source)) return;
+const copyProviderHome = async (source: string, destination: string): Promise<void> => {
+  await mkdir(destination, { recursive: true });
+  let entries: string[];
+  try {
+    entries = await readdir(source);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
 
-  for (const entry of readdirSync(source)) {
-    if (isRuntimeProviderEntry(entry)) continue;
+  await Promise.all(entries.map(async (entry) => {
+    if (isRuntimeProviderEntry(entry)) return;
     const sourcePath = join(source, entry);
     const destinationPath = join(destination, entry);
-    rmSync(destinationPath, { force: true, recursive: true });
-    cpSync(sourcePath, destinationPath, {
+    await rm(destinationPath, { force: true, recursive: true });
+    await cp(sourcePath, destinationPath, {
       recursive: true,
       force: true,
       mode: constants.COPYFILE_FICLONE,
       filter: (path) => path === sourcePath
         || !relative(sourcePath, path).split(sep).some(isRuntimeProviderEntry)
     });
-  }
+  }));
 };
 
-const codexConfigWithManagedSettings = (
+const codexConfigWithManagedSettings = async (
   home: string,
   instructions: string,
   disabledSkills: string
-): string => {
+): Promise<string> => {
   const path = join(home, "config.toml");
-  const hostConfig = existsSync(path) ? readFileSync(path, "utf8") : "";
+  let hostConfig = "";
+  try {
+    hostConfig = await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
   const preservedConfig = hostConfig
     .replace(/^\s*developer_instructions\s*=.*(?:\r?\n|$)/m, "")
     .trim();
@@ -145,8 +157,13 @@ const targetName = (target: RuntimeTarget): string => {
 
 class RemoteAgentRegistry implements AcpAgentRegistry {
   private readonly targets = new Map<string, RuntimeTarget>();
+  private readonly commands = new Map<string, string>();
 
-  constructor(private readonly dataDir: string, private readonly skillManager: SkillManager) {}
+  constructor(
+    private readonly dataDir: string,
+    private readonly skillManager: SkillManager,
+    private readonly providerHomePreparations: Map<string, Promise<void>>
+  ) {}
 
   register(target: RuntimeTarget): string {
     const name = targetName(target);
@@ -154,7 +171,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     return name;
   }
 
-  resolve(agentName: string): string {
+  async prepare(agentName: string): Promise<void> {
     const target = this.targets.get(agentName);
     if (target === undefined) {
       throw new AgentRuntimeError("invalid_runtime_target", "Unknown Runtime target");
@@ -165,28 +182,36 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     if (target.provider === "hermes") {
       const home = join(providerHome, "hermes");
       const hostHome = process.env.HERMES_HOME ?? join(homedir(), ".hermes");
-      copyProviderHome(hostHome, home);
+      await this.prepareProviderHome(hostHome, home);
       environment.push(`HERMES_HOME=${shellQuote(home)}`);
     } else if (target.provider === "codex") {
       const agentHome = join(providerHome, "codex");
       const home = join(agentHome, "sessions", String(target.sessionId));
       const hostHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
-      copyProviderHome(hostHome, home);
+      await this.prepareProviderHome(hostHome, home);
       const disabledSkills = this.skillManager.hostSkillFiles().map((path) => [
         "[[skills.config]]",
         `path = ${JSON.stringify(path)}`,
         "enabled = false"
       ].join("\n")).join("\n\n");
-      const config = codexConfigWithManagedSettings(home, target.instructions, disabledSkills);
-      writeFileSync(join(home, "config.toml"), config === "" ? "" : `${config}\n`, { mode: 0o600 });
+      const config = await codexConfigWithManagedSettings(home, target.instructions, disabledSkills);
+      await writeFile(join(home, "config.toml"), config === "" ? "" : `${config}\n`, { mode: 0o600 });
       environment.push(`CODEX_HOME=${shellQuote(home)}`);
     } else {
       const home = join(providerHome, "claude");
       const hostHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-      copyProviderHome(hostHome, home);
+      await this.prepareProviderHome(hostHome, home);
       environment.push(`CLAUDE_CONFIG_DIR=${shellQuote(home)}`);
     }
-    return `env ${environment.join(" ")} ${ACP_COMMAND[ACP_AGENT[target.provider]]}`;
+    this.commands.set(agentName, `env ${environment.join(" ")} ${ACP_COMMAND[ACP_AGENT[target.provider]]}`);
+  }
+
+  resolve(agentName: string): string {
+    const command = this.commands.get(agentName);
+    if (command === undefined) {
+      throw new AgentRuntimeError("session_not_ready", "Runtime target has not been prepared");
+    }
+    return command;
   }
 
   list(): string[] {
@@ -195,10 +220,26 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
 
   clear(): void {
     this.targets.clear();
+    this.commands.clear();
   }
 
   unregister(agentName: string): void {
     this.targets.delete(agentName);
+    this.commands.delete(agentName);
+  }
+
+  private async prepareProviderHome(source: string, destination: string): Promise<void> {
+    let preparation = this.providerHomePreparations.get(destination);
+    if (preparation === undefined) {
+      preparation = copyProviderHome(source, destination);
+      this.providerHomePreparations.set(destination, preparation);
+      void preparation.catch(() => {
+        if (this.providerHomePreparations.get(destination) === preparation) {
+          this.providerHomePreparations.delete(destination);
+        }
+      });
+    }
+    await preparation;
   }
 }
 
@@ -367,6 +408,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
   private readonly shutdownFailures: RuntimeShutdownFailure[] = [];
+  private readonly providerHomePreparations = new Map<string, Promise<void>>();
 
   constructor(private readonly config: AppConfig, private readonly skillManager = new SkillManager({ dataDir: config.dataDir })) {}
 
@@ -391,7 +433,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       existing.registry.unregister(existing.target);
     }
 
-    const registry = new RemoteAgentRegistry(this.config.dataDir, this.skillManager);
+    const registry = new RemoteAgentRegistry(this.config.dataDir, this.skillManager, this.providerHomePreparations);
     const agent = registry.register({
       provider: input.provider,
       agentId: input.agentId,
@@ -399,6 +441,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions
     });
+    await registry.prepare(agent);
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
     const handle = await runtime.ensureSession({
       sessionKey: `remote-agent:${input.sessionId}`,
@@ -580,7 +623,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     this.assertRunning();
     const sessionId = 0;
     assertTarget(provider, agentId, sessionId);
-    const registry = new RemoteAgentRegistry(this.config.dataDir, this.skillManager);
+    const registry = new RemoteAgentRegistry(this.config.dataDir, this.skillManager, this.providerHomePreparations);
     const probeAgent = registry.register({
       provider,
       agentId,
@@ -588,6 +631,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       browserProfilePath: join(this.config.dataDir, "agents", String(agentId), "doctor-browser"),
       instructions: ""
     });
+    await registry.prepare(probeAgent);
     const runtime = this.createRuntime(registry, probeAgent);
     try {
       const report = await runtime.doctor?.();

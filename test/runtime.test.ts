@@ -396,6 +396,28 @@ describe("AcpxAgentRuntime", () => {
     expect(readFileSync(join(home, "models.json"), "utf8")).toBe('{"models":["deepseek-v4-flash"]}');
   });
 
+  it("恢复同一 Session 时不重复复制 Provider Home", async () => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const hostCodexHome = join(root, "host-codex-once");
+    mkdirSync(hostCodexHome, { recursive: true });
+    writeFileSync(join(hostCodexHome, "auth.json"), "first auth");
+    vi.stubEnv("CODEX_HOME", hostCodexHome);
+    const acp = runtimeStub({ handle: { agentSessionId: "provider-session-1" } });
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(config);
+    const input = sessionInput(root, { provider: "codex", providerSessionId: "provider-session-1" });
+
+    await runtime.ensureSession(input);
+    writeFileSync(join(hostCodexHome, "auth.json"), "changed auth");
+    await runtime.ensureSession(input);
+
+    const sessionHome = join(
+      config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", SESSION_PATH_ID
+    );
+    expect(readFileSync(join(sessionHome, "auth.json"), "utf8")).toBe("first auth");
+  });
+
   it("使用固定 Runtime 配置、稳定 sessionKey 和首次 system prompt", async () => {
     const root = makeRoot();
     const config = makeConfig(root);
@@ -1048,8 +1070,7 @@ describe("AcpxAgentRuntime", () => {
       acpxMocks.createAcpRuntime.mockReturnValue(acp);
       const runtime = new AcpxAgentRuntime(makeConfig(root));
       const ensuring = runtime.ensureSession(sessionInput(root));
-      await vi.advanceTimersByTimeAsync(0);
-      expect(acp.ensureSession).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(acp.ensureSession).toHaveBeenCalledTimes(1));
       const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
 
       const firstShutdown = expect(runtime.shutdown()).rejects.toBeInstanceOf(AggregateError);
@@ -1105,7 +1126,7 @@ describe("AcpxAgentRuntime", () => {
       acpxMocks.createAcpRuntime.mockReturnValue(acp);
       const runtime = new AcpxAgentRuntime(makeConfig(root));
       const ensuring = runtime.ensureSession(sessionInput(root));
-      await vi.advanceTimersByTimeAsync(0);
+      await vi.waitFor(() => expect(acp.ensureSession).toHaveBeenCalledTimes(1));
       const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
 
       const firstShutdown = expect(runtime.shutdown()).rejects.toBeInstanceOf(AggregateError);

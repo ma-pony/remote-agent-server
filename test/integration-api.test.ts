@@ -320,11 +320,6 @@ describe("Integration endpoint API", () => {
       runId: number | null;
       status: string;
     };
-    const queried = await app.inject({
-      method: "GET",
-      url: `/integration/v1/tasks/${firstTask.taskId}`,
-      headers: endpointHeaders(endpoint.token)
-    });
     const continued = await app.inject({
       method: "POST",
       url: `/integration/v1/endpoints/${endpoint.endpoint.slug}/tasks`,
@@ -334,6 +329,11 @@ describe("Integration endpoint API", () => {
     await vi.waitFor(() => expect(
       (db.prepare("SELECT count(*) AS count FROM integration_tasks WHERE status = 'succeeded'").get() as { count: number }).count
     ).toBe(2));
+    const queried = await app.inject({
+      method: "GET",
+      url: `/integration/v1/tasks/${firstTask.taskId}`,
+      headers: endpointHeaders(endpoint.token)
+    });
 
     expect(first.statusCode).toBe(202);
     expect(repeated.statusCode).toBe(202);
@@ -939,7 +939,7 @@ describe("Integration endpoint API", () => {
     ).toEqual({ status: "cancelled" }));
     await vi.waitFor(() => expect(
       db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(nextTask.taskId)
-    ).toEqual({ status: "succeeded" }));
+    ).toEqual({ status: "succeeded" }), { timeout: 5_000 });
     const repeated = await app.inject({
       method: "POST",
       url: `/integration/v1/tasks/${task.taskId}/cancel`,

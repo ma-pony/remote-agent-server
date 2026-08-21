@@ -769,7 +769,7 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
-  it("恢复 delivering 并从 Run/Event 补建缺失的确定性 Delivery", () => {
+  it("恢复 delivering，并通过显式修复补建被删除的确定性 Delivery", () => {
     const harness = createHarness();
     const subscription = harness.createSubscription("recover", "secret");
     let eventStore!: EventStore;
@@ -821,7 +821,7 @@ describe("WebhookDispatcher", () => {
       WHERE subscription_id = ? AND event_type = 'task.started'
     `).run(subscription.id);
 
-    projection.recover();
+    projection.repairAll();
     harness.dispatcher.recover();
 
     expect(harness.store.findDeliveryByEventKey(subscription.id, `${task.id}:task.succeeded`)).toBeDefined();
@@ -851,7 +851,7 @@ describe("WebhookDispatcher", () => {
         SELECT event_sequence, event_sequences_json FROM integration_tasks WHERE id = ?
       `).get(task.id)
     };
-    projection.recover();
+    projection.repairAll();
     expect({
       deliveries: harness.db.prepare(`
         SELECT event_id, event_key, sequence, payload_json, status, attempt_count, next_attempt_at
@@ -864,7 +864,7 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
-  it("恢复乱序写入后复用全局因果顺序并以新的审计时间投递", async () => {
+  it("显式修复乱序写入后复用全局因果顺序并以新的审计时间投递", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
     const received: string[] = [];
@@ -928,7 +928,7 @@ describe("WebhookDispatcher", () => {
     `).run(subscription.id);
 
     vi.setSystemTime(new Date("2026-08-13T00:00:10.000Z"));
-    projection.recover();
+    projection.repairAll();
     const firstRecovery = harness.db.prepare(`
       SELECT event_id, event_key, sequence, dispatch_order, payload_json, created_at
       FROM webhook_deliveries WHERE subscription_id = ? ORDER BY rowid
@@ -949,7 +949,7 @@ describe("WebhookDispatcher", () => {
     expect(harness.db.prepare(`
       SELECT next_delivery_order FROM integration_endpoints WHERE id = ?
     `).get(harness.endpoint.id)).toEqual(originalEndpointCounter);
-    projection.recover();
+    projection.repairAll();
     expect(harness.db.prepare(`
       SELECT event_id, event_key, sequence, dispatch_order, payload_json, created_at
       FROM webhook_deliveries WHERE subscription_id = ? ORDER BY rowid

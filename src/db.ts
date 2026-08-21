@@ -177,6 +177,7 @@ const BUSINESS_TABLES = [
   "integration_endpoints",
   "integration_conversations",
   "integration_tasks",
+  "integration_task_events",
   "webhook_subscriptions",
   "webhook_deliveries"
 ] as const;
@@ -213,6 +214,7 @@ const FOREIGN_ID_TABLES: Record<string, Record<string, string>> = {
     session_id: "sessions",
     run_id: "runs"
   },
+  integration_task_events: { task_id: "integration_tasks" },
   webhook_subscriptions: { endpoint_id: "integration_endpoints" },
   webhook_deliveries: {
     subscription_id: "webhook_subscriptions",
@@ -240,7 +242,15 @@ const migrateTextIds = (db: Database.Database, storage?: MigrationStorage): void
         "one_active_run_per_session",
         "one_active_conversation_per_key",
         "integration_tasks_dispatch_order",
-        "webhook_deliveries_due"
+        "webhook_deliveries_due",
+        "runs_session_history",
+        "sessions_recent",
+        "events_run_completion",
+        "integration_conversations_endpoint_status",
+        "integration_tasks_endpoint_status",
+        "integration_tasks_endpoint_recent",
+        "webhook_deliveries_task_event",
+        "webhook_deliveries_subscription_queue"
       ]) {
         db.exec(`DROP INDEX IF EXISTS ${quote(index)}`);
       }
@@ -503,6 +513,9 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
     CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_session
     ON runs(session_id) WHERE status IN ('queued', 'running');
 
+    CREATE INDEX IF NOT EXISTS runs_session_history
+    ON runs(session_id, created_at, id);
+
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id INTEGER NOT NULL REFERENCES runs(id),
@@ -512,6 +525,9 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
       created_at TEXT NOT NULL,
       UNIQUE(run_id, seq)
     );
+
+    CREATE INDEX IF NOT EXISTS events_run_completion
+    ON events(run_id, seq) WHERE type IN ('message', 'status', 'error');
 
     CREATE TABLE IF NOT EXISTS integration_endpoints (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -541,6 +557,9 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
     CREATE UNIQUE INDEX IF NOT EXISTS one_active_conversation_per_key
     ON integration_conversations(endpoint_id, conversation_key) WHERE status = 'active';
 
+    CREATE INDEX IF NOT EXISTS integration_conversations_endpoint_status
+    ON integration_conversations(endpoint_id, status);
+
     CREATE TABLE IF NOT EXISTS integration_tasks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       endpoint_id INTEGER NOT NULL REFERENCES integration_endpoints(id),
@@ -567,8 +586,29 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
       UNIQUE(endpoint_id, request_id)
     );
 
+    CREATE TABLE IF NOT EXISTS integration_task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL REFERENCES integration_tasks(id) ON DELETE CASCADE,
+      event_key TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      dispatch_order INTEGER NOT NULL,
+      event_id TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(task_id, event_key),
+      UNIQUE(task_id, sequence)
+    );
+
     CREATE INDEX IF NOT EXISTS integration_tasks_dispatch_order
     ON integration_tasks(status, created_at, id);
+
+    CREATE INDEX IF NOT EXISTS integration_tasks_endpoint_status
+    ON integration_tasks(endpoint_id, status);
+
+    CREATE INDEX IF NOT EXISTS integration_tasks_endpoint_recent
+    ON integration_tasks(endpoint_id, created_at DESC, id DESC);
 
     CREATE TABLE IF NOT EXISTS webhook_subscriptions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -607,6 +647,15 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
 
     CREATE INDEX IF NOT EXISTS webhook_deliveries_due
     ON webhook_deliveries(status, next_attempt_at, dispatch_order);
+
+    CREATE INDEX IF NOT EXISTS sessions_recent
+    ON sessions(created_at DESC, id DESC);
+
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_task_event
+    ON webhook_deliveries(task_id, event_key, id);
+
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_subscription_queue
+    ON webhook_deliveries(subscription_id, dispatch_order, id, status);
   `);
 
   const hasColumn = (table: string, column: string): boolean =>

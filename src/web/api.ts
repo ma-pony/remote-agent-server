@@ -179,7 +179,11 @@ export type TokenUsageSummary = {
   usage: Omit<TokenUsage, "contextUsedTokens" | "contextWindowTokens">;
 };
 
-export type SessionDetail = Session & { runs: Run[]; usageSummary?: TokenUsageSummary };
+export type SessionDetail = Session & {
+  runs: Run[];
+  hasOlderRuns?: boolean;
+  usageSummary?: TokenUsageSummary;
+};
 
 export type RunEvent = {
   id: number;

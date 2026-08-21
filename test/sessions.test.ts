@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { AgentManager } from "../src/agents/agent-manager.js";
+import { McpManager } from "../src/mcp/mcp-manager.js";
 import type { ProjectEnvironmentCommands } from "../src/project-environments/project-environment-commands.js";
 import { recoverIncompleteSessions, SessionManager } from "../src/sessions/session-manager.js";
 import { BtrfsWorkspaceManager } from "../src/workspaces/btrfs-workspace.js";
@@ -146,6 +147,59 @@ describe("Session API", () => {
 
     expect(response.statusCode).toBe(200);
     expect((response.json() as Array<{ id: number }>).map(({ id }) => id)).toEqual([newer.id, older.id]);
+  });
+
+  it("列表批量计算 MCP 状态而不逐条查询 Session", async () => {
+    const { app } = await createTestApp();
+    const agent = await createAgent(app);
+    await createSession(app, agent.id);
+    await createSession(app, agent.id);
+    const perSession = vi.spyOn(McpManager.prototype, "getSessionStatus");
+
+    const response = await app.inject({ method: "GET", url: "/api/sessions", headers: authHeaders() });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toHaveLength(2);
+    expect(perSession).not.toHaveBeenCalled();
+  });
+
+  it("会话详情只返回最近 20 个 Run 并支持向前分页", async () => {
+    const { app, db } = await createTestApp();
+    const agent = await createAgent(app);
+    const session = await createSession(app, agent.id);
+    const runIds: number[] = [];
+    for (let index = 1; index <= 25; index += 1) {
+      runIds.push(Number(db.prepare(`
+        INSERT INTO runs (session_id, status, input, result, created_at, started_at, finished_at)
+        VALUES (?, 'succeeded', ?, 'done', ?, ?, ?)
+      `).run(
+        session.id,
+        `run-${index}`,
+        `2026-08-20T00:00:${String(index).padStart(2, "0")}.000Z`,
+        `2026-08-20T00:00:${String(index).padStart(2, "0")}.000Z`,
+        `2026-08-20T00:00:${String(index).padStart(2, "0")}.000Z`
+      ).lastInsertRowid));
+    }
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/sessions/${session.id}`,
+      headers: authHeaders()
+    });
+    const detailJson = detail.json() as { runs: Array<{ id: number }>; hasOlderRuns: boolean };
+    expect(detailJson.runs.map(({ id }) => id)).toEqual(runIds.slice(5));
+    expect(detailJson.hasOlderRuns).toBe(true);
+
+    const older = await app.inject({
+      method: "GET",
+      url: `/api/sessions/${session.id}/runs?beforeId=${runIds[5]}&limit=20`,
+      headers: authHeaders()
+    });
+    expect(older.statusCode).toBe(200);
+    expect(older.json()).toEqual({
+      items: runIds.slice(0, 5).map((id, index) => expect.objectContaining({ id, input: `run-${index + 1}` })),
+      hasMore: false
+    });
   });
 
   it("创建 Session 时保存 Agent 指令快照，之后修改 Agent 不影响已有 Session", async () => {

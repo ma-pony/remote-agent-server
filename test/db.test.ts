@@ -89,6 +89,7 @@ describe("database migration", () => {
       "events",
       "integration_conversations",
       "integration_endpoints",
+      "integration_task_events",
       "integration_tasks",
       "project_environment_revisions",
       "project_environments",

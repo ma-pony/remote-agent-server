@@ -96,6 +96,8 @@ type SessionValueRow = {
   encrypted_value: string | null;
 };
 
+type SessionValueWithSessionRow = SessionValueRow & { session_id: number };
+
 const MCP_NAME_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 const PARAMETER_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const COMMAND_PATTERN = /^[A-Za-z0-9._+-]+$/;
@@ -504,6 +506,42 @@ export class McpManager {
     const rows = this.db.prepare(
       "SELECT parameter_id, plain_value, encrypted_value FROM session_mcp_parameter_values WHERE session_id = ?"
     ).all(sessionId) as SessionValueRow[];
+    return this.buildSessionStatus(definitions, rows);
+  }
+
+  getSessionsStatus(sessions: Array<{ id: number; agentId: number }>): Map<number, SessionMcpStatus> {
+    if (sessions.length === 0) return new Map();
+    const agentIds = [...new Set(sessions.map(({ agentId }) => agentId))];
+    const sessionIds = sessions.map(({ id }) => id);
+    const definitions = this.db.prepare(`
+      SELECT * FROM agent_session_parameters
+      WHERE agent_id IN (${agentIds.map(() => "?").join(", ")})
+      ORDER BY created_at ASC, id ASC
+    `).all(...agentIds) as SessionParameterRow[];
+    const values = this.db.prepare(`
+      SELECT session_id, parameter_id, plain_value, encrypted_value
+      FROM session_mcp_parameter_values
+      WHERE session_id IN (${sessionIds.map(() => "?").join(", ")})
+    `).all(...sessionIds) as SessionValueWithSessionRow[];
+    const definitionsByAgent = new Map<number, AgentSessionParameter[]>();
+    for (const definition of definitions) {
+      const items = definitionsByAgent.get(definition.agent_id) ?? [];
+      items.push(toParameter(definition));
+      definitionsByAgent.set(definition.agent_id, items);
+    }
+    const valuesBySession = new Map<number, SessionValueRow[]>();
+    for (const value of values) {
+      const items = valuesBySession.get(value.session_id) ?? [];
+      items.push(value);
+      valuesBySession.set(value.session_id, items);
+    }
+    return new Map(sessions.map(({ id, agentId }) => [
+      id,
+      this.buildSessionStatus(definitionsByAgent.get(agentId) ?? [], valuesBySession.get(id) ?? [])
+    ]));
+  }
+
+  private buildSessionStatus(definitions: AgentSessionParameter[], rows: SessionValueRow[]): SessionMcpStatus {
     const values = new Map(rows.map((row) => [row.parameter_id, row]));
     const parameters = definitions.map((definition) => {
       const row = values.get(definition.id);

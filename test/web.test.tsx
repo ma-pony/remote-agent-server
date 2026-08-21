@@ -379,13 +379,16 @@ describe("最小管理界面", () => {
       streams[0]!.options.onmessage({ data: JSON.stringify(event("run-1", 5, "error", { message: "Provider 暂时不可用" })) });
     });
 
-    expect(screen.getByText("正在分析")).toBeInTheDocument();
     expect(screen.getByText("运行中")).toBeInTheDocument();
     expect(screen.getByText("已定位问题")).toBeInTheDocument();
+    expect(screen.queryByText("正在分析")).not.toBeInTheDocument();
+    expect(screen.queryByText("读取配置")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("执行轨迹 · 3 条"));
+    expect(screen.getByText("正在分析")).toBeInTheDocument();
     const tool = screen.getByText("读取配置").closest("details")!;
     expect(within(tool).getByText("已完成")).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Provider 暂时不可用");
-    expect(screen.getByText("执行轨迹 · 3 条").closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText("执行轨迹 · 3 条").closest("details")).toHaveAttribute("open");
 
     fireEvent.click(screen.getByRole("button", { name: "取消运行" }));
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(
@@ -403,6 +406,41 @@ describe("最小管理界面", () => {
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     expect(await screen.findByText("继续验证")).toBeInTheDocument();
     await waitFor(() => expect(streams).toHaveLength(2));
+  });
+
+  it("长会话按页加载更早的运行记录", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", `/sessions/${session.id}`);
+    const recentRun = {
+      id: "run-21",
+      sessionId: session.id,
+      status: "succeeded",
+      input: "最近任务",
+      result: "最近结果",
+      error: null,
+      createdAt: now,
+      startedAt: now,
+      finishedAt: now
+    };
+    const olderRun = { ...recentRun, id: "run-1", input: "更早任务", result: "更早结果" };
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, runs: [recentRun], hasOlderRuns: true });
+      if (url === "/api/agents") return jsonResponse([agent]);
+      if (url === "/api/runs/run-21/events?afterSeq=0") return jsonResponse([]);
+      if (url === `/api/sessions/${session.id}/runs?beforeId=run-21&limit=20`) {
+        return jsonResponse({ items: [olderRun], hasMore: false });
+      }
+      if (url === "/api/runs/run-1/events?afterSeq=0") return jsonResponse([]);
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByText("最近任务")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "加载更早记录" }));
+    expect(await screen.findByText("更早任务")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "加载更早记录" })).not.toBeInTheDocument();
   });
 
   it("SSE 断线后从最新 seq 重连，并在卸载时中止请求", async () => {

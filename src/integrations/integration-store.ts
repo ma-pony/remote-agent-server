@@ -100,6 +100,19 @@ type DeliveryRow = {
   updated_at: string;
 };
 
+type TaskEventRow = {
+  id: number;
+  task_id: number;
+  event_key: string;
+  event_type: string;
+  sequence: number;
+  dispatch_order: number;
+  event_id: string;
+  occurred_at: string;
+  payload_json: string;
+  created_at: string;
+};
+
 type LinkedRunRow = {
   id: number;
   session_id: number;
@@ -313,32 +326,21 @@ export class IntegrationStore {
   /** Aggregates management counters and one latest Task per Endpoint without materializing history. */
   listEndpointManagementSummaries(): EndpointManagementSummary[] {
     const rows = this.db.prepare(`
-      WITH conversation_counts AS (
-        SELECT endpoint_id, COUNT(*) AS active_conversation_count
-        FROM integration_conversations
-        WHERE status = 'active'
-        GROUP BY endpoint_id
-      ), task_rows AS (
-        SELECT endpoint_id, id, request_id, status, created_at,
-          ROW_NUMBER() OVER (PARTITION BY endpoint_id ORDER BY created_at DESC, id DESC) AS latest_rank
-        FROM integration_tasks task
-      ), task_counts AS (
-        SELECT endpoint_id, COUNT(*) AS active_task_count
-        FROM integration_tasks
-        WHERE status IN ('queued', 'running')
-        GROUP BY endpoint_id
-      )
       SELECT endpoint.id AS endpoint_id,
-        COALESCE(conversation_counts.active_conversation_count, 0) AS active_conversation_count,
-        COALESCE(task_counts.active_task_count, 0) AS active_task_count,
+        (SELECT COUNT(*) FROM integration_conversations conversation
+          WHERE conversation.endpoint_id = endpoint.id AND conversation.status = 'active') AS active_conversation_count,
+        (SELECT COUNT(*) FROM integration_tasks active_task
+          WHERE active_task.endpoint_id = endpoint.id AND active_task.status IN ('queued', 'running')) AS active_task_count,
         latest.id AS latest_task_id,
         latest.request_id AS latest_task_request_id,
         latest.status AS latest_task_status,
         latest.created_at AS latest_task_created_at
       FROM integration_endpoints endpoint
-      LEFT JOIN conversation_counts ON conversation_counts.endpoint_id = endpoint.id
-      LEFT JOIN task_counts ON task_counts.endpoint_id = endpoint.id
-      LEFT JOIN task_rows latest ON latest.endpoint_id = endpoint.id AND latest.latest_rank = 1
+      LEFT JOIN integration_tasks latest ON latest.id = (
+        SELECT recent.id FROM integration_tasks recent
+        WHERE recent.endpoint_id = endpoint.id
+        ORDER BY recent.created_at DESC, recent.id DESC LIMIT 1
+      )
       ORDER BY endpoint.created_at ASC, endpoint.id ASC
     `).all() as EndpointManagementSummaryRow[];
     return rows.map((row) => ({
@@ -857,37 +859,49 @@ export class IntegrationStore {
   appendTaskEventInTransaction(input: AppendTaskEventInput): WebhookDelivery[] {
     const task = this.taskRow(input.taskId);
     if (task === undefined) return [];
-    const eventSequences = JSON.parse(task.event_sequences_json) as Record<string, number>;
-    const eventDispatchOrders = JSON.parse(task.event_dispatch_orders_json) as Record<string, number>;
     const provisionalSequence = task.event_sequence + 1;
     const eventKey = input.eventKey ?? `${task.id}:${provisionalSequence}`;
-    const existing = this.db.prepare(`
+    let taskEvent = this.db.prepare(`
+      SELECT * FROM integration_task_events WHERE task_id = ? AND event_key = ?
+    `).get(task.id, eventKey) as TaskEventRow | undefined;
+    if (taskEvent === undefined) {
+      const legacySequences = JSON.parse(task.event_sequences_json) as Record<string, number>;
+      const legacyDispatchOrders = JSON.parse(task.event_dispatch_orders_json) as Record<string, number>;
+      const existing = this.db.prepare(`
         SELECT * FROM webhook_deliveries
         WHERE task_id = ? AND event_key = ?
         ORDER BY id ASC
       `).all(task.id, eventKey) as DeliveryRow[];
-    const firstExisting = existing[0];
-    const knownSequence = eventSequences[eventKey];
-    const knownDispatchOrder = eventDispatchOrders[eventKey];
-    const sequence = firstExisting?.sequence ?? knownSequence ?? provisionalSequence;
-    const dispatchOrder = knownDispatchOrder ?? this.allocateEndpointDeliveryOrderInTransaction(task.endpoint_id);
-    const eventId = firstExisting?.event_id ?? webhookEventId(task.endpoint_id, eventKey);
-    const occurredAt = firstExisting === undefined
-      ? input.occurredAt ?? new Date().toISOString()
-      : (JSON.parse(firstExisting.payload_json) as { occurredAt: string }).occurredAt;
-    if (knownSequence === undefined || knownDispatchOrder === undefined) {
-      if (knownSequence === undefined) eventSequences[eventKey] = sequence;
-      if (knownDispatchOrder === undefined) eventDispatchOrders[eventKey] = dispatchOrder;
-      this.db.prepare(`
-        UPDATE integration_tasks
-        SET event_sequence = ?, event_sequences_json = ?, event_dispatch_orders_json = ?
-        WHERE id = ?
+      const firstExisting = existing[0];
+      const sequence = firstExisting?.sequence ?? legacySequences[eventKey] ?? provisionalSequence;
+      const dispatchOrder = firstExisting?.dispatch_order
+        ?? legacyDispatchOrders[eventKey]
+        ?? this.allocateEndpointDeliveryOrderInTransaction(task.endpoint_id);
+      const eventId = firstExisting?.event_id ?? webhookEventId(task.endpoint_id, eventKey);
+      const occurredAt = firstExisting === undefined
+        ? input.occurredAt ?? new Date().toISOString()
+        : (JSON.parse(firstExisting.payload_json) as { occurredAt: string }).occurredAt;
+      const payloadJson = firstExisting?.payload_json
+        ?? this.publicTaskPayloadJson(task, { ...input, eventKey }, eventId, sequence, occurredAt);
+      const id = insertedId(this.db.prepare(`
+        INSERT INTO integration_task_events
+          (task_id, event_key, event_type, sequence, dispatch_order, event_id, occurred_at, payload_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        knownSequence === undefined ? sequence : task.event_sequence,
-        JSON.stringify(eventSequences),
-        JSON.stringify(eventDispatchOrders),
-        task.id
-      );
+        task.id,
+        eventKey,
+        input.eventType,
+        sequence,
+        dispatchOrder,
+        eventId,
+        occurredAt,
+        payloadJson,
+        new Date().toISOString()
+      ));
+      this.db.prepare(`
+        UPDATE integration_tasks SET event_sequence = MAX(event_sequence, ?) WHERE id = ?
+      `).run(sequence, task.id);
+      taskEvent = this.db.prepare("SELECT * FROM integration_task_events WHERE id = ?").get(id) as TaskEventRow;
     }
 
     const subscriptions = this.db.prepare(`
@@ -895,21 +909,19 @@ export class IntegrationStore {
       WHERE endpoint_id = ? AND enabled = 1
       ORDER BY created_at ASC, id ASC
     `).all(task.endpoint_id) as SubscriptionRow[];
-    const payloadJson = firstExisting?.payload_json
-      ?? this.publicTaskPayloadJson(task, { ...input, eventKey }, eventId, sequence, occurredAt);
     const deliveries = subscriptions.flatMap((row) => {
       const events = JSON.parse(row.events_json) as string[];
       if (!events.includes(input.eventType)) return [];
       return [this.createDeliveryInTransaction({
-        eventId,
-        eventKey,
-        sequence,
-        dispatchOrder,
+        eventId: taskEvent.event_id,
+        eventKey: taskEvent.event_key,
+        sequence: taskEvent.sequence,
+        dispatchOrder: taskEvent.dispatch_order,
         subscriptionId: row.id,
         taskId: task.id,
         eventType: input.eventType,
-        payloadJson,
-        nextAttemptAt: occurredAt
+        payloadJson: taskEvent.payload_json,
+        nextAttemptAt: taskEvent.occurred_at
       })];
     });
     return deliveries;

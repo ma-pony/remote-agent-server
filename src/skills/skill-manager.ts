@@ -121,11 +121,13 @@ const recursiveSkillDirectories = (root: string): string[] => {
 };
 
 const skillId = (directory: string): string => createHash("sha256").update(resolve(directory)).digest("hex").slice(0, 20);
+const HOST_SKILL_CACHE_TTL_MS = 30_000;
 
 /** Manages the host Skill catalog and each Agent's explicit Skill copies. */
 export class SkillManager {
   private readonly dataDir: string;
   private readonly roots: SkillRoot[];
+  private hostSnapshot: { files: string[]; catalog: AvailableSkill[]; capturedAt: number } | undefined;
 
   constructor({ dataDir, roots = defaultRoots() }: SkillManagerOptions) {
     this.dataDir = dataDir;
@@ -255,29 +257,27 @@ export class SkillManager {
   }
 
   hostSkillFiles(): string[] {
-    const files: string[] = [];
-    for (const root of this.roots) {
-      const directories = root.recursive === true
-        ? recursiveSkillDirectories(root.path)
-        : directSkillDirectories(root.path);
-      for (const directory of directories) files.push(join(directory, "SKILL.md"));
-    }
-    return [...new Set(files)];
+    return [...this.hostSkills().files];
   }
 
-  private catalog(): AvailableSkill[] {
+  private hostSkills(): { files: string[]; catalog: AvailableSkill[] } {
+    if (this.hostSnapshot !== undefined && Date.now() - this.hostSnapshot.capturedAt < HOST_SKILL_CACHE_TTL_MS) {
+      return this.hostSnapshot;
+    }
+    const files: string[] = [];
     const names = new Set<string>();
-    const result: AvailableSkill[] = [];
+    const catalog: AvailableSkill[] = [];
     for (const root of this.roots) {
       const directories = root.recursive === true
         ? recursiveSkillDirectories(root.path)
         : directSkillDirectories(root.path);
       for (const directory of directories) {
+        files.push(join(directory, "SKILL.md"));
         try {
           const details = metadata(directory);
           if (details.name === "" || names.has(details.name)) continue;
           names.add(details.name);
-          result.push({
+          catalog.push({
             id: skillId(directory),
             ...details,
             source: root.source,
@@ -290,7 +290,12 @@ export class SkillManager {
         }
       }
     }
-    return result;
+    this.hostSnapshot = { files: [...new Set(files)], catalog, capturedAt: Date.now() };
+    return this.hostSnapshot;
+  }
+
+  private catalog(): AvailableSkill[] {
+    return this.hostSkills().catalog.filter(({ directory }) => existsSync(join(directory, "SKILL.md")));
   }
 
   private availableCatalog(): AvailableSkill[] {

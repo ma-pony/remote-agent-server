@@ -1,4 +1,4 @@
-import { Component, type ErrorInfo, type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { Component, lazy, Suspense, type ErrorInfo, type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
 
 import { AppShellLayout } from "./components/app-shell.js";
@@ -8,26 +8,44 @@ import { Input } from "./components/ui/input.js";
 import { Field, FieldGroup, FieldLabel } from "./components/ui/field.js";
 import { I18nProvider, useI18n } from "./i18n.js";
 import { API_TOKEN_INVALID_EVENT, verifyApiToken } from "./api.js";
-import {
-  AgentCreatePage, AgentDetailLayout, AgentListPage, AgentOverviewPage,
-  AgentSettingsPage, AgentSkillsPage
-} from "./pages/agent-pages.js";
-import { AgentMcpEditorPage, AgentMcpPage } from "./pages/agent-mcp-pages.js";
-import { AgentParameterPage } from "./pages/agent-parameter-page.js";
-import {
-  ProjectEnvironmentCreatePage, ProjectEnvironmentDetailLayout, ProjectEnvironmentListPage,
-  ProjectEnvironmentOverviewPage, ProjectEnvironmentRepositoriesPage
-} from "./pages/project-environment-pages.js";
-import { SessionPage } from "./pages/session-page.js";
-import { SessionCreatePage, SessionListPage } from "./pages/session-pages.js";
-import { SessionSettingsPage } from "./pages/session-settings-page.js";
-import {
-  IntegrationConversationPage, IntegrationEndpointCreatePage, IntegrationEndpointDetailLayout,
-  IntegrationEndpointListPage, IntegrationEndpointMappingsPage, IntegrationEndpointOverviewPage,
-  IntegrationEndpointUsagePage,
-  IntegrationEndpointSettingsPage, IntegrationEndpointTasksPage, IntegrationEndpointWebhooksPage,
-  IntegrationTaskDetailPage
-} from "./pages/integration-pages.js";
+const agentPages = () => import("./pages/agent-pages.js");
+const AgentCreatePage = lazy(async () => ({ default: (await agentPages()).AgentCreatePage }));
+const AgentDetailLayout = lazy(async () => ({ default: (await agentPages()).AgentDetailLayout }));
+const AgentListPage = lazy(async () => ({ default: (await agentPages()).AgentListPage }));
+const AgentOverviewPage = lazy(async () => ({ default: (await agentPages()).AgentOverviewPage }));
+const AgentSettingsPage = lazy(async () => ({ default: (await agentPages()).AgentSettingsPage }));
+const AgentSkillsPage = lazy(async () => ({ default: (await agentPages()).AgentSkillsPage }));
+
+const agentMcpPages = () => import("./pages/agent-mcp-pages.js");
+const AgentMcpEditorPage = lazy(async () => ({ default: (await agentMcpPages()).AgentMcpEditorPage }));
+const AgentMcpPage = lazy(async () => ({ default: (await agentMcpPages()).AgentMcpPage }));
+const AgentParameterPage = lazy(async () => ({ default: (await import("./pages/agent-parameter-page.js")).AgentParameterPage }));
+
+const projectEnvironmentPages = () => import("./pages/project-environment-pages.js");
+const ProjectEnvironmentCreatePage = lazy(async () => ({ default: (await projectEnvironmentPages()).ProjectEnvironmentCreatePage }));
+const ProjectEnvironmentDetailLayout = lazy(async () => ({ default: (await projectEnvironmentPages()).ProjectEnvironmentDetailLayout }));
+const ProjectEnvironmentListPage = lazy(async () => ({ default: (await projectEnvironmentPages()).ProjectEnvironmentListPage }));
+const ProjectEnvironmentOverviewPage = lazy(async () => ({ default: (await projectEnvironmentPages()).ProjectEnvironmentOverviewPage }));
+const ProjectEnvironmentRepositoriesPage = lazy(async () => ({ default: (await projectEnvironmentPages()).ProjectEnvironmentRepositoriesPage }));
+
+const SessionPage = lazy(async () => ({ default: (await import("./pages/session-page.js")).SessionPage }));
+const sessionPages = () => import("./pages/session-pages.js");
+const SessionCreatePage = lazy(async () => ({ default: (await sessionPages()).SessionCreatePage }));
+const SessionListPage = lazy(async () => ({ default: (await sessionPages()).SessionListPage }));
+const SessionSettingsPage = lazy(async () => ({ default: (await import("./pages/session-settings-page.js")).SessionSettingsPage }));
+
+const integrationPages = () => import("./pages/integration-pages.js");
+const IntegrationConversationPage = lazy(async () => ({ default: (await integrationPages()).IntegrationConversationPage }));
+const IntegrationEndpointCreatePage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointCreatePage }));
+const IntegrationEndpointDetailLayout = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointDetailLayout }));
+const IntegrationEndpointListPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointListPage }));
+const IntegrationEndpointMappingsPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointMappingsPage }));
+const IntegrationEndpointOverviewPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointOverviewPage }));
+const IntegrationEndpointUsagePage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointUsagePage }));
+const IntegrationEndpointSettingsPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointSettingsPage }));
+const IntegrationEndpointTasksPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointTasksPage }));
+const IntegrationEndpointWebhooksPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointWebhooksPage }));
+const IntegrationTaskDetailPage = lazy(async () => ({ default: (await integrationPages()).IntegrationTaskDetailPage }));
 
 type AppErrorBoundaryProps = { children: ReactNode };
 type AppErrorBoundaryState = { failed: boolean };
@@ -74,7 +92,7 @@ const Application = () => {
     }} />;
   }
 
-  return <BrowserRouter><Routes>
+  return <BrowserRouter><Suspense fallback={<main className="grid min-h-64 place-items-center text-sm text-muted-foreground" role="status">加载页面…</main>}><Routes>
     <Route element={<AppShellLayout onDisconnect={() => {
       sessionStorage.removeItem("apiToken");
       setToken(null);
@@ -114,7 +132,7 @@ const Application = () => {
       <Route path="/integration-tasks/:id" element={<IntegrationTaskDetailPage />} />
       <Route path="*" element={<Navigate to="/agents" replace />} />
     </Route>
-  </Routes></BrowserRouter>;
+  </Routes></Suspense></BrowserRouter>;
 };
 
 const SessionRoute = () => {

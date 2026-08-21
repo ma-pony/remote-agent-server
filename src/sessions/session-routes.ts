@@ -18,6 +18,10 @@ const parseId = (value: string): number | undefined => {
 const updateMcpParametersSchema = z.object({
   values: z.record(z.string(), z.string().nullable())
 }).strict();
+const runHistoryQuerySchema = z.object({
+  beforeId: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20)
+});
 
 const sendError = (reply: FastifyReply, statusCode: number, code: string, message: string) =>
   reply.code(statusCode).send({ error: { code, message } });
@@ -77,12 +81,29 @@ export const registerSessionRoutes = (
     const session = id === undefined ? undefined : sessionManager.get(id);
     return session === undefined
       ? sendError(reply, 404, "not_found", "Session not found")
-      : {
-        ...session,
-        runs: runRepository.listBySession(session.id),
-        usageSummary: runRepository.summarizeBySession(session.id)
-      };
+      : (() => {
+        const page = runRepository.listSessionPage(session.id, undefined, 20);
+        return {
+          ...session,
+          runs: page.items,
+          hasOlderRuns: page.hasMore,
+          usageSummary: runRepository.summarizeBySession(session.id)
+        };
+      })();
   });
+
+  app.get<{ Params: { id: string }; Querystring: { beforeId?: string; limit?: string } }>(
+    "/sessions/:id/runs",
+    (request, reply) => {
+      const id = parseId(request.params.id);
+      if (id === undefined || sessionManager.get(id) === undefined) {
+        return sendError(reply, 404, "not_found", "Session not found");
+      }
+      const parsed = runHistoryQuerySchema.safeParse(request.query);
+      if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Run history cursor");
+      return runRepository.listSessionPage(id, parsed.data.beforeId, parsed.data.limit);
+    }
+  );
 
   app.patch<{ Params: { id: string } }>("/sessions/:id/mcp-parameters", (request, reply) => {
     const parsed = updateMcpParametersSchema.safeParse(request.body);

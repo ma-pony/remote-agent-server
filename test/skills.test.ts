@@ -59,6 +59,21 @@ describe("SkillManager", () => {
     ]);
   });
 
+  it("在同一进程内复用主机 Skill 目录快照", () => {
+    const root = makeRoot();
+    const source = join(root, "codex", "review");
+    writeSkill(source, "code-review", "Review changes");
+    const manager = new SkillManager({ dataDir: join(root, "data"), roots: rootsFor(root) });
+
+    expect(manager.list("agent-1")).toEqual([
+      expect.objectContaining({ name: "code-review", source: "codex" })
+    ]);
+    rmSync(source, { recursive: true });
+
+    expect(manager.hostSkillFiles()).toEqual([join(source, "SKILL.md")]);
+    expect(manager.list("agent-1")).toEqual([]);
+  });
+
   it("只按目录扫描生成的 ID 启用完整 Skill，并支持停用和来源移除后停用", () => {
     const root = makeRoot();
     const source = join(root, "codex", "review");

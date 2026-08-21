@@ -39,7 +39,7 @@ const eventStatus = (item: RunEvent): RunStatus | undefined => {
 
 const foldHistoricalStatus = (run: Run, events: RunEvent[]): Run => {
   let status = run.status;
-  for (const item of events.toSorted((left, right) => left.seq - right.seq)) {
+  for (const item of events) {
     const historicalStatus = eventStatus(item);
     if (historicalStatus !== undefined && terminalStatuses.has(historicalStatus)) status = historicalStatus;
   }
@@ -47,7 +47,9 @@ const foldHistoricalStatus = (run: Run, events: RunEvent[]): Run => {
 };
 
 const mergeEvent = (views: RunView[], runId: number, item: RunEvent, applyStatus = true): RunView[] => views.map((view) => {
-  if (view.run.id !== runId || view.events.some((event) => event.seq === item.seq)) return view;
+  if (view.run.id !== runId) return view;
+  const lastEvent = view.events.at(-1);
+  if (lastEvent?.seq === item.seq || (lastEvent !== undefined && item.seq < lastEvent.seq && view.events.some((event) => event.seq === item.seq))) return view;
   const status = applyStatus ? eventStatus(item) : undefined;
   return {
     run: !applyStatus
@@ -55,7 +57,9 @@ const mergeEvent = (views: RunView[], runId: number, item: RunEvent, applyStatus
       : status === undefined
       ? view.run.status === "queued" ? { ...view.run, status: "running" } : view.run
       : { ...view.run, status },
-    events: [...view.events, item].sort((left, right) => left.seq - right.seq),
+    events: lastEvent === undefined || item.seq > lastEvent.seq
+      ? [...view.events, item]
+      : [...view.events, item].sort((left, right) => left.seq - right.seq),
     historyError: view.historyError
   };
 });
@@ -74,6 +78,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   const [reloadGeneration, setReloadGeneration] = useState(0);
   const [streamError, setStreamError] = useState("");
   const [streamReconnectGeneration, setStreamReconnectGeneration] = useState(0);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const loadGeneration = useRef(0);
 
   useEffect(() => {
@@ -259,6 +264,38 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     }
   };
 
+  const loadOlderRuns = async () => {
+    const beforeId = views.at(0)?.run.id;
+    if (session === null || !session.hasOlderRuns || beforeId === undefined || loadingOlder) return;
+    setLoadingOlder(true);
+    setError("");
+    try {
+      const page = await api<{ items: Run[]; hasMore: boolean }>(`/sessions/${sessionId}/runs?beforeId=${beforeId}&limit=20`);
+      const histories = await Promise.allSettled(page.items.map((run) => api<RunEvent[]>(`/runs/${run.id}/events?afterSeq=0`)));
+      const olderViews = page.items.map((run, index): RunView => {
+        const history = histories[index];
+        if (history?.status === "fulfilled") {
+          return { run: foldHistoricalStatus(run, history.value), events: history.value, historyError: null };
+        }
+        return {
+          run,
+          events: [],
+          historyError: text(`历史加载失败：${errorMessage(history?.reason)}`, `Failed to load history: ${errorMessage(history?.reason)}`)
+        };
+      });
+      setViews((current) => [...olderViews, ...current]);
+      setSession((current) => current === null ? current : {
+        ...current,
+        runs: [...page.items, ...current.runs],
+        hasOlderRuns: page.hasMore
+      });
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
   const composerDisabled = initialLoading || loadError !== "" || session === null || activeRunId !== null || submitting || !mcpParametersValid;
 
   return (
@@ -271,6 +308,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
         {streamError !== "" ? <Alert variant="destructive" role="alert"><XCircle /><AlertTitle>{text("实时连接异常", "Live connection error")}</AlertTitle><AlertDescription className="flex items-center justify-between gap-3"><span>{streamError}</span>{streamError.includes("自动重连已停止") || streamError.includes("Automatic reconnection stopped") ? <Button size="sm" variant="outline" type="button" onClick={() => setStreamReconnectGeneration((current) => current + 1)}>{text("重新连接实时事件", "Reconnect live events")}</Button> : null}</AlertDescription></Alert> : null}
       </div>
       <section className="mt-6 flex flex-col gap-5" aria-label={text("运行历史", "Run history")} aria-live="polite">
+        {session?.hasOlderRuns ? <Button className="self-center" variant="outline" type="button" disabled={loadingOlder} onClick={() => void loadOlderRuns()}>{loadingOlder ? text("加载中…", "Loading…") : text("加载更早记录", "Load earlier runs")}</Button> : null}
         {views.length === 0 && session !== null ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">{text("还没有消息，输入任务开始第一轮。", "No messages yet. Enter a task to start the first turn.")}</CardContent></Card> : views.map((view) => <RunBlock key={view.run.id} view={view} />)}
       </section>
       {session !== null && !mcpParametersValid ? <Alert className="mt-6"><XCircle /><AlertTitle>{text("缺少 MCP 参数", "Missing MCP parameters")}</AlertTitle><AlertDescription>{text("请先在", "Complete these in")} <Link className="underline" to={`/sessions/${session.id}/settings`}>{text("会话设置", "session settings")}</Link>{text(` 中填写：${missingMcpParameters.join("、")}`, `: ${missingMcpParameters.join(", ")}`)}</AlertDescription></Alert> : null}
@@ -287,27 +325,36 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
 
 const RunBlock = ({ view }: { view: RunView }) => {
   const { text } = useI18n();
-  let output = "";
-  const details: RunEvent[] = [];
-  for (const item of view.events) {
-    const content = eventContent(item);
-    if (item.type === "message" && content.stream === "output" && typeof content.text === "string") output += content.text;
-    if (item.type !== "message") details.push(item);
-  }
-  if (output === "" && view.run.result !== null) output = view.run.result;
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const { output, details } = useMemo(() => {
+    const outputParts: string[] = [];
+    const nextDetails: RunEvent[] = [];
+    for (const item of view.events) {
+      if (item.type === "message") {
+        const content = eventContent(item);
+        if (content.stream === "output" && typeof content.text === "string") outputParts.push(content.text);
+      } else {
+        nextDetails.push(item);
+      }
+    }
+    return {
+      output: outputParts.length === 0 && view.run.result !== null ? view.run.result : outputParts.join(""),
+      details: nextDetails
+    };
+  }, [view.events, view.run.result]);
 
   return <article className="flex flex-col gap-3">
     <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-foreground px-4 py-3 text-background"><span className="mb-1 block text-xs font-semibold uppercase tracking-wide opacity-70">{text("你", "You")}</span><p className="whitespace-pre-wrap">{view.run.input}</p></div>
     <Card className="border-l-4 border-l-primary"><CardContent className="p-5">
       <div className="mb-4 flex items-center justify-between"><span className="text-sm font-semibold">{text("智能体", "Agent")}</span><Badge variant={view.run.status === "failed" ? "destructive" : view.run.status === "succeeded" ? "default" : "secondary"}>{({ queued: text("排队中", "Queued"), running: text("运行中", "Running"), succeeded: text("已完成", "Completed"), failed: text("失败", "Failed"), cancelled: text("已取消", "Cancelled") } satisfies Record<RunStatus, string>)[view.run.status]}</Badge></div>
       {output !== "" ? <p className="whitespace-pre-wrap leading-7">{output}</p> : activeStatuses.has(view.run.status) ? <p className="text-muted-foreground">{text("等待智能体输出…", "Waiting for agent output…")}</p> : null}
-      {(details.length > 0 || view.historyError !== null || (view.run.error !== null && !details.some((item) => item.type === "error"))) ? <details className="group mt-5 rounded-lg border bg-muted/30">
-        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium"><span>{text(`执行轨迹 · ${details.length} 条`, `Execution trace · ${details.length}`)}</span><ChevronDown className="size-4 transition-transform group-open:rotate-180" /></summary>
-        <div className="flex flex-col gap-2 border-t p-3">
-          {view.historyError !== null ? <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{view.historyError}</div> : null}
+      {view.historyError !== null ? <div className="mt-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">{view.historyError}</div> : null}
+      {view.run.error !== null && !details.some((item) => item.type === "error") ? <div className="mt-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive" role="alert">{view.run.error}</div> : null}
+      {details.length > 0 ? <details className="group mt-5 rounded-lg border bg-muted/30">
+        <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium" onClick={() => setDetailsOpen((current) => !current)}><span>{text(`执行轨迹 · ${details.length} 条`, `Execution trace · ${details.length}`)}</span><ChevronDown className="size-4 transition-transform group-open:rotate-180" /></summary>
+        {detailsOpen ? <div className="flex flex-col gap-2 border-t p-3">
           {details.map((item) => <EventRow key={item.id} item={item} />)}
-          {view.run.error !== null && !details.some((item) => item.type === "error") ? <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive" role="alert">{view.run.error}</div> : null}
-        </div>
+        </div> : null}
       </details> : null}
     </CardContent></Card>
   </article>;

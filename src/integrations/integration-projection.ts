@@ -77,22 +77,47 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
   }
 
   onFinished(run: Run): undefined {
-    const task = this.dependencies.store.finishTaskInTransaction(run, this.publicFailureNotice(run));
+    if (this.dependencies.store.getTaskByRun(run.id) === undefined) return undefined;
+    const completionEvents = this.completionEvents(run.id);
+    const task = this.dependencies.store.finishTaskInTransaction(run, this.publicFailureNotice(run, completionEvents));
     if (task === undefined) return undefined;
-    this.appendFinishedEvents(run, task);
+    this.appendFinishedEvents(run, task, completionEvents);
     return undefined;
   }
 
-  private appendFinishedEvents(run: Run, task: IntegrationTask): void {
+  private completionEvents(runId: number): Event[] {
+    const rows = this.dependencies.db.prepare(`
+      SELECT id, run_id, seq, type, content_json, created_at
+      FROM events
+      WHERE run_id = ? AND type IN ('message', 'status', 'error')
+      ORDER BY seq ASC
+    `).all(runId) as Array<{
+      id: number;
+      run_id: number;
+      seq: number;
+      type: Event["type"];
+      content_json: string;
+      created_at: string;
+    }>;
+    return rows.map((row) => ({
+      id: row.id,
+      runId: row.run_id,
+      seq: row.seq,
+      type: row.type,
+      contentJson: row.content_json,
+      createdAt: row.created_at
+    }));
+  }
+
+  private appendFinishedEvents(run: Run, task: IntegrationTask, events: Event[]): void {
     this.appendTerminalEvent(run, task);
     this.appendSystemNotice(run, task);
-    const output = this.agentOutput(run.id);
+    const output = this.agentOutput(events);
     if (output !== "") this.appendAgentReply(run, task, output);
   }
 
-  private publicFailureNotice(run: Run): { code: string; message: string; eventSeq: number | null } | undefined {
+  private publicFailureNotice(run: Run, events: Event[]): { code: string; message: string; eventSeq: number | null } | undefined {
     if (run.status !== "failed") return undefined;
-    const events = this.dependencies.listEvents(run.id);
     const marker = events.flatMap((event) => {
       if (event.type !== "status") return [];
       const content = record(JSON.parse(event.contentJson));
@@ -136,8 +161,8 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
     });
   }
 
-  private agentOutput(runId: number): string {
-    return this.dependencies.listEvents(runId).flatMap((event) => {
+  private agentOutput(events: Event[]): string {
+    return events.flatMap((event) => {
       if (event.type !== "message") return [];
       const content = record(JSON.parse(event.contentJson));
       return content?.stream === "output" && typeof content.text === "string" ? [content.text] : [];
@@ -167,7 +192,7 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
   }
 
   afterAppendCommit(event: Event): undefined {
-    if (this.dependencies.store.getTaskByRun(event.runId) !== undefined) {
+    if (event.type === "tool" && this.dependencies.store.getTaskByRun(event.runId) !== undefined) {
       this.dependencies.store.notifyDeliveriesChanged();
     }
     return undefined;
@@ -186,26 +211,14 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
     if (content === undefined) return undefined;
     const toolCallId = nonEmptyString(content.toolCallId);
     if (toolCallId === undefined) return undefined;
-    const priorToolContents = this.dependencies.listEvents(event.runId).flatMap((candidate) => {
-      if (candidate.type !== "tool" || candidate.seq >= event.seq) return [];
-      const prior = record(JSON.parse(candidate.contentJson));
-      return nonEmptyString(prior?.toolCallId) === toolCallId && prior !== undefined ? [prior] : [];
-    });
-
-    if (priorToolContents.length === 0) {
-      this.appendToolEvent(event, task, "tool.started", `${task.id}:tool:${toolCallId}:started`,
-        publicToolPayload(content, toolCallId, "started"), recovering);
-    }
+    this.appendToolEvent(event, task, "tool.started", `${task.id}:tool:${toolCallId}:started`,
+      publicToolPayload(content, toolCallId, "started"), recovering);
 
     const status = nonEmptyString(content.status);
     if (status === undefined) return undefined;
     const terminalEventType = toolTerminalEventType(status);
     if (terminalEventType === undefined) return undefined;
     const terminalPhase = terminalEventType === "tool.completed" ? "completed" : "failed";
-    const terminalAlreadyProjected = priorToolContents.some((prior) =>
-      toolTerminalEventType(nonEmptyString(prior.status) ?? "") === terminalEventType
-    );
-    if (terminalAlreadyProjected) return undefined;
     this.appendToolEvent(event, task, terminalEventType, `${task.id}:tool:${toolCallId}:${terminalPhase}`,
       publicToolPayload(content, toolCallId, terminalPhase), recovering);
   }
@@ -238,11 +251,33 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
     });
   }
 
-  /** Reconciles linked Task state and only the missing deterministic Webhook projections. */
+  /** Reconciles only Runs whose durable Task state was interrupted by a restart. */
   recover(): void {
+    for (const run of this.dependencies.store.listRunsNeedingProjection()) {
+      this.dependencies.db.exec("BEGIN IMMEDIATE");
+      try {
+        if (run.status === "running") this.onStarted(run);
+        if (run.status === "succeeded" || run.status === "failed" || run.status === "cancelled") {
+          this.onFinished(run);
+        }
+        this.dependencies.db.exec("COMMIT");
+      } catch (error) {
+        this.dependencies.db.exec("ROLLBACK");
+        throw error;
+      }
+      const task = this.dependencies.store.getTaskByRun(run.id);
+      if (task !== undefined) this.dependencies.store.notifyTaskChanged(task.id);
+    }
+    this.dependencies.store.notifyDeliveriesChanged();
+    this.notifyScheduler();
+  }
+
+  /** Explicitly repairs deleted deterministic projections; never runs on service startup. */
+  repairAll(): void {
     for (const run of this.dependencies.store.listLinkedRuns()) {
       this.dependencies.db.exec("BEGIN IMMEDIATE");
       try {
+        const events = this.dependencies.listEvents(run.id);
         const taskBefore = this.dependencies.store.getTaskByRun(run.id);
         if (run.status === "running" && taskBefore?.status === "queued") this.onStarted(run);
         if ((run.status === "succeeded" || run.status === "failed" || run.status === "cancelled")
@@ -266,13 +301,13 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
               this.appendSystemNotice(run, task);
             }
           }
-          const output = this.agentOutput(run.id);
+          const output = this.agentOutput(events);
           if (output !== ""
             && this.dependencies.store.needsTaskEventDelivery(task.id, "message.agent.reply", [replyEventKey])) {
             this.appendAgentReply(run, task, output);
           }
         }
-        for (const event of this.dependencies.listEvents(run.id)) this.projectToolEvent(event, true);
+        for (const event of events) this.projectToolEvent(event, true);
         this.dependencies.db.exec("COMMIT");
       } catch (error) {
         this.dependencies.db.exec("ROLLBACK");

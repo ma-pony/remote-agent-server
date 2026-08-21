@@ -238,7 +238,9 @@ export class SessionManager {
   /** Lists persisted Sessions with the newest first. */
   list(): SessionWithMcpStatus[] {
     const rows = this.db.prepare("SELECT * FROM sessions ORDER BY created_at DESC, id DESC").all() as SessionRow[];
-    return rows.map((row) => this.withMcpStatus(toSession(row)));
+    const sessions = rows.map(toSession);
+    const statuses = this.mcpManager.getSessionsStatus(sessions.map(({ id, agentId }) => ({ id, agentId })));
+    return sessions.map((session) => ({ ...session, ...statuses.get(session.id)! }));
   }
 
   /**
