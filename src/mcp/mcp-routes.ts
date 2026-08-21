@@ -39,6 +39,7 @@ const updateParameterSchema = z.object({
 }).strict();
 const checkSchema = z.object({ sessionId: z.number().int().positive().optional() }).strict().optional();
 const enabledSchema = z.object({ enabled: z.boolean() }).strict();
+const coreSchema = z.object({ core: z.boolean() }).strict();
 const deleteScopeSchema = z.object({ scope: z.enum(["current", "all"]).default("current") }).strict();
 const parseId = (value: string): number | undefined => {
   const parsed = z.coerce.number().int().positive().safeParse(value);
@@ -130,6 +131,19 @@ export const registerMcpRoutes = (app: FastifyInstance, { mcpManager, mcpChecker
       const server = agentId === undefined || id === undefined
         ? undefined
         : mcpManager.setServerEnabled(agentId, id, parsed.data.enabled);
+      return server === undefined ? notFound(reply, "MCP server not found") : server;
+    }
+  );
+  app.patch<{ Params: { agentId: string; id: string } }>(
+    "/agents/:agentId/mcp-servers/:id/core",
+    (request, reply) => {
+      const parsed = coreSchema.safeParse(request.body);
+      if (!parsed.success) return invalidRequest(reply, "Invalid MCP core state");
+      const agentId = parseId(request.params.agentId);
+      const id = parseId(request.params.id);
+      const server = agentId === undefined || id === undefined
+        ? undefined
+        : mcpManager.setServerCore(agentId, id, parsed.data.core);
       return server === undefined ? notFound(reply, "MCP server not found") : server;
     }
   );

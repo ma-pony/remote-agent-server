@@ -128,7 +128,7 @@ describe("Agent API", () => {
         secret: true
       }
     });
-    await app.inject({
+    const mcpCreated = await app.inject({
       method: "POST",
       url: `/api/agents/${source.id}/mcp-servers`,
       headers: authHeaders(),
@@ -143,6 +143,12 @@ describe("Agent API", () => {
           { name: "X-Tenant", source: "session_parameter", parameterKey: "tenant_token" }
         ]
       }
+    });
+    await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${source.id}/mcp-servers/${(mcpCreated.json() as { id: number }).id}/core`,
+      headers: authHeaders(),
+      payload: { core: true }
     });
 
     const sourceDir = join(dataDir, "agents", String(source.id));
@@ -206,6 +212,7 @@ describe("Agent API", () => {
       agentId: clone.id,
       name: "example_mcp",
       enabled: true,
+      core: true,
       lastCheckedAt: null,
       lastCheckStatus: null
     }]);

@@ -14,6 +14,7 @@ const agent = {
 };
 const server = {
   id: 1, agentId: agent.id, name: "example_mcp", transport: "http", enabled: true,
+  core: false,
   checkTimeoutSeconds: 30, lastCheckedAt: null, lastCheckStatus: null, lastCheckMessage: null,
   lastToolCount: null, createdAt: now, updatedAt: now
 };
@@ -38,6 +39,7 @@ afterEach(() => {
 
 it("Agent MCP 独立页面展示服务器和连接检查", async () => {
   let enabledBody: unknown;
+  let coreBody: unknown;
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
@@ -55,6 +57,10 @@ it("Agent MCP 独立页面展示服务器和连接检查", async () => {
       enabledBody = JSON.parse(String(init.body));
       return response({ ...server, enabled: false });
     }
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/core` && init?.method === "PATCH") {
+      coreBody = JSON.parse(String(init.body));
+      return response({ ...server, enabled: false, core: true });
+    }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -66,6 +72,9 @@ it("Agent MCP 独立页面展示服务器和连接检查", async () => {
   fireEvent.click(screen.getByRole("button", { name: "停用" }));
   await waitFor(() => expect(enabledBody).toEqual({ enabled: false }));
   expect(await screen.findByText("已停用")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "设为核心" }));
+  await waitFor(() => expect(coreBody).toEqual({ core: true }));
+  expect(await screen.findByText("核心")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
   expect(await screen.findByText("4 个工具可用")).toBeInTheDocument();
 });

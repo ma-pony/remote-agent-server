@@ -48,7 +48,7 @@ describe("RunMcpPreparer", () => {
     const servers = await fixture.preparer.prepare({
       agentId: fixture.agentId,
       sessionId: fixture.sessionId,
-      runId: "run-1",
+      runId: 1,
       workspacePath: "/workspace",
       browserProfilePath: "/browser"
     });
@@ -66,7 +66,7 @@ describe("RunMcpPreparer", () => {
     fixture.db.close();
   });
 
-  it("任一检查失败即脱敏失败，不返回 MCP 明文", async () => {
+  it("普通 MCP 检查失败时跳过并保留检查结果", async () => {
     const fixture = setup({
       check: async () => ({ status: "failed", code: "mcp_check_failed", message: "MCP private_mcp check failed" })
     });
@@ -79,15 +79,42 @@ describe("RunMcpPreparer", () => {
       headers: [{ name: "Authorization", source: "fixed", value: "Bearer header-secret", secret: true }]
     });
 
+    const servers = await fixture.preparer.prepare({
+      agentId: fixture.agentId,
+      sessionId: fixture.sessionId,
+      runId: 1,
+      workspacePath: "/workspace",
+      browserProfilePath: "/browser"
+    });
+
+    expect(servers).toEqual([]);
+    expect(fixture.manager.listServers(fixture.agentId)[0]).toMatchObject({ lastCheckStatus: "failed" });
+    fixture.db.close();
+  });
+
+  it("核心 MCP 检查失败时阻止 Run 且不暴露配置明文", async () => {
+    const fixture = setup({
+      check: async () => ({ status: "failed", code: "mcp_check_failed", message: "MCP grab-manager check failed" })
+    });
+    const created = fixture.manager.createServer(fixture.agentId, {
+      name: "grab-manager",
+      transport: "http",
+      enabled: true,
+      url: "https://example.test/mcp?token=url-secret",
+      checkTimeoutSeconds: 3,
+      headers: [{ name: "Authorization", source: "fixed", value: "Bearer header-secret", secret: true }]
+    });
+    fixture.db.prepare("UPDATE agent_mcp_servers SET core = 1 WHERE id = ?").run(created.id);
+
     const error = await fixture.preparer.prepare({
       agentId: fixture.agentId,
       sessionId: fixture.sessionId,
-      runId: "run-1",
+      runId: 1,
       workspacePath: "/workspace",
       browserProfilePath: "/browser"
     }).catch((caught: unknown) => caught);
 
-    expect(error).toEqual(new RunMcpPreparationError("MCP private_mcp check failed"));
+    expect(error).toEqual(new RunMcpPreparationError("MCP grab-manager check failed"));
     expect(JSON.stringify(error)).not.toMatch(/url-secret|header-secret|Authorization/i);
     fixture.db.close();
   });

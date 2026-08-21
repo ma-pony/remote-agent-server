@@ -492,7 +492,12 @@ describe("AcpxAgentRuntime", () => {
     acpxMocks.createAcpRuntime.mockReturnValue(acp);
     const runtime = new AcpxAgentRuntime(makeConfig(root));
 
-    await runtime.ensureSession(sessionInput(root, { providerSessionId: "provider-session-1" }));
+    await runtime.ensureSession(sessionInput(root, {
+      providerSessionId: "provider-session-1",
+      mcpServers: [{
+        type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: [], core: true
+      }]
+    }));
 
     expect(acp.ensureSession).toHaveBeenCalledWith(expect.objectContaining({
       resumeSessionId: "provider-session-1"
@@ -528,6 +533,30 @@ describe("AcpxAgentRuntime", () => {
     expect(acp.ensureSession).toHaveBeenCalledWith(expect.objectContaining({
       sessionKey: `remote-agent:${SESSION_ID}`
     }));
+  });
+
+  it("Codex 将核心 MCP namespace 固定为直接暴露且不把内部标记传给 ACP", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    const mcpServers = [{
+      type: "http",
+      name: "grab-manager",
+      url: "https://example.test/mcp",
+      headers: [],
+      core: true
+    }] as unknown as RuntimeMcpServer[];
+
+    await runtime.ensureSession(sessionInput(root, { mcpServers }));
+
+    const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    const command = options.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`);
+    expect(command).toContain("CODEX_CONFIG=");
+    expect(command).toContain("mcp__grab-manager");
+    expect(options.mcpServers).toEqual([{
+      type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
+    }]);
   });
 
   it("恢复得到不同 Provider ID 时关闭新 Handle 并报 session_resume_failed", async () => {
@@ -594,13 +623,21 @@ describe("AcpxAgentRuntime", () => {
     const runtime = new AcpxAgentRuntime(makeConfig(root));
 
     await runtime.ensureSession(sessionInput(root));
-    await runtime.ensureSession(sessionInput(root, { providerSessionId: "provider-session-1" }));
+    await runtime.ensureSession(sessionInput(root, {
+      providerSessionId: "provider-session-1",
+      mcpServers: [{
+        type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: [], core: true
+      }]
+    }));
 
     expect(acp.close).toHaveBeenCalledWith({ handle, reason: "session_handle_refreshed" });
     expect(acp.ensureSession).toHaveBeenCalledTimes(2);
     expect(acp.ensureSession.mock.calls[1]?.[0]).toMatchObject({
       resumeSessionId: "provider-session-1"
     });
+    const refreshedOptions = acpxMocks.createAcpRuntime.mock.calls[1]?.[0] as AcpRuntimeOptions;
+    expect(refreshedOptions.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`))
+      .toContain("mcp__grab-manager");
   });
 
   it("并发 ensure 按 Session 串行并复用同一 Handle", async () => {

@@ -7,7 +7,7 @@ export type RuntimeMcpKey =
   | "workspace_path"
   | "browser_profile_path";
 
-export type RuntimeMcpServer =
+export type RuntimeMcpServer = (
   | {
       type: "http";
       name: string;
@@ -20,7 +20,8 @@ export type RuntimeMcpServer =
       command: string;
       args: string[];
       env: Array<{ name: string; value: string }>;
-    };
+    }
+) & { core?: boolean };
 
 export type ResolvedMcpServer = {
   id: number;
@@ -94,6 +95,7 @@ export type AgentMcpServerSummary = {
   name: string;
   transport: McpTransport;
   enabled: boolean;
+  core: boolean;
   checkTimeoutSeconds: number;
   lastCheckedAt: string | null;
   lastCheckStatus: "passed" | "failed" | null;

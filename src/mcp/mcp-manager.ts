@@ -51,6 +51,7 @@ type McpServerRow = {
   name: string;
   transport: "http" | "stdio";
   enabled: 0 | 1;
+  core: 0 | 1;
   url: string | null;
   command: string | null;
   check_timeout_seconds: number;
@@ -118,6 +119,7 @@ const toSummary = (row: McpServerRow): AgentMcpServerSummary => ({
   name: row.name,
   transport: row.transport,
   enabled: row.enabled === 1,
+  core: row.core === 1,
   checkTimeoutSeconds: row.check_timeout_seconds,
   lastCheckedAt: row.last_checked_at,
   lastCheckStatus: row.last_check_status,
@@ -264,6 +266,14 @@ export class McpManager {
     const result = this.db.prepare(`
       UPDATE agent_mcp_servers SET enabled = ?, updated_at = ? WHERE id = ? AND agent_id = ?
     `).run(enabled ? 1 : 0, new Date().toISOString(), id, agentId);
+    if (result.changes !== 1) return undefined;
+    return toSummary(this.getServerRow(agentId, id)!);
+  }
+
+  setServerCore(agentId: number, id: number, core: boolean): AgentMcpServerSummary | undefined {
+    const result = this.db.prepare(`
+      UPDATE agent_mcp_servers SET core = ?, updated_at = ? WHERE id = ? AND agent_id = ?
+    `).run(core ? 1 : 0, new Date().toISOString(), id, agentId);
     if (result.changes !== 1) return undefined;
     return toSummary(this.getServerRow(agentId, id)!);
   }
@@ -803,6 +813,7 @@ export class McpManager {
         server: {
           type: "http",
           name: row.name,
+          ...(row.core === 1 ? { core: true } : {}),
           url: row.url!,
           headers: values.map((value) => ({
             name: value.target_name!,
@@ -817,6 +828,7 @@ export class McpManager {
       server: {
         type: "stdio",
         name: row.name,
+        ...(row.core === 1 ? { core: true } : {}),
         command: this.resolveCommand(row.command!),
         args: values.filter((value) => value.kind === "argument")
           .map((value) => this.resolveValue(value, context, sessionValues)),

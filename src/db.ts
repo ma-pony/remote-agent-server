@@ -421,6 +421,7 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
       name TEXT NOT NULL,
       transport TEXT NOT NULL CHECK (transport IN ('http', 'stdio')),
       enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+      core INTEGER NOT NULL DEFAULT 0 CHECK (core IN (0, 1)),
       url TEXT,
       command TEXT,
       check_timeout_seconds INTEGER NOT NULL DEFAULT 30,
@@ -669,6 +670,9 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
   }
   if (!hasColumn("agent_mcp_servers", "source_mcp_server_id")) {
     db.exec("ALTER TABLE agent_mcp_servers ADD COLUMN source_mcp_server_id INTEGER");
+  }
+  if (!hasColumn("agent_mcp_servers", "core")) {
+    db.exec("ALTER TABLE agent_mcp_servers ADD COLUMN core INTEGER NOT NULL DEFAULT 0 CHECK (core IN (0, 1))");
   }
   if (!hasColumn("sessions", "project_environment_revision_id")) {
     db.exec("ALTER TABLE sessions ADD COLUMN project_environment_revision_id INTEGER REFERENCES project_environment_revisions(id)");

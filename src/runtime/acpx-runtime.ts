@@ -50,6 +50,7 @@ type RuntimeTarget = {
   sessionId: number;
   browserProfilePath: string;
   instructions: string;
+  coreMcpServerNames: string[];
 };
 
 export class AgentRuntimeError extends Error {
@@ -197,6 +198,11 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const config = await codexConfigWithManagedSettings(home, target.instructions, disabledSkills);
       await writeFile(join(home, "config.toml"), config === "" ? "" : `${config}\n`, { mode: 0o600 });
       environment.push(`CODEX_HOME=${shellQuote(home)}`);
+      if (target.coreMcpServerNames.length > 0) {
+        environment.push(`CODEX_CONFIG=${shellQuote(JSON.stringify({
+          features: { code_mode: { direct_only_tool_namespaces: target.coreMcpServerNames.map((name) => `mcp__${name}`) } }
+        }))}`);
+      }
     } else {
       const home = join(providerHome, "claude");
       const hostHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
@@ -439,7 +445,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
       agentId: input.agentId,
       sessionId: input.sessionId,
       browserProfilePath: input.browserProfilePath,
-      instructions: input.instructions
+      instructions: input.instructions,
+      coreMcpServerNames: input.mcpServers.filter((server) => server.core === true).map((server) => server.name)
     });
     await registry.prepare(agent);
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
@@ -629,7 +636,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
       agentId,
       sessionId,
       browserProfilePath: join(this.config.dataDir, "agents", String(agentId), "doctor-browser"),
-      instructions: ""
+      instructions: "",
+      coreMcpServerNames: []
     });
     await registry.prepare(probeAgent);
     const runtime = this.createRuntime(registry, probeAgent);
@@ -767,13 +775,14 @@ export class AcpxAgentRuntime implements AgentRuntime {
     probeAgent?: string,
     mcpServers: RuntimeSessionInput["mcpServers"] = []
   ): AcpRuntime {
+    const providerMcpServers = mcpServers.map(({ core: _core, ...server }) => server);
     const options: AcpRuntimeOptions = {
       cwd: this.config.projectEnvironmentsRoot,
       sessionStore: createRuntimeStore({ stateDir: join(this.config.dataDir, "acpx") }),
       agentRegistry,
       permissionMode: "approve-all",
       nonInteractivePermissions: "fail",
-      mcpServers,
+      mcpServers: providerMcpServers,
       ...(probeAgent === undefined ? {} : { probeAgent })
     };
     return createAcpRuntime(options);

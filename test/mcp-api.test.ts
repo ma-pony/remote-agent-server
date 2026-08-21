@@ -56,6 +56,30 @@ afterEach(async () => {
 });
 
 describe("Agent MCP API", () => {
+  it("单独标记当前 Agent 的核心 MCP", async () => {
+    const { app, agentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders(),
+      payload: {
+        name: "grab-manager", transport: "http", enabled: true,
+        url: "https://example.test/mcp", checkTimeoutSeconds: 20, headers: []
+      }
+    });
+    const serverId = (created.json() as { id: number }).id;
+
+    expect(created.json()).toMatchObject({ core: false });
+    const updated = await app.inject({
+      method: "PATCH", url: `/api/agents/${agentId}/mcp-servers/${serverId}/core`, headers: authHeaders(),
+      payload: { core: true }
+    });
+
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({ id: serverId, core: true });
+    expect((await app.inject({
+      method: "GET", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders()
+    })).json()).toEqual([expect.objectContaining({ id: serverId, core: true })]);
+  });
+
   it("支持只删除当前 Agent 的 MCP 副本或删除整个共享组", async () => {
     const { app, agentId } = await createTestApp();
     const target = await app.inject({

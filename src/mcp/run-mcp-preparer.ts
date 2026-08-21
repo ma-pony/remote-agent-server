@@ -28,11 +28,11 @@ export class RunMcpPreparer {
       this.dependencies.manager.recordCheckResult(item.id, result);
       return { server: item.server, result };
     })).then((results) => {
-      const failed = results.find(({ result }) => result.status === "failed");
+      const failed = results.find(({ server, result }) => server.core === true && result.status === "failed");
       if (failed !== undefined) {
         throw new RunMcpPreparationError(`MCP ${failed.server.name} check failed`);
       }
-      return results.map(({ server }) => server);
+      return results.filter(({ result }) => result.status === "passed").map(({ server }) => server);
     });
   }
 }
