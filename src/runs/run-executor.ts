@@ -20,6 +20,9 @@ export type RunExecutorDependencies = {
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
+const MESSAGE_BATCH_INTERVAL_MS = 100;
+const MESSAGE_BATCH_MAX_BYTES = 4 * 1024;
+
 const persistedEvent = (event: Exclude<RuntimeEvent, { type: "usage" }>): { type: EventType; content: unknown } => {
   switch (event.type) {
     case "message":
@@ -40,7 +43,8 @@ type TurnRace =
   | { source: "event"; iteration: IteratorResult<RuntimeEvent> }
   | { source: "event_error"; error: unknown }
   | { source: "result"; result: RuntimeTurnResult }
-  | { source: "result_error"; error: unknown };
+  | { source: "result_error"; error: unknown }
+  | { source: "message_flush" };
 
 /**
  * Executes one persisted Run against the provider-neutral Runtime boundary.
@@ -72,6 +76,39 @@ export class RunExecutor {
     let liveIterator: AsyncIterator<RuntimeEvent> | undefined;
     let publicNoticeCode: "mcp_preflight_failed" | undefined;
     let usage: Partial<TokenUsage> = {};
+    let messageBatch: { stream: "output" | "thought"; text: string; bytes: number } | undefined;
+    let messageFlushTimer: ReturnType<typeof setTimeout> | undefined;
+    let messageFlushSignal: Promise<TurnRace> | undefined;
+
+    const clearMessageFlushTimer = (): void => {
+      if (messageFlushTimer !== undefined) clearTimeout(messageFlushTimer);
+      messageFlushTimer = undefined;
+      messageFlushSignal = undefined;
+    };
+    const flushMessageBatch = (): void => {
+      const batch = messageBatch;
+      if (batch === undefined) return;
+      messageBatch = undefined;
+      clearMessageFlushTimer();
+      this.eventStore.append(run.id, "message", { stream: batch.stream, text: batch.text });
+    };
+    const startMessageFlushTimer = (): void => {
+      messageFlushSignal = new Promise<TurnRace>((resolve) => {
+        messageFlushTimer = setTimeout(() => resolve({ source: "message_flush" }), MESSAGE_BATCH_INTERVAL_MS);
+        messageFlushTimer.unref();
+      });
+    };
+    const bufferMessage = (event: Extract<RuntimeEvent, { type: "message" }>): void => {
+      if (messageBatch !== undefined && messageBatch.stream !== event.stream) flushMessageBatch();
+      if (messageBatch === undefined) {
+        messageBatch = { stream: event.stream, text: event.text, bytes: Buffer.byteLength(event.text) };
+        startMessageFlushTimer();
+      } else {
+        messageBatch.text += event.text;
+        messageBatch.bytes += Buffer.byteLength(event.text);
+      }
+      if (messageBatch.bytes >= MESSAGE_BATCH_MAX_BYTES) flushMessageBatch();
+    };
 
     try {
       const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
@@ -123,8 +160,17 @@ export class RunExecutor {
       let result: RuntimeTurnResult | undefined;
 
       while (result === undefined) {
-        const outcome = await Promise.race([nextEvent, resultOutcome]);
+        const outcome = await Promise.race([
+          nextEvent,
+          resultOutcome,
+          ...(messageFlushSignal === undefined ? [] : [messageFlushSignal])
+        ]);
+        if (outcome.source === "message_flush") {
+          flushMessageBatch();
+          continue;
+        }
         if (outcome.source === "result") {
+          flushMessageBatch();
           result = outcome.result;
           await settleBestEffort(() => turn.closeEvents());
           await settleBestEffort(async () => iterator.return?.());
@@ -133,12 +179,15 @@ export class RunExecutor {
           break;
         }
         if (outcome.source === "result_error") {
+          flushMessageBatch();
           throw outcome.error;
         }
         if (outcome.source === "event_error") {
+          flushMessageBatch();
           throw outcome.error;
         }
         if (outcome.iteration.done) {
+          flushMessageBatch();
           const canonical = await resultOutcome;
           if (canonical.source === "result") result = canonical.result;
           else if (canonical.source === "result_error") throw canonical.error;
@@ -149,12 +198,18 @@ export class RunExecutor {
         }
 
         const runtimeEvent = outcome.iteration.value;
+        if (runtimeEvent.type === "message") {
+          if (runtimeEvent.stream === "output") output += runtimeEvent.text;
+          bufferMessage(runtimeEvent);
+          nextEvent = this.nextEvent(iterator);
+          continue;
+        }
+        flushMessageBatch();
         if (runtimeEvent.type === "usage") {
           usage = { ...usage, ...runtimeEvent.usage };
           nextEvent = this.nextEvent(iterator);
           continue;
         }
-        if (runtimeEvent.type === "message" && runtimeEvent.stream === "output") output += runtimeEvent.text;
         const event = persistedEvent(runtimeEvent);
         this.eventStore.append(run.id, event.type, event.content);
         nextEvent = this.nextEvent(iterator);
@@ -165,6 +220,7 @@ export class RunExecutor {
       }
       return this.finishFromCanonicalResult(run.id, output, result, usage);
     } catch (error) {
+      clearMessageFlushTimer();
       await this.cleanupFailedTurn(liveTurn, liveIterator);
       const message = errorMessage(error);
       const stableNoticeCode = publicNoticeCode
@@ -175,6 +231,7 @@ export class RunExecutor {
       this.appendBestEffort(run.id, "error", { message });
       return this.finishRun(run.id, { status: "failed", error: message }, usage);
     } finally {
+      clearMessageFlushTimer();
       this.cancellationIntents.delete(run.id);
     }
   }

@@ -414,6 +414,96 @@ describe("RunExecutor", () => {
     setupResult.db.close();
   });
 
+  it("连续文本帧合并后落库并在非消息边界保持事件顺序", async () => {
+    const setupResult = setup(createFakeRuntime({
+      events: [
+        { type: "message", stream: "output", text: "你" },
+        { type: "message", stream: "output", text: "好" },
+        { type: "message", stream: "thought", text: "思" },
+        { type: "message", stream: "thought", text: "考" },
+        { type: "status", text: "working" },
+        { type: "message", stream: "output", text: "完" },
+        { type: "message", stream: "output", text: "成" }
+      ],
+      result: { status: "completed" }
+    }));
+
+    await setupResult.executor.execute(setupResult.run.id);
+
+    const events = setupResult.eventStore.list(setupResult.run.id, 0);
+    expect(events.map((event) => event.type)).toEqual([
+      "message", "message", "status", "message", "status"
+    ]);
+    expect(events.map((event) => JSON.parse(event.contentJson))).toEqual([
+      { stream: "output", text: "你好" },
+      { stream: "thought", text: "思考" },
+      { text: "working" },
+      { stream: "output", text: "完成" },
+      { status: "succeeded" }
+    ]);
+    expect(setupResult.runRepository.get(setupResult.run.id)?.result).toBe("你好完成");
+    setupResult.db.close();
+  });
+
+  it("持续运行的 Turn 在 100ms 内持久化合并消息供 SSE 重放", async () => {
+    vi.useFakeTimers();
+    try {
+      const result = deferred<RuntimeTurnResult>();
+      const pendingEvent = deferred<IteratorResult<RuntimeEvent>>();
+      let nextCalls = 0;
+      const runtime = createFakeRuntime();
+      runtime.startTurn = (): RuntimeTurn => ({
+        events: {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => {
+                nextCalls += 1;
+                if (nextCalls === 1) {
+                  return Promise.resolve({
+                    done: false,
+                    value: { type: "message", stream: "output", text: "你" } satisfies RuntimeEvent
+                  });
+                }
+                if (nextCalls === 2) {
+                  return Promise.resolve({
+                    done: false,
+                    value: { type: "message", stream: "output", text: "好" } satisfies RuntimeEvent
+                  });
+                }
+                return pendingEvent.promise;
+              },
+              return: async () => ({ done: true, value: undefined })
+            };
+          }
+        },
+        result: result.promise,
+        cancel: async () => undefined,
+        closeEvents: async () => undefined
+      });
+      const setupResult = setup(runtime);
+      const execution = setupResult.executor.execute(setupResult.run.id);
+
+      for (let iteration = 0; iteration < 10 && nextCalls < 2; iteration += 1) await Promise.resolve();
+      expect(nextCalls).toBeGreaterThanOrEqual(2);
+      await vi.advanceTimersByTimeAsync(99);
+      expect(setupResult.eventStore.list(setupResult.run.id, 0).filter(({ type }) => type === "message"))
+        .toHaveLength(0);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(setupResult.eventStore.list(setupResult.run.id, 0)
+        .filter(({ type }) => type === "message")
+        .map((event) => JSON.parse(event.contentJson)))
+        .toEqual([{ stream: "output", text: "你好" }]);
+
+      result.resolve({ status: "completed" });
+      await execution;
+      expect(vi.getTimerCount()).toBe(0);
+      setupResult.db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("合并多次部分用量更新并只在 Run 终态保存最终快照", async () => {
     const setupResult = setup(createFakeRuntime({
       events: [
