@@ -99,6 +99,25 @@ describe("SkillManager", () => {
     expect(manager.setEnabled("agent-1", uploaded.id, true)).toMatchObject({ enabled: true });
   });
 
+  it("允许主 Skill 目录包含嵌套 Skill", () => {
+    const root = makeRoot();
+    const dataDir = join(root, "data");
+    const manager = new SkillManager({ dataDir, roots: [] });
+    const archive = zipSync({
+      "code-review-gate/SKILL.md": strToU8("---\nname: code-review-gate\ndescription: Review code changes\n---\n"),
+      "code-review-gate/references/guide.md": strToU8("# Guide\n"),
+      "code-review-gate/pattern-b/SKILL.md": strToU8("---\nname: pattern-b\ndescription: Handle pattern B\n---\n")
+    });
+
+    const uploaded = manager.upload("agent-1", "code-review-gate.zip", archive);
+
+    expect(uploaded).toMatchObject({ name: "code-review-gate", source: "upload", enabled: true });
+    expect(readFileSync(
+      join(dataDir, "agents", "agent-1", "skills", uploaded.id, "pattern-b", "SKILL.md"),
+      "utf8"
+    )).toContain("name: pattern-b");
+  });
+
   it("上传的 Skill 对所有 Agent 可见，并由每个 Agent 独立启用", () => {
     const root = makeRoot();
     const dataDir = join(root, "data");

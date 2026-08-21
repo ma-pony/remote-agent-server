@@ -209,9 +209,11 @@ export class SkillManager {
 
     const names = Object.keys(files);
     const manifests = names.filter((name) => name === "SKILL.md" || name.endsWith("/SKILL.md"));
-    if (manifests.length !== 1) throw new SkillManagerError("invalid_skill_archive");
-    const prefix = manifests[0]!.slice(0, -"SKILL.md".length);
-    if (names.some((name) => !name.startsWith(prefix))) throw new SkillManagerError("invalid_skill_archive");
+    const roots = manifests
+      .map((manifest) => manifest.slice(0, -"SKILL.md".length))
+      .filter((prefix) => names.every((name) => name.startsWith(prefix)));
+    if (roots.length !== 1) throw new SkillManagerError("invalid_skill_archive");
+    const prefix = roots[0]!;
 
     const libraryRoot = join(this.dataDir, "skill-library");
     const temporary = join(libraryRoot, `.upload-${randomUUID()}`);
