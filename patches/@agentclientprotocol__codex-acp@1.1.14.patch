@@ -2,7 +2,18 @@ diff --git a/dist/index.js b/dist/index.js
 index 9a0fc7cdf0f739d314c2178452efe32920265fbe..e7200704da6bd857a13a9cf70dc60d5f26b1bc66 100755
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -29070,9 +29070,16 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -26896,8 +26896,8 @@ class CodexAcpClient {
+       });
+     });
+   }
+-  async listMcpServers() {
+-    return this.codexClient.listMcpServerStatus({});
++  async listMcpServers(threadId) {
++    return this.codexClient.listMcpServerStatus(threadId ? { threadId } : {});
+   }
+   async listSessions(request) {
+     const sourceKinds = [
+@@ -29070,9 +29070,11 @@ Check ${configPath} and project .codex directories, especially their config.toml
      this.sessions.set(sessionId, sessionState);
      resumeSubscribed = false;
      if (requestedMcpServers.length > 0 && mcpServerStartupVersion !== null) {
@@ -12,16 +23,11 @@ index 9a0fc7cdf0f739d314c2178452efe32920265fbe..e7200704da6bd857a13a9cf70dc60d5f
 -        afterVersion: mcpServerStartupVersion
 +        requestedServers,
 +        afterVersion: mcpServerStartupVersion,
-+        startupPromise: this.runWithProcessCheck(
-+          () => this.codexAcpClient.awaitMcpServerStartup(
-+            Array.from(requestedServers),
-+            mcpServerStartupVersion
-+          )
-+        )
++        startupPromise: this.waitForMcpServerReadiness(sessionId, requestedServers)
        });
        this.publishMcpStartupStatusAsync(sessionId);
      }
-@@ -29794,9 +29801,16 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -29794,9 +29796,11 @@ Check ${configPath} and project .codex directories, especially their config.toml
      this.sessions.set(sessionId, sessionState);
      subscribed = false;
      if (requestedMcpServers.length > 0 && mcpServerStartupVersion !== null) {
@@ -31,29 +37,51 @@ index 9a0fc7cdf0f739d314c2178452efe32920265fbe..e7200704da6bd857a13a9cf70dc60d5f
 -        afterVersion: mcpServerStartupVersion
 +        requestedServers,
 +        afterVersion: mcpServerStartupVersion,
-+        startupPromise: this.runWithProcessCheck(
-+          () => this.codexAcpClient.awaitMcpServerStartup(
-+            Array.from(requestedServers),
-+            mcpServerStartupVersion
-+          )
-+        )
++        startupPromise: this.waitForMcpServerReadiness(sessionId, requestedServers)
        });
        this.publishMcpStartupStatusAsync(sessionId);
      }
-@@ -30026,28 +30040,34 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -30026,28 +30030,61 @@ Check ${configPath} and project .codex directories, especially their config.toml
    publishMcpStartupStatusAsync(sessionId) {
      void this.doPublishMcpStartupStatus(sessionId);
    }
++  async waitForMcpServerReadiness(sessionId, requestedServers) {
++    const deadline = Date.now() + 3e4;
++    for (; ; ) {
++      const response = await this.runWithProcessCheck(
++        () => this.codexAcpClient.listMcpServers(sessionId)
++      );
++      const servers = new Map(response.data.map((server) => [server.name, server]));
++      const ready = [];
++      for (const serverName of requestedServers) {
++        const server = servers.get(serverName);
++        if (server !== undefined && server.serverInfo !== null) {
++          ready.push(serverName);
++        }
++      }
++      if (ready.length === requestedServers.size) {
++        return { ready, failed: [], cancelled: [] };
++      }
++      if (Date.now() >= deadline) {
++        const unresolved = Array.from(requestedServers).filter((serverName) => !ready.includes(serverName));
++        return {
++          ready,
++          failed: unresolved.map((server) => ({ server, error: "MCP startup timed out" })),
++          cancelled: []
++        };
++      }
++      await new Promise((resolve) => setTimeout(resolve, 250));
++    }
++  }
 +  async waitForMcpStartupBeforePrompt(sessionId) {
 +    const pendingStartup = this.pendingMcpStartupSessions.get(sessionId);
 +    if (!pendingStartup) {
 +      return;
 +    }
 +    const mcpStartup = await pendingStartup.startupPromise;
-+    const failedServerNames = [
-+      ...mcpStartup.failed.map((server) => server.server),
-+      ...mcpStartup.cancelled
-+    ].filter((server) => pendingStartup.requestedServers.has(server));
++    const failedServerNames = mcpStartup.failed.map((server) => server.server).filter(
++      (server) => pendingStartup.requestedServers.has(server)
++    );
 +    if (failedServerNames.length > 0) {
 +      const message = `MCP servers failed to start: ${failedServerNames.join(", ")}`;
 +      throw RequestError.internalError({ mcpServers: failedServerNames }, message);
@@ -85,7 +113,7 @@ index 9a0fc7cdf0f739d314c2178452efe32920265fbe..e7200704da6bd857a13a9cf70dc60d5f
      }
    }
    async publishMcpStartupStatus(sessionId, mcpStartup, requestedServers) {
-@@ -30253,6 +30273,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -30253,6 +30290,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
        prompt: params.prompt
      });
      const sessionState = this.getSessionState(params.sessionId);
