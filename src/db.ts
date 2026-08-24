@@ -247,8 +247,10 @@ const migrateTextIds = (db: Database.Database, storage?: MigrationStorage): void
         "sessions_recent",
         "events_run_completion",
         "integration_conversations_endpoint_status",
+        "integration_conversations_session_recent",
         "integration_tasks_endpoint_status",
         "integration_tasks_endpoint_recent",
+        "integration_tasks_session_recent",
         "webhook_deliveries_task_event",
         "webhook_deliveries_subscription_queue"
       ]) {
@@ -560,6 +562,9 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
     CREATE INDEX IF NOT EXISTS integration_conversations_endpoint_status
     ON integration_conversations(endpoint_id, status);
 
+    CREATE INDEX IF NOT EXISTS integration_conversations_session_recent
+    ON integration_conversations(session_id, created_at DESC, id DESC);
+
     CREATE TABLE IF NOT EXISTS integration_tasks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       endpoint_id INTEGER NOT NULL REFERENCES integration_endpoints(id),
@@ -609,6 +614,9 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
 
     CREATE INDEX IF NOT EXISTS integration_tasks_endpoint_recent
     ON integration_tasks(endpoint_id, created_at DESC, id DESC);
+
+    CREATE INDEX IF NOT EXISTS integration_tasks_session_recent
+    ON integration_tasks(session_id, created_at DESC, id DESC);
 
     CREATE TABLE IF NOT EXISTS webhook_subscriptions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -80,11 +80,25 @@ export type Session = {
   workspacePath: string;
   projectEnvironmentRevisionId: number | null;
   instructionsSnapshot: string;
+  usage: Omit<TokenUsage, "contextUsedTokens" | "contextWindowTokens"> | null;
   createdAt: string;
   updatedAt: string;
   mcpParametersValid?: boolean;
   missingMcpParameters?: string[];
   mcpParameters?: SessionMcpParameterStatus[];
+};
+
+export type SessionListItem = Session & {
+  agentName: string;
+  agentProvider: Provider;
+  projectEnvironmentName: string | null;
+  integration: {
+    endpointId: number;
+    endpointName: string;
+    endpointSlug: string;
+    conversationKey: string | null;
+    latestRequestId: string | null;
+  } | null;
 };
 
 export type SessionMcpParameterStatus = {

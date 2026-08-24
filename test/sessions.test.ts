@@ -150,6 +150,54 @@ describe("Session API", () => {
     expect((response.json() as Array<{ id: number }>).map(({ id }) => id)).toEqual([newer.id, older.id]);
   });
 
+  it("列表返回可区分外部接入会话的摘要和累计 Token", async () => {
+    const { app, db } = await createTestApp();
+    const agent = await createAgent(app);
+    const session = await createSession(app, agent.id);
+    const now = "2026-08-24T08:00:00.000Z";
+    db.prepare(`
+      UPDATE sessions SET input_tokens = 9000, output_tokens = 2345, total_tokens = 12345
+      WHERE id = ?
+    `).run(session.id);
+    const endpointId = Number(db.prepare(`
+      INSERT INTO integration_endpoints
+        (name, slug, agent_id, enabled, token_hash, created_at, updated_at)
+      VALUES ('Grab Manager 爬虫开发', 'grab-impl', ?, 1, 'list-summary-token', ?, ?)
+    `).run(agent.id, now, now).lastInsertRowid);
+    const conversationId = Number(db.prepare(`
+      INSERT INTO integration_conversations
+        (endpoint_id, conversation_key, session_id, status, created_at)
+      VALUES (?, 'ticket-2084', ?, 'active', ?)
+    `).run(endpointId, session.id, now).lastInsertRowid);
+    db.prepare(`
+      INSERT INTO integration_tasks
+        (endpoint_id, conversation_id, session_id, request_id, request_fingerprint,
+         message, effective_prompt, status, created_at)
+      VALUES (?, ?, ?, 'dispatch-2084-2', 'list-summary-fingerprint',
+        '继续处理工单', '继续处理工单', 'queued', ?)
+    `).run(endpointId, conversationId, session.id, now);
+
+    const response = await app.inject({ method: "GET", url: "/api/sessions", headers: authHeaders() });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual([
+      expect.objectContaining({
+        id: session.id,
+        agentName: "Codex",
+        agentProvider: "codex",
+        projectEnvironmentName: "Test environment",
+        usage: expect.objectContaining({ totalTokens: 12345 }),
+        integration: {
+          endpointId,
+          endpointName: "Grab Manager 爬虫开发",
+          endpointSlug: "grab-impl",
+          conversationKey: "ticket-2084",
+          latestRequestId: "dispatch-2084-2"
+        }
+      })
+    ]);
+  });
+
   it("列表批量计算 MCP 状态而不逐条查询 Session", async () => {
     const { app } = await createTestApp();
     const agent = await createAgent(app);
@@ -775,6 +823,114 @@ describe("Session API", () => {
     expect(db.prepare("SELECT count(*) AS count FROM events").get()).toEqual({ count: 0 });
     expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 0 });
     expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+  });
+
+  it("永久删除 Session 时同时删除关联的外部接入记录", async () => {
+    const { app, db } = await createTestApp();
+    const agent = await createAgent(app);
+    const session = await createSession(app, agent.id);
+    const now = "2026-08-24T00:00:00.000Z";
+    const runId = Number(db.prepare(`
+      INSERT INTO runs (session_id, status, input, result, created_at, started_at, finished_at)
+      VALUES (?, 'succeeded', 'question', 'answer', ?, ?, ?)
+    `).run(session.id, now, now, now).lastInsertRowid);
+    const endpointId = Number(db.prepare(`
+      INSERT INTO integration_endpoints
+        (name, slug, agent_id, enabled, token_hash, created_at, updated_at)
+      VALUES ('测试接入', 'session-delete', ?, 1, 'session-delete-token', ?, ?)
+    `).run(agent.id, now, now).lastInsertRowid);
+    const conversationId = Number(db.prepare(`
+      INSERT INTO integration_conversations
+        (endpoint_id, conversation_key, session_id, status, created_at)
+      VALUES (?, 'ticket-2081', ?, 'active', ?)
+    `).run(endpointId, session.id, now).lastInsertRowid);
+    const taskId = Number(db.prepare(`
+      INSERT INTO integration_tasks
+        (endpoint_id, conversation_id, session_id, run_id, request_id, request_fingerprint,
+         message, effective_prompt, status, created_at, started_at, finished_at)
+      VALUES (?, ?, ?, ?, 'request-1', 'fingerprint-1', 'message', 'prompt', 'succeeded', ?, ?, ?)
+    `).run(endpointId, conversationId, session.id, runId, now, now, now).lastInsertRowid);
+    db.prepare(`
+      INSERT INTO integration_task_events
+        (task_id, event_key, event_type, sequence, dispatch_order, event_id, occurred_at, payload_json, created_at)
+      VALUES (?, 'task.finished', 'task.finished', 1, 1, 'event-1', ?, '{}', ?)
+    `).run(taskId, now, now);
+    const subscriptionId = Number(db.prepare(`
+      INSERT INTO webhook_subscriptions
+        (endpoint_id, name, url, enabled, events_json, encrypted_signing_secret, created_at, updated_at)
+      VALUES (?, '测试回调', 'https://example.test/webhook', 1, '["task.finished"]', 'secret', ?, ?)
+    `).run(endpointId, now, now).lastInsertRowid);
+    db.prepare(`
+      INSERT INTO webhook_deliveries
+        (event_id, event_key, sequence, dispatch_order, subscription_id, task_id, event_type,
+         payload_json, status, next_attempt_at, created_at, updated_at)
+      VALUES ('delivery-event-1', 'task.finished', 1, 1, ?, ?, 'task.finished', '{}', 'succeeded', ?, ?, ?)
+    `).run(subscriptionId, taskId, now, now, now);
+
+    const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
+
+    expect(response.statusCode).toBe(204);
+    for (const table of [
+      "webhook_deliveries",
+      "integration_task_events",
+      "integration_tasks",
+      "integration_conversations",
+      "runs",
+      "sessions"
+    ]) {
+      expect(db.prepare(`SELECT count(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+    }
+    expect(db.prepare("SELECT count(*) AS count FROM integration_endpoints").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT count(*) AS count FROM webhook_subscriptions").get()).toEqual({ count: 1 });
+  });
+
+  it("删除旧项目环境版本的最后一个 Session 后立即回收版本 Workspace", async () => {
+    const { app, db, dataDir } = await createTestApp();
+    const agent = await createAgent(app);
+    const first = await createSession(app, agent.id);
+    const second = await createSession(app, agent.id);
+    const environment = db.prepare("SELECT id FROM project_environments LIMIT 1").get() as { id: number };
+    const oldRevision = db.prepare(`
+      SELECT id FROM project_environment_revisions WHERE project_environment_id = ? ORDER BY id ASC LIMIT 1
+    `).get(environment.id) as { id: number };
+    const oldWorkspace = join(dataDir, "environments", String(environment.id), "revisions", String(oldRevision.id), "workspace");
+    mkdirSync(oldWorkspace, { recursive: true });
+    db.prepare("UPDATE project_environment_revisions SET workspace_path = ?, created_at = ? WHERE id = ?")
+      .run(oldWorkspace, "2026-08-12T00:00:00.000Z", oldRevision.id);
+    for (const [index, createdAt] of [
+      "2026-08-13T00:00:00.000Z",
+      "2026-08-14T00:00:00.000Z"
+    ].entries()) {
+      const revisionId = Number(db.prepare(`
+        INSERT INTO project_environment_revisions
+          (project_environment_id, status, workspace_path, input_fingerprint, created_at, finished_at)
+        VALUES (?, 'ready', ?, ?, ?, ?)
+      `).run(
+        environment.id,
+        join(dataDir, "environments", String(environment.id), "revisions", `new-${index}`, "workspace"),
+        `new-${index}`,
+        createdAt,
+        createdAt
+      ).lastInsertRowid);
+      if (index === 1) {
+        db.prepare("UPDATE project_environments SET current_revision_id = ? WHERE id = ?")
+          .run(revisionId, environment.id);
+      }
+    }
+    db.prepare("UPDATE sessions SET project_environment_revision_id = ? WHERE id IN (?, ?)")
+      .run(oldRevision.id, first.id, second.id);
+
+    const firstDelete = await app.inject({ method: "DELETE", url: `/api/sessions/${first.id}`, headers: authHeaders() });
+    expect(firstDelete.statusCode).toBe(204);
+    expect(existsSync(oldWorkspace)).toBe(true);
+    expect(db.prepare("SELECT workspace_path AS path FROM project_environment_revisions WHERE id = ?")
+      .get(oldRevision.id)).toEqual({ path: oldWorkspace });
+
+    const secondDelete = await app.inject({ method: "DELETE", url: `/api/sessions/${second.id}`, headers: authHeaders() });
+    expect(secondDelete.statusCode).toBe(204);
+    expect(existsSync(oldWorkspace)).toBe(false);
+    expect(db.prepare("SELECT workspace_path AS path FROM project_environment_revisions WHERE id = ?")
+      .get(oldRevision.id)).toEqual({ path: null });
   });
 
   it("删除 Session 需要鉴权并区分不存在与运行中", async () => {

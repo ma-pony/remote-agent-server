@@ -87,6 +87,19 @@ export type Session = {
   updatedAt: string;
 };
 
+export type SessionListItem = Session & {
+  agentName: string;
+  agentProvider: Provider;
+  projectEnvironmentName: string | null;
+  integration: {
+    endpointId: number;
+    endpointName: string;
+    endpointSlug: string;
+    conversationKey: string | null;
+    latestRequestId: string | null;
+  } | null;
+};
+
 export type Run = {
   id: number;
   sessionId: number;

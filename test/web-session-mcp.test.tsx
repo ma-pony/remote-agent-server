@@ -70,3 +70,56 @@ it("Session 设置页修改参数，缺少必填参数时对话页禁止发送",
   fireEvent.click(screen.getByRole("button", { name: "保存参数" }));
   expect(await screen.findByText("参数已保存")).toBeInTheDocument();
 });
+
+it("空闲 Session 确认后重建执行器会话并说明保留的数据", async () => {
+  window.history.replaceState({}, "", "/sessions/1/settings");
+  const detail = {
+    id: 1, agentId: agent.id, title: "租户工单", status: "idle", providerSessionId: "provider-session-1",
+    workspacePath: "/tmp/session-1", projectEnvironmentRevisionId: 1, createdAt: now, updatedAt: now,
+    mcpParametersValid: true, missingMcpParameters: [], mcpParameters: [], runs: []
+  };
+  let resolveReset!: (value: Response) => void;
+  const resetResponse = new Promise<Response>((resolve) => { resolveReset = resolve; });
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === "/api/sessions/1" && (init?.method ?? "GET") === "GET") return response(detail);
+    if (url === "/api/sessions/1/reset" && init?.method === "POST") {
+      return resetResponse;
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "重建执行器会话" }));
+  expect(screen.getByRole("alertdialog")).toHaveTextContent("保留对话历史、运行记录、工作区和浏览器数据");
+  expect(screen.getByRole("alertdialog")).toHaveTextContent("只清除执行器上下文");
+  fireEvent.click(screen.getByRole("button", { name: "确认重建" }));
+  expect(await screen.findByRole("button", { name: "重建中…" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "保存参数" })).toBeDisabled();
+  resolveReset(response({ ...detail, providerSessionId: null }));
+
+  expect(await screen.findByText("执行器会话已重建；下一轮将创建新执行器会话并重新注入 MCP。"))
+    .toBeInTheDocument();
+  expect(fetchMock.mock.calls.some(([input, init]) =>
+    input === "/api/sessions/1/reset" && init?.method === "POST"
+  )).toBe(true);
+});
+
+it("运行中的 Session 禁止重建执行器会话", async () => {
+  window.history.replaceState({}, "", "/sessions/1/settings");
+  const detail = {
+    id: 1, agentId: agent.id, title: "租户工单", status: "running", providerSessionId: "provider-session-1",
+    workspacePath: "/tmp/session-1", projectEnvironmentRevisionId: 1, createdAt: now, updatedAt: now,
+    mcpParametersValid: true, missingMcpParameters: [], mcpParameters: [], runs: []
+  };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === "/api/sessions/1") return response(detail);
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+
+  render(<App />);
+
+  expect(await screen.findByRole("button", { name: "重建执行器会话" })).toBeDisabled();
+});

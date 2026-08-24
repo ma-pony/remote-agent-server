@@ -7,7 +7,28 @@ import { App } from "../src/web/app.js";
 
 const now = "2026-08-13T00:00:00.000Z";
 const agent = { id: "agent-1", name: "主力 Codex", provider: "codex", enabled: true, projectEnvironmentId: "environment-1", createdAt: now, updatedAt: now };
-const session = { id: "session-1", agentId: agent.id, title: "修复工单 1332", status: "idle", providerSessionId: null, workspacePath: "/tmp/session-1", projectEnvironmentRevisionId: "revision-1", createdAt: now, updatedAt: now };
+const session = {
+  id: "session-1",
+  agentId: agent.id,
+  title: "Grab Manager 爬虫开发",
+  status: "idle",
+  providerSessionId: null,
+  workspacePath: "/tmp/session-1",
+  projectEnvironmentRevisionId: "revision-1",
+  usage: { inputTokens: 9000, outputTokens: 2345, cachedReadTokens: null, cachedWriteTokens: null, thoughtTokens: null, totalTokens: 12345 },
+  agentName: "主力 Codex",
+  agentProvider: "codex",
+  projectEnvironmentName: "爬虫项目环境",
+  integration: {
+    endpointId: 2,
+    endpointName: "Grab Manager 爬虫开发",
+    endpointSlug: "grab-impl",
+    conversationKey: "ticket-2084",
+    latestRequestId: "dispatch-2084-2"
+  },
+  createdAt: now,
+  updatedAt: now
+};
 const response = (value: unknown): Response => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
 
 beforeEach(() => {
@@ -24,11 +45,27 @@ afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 
 it("Session 列表与创建表单分离", async () => {
   render(<App />);
-  expect(await screen.findByRole("link", { name: "修复工单 1332" })).toBeInTheDocument();
+  expect((await screen.findAllByRole("link", { name: "Grab Manager 爬虫开发" }))[0]).toBeInTheDocument();
   expect(screen.queryByLabelText("会话标题")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("link", { name: "新建会话" }));
   await waitFor(() => expect(window.location.pathname).toBe("/sessions/new"));
   expect(await screen.findByLabelText("会话标题")).toBeInTheDocument();
+});
+
+it("列表展示会话来源、项目环境和累计 Token，并支持按外部标识搜索", async () => {
+  render(<App />);
+
+  expect(await screen.findByText("ticket-2084")).toBeInTheDocument();
+  expect(screen.getByText("/grab-impl")).toBeInTheDocument();
+  expect(screen.getByText("爬虫项目环境")).toBeInTheDocument();
+  expect(screen.getByText("12,345")).toBeInTheDocument();
+  expect(screen.getByText("会话 #session-1")).toBeInTheDocument();
+
+  const search = screen.getByLabelText("搜索会话");
+  fireEvent.change(search, { target: { value: "ticket-2084" } });
+  expect(screen.getAllByRole("link", { name: session.title })[0]).toBeInTheDocument();
+  fireEvent.change(search, { target: { value: "ticket-9999" } });
+  expect(screen.queryByRole("link", { name: session.title })).not.toBeInTheDocument();
 });
 
 it("列表二次确认后永久删除空闲 Session 并原地移除", async () => {

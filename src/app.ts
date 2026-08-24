@@ -115,6 +115,13 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     sessionsRoot: deps.config.sessionsRoot,
     commandRunner: deps.commandRunner
   });
+  const projectEnvironmentBuilder = new ProjectEnvironmentBuilder({
+    store: projectEnvironmentStore,
+    workspaceManager,
+    commands: projectEnvironmentCommands,
+    projectEnvironmentsRoot: deps.config.projectEnvironmentsRoot,
+    prepareTimeoutMs: deps.config.projectPrepareTimeoutMs
+  });
   const sessionManager = new SessionManager({
     db: deps.db,
     dataDir: deps.config.dataDir,
@@ -122,6 +129,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     runtime,
     workspaceManager,
     projectEnvironmentStore,
+    projectEnvironmentRevisionCleaner: projectEnvironmentBuilder,
     projectEnvironmentCommands,
     projectPrepareTimeoutMs: deps.config.projectPrepareTimeoutMs,
     mcpManager
@@ -142,13 +150,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const skillProjector = deps.skillProjector ?? new SkillProjector(deps.config.dataDir);
   const projectEnvironmentScheduler = deps.projectEnvironmentScheduler ?? new ProjectEnvironmentScheduler({
     store: projectEnvironmentStore,
-    builder: new ProjectEnvironmentBuilder({
-      store: projectEnvironmentStore,
-      workspaceManager,
-      commands: projectEnvironmentCommands,
-      projectEnvironmentsRoot: deps.config.projectEnvironmentsRoot,
-      prepareTimeoutMs: deps.config.projectPrepareTimeoutMs
-    }),
+    builder: projectEnvironmentBuilder,
     intervalMs: deps.config.projectEnvironmentCheckIntervalMs
   });
   const executor = new RunExecutor({ runtime, skillProjector, runRepository, eventStore, sessionManager, mcpPreparer });

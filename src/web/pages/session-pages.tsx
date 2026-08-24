@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, MessageSquarePlus, Plus, Search, Trash2, XCircle } from "lucide-react";
+import { ArrowLeft, Bot, Cable, FolderGit2, Hash, MessageSquarePlus, Plus, Search, Trash2, XCircle } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -15,7 +15,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { PageHeader } from "@/components/page-header";
-import { api, errorMessage, type Agent, type AgentSessionParameter, type Session } from "@/api";
+import { api, errorMessage, type Agent, type AgentSessionParameter, type Session, type SessionListItem } from "@/api";
 import { useI18n } from "@/i18n";
 
 const ErrorAlert = ({ message }: { message: string }) => { const { text } = useI18n(); return message === "" ? null : <Alert variant="destructive"><XCircle /><AlertTitle>{text("操作失败", "Operation failed")}</AlertTitle><AlertDescription>{message}</AlertDescription></Alert>; };
@@ -43,20 +43,38 @@ export const SessionDeleteDialog = ({ session, onDeleted, onError }: {
 };
 
 export const SessionListPage = () => {
-  const { text, formatDate } = useI18n();
-  const [sessions, setSessions] = useState<Session[] | null>(null);
-  const [agents, setAgents] = useState<Agent[]>([]);
+  const { locale, text, formatDate } = useI18n();
+  const [sessions, setSessions] = useState<SessionListItem[] | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    void Promise.all([api<Session[]>("/sessions", { signal: controller.signal }), api<Agent[]>("/agents", { signal: controller.signal })]).then(([sessionItems, agentItems]) => { setSessions(sessionItems); setAgents(agentItems); }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    void api<SessionListItem[]>("/sessions", { signal: controller.signal })
+      .then(setSessions)
+      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, []);
-  const names = useMemo(() => new Map(agents.map((agent) => [agent.id, agent.name])), [agents]);
-  const visible = (sessions ?? []).filter((session) => session.title.toLowerCase().includes(query.trim().toLowerCase()));
-  return <div className="mx-auto w-full max-w-6xl p-4 sm:p-6 lg:p-8"><PageHeader eyebrow={text("对话工作区", "CONVERSATION WORKSPACES")} title={text("会话", "Sessions")} description={text("每个会话保留独立工作区，并可在同一智能体上继续多轮任务。", "Each session keeps an isolated workspace and supports multiple turns with the same agent.")} action={<Button asChild><Link to="/sessions/new"><Plus />{text("新建会话", "New session")}</Link></Button>} /><ErrorAlert message={error} /><div className="mb-5 flex max-w-sm items-center gap-2 rounded-lg border bg-card px-3"><Search className="size-4 text-muted-foreground" /><Input aria-label={text("搜索会话", "Search sessions")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("按标题搜索", "Search by title")} value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-    {sessions === null ? <div className="flex flex-col gap-3">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-24" />)}</div> : visible.length === 0 ? <Card className="border-dashed"><CardContent className="py-16 text-center text-muted-foreground">{sessions.length === 0 ? text("暂无会话，创建一个开始对话。", "No sessions yet. Create one to start a conversation.") : text("没有匹配的会话。", "No matching sessions.")}</CardContent></Card> : <div className="divide-y rounded-xl border bg-card">{visible.map((session) => <div key={session.id} className="flex flex-col gap-3 p-5 transition-colors hover:bg-muted/50 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><h2 className="truncate font-medium"><Link className="hover:underline" to={`/sessions/${session.id}`} aria-label={session.title}>{session.title}</Link></h2><p className="mt-1 text-sm text-muted-foreground">{names.get(session.agentId) ?? session.agentId}</p></div><div className="flex items-center gap-3"><Badge variant={session.status === "running" ? "default" : "secondary"}>{session.status === "running" ? text("运行中", "Running") : text("空闲", "Idle")}</Badge><time className="text-sm text-muted-foreground" dateTime={session.updatedAt}>{formatDate(session.updatedAt)}</time><SessionDeleteDialog session={session} onDeleted={() => setSessions((current) => current?.filter((item) => item.id !== session.id) ?? [])} onError={setError} /></div></div>)}</div>}
+  const visible = useMemo(() => {
+    const normalized = query.trim().toLowerCase();
+    if (normalized === "") return sessions ?? [];
+    return (sessions ?? []).filter((session) => [
+      session.title,
+      String(session.id),
+      session.agentName,
+      session.agentProvider,
+      session.projectEnvironmentName,
+      session.integration?.endpointName,
+      session.integration?.endpointSlug,
+      session.integration?.conversationKey,
+      session.integration?.latestRequestId
+    ].filter((value) => value != null).join("\n").toLowerCase().includes(normalized));
+  }, [query, sessions]);
+  const providerLabel = (provider: SessionListItem["agentProvider"]): string => provider === "claude_code" ? "Claude Code" : provider === "codex" ? "Codex" : "Hermes";
+  const tokenTotal = (session: SessionListItem): string => session.usage?.totalTokens == null
+    ? text("未统计", "Not measured")
+    : new Intl.NumberFormat(locale).format(session.usage.totalTokens);
+  return <div className="mx-auto w-full max-w-6xl p-4 sm:p-6 lg:p-8"><PageHeader eyebrow={text("对话工作区", "CONVERSATION WORKSPACES")} title={text("会话", "Sessions")} description={text("每个会话保留独立工作区，并可在同一智能体上继续多轮任务。", "Each session keeps an isolated workspace and supports multiple turns with the same agent.")} action={<Button asChild><Link to="/sessions/new"><Plus />{text("新建会话", "New session")}</Link></Button>} /><ErrorAlert message={error} /><div className="mb-5 flex max-w-lg items-center gap-2 rounded-lg border bg-card px-3"><Search className="size-4 text-muted-foreground" /><Input aria-label={text("搜索会话", "Search sessions")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("搜索标题、会话 ID 或外部标识", "Search title, session ID, or external reference")} value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+    {sessions === null ? <div className="flex flex-col gap-3">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-40" />)}</div> : visible.length === 0 ? <Card className="border-dashed"><CardContent className="py-16 text-center text-muted-foreground">{sessions.length === 0 ? text("暂无会话，创建一个开始对话。", "No sessions yet. Create one to start a conversation.") : text("没有匹配的会话。", "No matching sessions.")}</CardContent></Card> : <div className="divide-y overflow-hidden rounded-xl border bg-card">{visible.map((session) => <article key={session.id} className="grid gap-5 p-5 transition-colors hover:bg-muted/40 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-x-3 gap-y-2"><h2 className="min-w-0 truncate font-heading text-lg font-medium"><Link className="hover:underline" to={`/sessions/${session.id}`} aria-label={session.title}>{session.title}</Link></h2><span className="font-mono text-xs text-muted-foreground">{text(`会话 #${session.id}`, `Session #${session.id}`)}</span></div><div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted-foreground"><span className="inline-flex items-center gap-1.5"><Bot className="size-3.5" />{session.agentName} · {providerLabel(session.agentProvider)}</span><span className="inline-flex items-center gap-1.5"><FolderGit2 className="size-3.5" />{session.projectEnvironmentName ?? text("未绑定项目环境", "No project environment")}</span></div>{session.integration === null ? <div className="mt-4 inline-flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground"><Hash className="size-3.5" />{text("手工创建", "Created manually")}</div> : <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border bg-muted/25 px-3 py-2 text-xs"><span className="inline-flex items-center gap-1.5 text-muted-foreground"><Cable className="size-3.5" />{text("外部接入", "Integration")}</span><Link aria-label={text(`查看接入端点 ${session.integration.endpointName}`, `View integration endpoint ${session.integration.endpointName}`)} className="font-medium hover:underline" to={`/integration-endpoints/${session.integration.endpointId}`}>{session.integration.endpointName}</Link><span className="font-mono text-muted-foreground">/{session.integration.endpointSlug}</span>{session.integration.conversationKey === null ? null : <span><span className="mr-1 text-muted-foreground">{text("外部对话", "Conversation")}</span><span className="font-mono">{session.integration.conversationKey}</span></span>}{session.integration.latestRequestId === null ? null : <span className="truncate"><span className="mr-1 text-muted-foreground">{text("最近请求", "Latest request")}</span><span className="font-mono">{session.integration.latestRequestId}</span></span>}</div>}</div><div className="flex items-end justify-between gap-5 border-t pt-4 lg:min-w-52 lg:flex-col lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0"><div className="lg:text-right"><p className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">{text("累计 Token", "Total tokens")}</p><p className="mt-1 font-mono text-xl font-semibold tabular-nums">{tokenTotal(session)}</p></div><div className="flex flex-wrap items-center justify-end gap-3"><Badge variant={session.status === "running" ? "default" : "secondary"}>{session.status === "running" ? text("运行中", "Running") : text("空闲", "Idle")}</Badge><time className="text-xs text-muted-foreground" dateTime={session.updatedAt}>{formatDate(session.updatedAt)}</time><SessionDeleteDialog session={session} onDeleted={() => setSessions((current) => current?.filter((item) => item.id !== session.id) ?? [])} onError={setError} /></div></div></article>)}</div>}
   </div>;
 };
 

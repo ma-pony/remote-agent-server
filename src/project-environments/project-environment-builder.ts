@@ -184,7 +184,8 @@ export class ProjectEnvironmentBuilder {
     }
   }
 
-  private async cleanupOldRevisions(environmentId: number): Promise<void> {
+  /** Removes obsolete revision Workspaces after their final Session reference is released. */
+  async cleanupOldRevisions(environmentId: number): Promise<void> {
     const ready = this.dependencies.store.listRevisions(environmentId).filter((item) => item.status === "ready");
     for (const revision of ready.slice(2)) {
       if (revision.workspacePath === null) continue;

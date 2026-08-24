@@ -141,6 +141,12 @@ describe("performance regressions", () => {
         WHERE endpoint_id = 1 AND status IN ('queued', 'running')`).all(),
       db.prepare(`EXPLAIN QUERY PLAN
         SELECT id FROM integration_tasks WHERE endpoint_id = 1
+        ORDER BY created_at DESC, id DESC LIMIT 1`).all(),
+      db.prepare(`EXPLAIN QUERY PLAN
+        SELECT id FROM integration_conversations WHERE session_id = 1
+        ORDER BY created_at DESC, id DESC LIMIT 1`).all(),
+      db.prepare(`EXPLAIN QUERY PLAN
+        SELECT id FROM integration_tasks WHERE session_id = 1
         ORDER BY created_at DESC, id DESC LIMIT 1`).all()
     ].flat() as Array<{ detail: string }>;
 
@@ -153,6 +159,8 @@ describe("performance regressions", () => {
     expect(details).toContain("integration_conversations_endpoint_status");
     expect(details).toContain("integration_tasks_endpoint_status");
     expect(details).toContain("integration_tasks_endpoint_recent");
+    expect(details).toContain("integration_conversations_session_recent");
+    expect(details).toContain("integration_tasks_session_recent");
     expect(details).not.toContain("USE TEMP B-TREE");
     db.close();
   });
