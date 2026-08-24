@@ -1,32 +1,8 @@
 diff --git a/dist/index.js b/dist/index.js
-index 9a0fc7cdf0f739d314c2178452efe32920265fbe..6962a1885cc4dda7547565962b3653279596dd79 100755
+index 9a0fc7cdf0f739d314c2178452efe32920265fbe..e7200704da6bd857a13a9cf70dc60d5f26b1bc66 100755
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -26669,8 +26669,22 @@ var CodexAcpClient = class {
-   }
-   async createSessionConfig(projectPath, additionalDirectories, mcpServers) {
-     const sessionRoots = [projectPath, ...additionalDirectories];
-+    const baseConfig = mergeGatewayConfig(this.config, this.gatewayConfig);
-+    const baseFeatures = isJsonObject(baseConfig.features) ? baseConfig.features : {};
-+    const baseCodeMode = isJsonObject(baseFeatures.code_mode) ? baseFeatures.code_mode : {};
-     const mergedConfig = {
--      ...mergeGatewayConfig(this.config, this.gatewayConfig),
-+      ...baseConfig,
-+      features: {
-+        ...baseFeatures,
-+        code_mode: {
-+          ...baseCodeMode,
-+          enabled: true,
-+          direct_only_tool_namespaces: mcpServers.map(
-+            (server) => `mcp__${sanitizeMcpServerName(server.name)}`
-+          )
-+        },
-+        code_mode_only: false
-+      },
-       projects: Object.fromEntries(sessionRoots.map((root) => [root, {
-         trust_level: "trusted"
-       }]))
-@@ -29070,9 +29084,16 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -29070,9 +29070,16 @@ Check ${configPath} and project .codex directories, especially their config.toml
      this.sessions.set(sessionId, sessionState);
      resumeSubscribed = false;
      if (requestedMcpServers.length > 0 && mcpServerStartupVersion !== null) {
@@ -45,7 +21,7 @@ index 9a0fc7cdf0f739d314c2178452efe32920265fbe..6962a1885cc4dda7547565962b365327
        });
        this.publishMcpStartupStatusAsync(sessionId);
      }
-@@ -29794,9 +29815,16 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -29794,9 +29801,16 @@ Check ${configPath} and project .codex directories, especially their config.toml
      this.sessions.set(sessionId, sessionState);
      subscribed = false;
      if (requestedMcpServers.length > 0 && mcpServerStartupVersion !== null) {
@@ -64,7 +40,7 @@ index 9a0fc7cdf0f739d314c2178452efe32920265fbe..6962a1885cc4dda7547565962b365327
        });
        this.publishMcpStartupStatusAsync(sessionId);
      }
-@@ -30026,28 +30054,34 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -30026,28 +30040,34 @@ Check ${configPath} and project .codex directories, especially their config.toml
    publishMcpStartupStatusAsync(sessionId) {
      void this.doPublishMcpStartupStatus(sessionId);
    }
@@ -109,7 +85,7 @@ index 9a0fc7cdf0f739d314c2178452efe32920265fbe..6962a1885cc4dda7547565962b365327
      }
    }
    async publishMcpStartupStatus(sessionId, mcpStartup, requestedServers) {
-@@ -30253,6 +30287,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
+@@ -30253,6 +30273,7 @@ Check ${configPath} and project .codex directories, especially their config.toml
        prompt: params.prompt
      });
      const sessionState = this.getSessionState(params.sessionId);

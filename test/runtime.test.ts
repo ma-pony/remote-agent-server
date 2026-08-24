@@ -396,6 +396,11 @@ describe("AcpxAgentRuntime", () => {
       'developer_instructions = "host instructions"',
       'model = "deepseek-v4-flash"',
       'model_provider = "deepseek"',
+      "# remote-agent-mcp-exposure-start",
+      "[features.code_mode]",
+      "enabled = true",
+      'direct_only_tool_namespaces = ["mcp__grab-manager"]',
+      "# remote-agent-mcp-exposure-end",
       "[model_providers.deepseek]",
       'base_url = "https://api.deepseek.com"',
       ""
@@ -418,6 +423,9 @@ describe("AcpxAgentRuntime", () => {
     expect(configToml).toContain('model = "deepseek-v4-flash"');
     expect(configToml).toContain('model_provider = "deepseek"');
     expect(configToml).toContain("[model_providers.deepseek]");
+    expect(configToml).not.toContain("remote-agent-mcp-exposure");
+    expect(configToml).not.toContain("[features.code_mode]");
+    expect(configToml).not.toContain("direct_only_tool_namespaces");
     expect(readFileSync(join(home, "models.json"), "utf8")).toBe('{"models":["deepseek-v4-flash"]}');
   });
 
@@ -560,7 +568,7 @@ describe("AcpxAgentRuntime", () => {
     }));
   });
 
-  it("Codex 统一通过 ACP 注入全部 MCP，并在启动配置中暴露全部工具命名空间", async () => {
+  it("Codex 统一通过 ACP 注入全部 MCP，但不强制启用 Code Mode", async () => {
     const root = makeRoot();
     const acp = runtimeStub();
     acpxMocks.createAcpRuntime.mockReturnValue(acp);
@@ -592,12 +600,9 @@ describe("AcpxAgentRuntime", () => {
     );
     const configToml = readFileSync(join(home, "config.toml"), "utf8");
     expect(configToml).not.toContain('[mcp_servers."grab-manager"]');
-    expect(configToml).toContain("# remote-agent-mcp-exposure-start");
-    expect(configToml).toContain("[features.code_mode]");
-    expect(configToml).toContain(
-      'direct_only_tool_namespaces = ["mcp__grab-manager", "mcp__optional-local"]'
-    );
-    expect(configToml).toContain("# remote-agent-mcp-exposure-end");
+    expect(configToml).not.toContain("# remote-agent-mcp-exposure-start");
+    expect(configToml).not.toContain("[features.code_mode]");
+    expect(configToml).not.toContain("direct_only_tool_namespaces");
     expect(options.mcpServers).toEqual([
       {
         type: "http", name: "grab-manager", url: "https://example.test/mcp",

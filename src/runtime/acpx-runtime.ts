@@ -53,7 +53,6 @@ type RuntimeTarget = {
   sessionId: number;
   browserProfilePath: string;
   instructions: string;
-  mcpServerNames: string[];
 };
 
 export class AgentRuntimeError extends Error {
@@ -131,8 +130,7 @@ const copyProviderHome = async (source: string, destination: string): Promise<vo
 const codexConfigWithManagedSettings = async (
   home: string,
   instructions: string,
-  disabledSkills: string,
-  mcpServerNames: string[]
+  disabledSkills: string
 ): Promise<string> => {
   const managedMcpStart = "# remote-agent-mcp-exposure-start";
   const managedMcpEnd = "# remote-agent-mcp-exposure-end";
@@ -145,30 +143,12 @@ const codexConfigWithManagedSettings = async (
   }
   const withoutManagedMcp = hostConfig
     .replace(new RegExp(`${managedMcpStart}[\\s\\S]*?${managedMcpEnd}\\s*`, "g"), "");
-  let insideCodeMode = false;
-  const preservedConfig = withoutManagedMcp.split(/\r?\n/).filter((line) => {
-    const header = line.trim().match(/^\[{1,2}([^\]]+)\]{1,2}$/)?.[1];
-    if (header !== undefined) {
-      insideCodeMode = header === "features.code_mode";
-      return !insideCodeMode;
-    }
-    return !insideCodeMode;
-  }).join("\n")
+  const preservedConfig = withoutManagedMcp
     .replace(/^\s*developer_instructions\s*=.*(?:\r?\n|$)/m, "")
     .trim();
-  const mcpExposure = mcpServerNames.length === 0 ? "" : [
-    managedMcpStart,
-    "[features.code_mode]",
-    "enabled = true",
-    `direct_only_tool_namespaces = [${mcpServerNames
-      .map((name) => JSON.stringify(`mcp__${name.replace(/\p{White_Space}/gu, "_")}`))
-      .join(", ")}]`,
-    managedMcpEnd
-  ].join("\n");
   return [
     instructions.trim() === "" ? "" : `developer_instructions = ${JSON.stringify(instructions)}`,
     preservedConfig,
-    mcpExposure,
     disabledSkills
   ].filter((section) => section !== "").join("\n\n");
 };
@@ -227,8 +207,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const config = await codexConfigWithManagedSettings(
         home,
         target.instructions,
-        disabledSkills,
-        target.mcpServerNames
+        disabledSkills
       );
       await writeFile(join(home, "config.toml"), config === "" ? "" : `${config}\n`, { mode: 0o600 });
       environment.push(`CODEX_HOME=${shellQuote(home)}`);
@@ -484,8 +463,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       agentId: input.agentId,
       sessionId: input.sessionId,
       browserProfilePath: input.browserProfilePath,
-      instructions: input.instructions,
-      mcpServerNames: input.mcpServers.map((server) => server.name)
+      instructions: input.instructions
     });
     await registry.prepare(agent);
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
@@ -677,8 +655,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       agentId,
       sessionId,
       browserProfilePath: join(this.config.dataDir, "agents", String(agentId), "doctor-browser"),
-      instructions: "",
-      mcpServerNames: []
+      instructions: ""
     });
     await registry.prepare(probeAgent);
     const runtime = this.createRuntime(registry, probeAgent);
