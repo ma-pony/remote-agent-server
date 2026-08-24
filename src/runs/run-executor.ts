@@ -130,7 +130,7 @@ export class RunExecutor {
         publicNoticeCode = "mcp_preflight_failed";
         throw error;
       }
-      const memory = this.skillProjector.prepare(agent, session);
+      const { memory, revision: skillsRevision } = this.skillProjector.prepare(agent, session);
       const runtimeSession = await this.runtime.ensureSession({
         sessionId: session.id,
         agentId: agent.id,
@@ -140,6 +140,7 @@ export class RunExecutor {
         providerSessionId: session.providerSessionId,
         instructions: session.instructionsSnapshot,
         memory,
+        skillsRevision,
         mcpServers
       });
       this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);

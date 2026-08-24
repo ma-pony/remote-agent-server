@@ -21,7 +21,7 @@ export type RuntimeMcpServer = (
       args: string[];
       env: Array<{ name: string; value: string }>;
     }
-) & { core?: boolean };
+) & { startupTimeoutSeconds?: number };
 
 export type ResolvedMcpServer = {
   id: number;
@@ -95,7 +95,6 @@ export type AgentMcpServerSummary = {
   name: string;
   transport: McpTransport;
   enabled: boolean;
-  core: boolean;
   checkTimeoutSeconds: number;
   lastCheckedAt: string | null;
   lastCheckStatus: "passed" | "failed" | null;

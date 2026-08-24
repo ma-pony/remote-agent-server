@@ -56,7 +56,7 @@ afterEach(async () => {
 });
 
 describe("Agent MCP API", () => {
-  it("单独标记当前 Agent 的核心 MCP", async () => {
+  it("MCP 接口不区分优先级", async () => {
     const { app, agentId } = await createTestApp();
     const created = await app.inject({
       method: "POST", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders(),
@@ -67,17 +67,18 @@ describe("Agent MCP API", () => {
     });
     const serverId = (created.json() as { id: number }).id;
 
-    expect(created.json()).toMatchObject({ core: false });
-    const updated = await app.inject({
+    expect(created.json()).not.toHaveProperty("core");
+    const obsoleteRoute = await app.inject({
       method: "PATCH", url: `/api/agents/${agentId}/mcp-servers/${serverId}/core`, headers: authHeaders(),
       payload: { core: true }
     });
 
-    expect(updated.statusCode).toBe(200);
-    expect(updated.json()).toMatchObject({ id: serverId, core: true });
-    expect((await app.inject({
+    expect(obsoleteRoute.statusCode).toBe(404);
+    const listed = (await app.inject({
       method: "GET", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders()
-    })).json()).toEqual([expect.objectContaining({ id: serverId, core: true })]);
+    })).json() as Array<Record<string, unknown>>;
+    expect(listed).toEqual([expect.objectContaining({ id: serverId })]);
+    expect(listed[0]).not.toHaveProperty("core");
   });
 
   it("支持只删除当前 Agent 的 MCP 副本或删除整个共享组", async () => {

@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 
@@ -39,9 +41,10 @@ export const ACP_AGENT = {
 
 const ACP_COMMAND: Record<(typeof ACP_AGENT)[Provider], string> = {
   claude: "npx -y @agentclientprotocol/claude-agent-acp@^0.60.0",
-  codex: "npx -y @agentclientprotocol/codex-acp@^1.1.5",
+  codex: "",
   hermes: "hermes acp"
 };
+const CODEX_ACP_ENTRYPOINT = createRequire(import.meta.url).resolve("@agentclientprotocol/codex-acp");
 
 const providers = new Set<Provider>(["claude_code", "codex", "hermes"]);
 type RuntimeTarget = {
@@ -50,7 +53,7 @@ type RuntimeTarget = {
   sessionId: number;
   browserProfilePath: string;
   instructions: string;
-  coreMcpServerNames: string[];
+  mcpServerNames: string[];
 };
 
 export class AgentRuntimeError extends Error {
@@ -61,6 +64,9 @@ export class AgentRuntimeError extends Error {
 }
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+const acpCommand = (provider: Provider): string => provider === "codex"
+  ? `${shellQuote(process.execPath)} ${shellQuote(CODEX_ACP_ENTRYPOINT)}`
+  : ACP_COMMAND[ACP_AGENT[provider]];
 
 const runtimeProviderEntries = new Set([
   "archived_sessions",
@@ -125,8 +131,11 @@ const copyProviderHome = async (source: string, destination: string): Promise<vo
 const codexConfigWithManagedSettings = async (
   home: string,
   instructions: string,
-  disabledSkills: string
+  disabledSkills: string,
+  mcpServerNames: string[]
 ): Promise<string> => {
+  const managedMcpStart = "# remote-agent-mcp-exposure-start";
+  const managedMcpEnd = "# remote-agent-mcp-exposure-end";
   const path = join(home, "config.toml");
   let hostConfig = "";
   try {
@@ -134,12 +143,32 @@ const codexConfigWithManagedSettings = async (
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  const preservedConfig = hostConfig
+  const withoutManagedMcp = hostConfig
+    .replace(new RegExp(`${managedMcpStart}[\\s\\S]*?${managedMcpEnd}\\s*`, "g"), "");
+  let insideCodeMode = false;
+  const preservedConfig = withoutManagedMcp.split(/\r?\n/).filter((line) => {
+    const header = line.trim().match(/^\[{1,2}([^\]]+)\]{1,2}$/)?.[1];
+    if (header !== undefined) {
+      insideCodeMode = header === "features.code_mode";
+      return !insideCodeMode;
+    }
+    return !insideCodeMode;
+  }).join("\n")
     .replace(/^\s*developer_instructions\s*=.*(?:\r?\n|$)/m, "")
     .trim();
+  const mcpExposure = mcpServerNames.length === 0 ? "" : [
+    managedMcpStart,
+    "[features.code_mode]",
+    "enabled = true",
+    `direct_only_tool_namespaces = [${mcpServerNames
+      .map((name) => JSON.stringify(`mcp__${name.replace(/\p{White_Space}/gu, "_")}`))
+      .join(", ")}]`,
+    managedMcpEnd
+  ].join("\n");
   return [
     instructions.trim() === "" ? "" : `developer_instructions = ${JSON.stringify(instructions)}`,
     preservedConfig,
+    mcpExposure,
     disabledSkills
   ].filter((section) => section !== "").join("\n\n");
 };
@@ -195,21 +224,21 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
         `path = ${JSON.stringify(path)}`,
         "enabled = false"
       ].join("\n")).join("\n\n");
-      const config = await codexConfigWithManagedSettings(home, target.instructions, disabledSkills);
+      const config = await codexConfigWithManagedSettings(
+        home,
+        target.instructions,
+        disabledSkills,
+        target.mcpServerNames
+      );
       await writeFile(join(home, "config.toml"), config === "" ? "" : `${config}\n`, { mode: 0o600 });
       environment.push(`CODEX_HOME=${shellQuote(home)}`);
-      if (target.coreMcpServerNames.length > 0) {
-        environment.push(`CODEX_CONFIG=${shellQuote(JSON.stringify({
-          features: { code_mode: { direct_only_tool_namespaces: target.coreMcpServerNames.map((name) => `mcp__${name}`) } }
-        }))}`);
-      }
     } else {
       const home = join(providerHome, "claude");
       const hostHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
       await this.prepareProviderHome(hostHome, home);
       environment.push(`CLAUDE_CONFIG_DIR=${shellQuote(home)}`);
     }
-    this.commands.set(agentName, `env ${environment.join(" ")} ${ACP_COMMAND[ACP_AGENT[target.provider]]}`);
+    this.commands.set(agentName, `env ${environment.join(" ")} ${acpCommand(target.provider)}`);
   }
 
   resolve(agentName: string): string {
@@ -259,6 +288,7 @@ type ManagedSession = {
   workspacePath: string;
   browserProfilePath: string;
   instructions: string;
+  configurationFingerprint: string;
   target: string;
 };
 
@@ -404,6 +434,15 @@ const systemPrompt = (input: RuntimeSessionInput): string => {
   return sections.join("\n\n");
 };
 
+const configurationFingerprint = (input: RuntimeSessionInput): string => createHash("sha256")
+  .update(JSON.stringify({
+    instructions: input.instructions,
+    memory: input.memory,
+    skillsRevision: input.skillsRevision ?? "",
+    mcpServers: input.mcpServers
+  }))
+  .digest("hex");
+
 /**
  * Adapts the embedded acpx API to the service's provider-neutral Runtime contract.
  */
@@ -427,13 +466,13 @@ export class AcpxAgentRuntime implements AgentRuntime {
     assertTarget(input.provider, input.agentId, input.sessionId);
     const existing = this.sessions.get(input.sessionId);
     const reusable = existing !== undefined && this.canReuse(existing, input);
-    if (reusable && input.providerSessionId === null) {
+    if (reusable) {
       return { providerSessionId: existing.providerSessionId };
     }
     if (existing !== undefined) {
       await existing.runtime.close({
         handle: existing.handle,
-        reason: reusable ? "session_handle_refreshed" : "session_handle_replaced"
+        reason: this.hasSameTarget(existing, input) ? "session_handle_refreshed" : "session_handle_replaced"
       });
       this.sessions.delete(input.sessionId);
       existing.registry.unregister(existing.target);
@@ -446,7 +485,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       sessionId: input.sessionId,
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions,
-      coreMcpServerNames: input.mcpServers.filter((server) => server.core === true).map((server) => server.name)
+      mcpServerNames: input.mcpServers.map((server) => server.name)
     });
     await registry.prepare(agent);
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
@@ -476,6 +515,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
           workspacePath: input.workspacePath,
           browserProfilePath: input.browserProfilePath,
           instructions: input.instructions,
+          configurationFingerprint: configurationFingerprint(input),
           target: agent
         });
         this.recordShutdownFailure("late_handle_close", input.sessionId, outcome.reason);
@@ -513,6 +553,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       workspacePath: input.workspacePath,
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions,
+      configurationFingerprint: configurationFingerprint(input),
       target: agent
     });
     return { providerSessionId };
@@ -637,7 +678,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       sessionId,
       browserProfilePath: join(this.config.dataDir, "agents", String(agentId), "doctor-browser"),
       instructions: "",
-      coreMcpServerNames: []
+      mcpServerNames: []
     });
     await registry.prepare(probeAgent);
     const runtime = this.createRuntime(registry, probeAgent);
@@ -738,11 +779,16 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   private canReuse(session: ManagedSession, input: RuntimeSessionInput): boolean {
+    return this.hasSameTarget(session, input)
+      && session.instructions === input.instructions
+      && session.configurationFingerprint === configurationFingerprint(input);
+  }
+
+  private hasSameTarget(session: ManagedSession, input: RuntimeSessionInput): boolean {
     return session.provider === input.provider
       && session.agentId === input.agentId
       && session.workspacePath === input.workspacePath
       && session.browserProfilePath === input.browserProfilePath
-      && session.instructions === input.instructions
       && (input.providerSessionId === null || session.providerSessionId === input.providerSessionId);
   }
 
@@ -775,7 +821,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
     probeAgent?: string,
     mcpServers: RuntimeSessionInput["mcpServers"] = []
   ): AcpRuntime {
-    const providerMcpServers = mcpServers.map(({ core: _core, ...server }) => server);
+    const providerMcpServers = mcpServers
+      .map(({ startupTimeoutSeconds: _startupTimeoutSeconds, ...server }) => server);
     const options: AcpRuntimeOptions = {
       cwd: this.config.projectEnvironmentsRoot,
       sessionStore: createRuntimeStore({ stateDir: join(this.config.dataDir, "acpx") }),

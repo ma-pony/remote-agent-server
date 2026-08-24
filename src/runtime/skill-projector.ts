@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
@@ -11,6 +11,11 @@ export type SkillProjectionAgent = {
 
 export type SkillProjectionSession = {
   workspacePath: string;
+};
+
+export type SkillProjection = {
+  memory: string;
+  revision: string;
 };
 
 const managedPrefix = "_remote-agent-managed-";
@@ -45,7 +50,7 @@ export class SkillProjector {
     this.fileSystem = { ...nodeFileSystem, ...fileSystem };
   }
 
-  prepare(agent: SkillProjectionAgent, session: SkillProjectionSession): string {
+  prepare(agent: SkillProjectionAgent, session: SkillProjectionSession): SkillProjection {
     const agentDirectory = join(this.dataDir, "agents", String(agent.id));
     const memoryPath = join(agentDirectory, "MEMORY.md");
     const memory = this.fileSystem.exists(memoryPath) ? this.fileSystem.read(memoryPath) : "";
@@ -56,15 +61,16 @@ export class SkillProjector {
     const backup = join(skillsRoot, `.remote-agent-skills.backup-${token}`);
     const movedExisting: string[] = [];
     const installed: string[] = [];
+    const enabledSkills = this.fileSystem.exists(source)
+      ? this.fileSystem.list(source).filter((entry) => !entry.startsWith("."))
+      : [];
 
     this.fileSystem.mkdir(skillsRoot);
     this.fileSystem.mkdir(temporary);
     this.fileSystem.mkdir(backup);
     try {
-      if (this.fileSystem.exists(source)) {
-        for (const name of this.fileSystem.list(source).filter((entry) => !entry.startsWith("."))) {
-          this.fileSystem.copy(join(source, name), join(temporary, `${managedPrefix}${name}`));
-        }
+      for (const name of enabledSkills) {
+        this.fileSystem.copy(join(source, name), join(temporary, `${managedPrefix}${name}`));
       }
 
       const existingManaged = this.fileSystem.list(skillsRoot).filter((name) => name.startsWith(managedPrefix));
@@ -91,7 +97,10 @@ export class SkillProjector {
       if (this.fileSystem.exists(backup)) this.fileSystem.remove(backup);
     }
 
-    return memory;
+    return {
+      memory,
+      revision: createHash("sha256").update(JSON.stringify(enabledSkills)).digest("hex")
+    };
   }
 
   private skillsRoot(agent: SkillProjectionAgent, session: SkillProjectionSession): string {

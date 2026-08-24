@@ -10,6 +10,7 @@ export type RuntimeSessionInput = {
   providerSessionId: string | null;
   instructions: string;
   memory: string;
+  skillsRevision?: string;
   mcpServers: RuntimeMcpServer[];
 };
 

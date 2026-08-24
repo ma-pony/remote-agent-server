@@ -26,9 +26,15 @@ export class RunMcpPreparer {
     return Promise.all(resolved.map(async (item) => {
       const result = await this.dependencies.checker.check(item.server, item.checkTimeoutMs);
       this.dependencies.manager.recordCheckResult(item.id, result);
-      return { server: item.server, result };
+      return {
+        server: {
+          ...item.server,
+          startupTimeoutSeconds: Math.max(1, Math.ceil(item.checkTimeoutMs / 1000))
+        },
+        result
+      };
     })).then((results) => {
-      const failed = results.find(({ server, result }) => server.core === true && result.status === "failed");
+      const failed = results.find(({ result }) => result.status === "failed");
       if (failed !== undefined) {
         throw new RunMcpPreparationError(`MCP ${failed.server.name} check failed`);
       }

@@ -389,7 +389,8 @@ describe("database migration", () => {
 
     const columns = db.prepare("PRAGMA table_info(agent_mcp_servers)").all()
       .map((row) => (row as { name: string }).name);
-    expect(columns).toEqual(expect.arrayContaining(["source_mcp_server_id", "core"]));
+    expect(columns).toEqual(expect.arrayContaining(["source_mcp_server_id"]));
+    expect(columns).not.toContain("core");
     db.close();
   });
 

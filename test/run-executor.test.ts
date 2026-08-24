@@ -31,7 +31,7 @@ const deferred = <T>() => {
 
 const setup = (
   runtime: AgentRuntime,
-  prepare = vi.fn(() => "remember this"),
+  prepare = vi.fn(() => ({ memory: "remember this", revision: "skills-v1" })),
   mcpPrepare = vi.fn(async () => []),
   runRepositoryOptions: Record<string, unknown> = {}
 ) => {
@@ -130,7 +130,7 @@ describe("RunExecutor", () => {
     const runtime = createFakeRuntime();
     runtime.ensureSession = vi.fn(runtime.ensureSession);
     runtime.startTurn = vi.fn(runtime.startTurn);
-    const prepare = vi.fn(() => "remember this");
+    const prepare = vi.fn(() => ({ memory: "remember this", revision: "skills-v1" }));
     const mcpPrepare = vi.fn(async () => []);
     const setupResult = setup(runtime, prepare, mcpPrepare);
     setupResult.db.prepare(`
@@ -158,7 +158,7 @@ describe("RunExecutor", () => {
     const runtime = createFakeRuntime();
     runtime.ensureSession = vi.fn(runtime.ensureSession);
     runtime.startTurn = vi.fn(runtime.startTurn);
-    const prepare = vi.fn(() => "remember this");
+    const prepare = vi.fn(() => ({ memory: "remember this", revision: "skills-v1" }));
     const mcpPrepare = vi.fn(async () => { throw new Error("MCP private_mcp check failed"); });
     const setupResult = setup(runtime, prepare, mcpPrepare);
 
@@ -378,7 +378,7 @@ describe("RunExecutor", () => {
     });
     const prepare = vi.fn(() => {
       expect(setupResult.runRepository.get(setupResult.run.id)?.status).toBe("running");
-      return "remember this";
+      return { memory: "remember this", revision: "skills-v1" };
     });
     setupResult = setup(runtime, prepare);
     const startTurn = runtime.startTurn.bind(runtime);

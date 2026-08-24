@@ -144,13 +144,6 @@ describe("Agent API", () => {
         ]
       }
     });
-    await app.inject({
-      method: "PATCH",
-      url: `/api/agents/${source.id}/mcp-servers/${(mcpCreated.json() as { id: number }).id}/core`,
-      headers: authHeaders(),
-      payload: { core: true }
-    });
-
     const sourceDir = join(dataDir, "agents", String(source.id));
     for (const root of ["skills", "skill-library"]) {
       const directory = join(sourceDir, root, "upload-review");
@@ -212,7 +205,6 @@ describe("Agent API", () => {
       agentId: clone.id,
       name: "example_mcp",
       enabled: true,
-      core: true,
       lastCheckedAt: null,
       lastCheckStatus: null
     }]);

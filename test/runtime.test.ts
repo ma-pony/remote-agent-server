@@ -68,6 +68,7 @@ const sessionInput = (root: string, overrides: Partial<RuntimeSessionInput> = {}
   providerSessionId: null,
   instructions: "只根据当前代码和测试给出结论。",
   memory: "Always inspect the current code.",
+  skillsRevision: "skills-v1",
   mcpServers: [],
   ...overrides
 });
@@ -208,12 +209,12 @@ describe("SkillProjector", () => {
     const memoryPath = join(config.dataDir, "agents", AGENT_PATH_ID, "MEMORY.md");
     writeFileSync(memoryPath, "remember this");
 
-    const memory = new SkillProjector(config.dataDir).prepare(
+    const projection = new SkillProjector(config.dataDir).prepare(
       { id: AGENT_ID, provider },
       { workspacePath: root }
     );
 
-    expect(memory).toBe("remember this");
+    expect(projection).toMatchObject({ memory: "remember this", revision: expect.any(String) });
     expect(readFileSync(join(destination, "_remote-agent-managed-ticket-workflow", "SKILL.md"), "utf8")).toBe("new skill");
     expect(readFileSync(join(destination, "template-skill", "SKILL.md"), "utf8")).toBe("keep me");
   });
@@ -222,12 +223,35 @@ describe("SkillProjector", () => {
     const root = makeRoot();
     const config = makeConfig(root);
 
-    const memory = new SkillProjector(config.dataDir).prepare(
+    const projection = new SkillProjector(config.dataDir).prepare(
       { id: AGENT_ID, provider: "codex" },
       { workspacePath: root }
     );
 
-    expect(memory).toBe("");
+    expect(projection).toMatchObject({ memory: "", revision: expect.any(String) });
+  });
+
+  it("启用 Skill 集合变化时生成不同配置版本", () => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const source = join(config.dataDir, "agents", AGENT_PATH_ID, "skills");
+    const projector = new SkillProjector(config.dataDir);
+
+    const first = projector.prepare(
+      { id: AGENT_ID, provider: "codex" },
+      { workspacePath: root }
+    );
+    mkdirSync(join(source, "ticket-workflow"), { recursive: true });
+    writeFileSync(join(source, "ticket-workflow", "SKILL.md"), "skill");
+    const second = projector.prepare(
+      { id: AGENT_ID, provider: "codex" },
+      { workspacePath: root }
+    );
+
+    expect(first).toMatchObject({ memory: "", revision: expect.any(String) });
+    expect(second).toMatchObject({ memory: "", revision: expect.any(String) });
+    expect((second as unknown as { revision: string }).revision)
+      .not.toBe((first as unknown as { revision: string }).revision);
   });
 
   it("Memory 读取失败时保留旧托管 Skills", () => {
@@ -271,7 +295,7 @@ describe("SkillProjector", () => {
 describe("AcpxAgentRuntime", () => {
   it.each([
     ["claude_code", "npx -y @agentclientprotocol/claude-agent-acp@^0.60.0"],
-    ["codex", "npx -y @agentclientprotocol/codex-acp@^1.1.5"],
+    ["codex", "codex-acp/dist/index.js"],
     ["hermes", "hermes acp"]
   ] as const)("固定 %s Provider 命令并安全转义路径", async (provider, providerCommand) => {
     const root = makeRoot();
@@ -293,6 +317,7 @@ describe("AcpxAgentRuntime", () => {
       expect(command).not.toContain("CODEX_HOME=");
       expect(command).not.toContain("CLAUDE_CONFIG_DIR=");
     } else if (provider === "codex") {
+      expect(command).not.toContain("npx -y @agentclientprotocol/codex-acp");
       expect(command).toContain(`CODEX_HOME='${join(
         config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", SESSION_PATH_ID
       )}'`);
@@ -495,7 +520,7 @@ describe("AcpxAgentRuntime", () => {
     await runtime.ensureSession(sessionInput(root, {
       providerSessionId: "provider-session-1",
       mcpServers: [{
-        type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: [], core: true
+        type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
       }]
     }));
 
@@ -535,28 +560,51 @@ describe("AcpxAgentRuntime", () => {
     }));
   });
 
-  it("Codex 将核心 MCP namespace 固定为直接暴露且不把内部标记传给 ACP", async () => {
+  it("Codex 统一通过 ACP 注入全部 MCP，并在启动配置中暴露全部工具命名空间", async () => {
     const root = makeRoot();
     const acp = runtimeStub();
     acpxMocks.createAcpRuntime.mockReturnValue(acp);
     const runtime = new AcpxAgentRuntime(makeConfig(root));
-    const mcpServers = [{
-      type: "http",
-      name: "grab-manager",
-      url: "https://example.test/mcp",
-      headers: [],
-      core: true
-    }] as unknown as RuntimeMcpServer[];
+    const mcpServers = [
+      {
+        type: "http",
+        name: "grab-manager",
+        url: "https://example.test/mcp",
+        headers: [{ name: "X-Api-Key", value: "secret" }],
+        startupTimeoutSeconds: 30
+      },
+      {
+        type: "stdio",
+        name: "optional-local",
+        command: "npx",
+        args: ["-y", "example-mcp"],
+        env: []
+      }
+    ] as unknown as RuntimeMcpServer[];
 
     await runtime.ensureSession(sessionInput(root, { mcpServers }));
 
     const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
     const command = options.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`);
-    expect(command).toContain("CODEX_CONFIG=");
-    expect(command).toContain("mcp__grab-manager");
-    expect(options.mcpServers).toEqual([{
-      type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
-    }]);
+    expect(command).not.toContain("CODEX_CONFIG=");
+    const home = join(
+      makeConfig(root).dataDir, "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", SESSION_PATH_ID
+    );
+    const configToml = readFileSync(join(home, "config.toml"), "utf8");
+    expect(configToml).not.toContain('[mcp_servers."grab-manager"]');
+    expect(configToml).toContain("# remote-agent-mcp-exposure-start");
+    expect(configToml).toContain("[features.code_mode]");
+    expect(configToml).toContain(
+      'direct_only_tool_namespaces = ["mcp__grab-manager", "mcp__optional-local"]'
+    );
+    expect(configToml).toContain("# remote-agent-mcp-exposure-end");
+    expect(options.mcpServers).toEqual([
+      {
+        type: "http", name: "grab-manager", url: "https://example.test/mcp",
+        headers: [{ name: "X-Api-Key", value: "secret" }]
+      },
+      { type: "stdio", name: "optional-local", command: "npx", args: ["-y", "example-mcp"], env: [] }
+    ]);
   });
 
   it("恢复得到不同 Provider ID 时关闭新 Handle 并报 session_resume_failed", async () => {
@@ -613,7 +661,7 @@ describe("AcpxAgentRuntime", () => {
     expect(acp.ensureSession.mock.calls[0]?.[0]).toHaveProperty("sessionOptions");
   });
 
-  it("已有 Provider Session 的下一次 ensure 会刷新 Handle 并继续原 Session", async () => {
+  it("已有 Provider Session 且配置未变化时复用 Handle", async () => {
     const root = makeRoot();
     const acp = runtimeStub();
     const handle = await acp.ensureSession();
@@ -622,13 +670,38 @@ describe("AcpxAgentRuntime", () => {
     acpxMocks.createAcpRuntime.mockReturnValue(acp);
     const runtime = new AcpxAgentRuntime(makeConfig(root));
 
-    await runtime.ensureSession(sessionInput(root));
-    await runtime.ensureSession(sessionInput(root, {
-      providerSessionId: "provider-session-1",
-      mcpServers: [{
-        type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: [], core: true
-      }]
-    }));
+    const mcpServers = [{
+      type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
+    }] as RuntimeMcpServer[];
+    await runtime.ensureSession({ ...sessionInput(root, { mcpServers }), skillsRevision: "skills-v1" } as RuntimeSessionInput);
+    await runtime.ensureSession({
+      ...sessionInput(root, { providerSessionId: "provider-session-1", mcpServers }),
+      skillsRevision: "skills-v1"
+    } as RuntimeSessionInput);
+
+    expect(acp.close).not.toHaveBeenCalled();
+    expect(acp.ensureSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("已有 Provider Session 的 MCP 配置变化时刷新 Handle并继续原 Session", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    const handle = await acp.ensureSession();
+    acp.ensureSession.mockReset();
+    acp.ensureSession.mockResolvedValue(handle);
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+
+    await runtime.ensureSession({ ...sessionInput(root), skillsRevision: "skills-v1" } as RuntimeSessionInput);
+    await runtime.ensureSession({
+      ...sessionInput(root, {
+        providerSessionId: "provider-session-1",
+        mcpServers: [{
+          type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
+        }]
+      }),
+      skillsRevision: "skills-v1"
+    } as RuntimeSessionInput);
 
     expect(acp.close).toHaveBeenCalledWith({ handle, reason: "session_handle_refreshed" });
     expect(acp.ensureSession).toHaveBeenCalledTimes(2);
@@ -636,8 +709,9 @@ describe("AcpxAgentRuntime", () => {
       resumeSessionId: "provider-session-1"
     });
     const refreshedOptions = acpxMocks.createAcpRuntime.mock.calls[1]?.[0] as AcpRuntimeOptions;
-    expect(refreshedOptions.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`))
-      .toContain("mcp__grab-manager");
+    expect(refreshedOptions.mcpServers).toEqual([{
+      type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
+    }]);
   });
 
   it("并发 ensure 按 Session 串行并复用同一 Handle", async () => {

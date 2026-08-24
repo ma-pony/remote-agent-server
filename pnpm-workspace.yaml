@@ -1,0 +1,6 @@
+onlyBuiltDependencies:
+  - better-sqlite3
+  - esbuild
+
+patchedDependencies:
+  "@agentclientprotocol/codex-acp@1.1.14": patches/@agentclientprotocol__codex-acp@1.1.14.patch

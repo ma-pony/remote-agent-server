@@ -59,40 +59,18 @@ describe("RunMcpPreparer", () => {
       url: "https://example.test/mcp",
       headers: [{ name: "Authorization", value: "Bearer runtime-secret" }]
     }, 7000);
-    expect(servers).toEqual([expect.objectContaining({ type: "http", name: "example_mcp" })]);
+    expect(servers).toEqual([expect.objectContaining({
+      type: "http",
+      name: "example_mcp",
+      startupTimeoutSeconds: 7
+    })]);
     expect(fixture.manager.listServers(fixture.agentId)[0]).toMatchObject({
       lastCheckStatus: "passed", lastToolCount: 2
     });
     fixture.db.close();
   });
 
-  it("普通 MCP 检查失败时跳过并保留检查结果", async () => {
-    const fixture = setup({
-      check: async () => ({ status: "failed", code: "mcp_check_failed", message: "MCP private_mcp check failed" })
-    });
-    fixture.manager.createServer(fixture.agentId, {
-      name: "private_mcp",
-      transport: "http",
-      enabled: true,
-      url: "https://example.test/mcp?token=url-secret",
-      checkTimeoutSeconds: 3,
-      headers: [{ name: "Authorization", source: "fixed", value: "Bearer header-secret", secret: true }]
-    });
-
-    const servers = await fixture.preparer.prepare({
-      agentId: fixture.agentId,
-      sessionId: fixture.sessionId,
-      runId: 1,
-      workspacePath: "/workspace",
-      browserProfilePath: "/browser"
-    });
-
-    expect(servers).toEqual([]);
-    expect(fixture.manager.listServers(fixture.agentId)[0]).toMatchObject({ lastCheckStatus: "failed" });
-    fixture.db.close();
-  });
-
-  it("核心 MCP 检查失败时阻止 Run 且不暴露配置明文", async () => {
+  it("任一启用 MCP 检查失败时阻止 Run 且不暴露配置明文", async () => {
     const fixture = setup({
       check: async () => ({ status: "failed", code: "mcp_check_failed", message: "MCP grab-manager check failed" })
     });
@@ -104,8 +82,6 @@ describe("RunMcpPreparer", () => {
       checkTimeoutSeconds: 3,
       headers: [{ name: "Authorization", source: "fixed", value: "Bearer header-secret", secret: true }]
     });
-    fixture.db.prepare("UPDATE agent_mcp_servers SET core = 1 WHERE id = ?").run(created.id);
-
     const error = await fixture.preparer.prepare({
       agentId: fixture.agentId,
       sessionId: fixture.sessionId,
