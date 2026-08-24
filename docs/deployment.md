@@ -193,7 +193,7 @@ sudo -u remote-agent editor /opt/remote-agent-server/.env
 
 将生成的长随机值填入 `API_TOKEN`。不要提交 `.env`，不要在仓库或 systemd unit 中硬编码 Provider 凭证。Claude/Codex 的原生登录状态由该系统用户保存；Hermes 的原生状态使用后文每个 Agent 的 `HERMES_HOME`。服务建议只监听内网；若需要跨网络访问，放在 TLS 反向代理后，并仅把 Bearer Token 分发给可信调用方。
 
-如果项目环境使用 `uv sync`，安装 uv `0.10.9` 或更高版本。服务在准备命令中自动设置 `UV_VENV_RELOCATABLE=1`，以便新建虚拟环境随 APFS Clone/Btrfs Snapshot 迁移。升级 uv 后需要在管理界面重新同步项目环境，已有 `.venv` 不会自动转换。
+如果项目环境使用 `uv sync`，确认 `uv venv --help` 包含 `--relocatable`。服务检测到 `uv.lock` 后，会在项目准备命令前执行 `uv venv --relocatable .venv`，使后续 `uv sync` 安装的标准命令入口可以随 APFS Clone/Btrfs Snapshot 迁移。升级 uv 后需要在管理界面重新同步项目环境，已有 `.venv` 不会自动转换。
 
 有头浏览器需要服务器上真实的桌面/X display，以及 `remote-agent` 对该 display 的访问权。先以该用户检查，再把实际 `DISPLAY` 和 `XAUTHORITY` 写入 `.env`：
 

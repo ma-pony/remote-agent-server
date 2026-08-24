@@ -230,9 +230,27 @@ describe("SystemProjectEnvironmentCommands", () => {
     }, "/tmp", 1_000, new AbortController().signal)).resolves.toBeUndefined();
   });
 
-  it("项目准备命令创建可迁移的 uv 虚拟环境", async () => {
+  it("uv 项目先创建可迁移虚拟环境再执行准备命令", async () => {
+    const root = mkdtempSync(join(tmpdir(), "project-environment-uv-"));
+    tempDirectories.push(root);
+    const localBin = join(root, ".local", "bin");
+    const repositoryPath = join(root, "repository");
+    mkdirSync(localBin, { recursive: true });
+    mkdirSync(repositoryPath, { recursive: true });
+    writeFileSync(join(repositoryPath, "uv.lock"), "");
+    const uv = join(localBin, "uv");
+    writeFileSync(uv, [
+      "#!/bin/sh",
+      "test \"$1\" = venv",
+      "test \"$2\" = --relocatable",
+      "test \"$3\" = .venv",
+      "mkdir -p .venv",
+      "printf 'ready\\n' > .venv/relocatable",
+      ""
+    ].join("\n"), { mode: 0o700 });
+    chmodSync(uv, 0o700);
     const commands = new SystemProjectEnvironmentCommands({
-      environment: { HOME: "/tmp", PATH: "/usr/bin:/bin" }
+      environment: { HOME: root, PATH: "/usr/bin:/bin" }
     });
 
     await expect(commands.prepare({
@@ -240,10 +258,10 @@ describe("SystemProjectEnvironmentCommands", () => {
       projectEnvironmentId: "environment-1",
       name: "api",
       gitUrl: "git@example.test:api.git",
-      prepareCommand: "test \"$UV_VENV_RELOCATABLE\" = 1",
+      prepareCommand: "test -f .venv/relocatable",
       createdAt: "2026-08-13T00:00:00.000Z",
       updatedAt: "2026-08-13T00:00:00.000Z"
-    }, "/tmp", 1_000, new AbortController().signal)).resolves.toBeUndefined();
+    }, repositoryPath, 1_000, new AbortController().signal)).resolves.toBeUndefined();
   });
 
   it("准备失败时同时保留 stderr 警告和 stdout 的真正错误", async () => {
@@ -298,6 +316,23 @@ describe("ProjectEnvironmentBuilder", () => {
     expect(calls).toEqual([]);
     expect(store.listRevisions(environment.id)).toHaveLength(1);
     expect(store.get(environment.id)?.currentRevisionId).toBe(first.revisionId);
+    db.close();
+  });
+
+  it("环境准备规则升级时即使仓库无变化也重新构建", async () => {
+    const { db, store, calls, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" });
+    const first = await builder.checkAndBuild(environment.id);
+    db.prepare("UPDATE project_environment_revisions SET input_fingerprint = ? WHERE id = ?")
+      .run("8196ab4842508de7e128ac24eaa3d4d8fc4a2368221e646a850f7e981ab9c54d", first.revisionId);
+    calls.splice(0);
+
+    const second = await builder.checkAndBuild(environment.id);
+
+    expect(second).toMatchObject({ outcome: "published", revisionId: expect.any(Number) });
+    expect(second.revisionId).not.toBe(first.revisionId);
+    expect(calls).toEqual(["clean:api", "prepare:api"]);
     db.close();
   });
 

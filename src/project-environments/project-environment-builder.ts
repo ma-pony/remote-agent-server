@@ -20,9 +20,11 @@ type EnvironmentManifest = { repositories: ManifestRepository[] };
 type InspectedRepository = { repository: EnvironmentRepository; state: RemoteRepositoryState };
 
 const MANIFEST_NAME = ".remote-agent-environment.json";
+const PREPARATION_VERSION = 2;
 
 const fingerprint = (values: ManifestRepository[]): string =>
-  createHash("sha256").update(JSON.stringify(values)).digest("hex");
+  createHash("sha256").update(JSON.stringify({ preparationVersion: PREPARATION_VERSION, repositories: values }))
+    .digest("hex");
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 

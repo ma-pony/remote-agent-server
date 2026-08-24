@@ -156,7 +156,7 @@ Open **Project environments → New project environment**:
 
 A sync builds a new revision in persistent storage and publishes it only after every repository and preparation command succeeds. The server checks remotes every three hours, and an operator can sync at any time. Existing sessions keep their revision; new sessions use the latest ready revision. A session directly uses an APFS clone or Btrfs snapshot of that revision without rerunning cleanup or preparation. Legacy sessions still perform one compatibility repair before their next run.
 
-Preparation processes automatically receive `UV_VENV_RELOCATABLE=1`. Projects that use `uv sync` should install uv `0.10.9` or newer and resync their project environment so newly created `.venv` standard entry points can move with the session workspace. uv does not fully guarantee custom scripts or native binaries, so a project-environment revision remains protected while any session references it.
+When a project contains `uv.lock`, the server runs `uv venv --relocatable .venv` before the configured preparation command. The project's existing `uv sync` or Make command then reuses that relocatable environment. The server uv installation must support `--relocatable`; resync the project environment after upgrading because existing `.venv` directories are not converted. Custom scripts, native binaries, and editable installs may still reference the source directory, so a project-environment revision remains protected while any session references it.
 
 ### 3. Create an agent
 

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
 import type { EnvironmentRepository } from "../domain.js";
@@ -92,7 +93,6 @@ export class SystemProjectEnvironmentCommands implements ProjectEnvironmentComma
     const path = (environment.PATH ?? "").split(delimiter).filter((item) => item !== "");
     this.environment = {
       ...environment,
-      UV_VENV_RELOCATABLE: "1",
       PATH: localBin === undefined || path.includes(localBin)
         ? path.join(delimiter)
         : [localBin, ...path].join(delimiter)
@@ -165,6 +165,11 @@ export class SystemProjectEnvironmentCommands implements ProjectEnvironmentComma
     signal: AbortSignal
   ): Promise<void> {
     if (repository.prepareCommand === null || repository.prepareCommand.trim() === "") return;
+    if (existsSync(join(destination, "uv.lock")) && !existsSync(join(destination, ".venv"))) {
+      await runProcess("uv", ["venv", "--relocatable", ".venv"], {
+        cwd: destination, environment: this.environment, signal, timeoutMs
+      });
+    }
     await runProcess("/bin/sh", ["-lc", repository.prepareCommand], {
       cwd: destination, environment: this.environment, signal, timeoutMs
     });
