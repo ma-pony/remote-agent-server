@@ -75,7 +75,8 @@ const createTestApp = async (
       sessionsRoot: "/unused/sessions",
       maxConcurrentRuns: 1,
       projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-      projectPrepareTimeoutMs: 30 * 60 * 1000
+      projectPrepareTimeoutMs: 30 * 60 * 1000,
+      sessionRetentionMs: 0
     },
     db,
     runtime,
@@ -879,10 +880,10 @@ describe("Integration endpoint API", () => {
     const result = deferred<RuntimeTurnResult>();
     const runtime = createFakeRuntime();
     const succeedingTurn = runtime.startTurn;
-    let turnCount = 0;
+    const startedInputs: string[] = [];
     runtime.startTurn = (input) => {
-      turnCount += 1;
-      return turnCount === 1 ? {
+      startedInputs.push(input.text);
+      return input.text.includes("long work") ? {
         events: { async *[Symbol.asyncIterator]() {} },
         result: result.promise,
         cancel: async () => undefined,
@@ -948,7 +949,7 @@ describe("Integration endpoint API", () => {
 
     expect(cancelled.statusCode).toBe(200);
     expect(runtime.cancel).toHaveBeenCalledWith(task.sessionId);
-    expect(turnCount).toBe(2);
+    expect(startedInputs).toContain("Resolve the support request.\n\nnext work");
     expect(repeated.statusCode).toBe(200);
     expect(repeated.json()).toMatchObject({ taskId: task.taskId, status: "cancelled" });
   });
@@ -1103,7 +1104,8 @@ describe("Integration endpoint API", () => {
         sessionsRoot: "/unused/sessions",
         maxConcurrentRuns: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-        projectPrepareTimeoutMs: 30 * 60 * 1000
+        projectPrepareTimeoutMs: 30 * 60 * 1000,
+        sessionRetentionMs: 0
       },
       db,
       runtime: createFakeRuntime(),
@@ -1142,7 +1144,8 @@ describe("Integration endpoint API", () => {
         sessionsRoot: "/unused/sessions",
         maxConcurrentRuns: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-        projectPrepareTimeoutMs: 30 * 60 * 1000
+        projectPrepareTimeoutMs: 30 * 60 * 1000,
+        sessionRetentionMs: 0
       },
       db,
       runtime: createFakeRuntime(),

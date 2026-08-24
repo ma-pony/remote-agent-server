@@ -52,7 +52,8 @@ const createTestApp = async (): Promise<{
       sessionsRoot: "/unused/sessions",
       maxConcurrentRuns: 4,
       projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-      projectPrepareTimeoutMs: 30 * 60 * 1000
+      projectPrepareTimeoutMs: 30 * 60 * 1000,
+      sessionRetentionMs: 0
     },
     db,
     runtime: createFakeRuntime()

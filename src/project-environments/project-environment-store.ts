@@ -256,6 +256,13 @@ export class ProjectEnvironmentStore {
     return rows.map(toRevision);
   }
 
+  /** Returns whether one immutable revision is still the base of any Session snapshot. */
+  isRevisionReferenced(id: number): boolean {
+    return this.db.prepare(
+      "SELECT 1 FROM sessions WHERE project_environment_revision_id = ? LIMIT 1"
+    ).get(id) !== undefined;
+  }
+
   markChecked(projectEnvironmentId: number): void {
     const now = new Date().toISOString();
     this.db.prepare("UPDATE project_environments SET last_checked_at = ?, updated_at = ? WHERE id = ?")

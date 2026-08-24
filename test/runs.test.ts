@@ -46,7 +46,8 @@ const createApiTestApp = async (options: { runtime?: AgentRuntime; maxConcurrent
       sessionsRoot: join(root, "sessions"),
       maxConcurrentRuns: options.maxConcurrentRuns ?? 2,
       projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-      projectPrepareTimeoutMs: 30 * 60 * 1000
+      projectPrepareTimeoutMs: 30 * 60 * 1000,
+      sessionRetentionMs: 0
     },
     db,
     runtime: options.runtime ?? createFakeRuntime(),

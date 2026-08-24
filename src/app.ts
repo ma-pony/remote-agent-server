@@ -46,6 +46,10 @@ import { RunRepository } from "./runs/run-repository.js";
 import { registerRunRoutes } from "./runs/run-routes.js";
 import { RunScheduler } from "./runs/run-scheduler.js";
 import { SessionManager } from "./sessions/session-manager.js";
+import {
+  SessionCleanupScheduler,
+  type SessionCleanupSchedulerLike
+} from "./sessions/session-cleanup-scheduler.js";
 import { registerSessionRoutes } from "./sessions/session-routes.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import { type CommandRunner, type WorkspaceManager } from "./workspaces/workspace-manager.js";
@@ -63,6 +67,7 @@ export type AppDependencies = {
   projectEnvironmentStore?: ProjectEnvironmentStore;
   projectEnvironmentCommands?: ProjectEnvironmentCommands;
   projectEnvironmentScheduler?: ProjectEnvironmentCheckScheduler;
+  sessionCleanupScheduler?: SessionCleanupSchedulerLike;
   mcpManager?: McpManager;
   mcpChecker?: McpChecker;
   integrationStore?: IntegrationStore;
@@ -120,6 +125,11 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     projectEnvironmentCommands,
     projectPrepareTimeoutMs: deps.config.projectPrepareTimeoutMs,
     mcpManager
+  });
+  const sessionCleanupScheduler = deps.sessionCleanupScheduler ?? new SessionCleanupScheduler({
+    sessionManager,
+    retentionMs: deps.config.sessionRetentionMs,
+    intervalMs: 60 * 60 * 1000
   });
   let eventStore = deps.eventStore;
   const integrationProjection = deps.integrationProjection ?? new IntegrationProjection({
@@ -236,6 +246,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     } catch (error) {
       failures.push(error);
     }
+    sessionCleanupScheduler.stop();
     try {
       await runtime.shutdown();
     } catch (error) {
@@ -251,6 +262,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   integrationTaskScheduler.start();
   webhookDispatcher.start();
   projectEnvironmentScheduler.start();
+  sessionCleanupScheduler.start();
 
   return app;
 };

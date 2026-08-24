@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type Database from "better-sqlite3";
@@ -96,6 +96,7 @@ export type SessionManagerDependencies = {
 };
 
 const ENVIRONMENT_PREPARED_MARKER = ".project-environment-prepared-v1";
+const ENVIRONMENT_SNAPSHOT_MARKER = ".project-environment-snapshot-v2";
 const DEFAULT_PROJECT_PREPARE_TIMEOUT_MS = 30 * 60 * 1000;
 
 /** Removes Session creations interrupted before their Workspace became ready. */
@@ -190,9 +191,8 @@ export class SessionManager {
     }
 
     try {
-      if (await this.prepareWorkspaceRevision(workspace.workspacePath, revision.id)) {
-        await writeFile(join(workspace.runtimePath, ENVIRONMENT_PREPARED_MARKER), "ready\n", "utf8");
-      }
+      await mkdir(workspace.runtimePath, { recursive: true });
+      await writeFile(join(workspace.runtimePath, ENVIRONMENT_SNAPSHOT_MARKER), "ready\n", "utf8");
     } catch (_error) {
       this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
       try {
@@ -283,15 +283,33 @@ export class SessionManager {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
     if (session.projectEnvironmentRevisionId === null) return;
-    const markerPath = join(dirname(session.workspacePath), "runtime", ENVIRONMENT_PREPARED_MARKER);
-    try {
-      if (await readFile(markerPath, "utf8") === "ready\n") return;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const runtimePath = join(dirname(session.workspacePath), "runtime");
+    for (const marker of [ENVIRONMENT_SNAPSHOT_MARKER, ENVIRONMENT_PREPARED_MARKER]) {
+      try {
+        if (await readFile(join(runtimePath, marker), "utf8") === "ready\n") return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
     if (await this.prepareWorkspaceRevision(session.workspacePath, session.projectEnvironmentRevisionId)) {
-      await writeFile(markerPath, "ready\n", "utf8");
+      await writeFile(join(runtimePath, ENVIRONMENT_PREPARED_MARKER), "ready\n", "utf8");
     }
+  }
+
+  /** Lists idle Sessions whose last activity is older than one exact cutoff. */
+  listExpiredIds(cutoff: string): number[] {
+    const rows = this.db.prepare(`
+      SELECT id FROM sessions
+      WHERE status = 'idle' AND updated_at < ?
+        AND NOT EXISTS (
+          SELECT 1 FROM runs
+          WHERE session_id = sessions.id AND status IN ('queued', 'running')
+        )
+        AND NOT EXISTS (SELECT 1 FROM integration_conversations WHERE session_id = sessions.id)
+        AND NOT EXISTS (SELECT 1 FROM integration_tasks WHERE session_id = sessions.id)
+      ORDER BY updated_at ASC, id ASC
+    `).all(cutoff) as Array<{ id: number }>;
+    return rows.map(({ id }) => id);
   }
 
   /**

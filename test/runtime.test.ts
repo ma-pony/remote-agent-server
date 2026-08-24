@@ -56,7 +56,8 @@ const makeConfig = (root: string): AppConfig => ({
   sessionsRoot: join(root, "sessions"),
   maxConcurrentRuns: 4,
   projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-  projectPrepareTimeoutMs: 30 * 60 * 1000
+  projectPrepareTimeoutMs: 30 * 60 * 1000,
+  sessionRetentionMs: 0
 });
 
 const sessionInput = (root: string, overrides: Partial<RuntimeSessionInput> = {}): RuntimeSessionInput => ({

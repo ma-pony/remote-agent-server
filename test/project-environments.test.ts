@@ -230,6 +230,22 @@ describe("SystemProjectEnvironmentCommands", () => {
     }, "/tmp", 1_000, new AbortController().signal)).resolves.toBeUndefined();
   });
 
+  it("项目准备命令创建可迁移的 uv 虚拟环境", async () => {
+    const commands = new SystemProjectEnvironmentCommands({
+      environment: { HOME: "/tmp", PATH: "/usr/bin:/bin" }
+    });
+
+    await expect(commands.prepare({
+      id: "repository-1",
+      projectEnvironmentId: "environment-1",
+      name: "api",
+      gitUrl: "git@example.test:api.git",
+      prepareCommand: "test \"$UV_VENV_RELOCATABLE\" = 1",
+      createdAt: "2026-08-13T00:00:00.000Z",
+      updatedAt: "2026-08-13T00:00:00.000Z"
+    }, "/tmp", 1_000, new AbortController().signal)).resolves.toBeUndefined();
+  });
+
   it("准备失败时同时保留 stderr 警告和 stdout 的真正错误", async () => {
     const commands = new SystemProjectEnvironmentCommands();
     const controller = new AbortController();
@@ -335,6 +351,36 @@ describe("ProjectEnvironmentBuilder", () => {
     expect(existsSync(join(nextWorkspace, "api", "local-notes.txt"))).toBe(true);
     expect(readFileSync(join(nextWorkspace, "api", ".venv", "bin", "project-tool"), "utf8"))
       .toBe(`#!${join(nextWorkspace, "api")}/.venv/bin/python\n`);
+    db.close();
+  });
+
+  it("保留仍被 Session 引用的旧版本并在引用解除后的同步中清理", async () => {
+    const { db, store, remoteCommits, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" });
+    const first = await builder.checkAndBuild(environment.id);
+    const firstRevision = store.getRevision(first.revisionId!)!;
+    const agent = db.prepare("SELECT id FROM agents ORDER BY id LIMIT 1").get() as { id: number };
+    const sessionId = Number(db.prepare(`
+      INSERT INTO sessions
+        (agent_id, title, status, workspace_path, project_environment_revision_id, created_at, updated_at)
+      VALUES (?, '引用旧版本', 'idle', '/sessions/pinned/workspace', ?, ?, ?)
+    `).run(agent.id, firstRevision.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z").lastInsertRowid);
+
+    remoteCommits.set("api", "commit-2");
+    await builder.checkAndBuild(environment.id);
+    remoteCommits.set("api", "commit-3");
+    await builder.checkAndBuild(environment.id);
+
+    expect(store.getRevision(firstRevision.id)?.workspacePath).toBe(firstRevision.workspacePath);
+    expect(existsSync(firstRevision.workspacePath!)).toBe(true);
+
+    db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
+    remoteCommits.set("api", "commit-4");
+    await builder.checkAndBuild(environment.id);
+
+    expect(store.getRevision(firstRevision.id)?.workspacePath).toBeNull();
+    expect(existsSync(firstRevision.workspacePath!)).toBe(false);
     db.close();
   });
 
@@ -519,7 +565,8 @@ describe("Project environment API", () => {
         sessionsRoot: join(fixture.root, "sessions"),
         maxConcurrentRuns: 1,
         projectEnvironmentCheckIntervalMs: 10_800_000,
-        projectPrepareTimeoutMs: 1_800_000
+        projectPrepareTimeoutMs: 1_800_000,
+        sessionRetentionMs: 0
       },
       db: fixture.db,
       runtime: createFakeRuntime(),

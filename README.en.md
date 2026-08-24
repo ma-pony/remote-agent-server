@@ -154,7 +154,9 @@ Open **Project environments → New project environment**:
 3. Select **Sync now**.
 4. Wait for the current revision to become **Ready**.
 
-A sync builds a new revision in persistent storage and publishes it only after every repository and preparation command succeeds. The server checks remotes every three hours, and an operator can sync at any time. Existing sessions keep their revision; new sessions use the latest ready revision.
+A sync builds a new revision in persistent storage and publishes it only after every repository and preparation command succeeds. The server checks remotes every three hours, and an operator can sync at any time. Existing sessions keep their revision; new sessions use the latest ready revision. A session directly uses an APFS clone or Btrfs snapshot of that revision without rerunning cleanup or preparation. Legacy sessions still perform one compatibility repair before their next run.
+
+Preparation processes automatically receive `UV_VENV_RELOCATABLE=1`. Projects that use `uv sync` should install uv `0.10.9` or newer and resync their project environment so newly created `.venv` standard entry points can move with the session workspace. uv does not fully guarantee custom scripts or native binaries, so a project-environment revision remains protected while any session references it.
 
 ### 3. Create an agent
 
@@ -489,6 +491,7 @@ curl --fail-with-body \
 | `MAX_CONCURRENT_RUNS` | No | `4` | Maximum concurrently executing runs. |
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | No | `3` | Remote repository check interval. |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | No | `30` | Per-repository preparation timeout. |
+| `SESSION_RETENTION_HOURS` | No | `168` | Retention for idle sessions. Cleanup runs hourly; set to `0` to disable it. Sessions referenced by external-integration audit records are retained. |
 | `DISPLAY` / `XAUTHORITY` | Browser use | None | Desktop/X display for headed browsers. |
 
 On first startup, the server creates `DATA_DIR/secret.key` with mode `0600`. The AES-256-GCM master key encrypts MCP secrets, endpoint fixed values, Webhook credentials, and sensitive session parameters. Back it up together with the SQLite database.

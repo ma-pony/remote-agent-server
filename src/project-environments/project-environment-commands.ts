@@ -92,6 +92,7 @@ export class SystemProjectEnvironmentCommands implements ProjectEnvironmentComma
     const path = (environment.PATH ?? "").split(delimiter).filter((item) => item !== "");
     this.environment = {
       ...environment,
+      UV_VENV_RELOCATABLE: "1",
       PATH: localBin === undefined || path.includes(localBin)
         ? path.join(delimiter)
         : [localBin, ...path].join(delimiter)

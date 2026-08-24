@@ -11,6 +11,7 @@ export type AppConfig = {
   maxConcurrentRuns: number;
   projectEnvironmentCheckIntervalMs: number;
   projectPrepareTimeoutMs: number;
+  sessionRetentionMs: number;
 };
 
 const configSchema = z.object({
@@ -23,7 +24,8 @@ const configSchema = z.object({
   SESSIONS_ROOT: z.string().default("/srv/remote-agent/sessions"),
   MAX_CONCURRENT_RUNS: z.coerce.number().int().positive().default(4),
   PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS: z.coerce.number().positive().default(3),
-  PROJECT_PREPARE_TIMEOUT_MINUTES: z.coerce.number().positive().default(30)
+  PROJECT_PREPARE_TIMEOUT_MINUTES: z.coerce.number().positive().default(30),
+  SESSION_RETENTION_HOURS: z.coerce.number().nonnegative().default(7 * 24)
 });
 
 /**
@@ -42,6 +44,7 @@ export const loadConfig = (env: Record<string, string | undefined>): AppConfig =
     sessionsRoot: config.SESSIONS_ROOT,
     maxConcurrentRuns: config.MAX_CONCURRENT_RUNS,
     projectEnvironmentCheckIntervalMs: config.PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS * 60 * 60 * 1000,
-    projectPrepareTimeoutMs: config.PROJECT_PREPARE_TIMEOUT_MINUTES * 60 * 1000
+    projectPrepareTimeoutMs: config.PROJECT_PREPARE_TIMEOUT_MINUTES * 60 * 1000,
+    sessionRetentionMs: config.SESSION_RETENTION_HOURS * 60 * 60 * 1000
   };
 };

@@ -186,6 +186,7 @@ export class ProjectEnvironmentBuilder {
     const ready = this.dependencies.store.listRevisions(environmentId).filter((item) => item.status === "ready");
     for (const revision of ready.slice(2)) {
       if (revision.workspacePath === null) continue;
+      if (this.dependencies.store.isRevisionReferenced(revision.id)) continue;
       if (!isInside(this.dependencies.projectEnvironmentsRoot, revision.workspacePath)) continue;
       await this.dependencies.workspaceManager.removeRevision(revision.workspacePath);
       await rm(dirname(revision.workspacePath), { recursive: true, force: true });

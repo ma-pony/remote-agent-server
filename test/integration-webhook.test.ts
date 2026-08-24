@@ -1048,7 +1048,8 @@ describe("Webhook management API", () => {
         sessionsRoot: "/unused/sessions",
         maxConcurrentRuns: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-        projectPrepareTimeoutMs: 30 * 60 * 1000
+        projectPrepareTimeoutMs: 30 * 60 * 1000,
+        sessionRetentionMs: 0
       },
       db,
       runtime: createFakeRuntime(),
@@ -1289,7 +1290,8 @@ describe("Webhook management API", () => {
       config: {
         host: "127.0.0.1", port: 3000, apiToken, dataDir: harness.root, databasePath: ":memory:",
         projectEnvironmentsRoot: "/unused/environments", sessionsRoot: "/unused/sessions", maxConcurrentRuns: 1,
-        projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000, projectPrepareTimeoutMs: 30 * 60 * 1000
+        projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000, projectPrepareTimeoutMs: 30 * 60 * 1000,
+        sessionRetentionMs: 0
       },
       db: harness.db,
       runtime: createFakeRuntime(),

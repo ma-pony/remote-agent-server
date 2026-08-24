@@ -97,7 +97,8 @@ describe("最小管理界面", () => {
         sessionsRoot: "/unused/sessions",
         maxConcurrentRuns: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-        projectPrepareTimeoutMs: 30 * 60 * 1000
+        projectPrepareTimeoutMs: 30 * 60 * 1000,
+        sessionRetentionMs: 0
       },
       db,
       runtime: createFakeRuntime(),
@@ -162,7 +163,8 @@ describe("最小管理界面", () => {
         sessionsRoot: "/unused/sessions",
         maxConcurrentRuns: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-        projectPrepareTimeoutMs: 30 * 60 * 1000
+        projectPrepareTimeoutMs: 30 * 60 * 1000,
+        sessionRetentionMs: 0
       },
       db,
       runtime: createFakeRuntime(),

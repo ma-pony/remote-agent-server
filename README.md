@@ -154,7 +154,9 @@ hermes --version
 3. 点击 **立即同步**。
 4. 等待当前版本变为 **可用**。
 
-同步会在持久目录中构建新版本。所有仓库及准备命令成功后，新版本才会发布。系统每 3 小时检查一次远程仓库，也可以手动同步。已有 Session 保持原版本，新 Session 使用最新可用版本。
+同步会在持久目录中构建新版本。所有仓库及准备命令成功后，新版本才会发布。系统每 3 小时检查一次远程仓库，也可以手动同步。已有 Session 保持原版本，新 Session 使用最新可用版本。Session 直接使用当前版本的 APFS Clone/Btrfs Snapshot，不重复执行清理或准备命令；旧 Session 在首次继续运行时仍会完成一次兼容修复。
+
+项目准备进程会自动设置 `UV_VENV_RELOCATABLE=1`。使用 `uv sync` 的项目建议安装 uv `0.10.9` 或更高版本，并重新同步项目环境，使新建 `.venv` 的标准命令入口可以随 Session Workspace 一起迁移。自定义脚本和原生二进制不在 uv 的完整迁移保证内，因此仍被 Session 引用的项目环境版本不会被自动清理。
 
 ### 3. 创建 Agent
 
@@ -497,6 +499,7 @@ curl --fail-with-body \
 | `MAX_CONCURRENT_RUNS` | 否 | `4` | 同时执行的 Run 数量上限。 |
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | 否 | `3` | 远程仓库检查间隔。 |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | 否 | `30` | 单个仓库准备命令超时时间。 |
+| `SESSION_RETENTION_HOURS` | 否 | `168` | 空闲 Session 的保留时间；服务每小时清理一次，设为 `0` 关闭。被外部接入审计记录引用的 Session 不会自动删除。 |
 | `DISPLAY` / `XAUTHORITY` | 浏览器场景 | 无 | 有头浏览器使用的桌面或 X display。 |
 
 首次启动会创建权限为 `0600` 的 `DATA_DIR/secret.key`。该 AES-256-GCM 主密钥用于加密 MCP 敏感值、端点固定参数、Webhook 凭证和 Session 敏感参数。请把它和 SQLite 数据库一起备份。

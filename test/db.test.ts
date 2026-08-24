@@ -33,6 +33,11 @@ describe("configuration", () => {
     expect(config.projectPrepareTimeoutMs).toBe(30 * 60 * 1000);
     expect(config.projectEnvironmentsRoot).toBe("/srv/remote-agent/environments");
   });
+
+  it("会话默认保留七天且允许通过零关闭自动清理", () => {
+    expect(loadConfig(validEnv).sessionRetentionMs).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(loadConfig({ ...validEnv, SESSION_RETENTION_HOURS: "0" }).sessionRetentionMs).toBe(0);
+  });
 });
 
 describe("database migration", () => {

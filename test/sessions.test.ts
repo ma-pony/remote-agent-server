@@ -66,7 +66,8 @@ const createTestApp = async (options: {
     sessionsRoot: join(dataDir, "sessions"),
     maxConcurrentRuns: 4,
     projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-    projectPrepareTimeoutMs: 30 * 60 * 1000
+    projectPrepareTimeoutMs: 30 * 60 * 1000,
+    sessionRetentionMs: 0
   };
   const app = buildApp({
     config,
@@ -420,7 +421,7 @@ describe("Session API", () => {
     expect(list.json()).toMatchObject([{ id: session.id, title: "修复工单 1332" }]);
   });
 
-  it("创建 Session 后按项目 gitignore 清理并重新准备环境", async () => {
+  it("创建 Session 后直接使用项目环境快照并写入就绪标记", async () => {
     let sessionWorkspace = "";
     const cleanIgnored = vi.fn(async (_repository, destination: string) => {
       expect(existsSync(join(destination, ".venv"))).toBe(true);
@@ -471,12 +472,14 @@ describe("Session API", () => {
     });
 
     expect(created.statusCode).toBe(201);
-    expect(cleanIgnored).toHaveBeenCalledTimes(1);
-    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(cleanIgnored).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
     const repositoryPath = join(sessionWorkspace, "bid-spiders");
     expect(readFileSync(join(repositoryPath, ".venv", "bin", "playwright"), "utf8"))
-      .toBe(`#!${repositoryPath}/.venv/bin/python\n`);
+      .toBe("#!/old/revision/.venv/bin/python\n");
     expect(readFileSync(join(repositoryPath, "local-notes.txt"), "utf8")).toBe("keep me");
+    expect(readFileSync(join(dirname(sessionWorkspace), "runtime", ".project-environment-snapshot-v2"), "utf8"))
+      .toBe("ready\n");
   });
 
   it("旧 Session 首次继续运行前只修复一次项目环境", async () => {
@@ -759,7 +762,6 @@ describe("Session API", () => {
       INSERT INTO events (run_id, seq, type, content_json, created_at)
       VALUES (?, 1, 'message', '{"text":"answer"}', ?)
     `).run(runId, "2026-08-13T00:00:01.000Z");
-
     const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
 
     expect(response.statusCode).toBe(204);

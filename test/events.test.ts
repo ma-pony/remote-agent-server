@@ -57,7 +57,8 @@ const createEventApp = async () => {
       sessionsRoot: join(dataDir, "sessions"),
       maxConcurrentRuns: 2,
       projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
-      projectPrepareTimeoutMs: 30 * 60 * 1000
+      projectPrepareTimeoutMs: 30 * 60 * 1000,
+      sessionRetentionMs: 0
     },
     db,
     runtime: createFakeRuntime(),
