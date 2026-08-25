@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
@@ -9,6 +10,7 @@ export type RemoteRepositoryState = { defaultBranch: string; commit: string };
 export interface ProjectEnvironmentCommands {
   inspect(repository: EnvironmentRepository, signal: AbortSignal): Promise<RemoteRepositoryState>;
   isRepository(destination: string, signal: AbortSignal): Promise<boolean>;
+  dependencyFingerprint(destination: string, signal: AbortSignal): Promise<string | null>;
   clone(
     repository: EnvironmentRepository,
     destination: string,
@@ -118,6 +120,21 @@ export class SystemProjectEnvironmentCommands implements ProjectEnvironmentComma
     } catch (_error) {
       return false;
     }
+  }
+
+  async dependencyFingerprint(destination: string, signal: AbortSignal): Promise<string | null> {
+    const hash = createHash("sha256");
+    for (const name of ["uv.lock", "pyproject.toml", ".python-version"]) {
+      try {
+        const { stdout } = await runProcess("git", ["rev-parse", `HEAD:${name}`], {
+          cwd: destination, environment: this.environment, signal
+        });
+        hash.update(name).update("\0").update(stdout.trim()).update("\0");
+      } catch (_error) {
+        if (name === "uv.lock") return null;
+      }
+    }
+    return hash.digest("hex");
   }
 
   async clone(

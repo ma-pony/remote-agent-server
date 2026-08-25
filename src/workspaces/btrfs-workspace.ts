@@ -130,6 +130,12 @@ export class BtrfsWorkspaceManager implements WorkspaceManager {
 
   /** Deletes one exact environment revision subvolume. */
   async removeRevision(path: string): Promise<void> {
+    try {
+      await systemStat(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
     await this.commandRunner.run("btrfs", ["subvolume", "delete", path]);
     await rm(path, { force: true, recursive: true });
   }

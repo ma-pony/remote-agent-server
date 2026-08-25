@@ -530,6 +530,45 @@ describe("Session API", () => {
       .toBe("ready\n");
   });
 
+  it("Session 快照完成后立即重试清理旧项目环境", async () => {
+    const { db, seed } = createTestDatabase();
+    const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-session-cleanup-"));
+    tempDirs.push(dataDir);
+    const sessionRoot = join(dataDir, "sessions", "1");
+    let cleanedEnvironmentId: number | undefined;
+    const runtime = createFakeRuntime();
+    const manager = new SessionManager({
+      db,
+      dataDir,
+      agentManager: new AgentManager({ db, dataDir, runtime }),
+      runtime,
+      workspaceManager: {
+        check: async () => undefined,
+        createSession: async () => {
+          mkdirSync(join(sessionRoot, "workspace"), { recursive: true });
+          mkdirSync(join(sessionRoot, "runtime"), { recursive: true });
+          mkdirSync(join(sessionRoot, "browser"), { recursive: true });
+          return {
+            workspacePath: join(sessionRoot, "workspace"),
+            runtimePath: join(sessionRoot, "runtime"),
+            browserProfilePath: join(sessionRoot, "browser")
+          };
+        },
+        deleteSession: async () => undefined,
+        createRevision: async () => undefined,
+        removeRevision: async () => undefined
+      },
+      projectEnvironmentRevisionCleaner: {
+        cleanupOldRevisions: async (environmentId) => { cleanedEnvironmentId = environmentId; }
+      }
+    });
+
+    await manager.create({ agentId: seed.agent.id, title: "并发快照", mcpParameters: {} });
+
+    expect(cleanedEnvironmentId).toBe(seed.projectEnvironment.id);
+    db.close();
+  });
+
   it("旧 Session 首次继续运行前只修复一次项目环境", async () => {
     const { db, seed } = createTestDatabase();
     const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-existing-session-"));
@@ -884,7 +923,7 @@ describe("Session API", () => {
     expect(db.prepare("SELECT count(*) AS count FROM webhook_subscriptions").get()).toEqual({ count: 1 });
   });
 
-  it("删除旧项目环境版本的最后一个 Session 后立即回收版本 Workspace", async () => {
+  it("删除 Session 后重试回收发布阶段遗留的旧环境 Workspace", async () => {
     const { app, db, dataDir } = await createTestApp();
     const agent = await createAgent(app);
     const first = await createSession(app, agent.id);
@@ -922,9 +961,9 @@ describe("Session API", () => {
 
     const firstDelete = await app.inject({ method: "DELETE", url: `/api/sessions/${first.id}`, headers: authHeaders() });
     expect(firstDelete.statusCode).toBe(204);
-    expect(existsSync(oldWorkspace)).toBe(true);
+    expect(existsSync(oldWorkspace)).toBe(false);
     expect(db.prepare("SELECT workspace_path AS path FROM project_environment_revisions WHERE id = ?")
-      .get(oldRevision.id)).toEqual({ path: oldWorkspace });
+      .get(oldRevision.id)).toEqual({ path: null });
 
     const secondDelete = await app.inject({ method: "DELETE", url: `/api/sessions/${second.id}`, headers: authHeaders() });
     expect(secondDelete.statusCode).toBe(204);

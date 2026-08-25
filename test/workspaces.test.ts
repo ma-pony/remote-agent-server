@@ -181,6 +181,7 @@ describe("BtrfsWorkspaceManager", () => {
     const session = await manager.createSession("session-456", source);
     await manager.createRevision(emptyRevision, null);
     await manager.createRevision(copiedRevision, source);
+    mkdirSync(copiedRevision);
     await manager.removeRevision(copiedRevision);
 
     expect(calls).toEqual([
@@ -189,6 +190,20 @@ describe("BtrfsWorkspaceManager", () => {
       { command: "btrfs", args: ["subvolume", "snapshot", source, copiedRevision] },
       { command: "btrfs", args: ["subvolume", "delete", copiedRevision] }
     ]);
+  });
+
+  it("删除已不存在的环境 Subvolume 时直接视为成功", async () => {
+    const root = createTempDir();
+    const { runner, calls } = createRunner();
+    const manager = new BtrfsWorkspaceManager({
+      projectEnvironmentsRoot: join(root, "environments"),
+      sessionsRoot: join(root, "sessions"),
+      commandRunner: runner
+    });
+
+    await manager.removeRevision(join(root, "missing-revision"));
+
+    expect(calls).toEqual([]);
   });
 
   it("快照失败时清理尚未持久化的 Session 目录", async () => {

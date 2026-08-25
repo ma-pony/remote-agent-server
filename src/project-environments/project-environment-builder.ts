@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 
 import type { EnvironmentRepository } from "../domain.js";
@@ -13,18 +13,49 @@ type ManifestRepository = {
   prepareCommand: string | null;
   defaultBranch: string;
   commit: string;
+  dependencyFingerprint?: string | null;
 };
 
-type EnvironmentManifest = { repositories: ManifestRepository[] };
+type EnvironmentManifest = { preparationVersion?: number; repositories: ManifestRepository[] };
 
 type InspectedRepository = { repository: EnvironmentRepository; state: RemoteRepositoryState };
 
 const MANIFEST_NAME = ".remote-agent-environment.json";
-const PREPARATION_VERSION = 2;
+const PREPARATION_VERSION = 3;
+const UV_DEPENDENCY_FILES = ["uv.lock", "pyproject.toml", ".python-version"] as const;
 
 const fingerprint = (values: ManifestRepository[]): string =>
-  createHash("sha256").update(JSON.stringify({ preparationVersion: PREPARATION_VERSION, repositories: values }))
+  createHash("sha256").update(JSON.stringify({
+    preparationVersion: PREPARATION_VERSION,
+    repositories: values.map(({ dependencyFingerprint: _dependencyFingerprint, ...repository }) => repository)
+  }))
     .digest("hex");
+
+type DependencyFileSnapshot = Array<{ name: string; content: Buffer | null }>;
+
+const readDependencyFiles = async (repositoryPath: string): Promise<DependencyFileSnapshot> => {
+  const files: DependencyFileSnapshot = [];
+  for (const name of UV_DEPENDENCY_FILES) {
+    try {
+      files.push({ name, content: await readFile(join(repositoryPath, name)) });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      files.push({ name, content: null });
+    }
+  }
+  return files;
+};
+
+const restoreDependencyFiles = async (
+  repositoryPath: string,
+  files: DependencyFileSnapshot
+): Promise<void> => {
+  for (const { name, content } of files) {
+    const path = join(repositoryPath, name);
+    if (content === null) await rm(path, { force: true });
+    else await writeFile(path, content);
+  }
+};
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
@@ -84,6 +115,7 @@ export class ProjectEnvironmentBuilder {
       inspected.push({ repository, state: await this.dependencies.commands.inspect(repository, signal) });
     }
     const manifest: EnvironmentManifest = {
+      preparationVersion: PREPARATION_VERSION,
       repositories: inspected.map(({ repository, state }) => ({
         name: repository.name,
         gitUrl: repository.gitUrl,
@@ -105,6 +137,11 @@ export class ProjectEnvironmentBuilder {
     }
     this.dependencies.store.markChecked(environmentId);
     if (current?.inputFingerprint === inputFingerprint && invalidRepositories.size === 0) {
+      try {
+        await this.cleanupOldRevisions(environmentId);
+      } catch (_cleanupError) {
+        // Cleanup is best-effort and will be retried by a later sync or Session lifecycle event.
+      }
       return { outcome: "unchanged" };
     }
 
@@ -126,52 +163,82 @@ export class ProjectEnvironmentBuilder {
     try {
       await this.dependencies.workspaceManager.createRevision(workspacePath, current?.workspacePath ?? null);
       const previousManifest = current?.workspacePath === null || current === undefined
-        ? { repositories: [] }
+        ? { preparationVersion: PREPARATION_VERSION, repositories: [] }
         : await this.readManifest(current.workspacePath);
       const previousByName = new Map(previousManifest.repositories.map((item) => [item.name, item]));
       const currentNames = new Set(manifest.repositories.map((item) => item.name));
+      const preparationRulesChanged = previousManifest.preparationVersion !== undefined
+        && previousManifest.preparationVersion !== PREPARATION_VERSION;
       for (const previous of previousManifest.repositories) {
         if (!currentNames.has(previous.name)) await rm(join(workspacePath, previous.name), { recursive: true, force: true });
       }
 
-      for (const { repository, state } of inspected) {
+      for (const [index, { repository, state }] of inspected.entries()) {
         const previous = previousByName.get(repository.name);
         const destination = join(workspacePath, repository.name);
         const needsClone = previous === undefined
           || previous.gitUrl !== repository.gitUrl
           || invalidRepositories.has(repository.name);
         const sourceChanged = needsClone || previous.commit !== state.commit || previous.defaultBranch !== state.defaultBranch;
+        const preparationChanged = previous?.prepareCommand !== repository.prepareCommand;
+        const previousDependencyFingerprint = needsClone
+          ? null
+          : previous?.dependencyFingerprint
+            ?? await this.dependencies.commands.dependencyFingerprint(destination, signal);
+        const preparedDependencyFiles = sourceChanged && previousDependencyFingerprint !== null
+          ? await readDependencyFiles(destination)
+          : [];
         if (needsClone) {
           stage = `clone:${repository.name}`;
           await rm(destination, { recursive: true, force: true });
           await this.dependencies.commands.clone(repository, destination, state.defaultBranch, signal);
-        } else if (sourceChanged) {
+        } else if (sourceChanged || preparationRulesChanged || preparationChanged) {
           stage = `update:${repository.name}`;
           await this.dependencies.commands.update(repository, destination, state.defaultBranch, signal);
         }
-        stage = `clean:${repository.name}`;
-        await this.dependencies.commands.cleanIgnored(repository, destination, signal);
-        stage = `prepare:${repository.name}`;
-        await this.dependencies.commands.prepare(
-          repository,
-          destination,
-          this.dependencies.prepareTimeoutMs,
-          signal
+        const nextDependencyFingerprint = await this.dependencies.commands.dependencyFingerprint(destination, signal);
+        const dependenciesChanged = sourceChanged && (
+          previousDependencyFingerprint === null
+          || nextDependencyFingerprint === null
+          || previousDependencyFingerprint !== nextDependencyFingerprint
         );
+        if (needsClone || preparationRulesChanged || preparationChanged || dependenciesChanged) {
+          stage = `clean:${repository.name}`;
+          await this.dependencies.commands.cleanIgnored(repository, destination, signal);
+          stage = `prepare:${repository.name}`;
+          await this.dependencies.commands.prepare(
+            repository,
+            destination,
+            this.dependencies.prepareTimeoutMs,
+            signal
+          );
+        } else if (sourceChanged) {
+          await restoreDependencyFiles(destination, preparedDependencyFiles);
+        }
+        manifest.repositories[index] = {
+          ...manifest.repositories[index]!,
+          dependencyFingerprint: nextDependencyFingerprint
+        };
       }
       stage = "manifest";
       await writeFile(join(workspacePath, MANIFEST_NAME), JSON.stringify(manifest, null, 2), "utf8");
       this.dependencies.store.publishRevision(revision.id);
-      await this.cleanupOldRevisions(environmentId);
+      try {
+        await this.cleanupOldRevisions(environmentId);
+      } catch (_cleanupError) {
+        // The published environment remains authoritative; a later cleanup pass retries obsolete Workspaces.
+      }
       return { outcome: "published", revisionId };
     } catch (error) {
+      let workspaceRemoved = false;
       try {
         await this.dependencies.workspaceManager.removeRevision(workspacePath);
+        workspaceRemoved = true;
       } catch (_cleanupError) {
         // The build error remains authoritative.
       }
       this.dependencies.store.failRevision(revision.id, stage, errorMessage(error));
-      this.dependencies.store.clearRevisionWorkspacePath(revision.id);
+      if (workspaceRemoved) this.dependencies.store.clearRevisionWorkspacePath(revision.id);
       throw error;
     }
   }
@@ -180,16 +247,19 @@ export class ProjectEnvironmentBuilder {
     try {
       return JSON.parse(await readFile(join(workspacePath, MANIFEST_NAME), "utf8")) as EnvironmentManifest;
     } catch (_error) {
-      return { repositories: [] };
+      return { preparationVersion: PREPARATION_VERSION, repositories: [] };
     }
   }
 
-  /** Removes obsolete revision Workspaces after their final Session reference is released. */
+  /** Keeps only the current environment Workspace; Session snapshots own their filesystem state. */
   async cleanupOldRevisions(environmentId: number): Promise<void> {
-    const ready = this.dependencies.store.listRevisions(environmentId).filter((item) => item.status === "ready");
-    for (const revision of ready.slice(2)) {
+    const currentRevisionId = this.dependencies.store.get(environmentId)?.currentRevisionId;
+    const obsolete = this.dependencies.store.listRevisions(environmentId)
+      .filter((item) => item.status === "ready" || item.status === "failed");
+    for (const revision of obsolete) {
+      if (revision.id === currentRevisionId) continue;
       if (revision.workspacePath === null) continue;
-      if (this.dependencies.store.isRevisionReferenced(revision.id)) continue;
+      if (this.dependencies.store.isRevisionSnapshotPending(revision.id)) continue;
       if (!isInside(this.dependencies.projectEnvironmentsRoot, revision.workspacePath)) continue;
       await this.dependencies.workspaceManager.removeRevision(revision.workspacePath);
       await rm(dirname(revision.workspacePath), { recursive: true, force: true });

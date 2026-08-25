@@ -162,7 +162,7 @@ it("Agent 没有调用入口时可创建并在新建页自动选中当前 Agent"
   fireEvent.click(screen.getByRole("link", { name: "创建接入端点" }));
   await waitFor(() => expect(window.location.pathname).toBe("/integration-endpoints/new"));
   expect(window.location.search).toBe(`?agentId=${agent.id}`);
-  expect(await screen.findByLabelText("智能体")).toHaveValue(String(agent.id));
+  await waitFor(() => expect(screen.getByLabelText("智能体")).toHaveValue(String(agent.id)));
 });
 
 it("在 Agent 独立 Skills 页面搜索并启用 Skill", async () => {

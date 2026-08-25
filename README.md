@@ -156,7 +156,7 @@ hermes --version
 
 同步会在持久目录中构建新版本。所有仓库及准备命令成功后，新版本才会发布。系统每 3 小时检查一次远程仓库，也可以手动同步。已有 Session 保持原版本，新 Session 使用最新可用版本。Session 直接使用当前版本的 APFS Clone/Btrfs Snapshot，不重复执行清理或准备命令；旧 Session 在首次继续运行时仍会完成一次兼容修复。
 
-项目包含 `uv.lock` 时，服务会在原准备命令前先执行 `uv venv --relocatable .venv`，之后项目原有的 `uv sync` 或 Make 命令会复用这个可迁移环境。服务器上的 uv 必须支持 `--relocatable`；升级后需要重新同步项目环境，已有 `.venv` 不会自动转换。自定义脚本、原生二进制和 editable 安装仍可能引用源目录，因此仍被 Session 引用的项目环境版本不会被自动清理。
+项目包含 `uv.lock` 时，服务会在原准备命令前先执行 `uv venv --relocatable .venv`，之后项目原有的 `uv sync` 或 Make 命令会复用这个可迁移环境。服务器需要安装 uv `>= 0.10.8`；升级后需要重新同步项目环境，已有 `.venv` 不会自动转换。同步时会比较 `uv.lock`、`pyproject.toml` 和 `.python-version`：依赖未变只更新源码，依赖变化才清理并重新准备该项目。项目环境只保留当前 Workspace；Session 使用自己的 Btrfs 快照，不依赖旧项目环境 Workspace。
 
 ### 3. 创建 Agent
 

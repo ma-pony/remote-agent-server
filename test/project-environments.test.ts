@@ -29,18 +29,30 @@ const createBuilderFixture = () => {
   const root = mkdtempSync(join(tmpdir(), "project-environment-builder-"));
   tempDirectories.push(root);
   const remoteCommits = new Map<string, string>();
+  const remoteDependencies = new Map<string, string>();
   const calls: string[] = [];
+  const writeDependencyState = (repositoryName: string, destination: string) => {
+    const dependency = remoteDependencies.get(repositoryName) ?? "lock-1\n";
+    writeFileSync(join(destination, "uv.lock"), dependency);
+    writeFileSync(join(destination, ".git", "remote-agent-dependency"), dependency);
+  };
   const commands: ProjectEnvironmentCommands = {
     inspect: async (repository) => ({ defaultBranch: "main", commit: remoteCommits.get(repository.name) ?? "commit-1" }),
     isRepository: async (destination) => existsSync(join(destination, ".git", "HEAD")),
+    dependencyFingerprint: async (destination) => readFileSync(
+      join(destination, ".git", "remote-agent-dependency"),
+      "utf8"
+    ),
     clone: async (repository, destination) => {
       calls.push(`clone:${repository.name}`);
       mkdirSync(join(destination, ".git"), { recursive: true });
       writeFileSync(join(destination, ".git", "HEAD"), "ref: refs/heads/main\n");
+      writeDependencyState(repository.name, destination);
     },
     update: async (repository, destination) => {
       calls.push(`update:${repository.name}`);
       expect(existsSync(destination)).toBe(true);
+      writeDependencyState(repository.name, destination);
     },
     cleanIgnored: async (repository, destination) => {
       calls.push(`clean:${repository.name}`);
@@ -54,6 +66,9 @@ const createBuilderFixture = () => {
         expect(existsSync(join(destination, ".venv"))).toBe(false);
         mkdirSync(join(destination, ".venv", "bin"), { recursive: true });
         writeFileSync(join(destination, ".venv", "bin", "project-tool"), `#!${destination}/.venv/bin/python\n`);
+      }
+      if (repository.prepareCommand === "mutate-lock") {
+        writeFileSync(join(destination, "uv.lock"), "generated-by-prepare\n");
       }
     }
   };
@@ -75,7 +90,7 @@ const createBuilderFixture = () => {
     projectEnvironmentsRoot: root,
     prepareTimeoutMs: 1_000
   });
-  return { db, store, root, remoteCommits, calls, builder };
+  return { db, store, root, remoteCommits, remoteDependencies, calls, workspaceManager, builder };
 };
 
 describe("ProjectEnvironmentStore", () => {
@@ -182,6 +197,31 @@ describe("ProjectEnvironmentStore", () => {
 });
 
 describe("SystemProjectEnvironmentCommands", () => {
+  it("依赖指纹读取 Git HEAD，不受准备命令修改工作区锁文件影响", async () => {
+    const repositoryPath = mkdtempSync(join(tmpdir(), "project-environment-git-dependency-"));
+    tempDirectories.push(repositoryPath);
+    execFileSync("git", ["init", "--quiet"], { cwd: repositoryPath });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repositoryPath });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repositoryPath });
+    writeFileSync(join(repositoryPath, "uv.lock"), "lock-1\n");
+    writeFileSync(join(repositoryPath, "pyproject.toml"), "[project]\nname='example'\n");
+    execFileSync("git", ["add", "uv.lock", "pyproject.toml"], { cwd: repositoryPath });
+    execFileSync("git", ["commit", "--quiet", "-m", "initial"], { cwd: repositoryPath });
+    const commands = new SystemProjectEnvironmentCommands();
+    const signal = new AbortController().signal;
+    const initial = await commands.dependencyFingerprint(repositoryPath, signal);
+    writeFileSync(join(repositoryPath, "uv.lock"), "generated-by-prepare\n");
+
+    const preparedWorkspace = await commands.dependencyFingerprint(repositoryPath, signal);
+    execFileSync("git", ["add", "uv.lock"], { cwd: repositoryPath });
+    execFileSync("git", ["commit", "--quiet", "-m", "dependency change"], { cwd: repositoryPath });
+    const changed = await commands.dependencyFingerprint(repositoryPath, signal);
+
+    expect(initial).not.toBeNull();
+    expect(preparedWorkspace).toBe(initial);
+    expect(changed).not.toBe(initial);
+  });
+
   it("只清理项目 .gitignore 已忽略的文件", async () => {
     const repositoryPath = mkdtempSync(join(tmpdir(), "project-environment-clean-"));
     tempDirectories.push(repositoryPath);
@@ -324,6 +364,10 @@ describe("ProjectEnvironmentBuilder", () => {
     const environment = store.create({ name: "研发环境" });
     store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" });
     const first = await builder.checkAndBuild(environment.id);
+    const manifestPath = join(store.getRevision(first.revisionId!)!.workspacePath!, ".remote-agent-environment.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { preparationVersion: number };
+    manifest.preparationVersion = 1;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
     db.prepare("UPDATE project_environment_revisions SET input_fingerprint = ? WHERE id = ?")
       .run("8196ab4842508de7e128ac24eaa3d4d8fc4a2368221e646a850f7e981ab9c54d", first.revisionId);
     calls.splice(0);
@@ -332,7 +376,7 @@ describe("ProjectEnvironmentBuilder", () => {
 
     expect(second).toMatchObject({ outcome: "published", revisionId: expect.any(Number) });
     expect(second.revisionId).not.toBe(first.revisionId);
-    expect(calls).toEqual(["clean:api", "prepare:api"]);
+    expect(calls).toEqual(["update:api", "clean:api", "prepare:api"]);
     db.close();
   });
 
@@ -354,7 +398,7 @@ describe("ProjectEnvironmentBuilder", () => {
     db.close();
   });
 
-  it("只有一个项目变化时只更新其源码，并为新修订重新准备所有项目", async () => {
+  it("只有一个项目代码变化且依赖未变时只更新其源码", async () => {
     const { db, store, remoteCommits, calls, builder } = createBuilderFixture();
     const environment = store.create({ name: "研发环境" });
     store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" });
@@ -365,12 +409,12 @@ describe("ProjectEnvironmentBuilder", () => {
 
     await builder.checkAndBuild(environment.id);
 
-    expect(calls).toEqual(["clean:api", "prepare:api", "update:web", "clean:web", "prepare:web"]);
+    expect(calls).toEqual(["update:web"]);
     db.close();
   });
 
-  it("新修订按各项目 gitignore 清理后重建环境", async () => {
-    const { db, store, remoteCommits, calls, builder } = createBuilderFixture();
+  it("项目依赖变化时只清理并重新准备发生变化的项目", async () => {
+    const { db, store, remoteCommits, remoteDependencies, calls, builder } = createBuilderFixture();
     const environment = store.create({ name: "研发环境" });
     store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "rebuild-env" });
     await builder.checkAndBuild(environment.id);
@@ -378,6 +422,7 @@ describe("ProjectEnvironmentBuilder", () => {
     writeFileSync(join(firstWorkspace, "api", "local-notes.txt"), "keep me");
     calls.splice(0);
     remoteCommits.set("api", "commit-2");
+    remoteDependencies.set("api", "lock-2\n");
 
     await builder.checkAndBuild(environment.id);
 
@@ -389,7 +434,90 @@ describe("ProjectEnvironmentBuilder", () => {
     db.close();
   });
 
-  it("保留仍被 Session 引用的旧版本并在引用解除后的同步中清理", async () => {
+  it("准备命令修改锁文件时仍按 Git 中的依赖状态判断后续代码更新", async () => {
+    const { db, store, remoteCommits, calls, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "mutate-lock" });
+    await builder.checkAndBuild(environment.id);
+    calls.splice(0);
+    remoteCommits.set("api", "commit-2");
+
+    await builder.checkAndBuild(environment.id);
+
+    expect(calls).toEqual(["update:api"]);
+    expect(readFileSync(join(store.getCurrentRevision(environment.id)!.workspacePath!, "api", "uv.lock"), "utf8"))
+      .toBe("generated-by-prepare\n");
+    db.close();
+  });
+
+  it("旧 manifest 没有依赖指纹时以当前 Git 状态建立基线而不重建环境", async () => {
+    const { db, store, remoteCommits, calls, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: null });
+    await builder.checkAndBuild(environment.id);
+    const workspace = store.getCurrentRevision(environment.id)!.workspacePath!;
+    const manifestPath = join(workspace, ".remote-agent-environment.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      repositories: Array<Record<string, unknown>>;
+    };
+    delete manifest.repositories[0]!.dependencyFingerprint;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    calls.splice(0);
+    remoteCommits.set("api", "commit-2");
+
+    await builder.checkAndBuild(environment.id);
+
+    expect(calls).toEqual(["update:api"]);
+    db.close();
+  });
+
+  it("旧 manifest 首次同步只迁移依赖基线和准备规则版本", async () => {
+    const { db, store, calls, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: null });
+    const first = await builder.checkAndBuild(environment.id);
+    const workspace = store.getRevision(first.revisionId!)!.workspacePath!;
+    const manifestPath = join(workspace, ".remote-agent-environment.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+      preparationVersion?: number;
+      repositories: Array<Record<string, unknown>>;
+    };
+    delete manifest.preparationVersion;
+    delete manifest.repositories[0]!.dependencyFingerprint;
+    writeFileSync(manifestPath, JSON.stringify(manifest));
+    db.prepare("UPDATE project_environment_revisions SET input_fingerprint = 'legacy-v2' WHERE id = ?")
+      .run(first.revisionId);
+    calls.splice(0);
+
+    const migrated = await builder.checkAndBuild(environment.id);
+
+    expect(migrated.outcome).toBe("published");
+    expect(calls).toEqual([]);
+    const migratedManifest = JSON.parse(readFileSync(
+      join(store.getCurrentRevision(environment.id)!.workspacePath!, ".remote-agent-environment.json"),
+      "utf8"
+    )) as { preparationVersion: number; repositories: Array<{ dependencyFingerprint?: string }> };
+    expect(migratedManifest.preparationVersion).toBe(3);
+    expect(migratedManifest.repositories[0]!.dependencyFingerprint).toBe("lock-1\n");
+    db.close();
+  });
+
+  it("删除项目时不重新准备未变化的剩余项目", async () => {
+    const { db, store, calls, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    const api = store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "uv sync" });
+    store.addRepository(environment.id, { name: "web", gitUrl: "git:web", prepareCommand: "uv sync" });
+    await builder.checkAndBuild(environment.id);
+    calls.splice(0);
+    store.removeRepository(environment.id, api.id);
+
+    await builder.checkAndBuild(environment.id);
+
+    expect(calls).toEqual([]);
+    db.close();
+  });
+
+  it("发布后只保留当前环境 Workspace，旧 Session 继续使用自己的快照", async () => {
     const { db, store, remoteCommits, builder } = createBuilderFixture();
     const environment = store.create({ name: "研发环境" });
     store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" });
@@ -404,16 +532,57 @@ describe("ProjectEnvironmentBuilder", () => {
 
     remoteCommits.set("api", "commit-2");
     await builder.checkAndBuild(environment.id);
-    remoteCommits.set("api", "commit-3");
+
+    expect(store.getRevision(firstRevision.id)?.workspacePath).toBeNull();
+    expect(existsSync(firstRevision.workspacePath!)).toBe(false);
+    expect(db.prepare("SELECT project_environment_revision_id FROM sessions WHERE id = ?").get(sessionId))
+      .toEqual({ project_environment_revision_id: firstRevision.id });
+    db.close();
+  });
+
+  it("旧环境清理失败时保留已经原子发布的新环境", async () => {
+    const { db, store, remoteCommits, workspaceManager, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: "bundle install" });
+    const first = await builder.checkAndBuild(environment.id);
+    const firstWorkspace = store.getRevision(first.revisionId!)!.workspacePath!;
+    const removeRevision = workspaceManager.removeRevision.bind(workspaceManager);
+    workspaceManager.removeRevision = async (path) => {
+      if (path === firstWorkspace) throw new Error("cleanup failed");
+      await removeRevision(path);
+    };
+    remoteCommits.set("api", "commit-2");
+
+    const published = await builder.checkAndBuild(environment.id);
+
+    expect(published).toMatchObject({ outcome: "published", revisionId: expect.any(Number) });
+    expect(store.get(environment.id)?.currentRevisionId).toBe(published.revisionId);
+    expect(existsSync(store.getCurrentRevision(environment.id)!.workspacePath!)).toBe(true);
+    expect(store.getRevision(first.revisionId!)?.workspacePath).toBe(firstWorkspace);
+    db.close();
+  });
+
+  it("创建中的 Session 暂时保护旧环境，快照完成后可以重试清理", async () => {
+    const { db, store, remoteCommits, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: null });
+    const first = await builder.checkAndBuild(environment.id);
+    const firstRevision = store.getRevision(first.revisionId!)!;
+    const agent = db.prepare("SELECT id FROM agents ORDER BY id LIMIT 1").get() as { id: number };
+    const sessionId = Number(db.prepare(`
+      INSERT INTO sessions
+        (agent_id, title, status, workspace_path, project_environment_revision_id, created_at, updated_at)
+      VALUES (?, '正在创建', 'running', 'pending:test', ?, ?, ?)
+    `).run(agent.id, firstRevision.id, "2026-08-13T00:00:00.000Z", "2026-08-13T00:00:00.000Z").lastInsertRowid);
+    remoteCommits.set("api", "commit-2");
+
     await builder.checkAndBuild(environment.id);
 
     expect(store.getRevision(firstRevision.id)?.workspacePath).toBe(firstRevision.workspacePath);
     expect(existsSync(firstRevision.workspacePath!)).toBe(true);
-
-    db.prepare("DELETE FROM sessions WHERE id = ?").run(sessionId);
-    remoteCommits.set("api", "commit-4");
-    await builder.checkAndBuild(environment.id);
-
+    db.prepare("UPDATE sessions SET workspace_path = '/sessions/ready/workspace', status = 'idle' WHERE id = ?")
+      .run(sessionId);
+    await builder.cleanupOldRevisions(environment.id);
     expect(store.getRevision(firstRevision.id)?.workspacePath).toBeNull();
     expect(existsSync(firstRevision.workspacePath!)).toBe(false);
     db.close();
@@ -432,6 +601,28 @@ describe("ProjectEnvironmentBuilder", () => {
     const failed = store.listRevisions(environment.id)[0]!;
     expect(failed).toMatchObject({ status: "failed", failureStage: "prepare:api", workspacePath: null });
     expect(existsSync(join(root, String(environment.id), "revisions", String(failed.id), "workspace"))).toBe(false);
+    db.close();
+  });
+
+  it("失败 Workspace 删除失败时保留路径并在下次同步重试", async () => {
+    const { db, store, workspaceManager, builder } = createBuilderFixture();
+    const environment = store.create({ name: "研发环境" });
+    const repository = store.addRepository(environment.id, { name: "api", gitUrl: "git:api", prepareCommand: null });
+    await builder.checkAndBuild(environment.id);
+    store.updateRepository(environment.id, repository.id, { prepareCommand: "exit 1" });
+    const removeRevision = workspaceManager.removeRevision.bind(workspaceManager);
+    workspaceManager.removeRevision = async () => { throw new Error("cleanup failed"); };
+
+    await expect(builder.checkAndBuild(environment.id)).rejects.toThrow("prepare failed");
+
+    const failed = store.listRevisions(environment.id)[0]!;
+    expect(failed).toMatchObject({ status: "failed", workspacePath: expect.any(String) });
+    expect(existsSync(failed.workspacePath!)).toBe(true);
+    workspaceManager.removeRevision = removeRevision;
+    store.updateRepository(environment.id, repository.id, { prepareCommand: null });
+    await builder.checkAndBuild(environment.id);
+    expect(store.getRevision(failed.id)?.workspacePath).toBeNull();
+    expect(existsSync(failed.workspacePath!)).toBe(false);
     db.close();
   });
 });

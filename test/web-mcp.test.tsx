@@ -261,7 +261,7 @@ it("从共享 MCP 区域一键添加并启用", async () => {
   render(<App />);
 
   expect(await screen.findByText("可添加的 MCP")).toBeInTheDocument();
-  expect(screen.getByText("mongodb")).toBeInTheDocument();
+  expect(await screen.findByText("mongodb")).toBeInTheDocument();
   expect(screen.getByText("来自 数据智能体")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "添加并启用 mongodb" }));
 

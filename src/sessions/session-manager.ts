@@ -218,6 +218,7 @@ export class SessionManager {
       workspace = await this.workspaceManager.createSession(id, revision.workspacePath);
     } catch (error) {
       this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+      await this.cleanupEnvironmentRevisions(revision.projectEnvironmentId);
       if (error instanceof WorkspaceCreateError) throw error;
       throw new WorkspaceCreateError();
     }
@@ -232,6 +233,7 @@ export class SessionManager {
       } catch (_cleanupError) {
         // The preparation failure remains authoritative.
       }
+      await this.cleanupEnvironmentRevisions(revision.projectEnvironmentId);
       throw new WorkspaceCreateError();
     }
 
@@ -249,8 +251,11 @@ export class SessionManager {
       } catch (_rollbackError) {
         // The database failure remains the primary error; rollback was still attempted.
       }
+      await this.cleanupEnvironmentRevisions(revision.projectEnvironmentId);
       throw new SessionManagerError("session_create_failed");
     }
+
+    await this.cleanupEnvironmentRevisions(revision.projectEnvironmentId);
 
     return this.withMcpStatus({
       id,
@@ -557,6 +562,15 @@ export class SessionManager {
       );
     }
     return true;
+  }
+
+  private async cleanupEnvironmentRevisions(environmentId: number): Promise<void> {
+    if (this.projectEnvironmentRevisionCleaner === undefined) return;
+    try {
+      await this.projectEnvironmentRevisionCleaner.cleanupOldRevisions(environmentId);
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   private releaseDeleteClaim(id: number, clearProviderSessionId: boolean, cause: unknown): never {
