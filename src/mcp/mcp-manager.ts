@@ -53,6 +53,7 @@ type McpServerRow = {
   enabled: 0 | 1;
   url: string | null;
   command: string | null;
+  allowed_tools_json: string | null;
   check_timeout_seconds: number;
   last_checked_at: string | null;
   last_check_status: "passed" | "failed" | null;
@@ -118,6 +119,7 @@ const toSummary = (row: McpServerRow): AgentMcpServerSummary => ({
   name: row.name,
   transport: row.transport,
   enabled: row.enabled === 1,
+  allowedTools: row.allowed_tools_json === null ? null : JSON.parse(row.allowed_tools_json) as string[],
   checkTimeoutSeconds: row.check_timeout_seconds,
   lastCheckedAt: row.last_checked_at,
   lastCheckStatus: row.last_check_status,
@@ -229,11 +231,11 @@ export class McpManager {
         installedId = insertedId(this.db.prepare(`
           INSERT INTO agent_mcp_servers
             (agent_id, source_mcp_server_id, name, transport, enabled, url, command,
-             check_timeout_seconds, created_at, updated_at)
-          VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+             allowed_tools_json, check_timeout_seconds, created_at, updated_at)
+          VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
         `).run(
           agentId, source.id, source.name, source.transport, source.url, source.command,
-          source.check_timeout_seconds, now, now
+          source.allowed_tools_json, source.check_timeout_seconds, now, now
         ));
         const values = this.listValueRows(source.id);
         const insertValue = this.db.prepare(`
@@ -264,6 +266,20 @@ export class McpManager {
     const result = this.db.prepare(`
       UPDATE agent_mcp_servers SET enabled = ?, updated_at = ? WHERE id = ? AND agent_id = ?
     `).run(enabled ? 1 : 0, new Date().toISOString(), id, agentId);
+    if (result.changes !== 1) return undefined;
+    return toSummary(this.getServerRow(agentId, id)!);
+  }
+
+  setAllowedTools(agentId: number, id: number, allowedTools: string[] | null): AgentMcpServerSummary | undefined {
+    if (allowedTools !== null) {
+      const unique = new Set(allowedTools);
+      if (unique.size !== allowedTools.length || allowedTools.some((name) => name.trim() === "")) {
+        throw new McpManagerError("invalid_mcp_value");
+      }
+    }
+    const result = this.db.prepare(`
+      UPDATE agent_mcp_servers SET allowed_tools_json = ?, updated_at = ? WHERE id = ? AND agent_id = ?
+    `).run(allowedTools === null ? null : JSON.stringify(allowedTools), new Date().toISOString(), id, agentId);
     if (result.changes !== 1) return undefined;
     return toSummary(this.getServerRow(agentId, id)!);
   }
@@ -807,7 +823,10 @@ export class McpManager {
           headers: values.map((value) => ({
             name: value.target_name!,
             value: this.resolveValue(value, context, sessionValues)
-          }))
+          })),
+          ...(row.allowed_tools_json === null
+            ? {}
+            : { allowedTools: JSON.parse(row.allowed_tools_json) as string[] })
         }
       };
     }
@@ -823,7 +842,10 @@ export class McpManager {
         env: values.filter((value) => value.kind === "environment").map((value) => ({
           name: value.target_name!,
           value: this.resolveValue(value, context, sessionValues)
-        }))
+        })),
+        ...(row.allowed_tools_json === null
+          ? {}
+          : { allowedTools: JSON.parse(row.allowed_tools_json) as string[] })
       }
     };
   }

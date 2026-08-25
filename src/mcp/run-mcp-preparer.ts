@@ -1,5 +1,6 @@
 import type { McpChecker } from "./mcp-checker.js";
 import { McpManager } from "./mcp-manager.js";
+import { wrapMcpServerWithToolFilter } from "./mcp-tool-filter.js";
 import type { ResolveMcpContext, RuntimeMcpServer } from "./mcp-types.js";
 
 export class RunMcpPreparationError extends Error {
@@ -24,13 +25,14 @@ export class RunMcpPreparer {
     }
     if (resolved.length === 0) return [];
     return Promise.all(resolved.map(async (item) => {
-      const result = await this.dependencies.checker.check(item.server, item.checkTimeoutMs);
+      const { allowedTools, ...upstream } = item.server;
+      const result = await this.dependencies.checker.check(upstream, item.checkTimeoutMs);
       this.dependencies.manager.recordCheckResult(item.id, result);
+      const startupTimeoutSeconds = Math.max(1, Math.ceil(item.checkTimeoutMs / 1000));
       return {
-        server: {
-          ...item.server,
-          startupTimeoutSeconds: Math.max(1, Math.ceil(item.checkTimeoutMs / 1000))
-        },
+        server: allowedTools === undefined
+          ? { ...upstream, startupTimeoutSeconds }
+          : wrapMcpServerWithToolFilter(upstream, allowedTools, startupTimeoutSeconds),
         result
       };
     })).then((results) => {

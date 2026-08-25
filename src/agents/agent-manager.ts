@@ -151,18 +151,19 @@ export class AgentManager {
         }
 
         const servers = this.db.prepare(`
-          SELECT id, source_mcp_server_id, name, transport, enabled, url, command, check_timeout_seconds
+          SELECT id, source_mcp_server_id, name, transport, enabled, url, command,
+                 check_timeout_seconds, allowed_tools_json
           FROM agent_mcp_servers WHERE agent_id = ? ORDER BY created_at ASC, id ASC
         `).all(id) as Array<{
           id: number; source_mcp_server_id: number | null; name: string; transport: string; enabled: number; url: string | null;
-          command: string | null; check_timeout_seconds: number;
+          command: string | null; check_timeout_seconds: number; allowed_tools_json: string | null;
         }>;
         for (const server of servers) {
           const newServerId = insertedId(this.db.prepare(`
             INSERT INTO agent_mcp_servers
               (agent_id, source_mcp_server_id, name, transport, enabled, url, command,
-               check_timeout_seconds, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               check_timeout_seconds, allowed_tools_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `).run(
             clonedId,
             server.source_mcp_server_id ?? server.id,
@@ -172,6 +173,7 @@ export class AgentManager {
             server.url,
             server.command,
             server.check_timeout_seconds,
+            server.allowed_tools_json,
             createdAt,
             createdAt
           ));

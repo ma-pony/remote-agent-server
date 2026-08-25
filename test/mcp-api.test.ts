@@ -82,6 +82,44 @@ describe("Agent MCP API", () => {
     expect(listed[0]).not.toHaveProperty("core");
   });
 
+  it("可为单个 Agent MCP 保存工具白名单，并切回全部工具", async () => {
+    const { app, agentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders(),
+      payload: {
+        name: "grab-manager", transport: "http", enabled: true,
+        url: "https://example.test/mcp", checkTimeoutSeconds: 20, headers: []
+      }
+    });
+    const serverId = (created.json() as { id: number }).id;
+    expect(created.json()).toMatchObject({ allowedTools: null });
+
+    const selected = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agentId}/mcp-servers/${serverId}/tools`,
+      headers: authHeaders(),
+      payload: { allowedTools: ["ticket_get", "grab_run_task"] }
+    });
+    expect(selected.statusCode).toBe(200);
+    expect(selected.json()).toMatchObject({ allowedTools: ["ticket_get", "grab_run_task"] });
+
+    const listed = await app.inject({
+      method: "GET", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders()
+    });
+    expect(listed.json()).toEqual([
+      expect.objectContaining({ id: serverId, allowedTools: ["ticket_get", "grab_run_task"] })
+    ]);
+
+    const all = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agentId}/mcp-servers/${serverId}/tools`,
+      headers: authHeaders(),
+      payload: { allowedTools: null }
+    });
+    expect(all.statusCode).toBe(200);
+    expect(all.json()).toMatchObject({ allowedTools: null });
+  });
+
   it("支持只删除当前 Agent 的 MCP 副本或删除整个共享组", async () => {
     const { app, agentId } = await createTestApp();
     const target = await app.inject({
@@ -161,6 +199,12 @@ describe("Agent MCP API", () => {
       }
     });
     const sourceServerId = (created.json() as { id: number }).id;
+    await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agentId}/mcp-servers/${sourceServerId}/tools`,
+      headers: authHeaders(),
+      payload: { allowedTools: ["ticket_get"] }
+    });
 
     const catalog = await app.inject({
       method: "GET",
@@ -179,7 +223,9 @@ describe("Agent MCP API", () => {
       headers: authHeaders()
     });
     expect(installed.statusCode).toBe(201);
-    expect(installed.json()).toMatchObject({ agentId: targetAgentId, name: "shared_mcp", enabled: true });
+    expect(installed.json()).toMatchObject({
+      agentId: targetAgentId, name: "shared_mcp", enabled: true, allowedTools: ["ticket_get"]
+    });
     expect(JSON.stringify(installed.json())).not.toContain("shared-secret");
 
     const disabled = await app.inject({

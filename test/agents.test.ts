@@ -145,6 +145,13 @@ describe("Agent API", () => {
         ]
       }
     });
+    const sourceMcpServer = mcpCreated.json() as { id: number };
+    await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${source.id}/mcp-servers/${sourceMcpServer.id}/tools`,
+      headers: authHeaders(),
+      payload: { allowedTools: ["ticket_get"] }
+    });
     const sourceDir = join(dataDir, "agents", String(source.id));
     for (const root of ["skills", "skill-library"]) {
       const directory = join(sourceDir, root, "upload-review");
@@ -206,6 +213,7 @@ describe("Agent API", () => {
       agentId: clone.id,
       name: "example_mcp",
       enabled: true,
+      allowedTools: ["ticket_get"],
       lastCheckedAt: null,
       lastCheckStatus: null
     }]);

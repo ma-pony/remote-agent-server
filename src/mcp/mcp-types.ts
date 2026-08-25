@@ -21,7 +21,7 @@ export type RuntimeMcpServer = (
       args: string[];
       env: Array<{ name: string; value: string }>;
     }
-) & { startupTimeoutSeconds?: number };
+  ) & { startupTimeoutSeconds?: number; allowedTools?: string[] };
 
 export type ResolvedMcpServer = {
   id: number;
@@ -95,6 +95,7 @@ export type AgentMcpServerSummary = {
   name: string;
   transport: McpTransport;
   enabled: boolean;
+  allowedTools: string[] | null;
   checkTimeoutSeconds: number;
   lastCheckedAt: string | null;
   lastCheckStatus: "passed" | "failed" | null;

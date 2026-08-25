@@ -39,6 +39,9 @@ const updateParameterSchema = z.object({
 }).strict();
 const checkSchema = z.object({ sessionId: z.number().int().positive().optional() }).strict().optional();
 const enabledSchema = z.object({ enabled: z.boolean() }).strict();
+const allowedToolsSchema = z.object({
+  allowedTools: z.array(z.string().min(1)).nullable()
+}).strict();
 const deleteScopeSchema = z.object({ scope: z.enum(["current", "all"]).default("current") }).strict();
 const parseId = (value: string): number | undefined => {
   const parsed = z.coerce.number().int().positive().safeParse(value);
@@ -131,6 +134,21 @@ export const registerMcpRoutes = (app: FastifyInstance, { mcpManager, mcpChecker
         ? undefined
         : mcpManager.setServerEnabled(agentId, id, parsed.data.enabled);
       return server === undefined ? notFound(reply, "MCP server not found") : server;
+    }
+  );
+  app.patch<{ Params: { agentId: string; id: string } }>(
+    "/agents/:agentId/mcp-servers/:id/tools",
+    (request, reply) => {
+      const parsed = allowedToolsSchema.safeParse(request.body);
+      if (!parsed.success) return invalidRequest(reply, "Invalid MCP tool access");
+      try {
+        const agentId = parseId(request.params.agentId);
+        const id = parseId(request.params.id);
+        const server = agentId === undefined || id === undefined
+          ? undefined
+          : mcpManager.setAllowedTools(agentId, id, parsed.data.allowedTools);
+        return server === undefined ? notFound(reply, "MCP server not found") : server;
+      } catch (error) { return handleMcpError(reply, error); }
     }
   );
   app.delete<{ Params: { agentId: string; id: string }; Querystring: { scope?: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) => {

@@ -16,6 +16,7 @@
     "smoke:integrations": "tsx scripts/smoke-integrations.ts",
     "smoke:providers": "tsx scripts/smoke-providers.ts",
     "test": "vitest run",
+    "test:mcp-process": "REMOTE_AGENT_MCP_PROCESS_TEST=1 vitest run test/mcp-tool-filter.test.ts",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc --ignoreConfig --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --types node scripts/smoke-providers.ts scripts/smoke-integrations.ts"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
     "@fontsource-variable/geist": "^5.3.0",
     "@microsoft/fetch-event-source": "^2.0.1",
     "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
     "@tailwindcss/vite": "^4.3.3",
     "acpx": "0.12.1",
     "better-sqlite3": "^12.11.1",

@@ -14,6 +14,7 @@ const agent = {
 };
 const server = {
   id: 1, agentId: agent.id, name: "example_mcp", transport: "http", enabled: true,
+  allowedTools: null,
   checkTimeoutSeconds: 30, lastCheckedAt: null, lastCheckStatus: null, lastCheckMessage: null,
   lastToolCount: null, createdAt: now, updatedAt: now
 };
@@ -63,6 +64,10 @@ it("Agent MCP 独立页面展示服务器和连接检查", async () => {
 
   expect(await screen.findByText("MCP 服务器")).toBeInTheDocument();
   expect(await screen.findByText("example_mcp")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "设置 example_mcp 的工具范围" })).toBeVisible();
+  expect(screen.getByRole("link", { name: "编辑 example_mcp" })).toHaveAttribute(
+    "href", `/agents/${agent.id}/mcp/${server.id}`
+  );
   fireEvent.click(screen.getByRole("button", { name: "停用" }));
   await waitFor(() => expect(enabledBody).toEqual({ enabled: false }));
   expect(await screen.findByText("已停用")).toBeInTheDocument();
@@ -144,12 +149,92 @@ it("点击工具数量后实时检查并展示全部工具", async () => {
 
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: "查看 2 个工具" }));
+  fireEvent.click(await screen.findByRole("button", { name: "设置 example_mcp 的工具范围" }));
   expect(await screen.findByRole("heading", { name: "example_mcp 的工具" })).toBeInTheDocument();
   expect(screen.getByText("ticket_get")).toBeInTheDocument();
   expect(screen.getByText("读取工单详情")).toBeInTheDocument();
   expect(screen.getByText("ticket_pause")).toBeInTheDocument();
   expect(screen.getByText("暂无说明")).toBeInTheDocument();
+});
+
+it("工具说明默认单行折叠，并可独立展开和收起", async () => {
+  const checkedServer = { ...server, lastCheckStatus: "passed" as const, lastToolCount: 2 };
+  const description = "读取工单详情。\n参数：ticket_id，工单数字 ID。\n返回工单当前状态和执行证据。";
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([checkedServer]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+      return response({
+        status: "passed", toolCount: 2, message: "2 tools available",
+        tools: [
+          { name: "ticket_get", description },
+          { name: "ticket_pause", description: "暂停工单并等待人工处理。" }
+        ]
+      });
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "查看 2 个工具" }));
+  await screen.findByRole("heading", { name: "example_mcp 的工具" });
+
+  const descriptionElement = screen.getByText(/读取工单详情。/);
+  const expandButton = screen.getByRole("button", { name: "展开 ticket_get 的说明" });
+  expect(descriptionElement).toHaveClass("line-clamp-1");
+  expect(expandButton).toHaveAttribute("aria-expanded", "false");
+
+  fireEvent.click(expandButton);
+  expect(descriptionElement).not.toHaveClass("line-clamp-1");
+  expect(descriptionElement).toHaveClass("whitespace-pre-wrap");
+  expect(screen.getByRole("button", { name: "收起 ticket_get 的说明" })).toHaveAttribute("aria-expanded", "true");
+
+  fireEvent.click(screen.getByRole("button", { name: "收起 ticket_get 的说明" }));
+  expect(descriptionElement).toHaveClass("line-clamp-1");
+});
+
+it("可在工具列表中选择当前 Agent 暴露的 MCP 工具", async () => {
+  let toolsBody: unknown;
+  let currentServer = { ...server, lastCheckStatus: "passed" as const, lastToolCount: 2 };
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([currentServer]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+      return response({
+        status: "passed", toolCount: 2, message: "2 tools available",
+        tools: [{ name: "ticket_get", description: "读取工单详情" }, { name: "ticket_pause", description: null }]
+      });
+    }
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/tools` && init?.method === "PATCH") {
+      toolsBody = JSON.parse(String(init.body));
+      currentServer = { ...currentServer, allowedTools: (toolsBody as { allowedTools: string[] }).allowedTools };
+      return response(currentServer);
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "查看 2 个工具" }));
+  await screen.findByRole("heading", { name: "example_mcp 的工具" });
+  expect(screen.getByText(/保存后当前运行不受影响，下一次运行会自动刷新执行器会话并生效。/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("radio", { name: "仅所选工具" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "ticket_pause" }));
+  fireEvent.click(screen.getByRole("button", { name: "保存工具权限" }));
+
+  await waitFor(() => expect(toolsBody).toEqual({ allowedTools: ["ticket_get"] }));
+  expect(await screen.findByText("已选择 1 个工具")).toBeInTheDocument();
 });
 
 it("从共享 MCP 区域一键添加并启用", async () => {

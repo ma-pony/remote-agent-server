@@ -70,6 +70,55 @@ describe("RunMcpPreparer", () => {
     fixture.db.close();
   });
 
+  it("仅所选工具模式在检查原 MCP 后注入透明 stdio 过滤代理", async () => {
+    const check = vi.fn(async () => ({ status: "passed" as const, toolCount: 2, message: "2 tools available" }));
+    const fixture = setup({ check });
+    const created = fixture.manager.createServer(fixture.agentId, {
+      name: "grab-manager",
+      transport: "http",
+      enabled: true,
+      url: "https://example.test/mcp",
+      checkTimeoutSeconds: 7,
+      headers: [{ name: "Authorization", source: "fixed", value: "Bearer runtime-secret", secret: true }]
+    });
+    fixture.manager.setAllowedTools(fixture.agentId, created.id, ["ticket_get"]);
+
+    const [server] = await fixture.preparer.prepare({
+      agentId: fixture.agentId,
+      sessionId: fixture.sessionId,
+      runId: 1,
+      workspacePath: "/workspace",
+      browserProfilePath: "/browser"
+    });
+
+    expect(check).toHaveBeenCalledWith({
+      type: "http",
+      name: "grab-manager",
+      url: "https://example.test/mcp",
+      headers: [{ name: "Authorization", value: "Bearer runtime-secret" }]
+    }, 7000);
+    expect(server).toMatchObject({
+      type: "stdio",
+      name: "grab-manager",
+      command: process.execPath,
+      startupTimeoutSeconds: 7
+    });
+    expect(server?.type).toBe("stdio");
+    const encoded = server?.type === "stdio"
+      ? server.env.find(({ name }) => name === "REMOTE_AGENT_MCP_FILTER_CONFIG")?.value
+      : undefined;
+    expect(JSON.parse(encoded ?? "null")).toEqual({
+      allowedTools: ["ticket_get"],
+      upstream: {
+        type: "http",
+        name: "grab-manager",
+        url: "https://example.test/mcp",
+        headers: [{ name: "Authorization", value: "Bearer runtime-secret" }]
+      }
+    });
+    fixture.db.close();
+  });
+
   it("任一启用 MCP 检查失败时阻止 Run 且不暴露配置明文", async () => {
     const fixture = setup({
       check: async () => ({ status: "failed", code: "mcp_check_failed", message: "MCP grab-manager check failed" })

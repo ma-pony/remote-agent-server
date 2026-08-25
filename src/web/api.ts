@@ -140,6 +140,7 @@ export type AgentMcpServerSummary = {
   name: string;
   transport: "http" | "stdio";
   enabled: boolean;
+  allowedTools: string[] | null;
   checkTimeoutSeconds: number;
   lastCheckedAt: string | null;
   lastCheckStatus: "passed" | "failed" | null;

@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { ArrowLeft, CheckCircle2, Plus, RefreshCw, Trash2, XCircle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, ChevronDown, Pencil, Plus, RefreshCw, SlidersHorizontal, Trash2, XCircle } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
 
 import {
@@ -30,6 +30,46 @@ type McpToolSummary = { name: string; description: string | null };
 type McpCheckResponse =
   | { status: "passed"; toolCount: number; message: string; tools?: McpToolSummary[] }
   | { status: "failed"; message: string };
+type ToolDialogState = {
+  serverId: number;
+  serverName: string;
+  tools: McpToolSummary[];
+  accessMode: "all" | "selected";
+  selectedTools: string[];
+};
+
+const McpToolRow = ({ tool, checked, disabled, onCheckedChange }: {
+  tool: McpToolSummary;
+  checked: boolean;
+  disabled: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}) => {
+  const { text } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  const description = tool.description ?? text("暂无说明", "No description");
+  return <div className="flex gap-3 p-4">
+    <input
+      type="checkbox"
+      className="mt-1"
+      aria-label={tool.name}
+      disabled={disabled}
+      checked={checked}
+      onChange={(event) => onCheckedChange(event.target.checked)}
+    />
+    <div className="min-w-0 flex-1">
+      {tool.description === null ? <><code className="text-sm font-semibold">{tool.name}</code><p className="mt-1 text-sm text-muted-foreground">{description}</p></> : <button
+        type="button"
+        className="group w-full min-w-0 text-left"
+        aria-expanded={expanded}
+        aria-label={text(`${expanded ? "收起" : "展开"} ${tool.name} 的说明`, `${expanded ? "Collapse" : "Expand"} ${tool.name} description`)}
+        onClick={() => setExpanded((value) => !value)}
+      >
+        <span className="flex items-center justify-between gap-3"><code className="min-w-0 truncate text-sm font-semibold">{tool.name}</code><ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform ${expanded ? "rotate-180" : ""}`} aria-hidden="true" /></span>
+        <p className={`mt-1 text-sm text-muted-foreground ${expanded ? "whitespace-pre-wrap" : "line-clamp-1"}`}>{description}</p>
+      </button>}
+    </div>
+  </div>;
+};
 
 export const AgentMcpPage = () => {
   const { text } = useI18n();
@@ -41,7 +81,7 @@ export const AgentMcpPage = () => {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
-  const [toolDialog, setToolDialog] = useState<{ serverName: string; tools: McpToolSummary[] } | null>(null);
+  const [toolDialog, setToolDialog] = useState<ToolDialogState | null>(null);
 
   const load = () => Promise.all([
     api<AgentMcpServerSummary[]>(`/agents/${id}/mcp-servers`),
@@ -83,7 +123,14 @@ export const AgentMcpPage = () => {
     try {
       const result = await probe(server);
       if (result.status === "failed") { setError(result.message); return; }
-      setToolDialog({ serverName: server.name, tools: result.tools ?? [] });
+      const tools = result.tools ?? [];
+      setToolDialog({
+        serverId: server.id,
+        serverName: server.name,
+        tools,
+        accessMode: server.allowedTools === null ? "all" : "selected",
+        selectedTools: server.allowedTools ?? tools.map((tool) => tool.name)
+      });
       await load();
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
@@ -103,6 +150,23 @@ export const AgentMcpPage = () => {
       setServers((items) => (items ?? []).map((item) => item.id === updated.id ? updated : item));
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
+  const saveToolAccess = async () => {
+    if (toolDialog === null) return;
+    setBusy(`tools-save-${toolDialog.serverId}`); setError("");
+    try {
+      const updated = await api<AgentMcpServerSummary>(
+        `/agents/${id}/mcp-servers/${toolDialog.serverId}/tools`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({
+            allowedTools: toolDialog.accessMode === "all" ? null : toolDialog.selectedTools
+          })
+        }
+      );
+      setServers((items) => (items ?? []).map((item) => item.id === updated.id ? updated : item));
+      setToolDialog(null);
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
+  };
   const remove = async (server: AgentMcpServerSummary, scope: "current" | "all") => {
     setBusy(`delete-${server.id}`); setError("");
     try {
@@ -112,10 +176,36 @@ export const AgentMcpPage = () => {
   };
 
   return <div className="flex flex-col gap-6"><ErrorAlert message={error} />
-    <Dialog open={toolDialog !== null} onOpenChange={(open) => { if (!open) setToolDialog(null); }}><DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-2xl"><DialogHeader><DialogTitle>{text(`${toolDialog?.serverName ?? "MCP"} 的工具`, `${toolDialog?.serverName ?? "MCP"} tools`)}</DialogTitle><DialogDescription>{text("实时读取当前 MCP 服务器公开的工具名称和说明。", "Read the tool names and descriptions currently exposed by this MCP server.")}</DialogDescription></DialogHeader>{toolDialog?.tools.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{text("当前没有可用工具。", "No tools are currently available.")}</p> : <div className="divide-y rounded-lg border">{toolDialog?.tools.map((tool) => <div key={tool.name} className="p-4"><code className="text-sm font-semibold">{tool.name}</code><p className="mt-1 whitespace-pre-wrap text-sm text-muted-foreground">{tool.description ?? text("暂无说明", "No description")}</p></div>)}</div>}</DialogContent></Dialog>
+    <Dialog open={toolDialog !== null} onOpenChange={(open) => { if (!open) setToolDialog(null); }}>
+      <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>{text(`${toolDialog?.serverName ?? "MCP"} 的工具`, `${toolDialog?.serverName ?? "MCP"} tools`)}</DialogTitle>
+          <DialogDescription>{text(
+            "选择当前智能体可以看到和调用的工具。保存后当前运行不受影响，下一次运行会自动刷新执行器会话并生效。",
+            "Choose which tools this agent can see and call. The current run is unchanged; the next run refreshes the executor session automatically."
+          )}</DialogDescription>
+        </DialogHeader>
+        {toolDialog === null ? null : <>
+          <div className="grid gap-3 rounded-lg border p-4 sm:grid-cols-2">
+            <label className="flex cursor-pointer items-start gap-3"><input type="radio" name="mcp-tool-access" className="mt-1" aria-label={text("全部工具", "All tools")} checked={toolDialog.accessMode === "all"} onChange={() => setToolDialog({ ...toolDialog, accessMode: "all" })} /><span><span className="block font-medium">{text("全部工具", "All tools")}</span><span className="text-sm text-muted-foreground">{text("自动包含以后新增的工具。", "Automatically include tools added later.")}</span></span></label>
+            <label className="flex cursor-pointer items-start gap-3"><input type="radio" name="mcp-tool-access" className="mt-1" aria-label={text("仅所选工具", "Selected tools only")} checked={toolDialog.accessMode === "selected"} onChange={() => setToolDialog({ ...toolDialog, accessMode: "selected" })} /><span><span className="block font-medium">{text("仅所选工具", "Selected tools only")}</span><span className="text-sm text-muted-foreground">{text("未选择的工具不会暴露给模型。", "Unselected tools are hidden from the model.")}</span></span></label>
+          </div>
+          {toolDialog.tools.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{text("当前没有可用工具。", "No tools are currently available.")}</p> : <div className="divide-y rounded-lg border">{toolDialog.tools.map((tool) => {
+            const checked = toolDialog.accessMode === "all" || toolDialog.selectedTools.includes(tool.name);
+            return <McpToolRow key={tool.name} tool={tool} disabled={toolDialog.accessMode === "all"} checked={checked} onCheckedChange={(toolChecked) => setToolDialog({
+              ...toolDialog,
+              selectedTools: toolChecked
+                ? [...toolDialog.selectedTools, tool.name]
+                : toolDialog.selectedTools.filter((name) => name !== tool.name)
+            })} />;
+          })}</div>}
+          <div className="flex justify-end"><Button disabled={busy !== ""} onClick={() => void saveToolAccess()}>{text("保存工具权限", "Save tool access")}</Button></div>
+        </>}
+      </DialogContent>
+    </Dialog>
     {notice === "" ? null : <Alert><CheckCircle2 /><AlertTitle>{text("连接正常", "Connection healthy")}</AlertTitle><AlertDescription>{notice}</AlertDescription></Alert>}
     <Card><CardHeader className="flex-row items-start justify-between gap-4"><div><CardTitle>{text("MCP 服务器", "MCP servers")}</CardTitle><CardDescription className="mt-2">{text("所有已启用的 MCP 都会在运行前检查并注入智能体；任一连接失败都会阻止本次运行。", "All enabled MCP servers are checked and injected before a run. Any connection failure blocks that run.")}</CardDescription></div><Button asChild><Link to={`/agents/${id}/mcp/new`}><Plus />{text("新建 MCP", "New MCP server")}</Link></Button></CardHeader>
-      <CardContent className="flex flex-col gap-4"><Field><FieldLabel htmlFor="check-session">{text("检查使用的会话", "Session used for checks")}</FieldLabel><NativeSelect id="check-session" className="max-w-sm" value={checkSessionId} onChange={(event) => setCheckSessionId(event.target.value)}><NativeSelectOption value="">{text("不使用会话参数", "Do not use session parameters")}</NativeSelectOption>{sessions.map((session) => <NativeSelectOption key={session.id} value={session.id}>{session.title}</NativeSelectOption>)}</NativeSelect><FieldDescription>{text("只有 MCP 引用了会话参数时才需要选择。", "Select a session only when the MCP configuration references session parameters.")}</FieldDescription></Field>{servers === null ? <Skeleton className="h-36" /> : servers.length === 0 ? <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">{text("尚未配置 MCP。", "No MCP servers configured.")}</div> : <div className="divide-y rounded-lg border">{servers.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2"><Link className="font-medium hover:underline" to={`/agents/${id}/mcp/${server.id}`}>{server.name}</Link><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant={server.enabled ? "default" : "secondary"}>{server.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{server.lastCheckStatus === null ? text("尚未检查", "Not checked") : server.lastCheckStatus === "passed" ? <>{text("最近检查通过 · ", "Last check passed · ")}<button type="button" className="font-medium underline underline-offset-4 hover:text-foreground" aria-label={text(`查看 ${server.lastToolCount ?? 0} 个工具`, `View ${server.lastToolCount ?? 0} tools`)} disabled={busy !== ""} onClick={() => void showTools(server)}>{text(`${server.lastToolCount ?? 0} 个工具`, `${server.lastToolCount ?? 0} tools`)}</button></> : text("最近检查失败", "Last check failed")}</p></div><div className="flex flex-wrap gap-2"><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void toggle(server)}>{server.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void check(server)}><RefreshCw className={busy === `check-${server.id}` ? "animate-spin" : ""} />{text("检查连接", "Check connection")}</Button><AlertDialog><AlertDialogTrigger asChild><Button variant="ghost" size="sm" disabled={busy !== ""} aria-label={text(`删除 ${server.name}`, `Delete ${server.name}`)}><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${server.name}”？`, `Delete “${server.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("仅删除当前配置只影响当前智能体；从所有智能体删除会同时删除共享源和全部副本。", "Deleting only the current configuration affects this agent. Deleting from all agents also removes the shared source and every copy.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="outline" onClick={() => void remove(server, "current")}>{text("仅删除当前", "Current agent only")}</AlertDialogAction><AlertDialogAction variant="destructive" onClick={() => void remove(server, "all")}>{text("从所有智能体删除", "Delete from all agents")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></div>)}</div>}</CardContent>
+      <CardContent className="flex flex-col gap-4"><Field><FieldLabel htmlFor="check-session">{text("检查使用的会话", "Session used for checks")}</FieldLabel><NativeSelect id="check-session" className="max-w-sm" value={checkSessionId} onChange={(event) => setCheckSessionId(event.target.value)}><NativeSelectOption value="">{text("不使用会话参数", "Do not use session parameters")}</NativeSelectOption>{sessions.map((session) => <NativeSelectOption key={session.id} value={session.id}>{session.title}</NativeSelectOption>)}</NativeSelect><FieldDescription>{text("只有 MCP 引用了会话参数时才需要选择。", "Select a session only when the MCP configuration references session parameters.")}</FieldDescription></Field>{servers === null ? <Skeleton className="h-36" /> : servers.length === 0 ? <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">{text("尚未配置 MCP。", "No MCP servers configured.")}</div> : <div className="divide-y rounded-lg border">{servers.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><Link className="font-medium hover:underline" to={`/agents/${id}/mcp/${server.id}`}>{server.name}</Link><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant={server.enabled ? "default" : "secondary"}>{server.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge><Badge variant="outline">{server.allowedTools === null ? text("全部工具", "All tools") : text(`已选择 ${server.allowedTools.length} 个工具`, `${server.allowedTools.length} selected tools`)}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{server.lastCheckStatus === null ? text("尚未检查", "Not checked") : server.lastCheckStatus === "passed" ? <>{text("最近检查通过 · ", "Last check passed · ")}<button type="button" className="font-medium underline underline-offset-4 hover:text-foreground" aria-label={text(`查看 ${server.lastToolCount ?? 0} 个工具`, `View ${server.lastToolCount ?? 0} tools`)} disabled={busy !== ""} onClick={() => void showTools(server)}>{text(`${server.lastToolCount ?? 0} 个工具`, `${server.lastToolCount ?? 0} tools`)}</button></> : text("最近检查失败", "Last check failed")}</p></div><div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy !== ""} aria-label={text(`设置 ${server.name} 的工具范围`, `Set tool scope for ${server.name}`)} onClick={() => void showTools(server)}><SlidersHorizontal />{text("工具范围", "Tool scope")}</Button><Button variant="outline" size="sm" asChild><Link aria-label={text(`编辑 ${server.name}`, `Edit ${server.name}`)} to={`/agents/${id}/mcp/${server.id}`}><Pencil />{text("编辑", "Edit")}</Link></Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void toggle(server)}>{server.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void check(server)}><RefreshCw className={busy === `check-${server.id}` ? "animate-spin" : ""} />{text("检查连接", "Check connection")}</Button><AlertDialog><AlertDialogTrigger asChild><Button variant="ghost" size="sm" disabled={busy !== ""} aria-label={text(`删除 ${server.name}`, `Delete ${server.name}`)}><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${server.name}”？`, `Delete “${server.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("仅删除当前配置只影响当前智能体；从所有智能体删除会同时删除共享源和全部副本。", "Deleting only the current configuration affects this agent. Deleting from all agents also removes the shared source and every copy.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="outline" onClick={() => void remove(server, "current")}>{text("仅删除当前", "Current agent only")}</AlertDialogAction><AlertDialogAction variant="destructive" onClick={() => void remove(server, "all")}>{text("从所有智能体删除", "Delete from all agents")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></div>)}</div>}</CardContent>
     </Card>
     <Card><CardHeader><CardTitle>{text("可添加的 MCP", "Available MCP servers")}</CardTitle><CardDescription>{text("其他智能体创建的 MCP。添加后配置独立，可单独编辑或停用。", "MCP servers created by other agents. Installed copies can be edited or disabled independently.")}</CardDescription></CardHeader><CardContent>{catalog === null ? <Skeleton className="h-24" /> : catalog.length === 0 ? <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">{text("所有共享 MCP 均已添加。", "All shared MCP servers are installed.")}</div> : <div className="divide-y rounded-lg border">{catalog.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2"><p className="font-medium">{server.name}</p><Badge variant="outline">{server.transport.toUpperCase()}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{text(`来自 ${server.sourceAgentName}`, `From ${server.sourceAgentName}`)}</p></div><Button size="sm" disabled={busy !== ""} aria-label={text(`添加并启用 ${server.name}`, `Install and enable ${server.name}`)} onClick={() => void install(server)}><Plus />{text("添加并启用", "Install and enable")}</Button></div>)}</div>}</CardContent></Card>
   </div>;

@@ -425,6 +425,7 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
       enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
       url TEXT,
       command TEXT,
+      allowed_tools_json TEXT,
       check_timeout_seconds INTEGER NOT NULL DEFAULT 30,
       last_checked_at TEXT,
       last_check_status TEXT CHECK (last_check_status IN ('passed', 'failed')),
@@ -677,6 +678,9 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
   }
   if (!hasColumn("agent_mcp_servers", "source_mcp_server_id")) {
     db.exec("ALTER TABLE agent_mcp_servers ADD COLUMN source_mcp_server_id INTEGER");
+  }
+  if (!hasColumn("agent_mcp_servers", "allowed_tools_json")) {
+    db.exec("ALTER TABLE agent_mcp_servers ADD COLUMN allowed_tools_json TEXT");
   }
   if (hasColumn("agent_mcp_servers", "core")) {
     db.exec("ALTER TABLE agent_mcp_servers DROP COLUMN core");
