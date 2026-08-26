@@ -4,7 +4,7 @@ import { Link, useNavigate, useParams } from "react-router";
 
 import {
   api, errorMessage, type AgentMcpServerDetail, type AgentMcpServerSummary,
-  type AgentSessionParameter, type McpValueView, type ProviderMcpCatalogItem, type Session,
+  type AgentSessionParameter, type McpValueView, type Page, type ProviderMcpCatalogItem, type Session,
   type SharedMcpServerSummary
 } from "@/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -37,6 +37,20 @@ type ToolDialogState = {
   tools: McpToolSummary[];
   accessMode: "all" | "selected";
   selectedTools: string[];
+};
+
+const listAgentSessions = async (agentId: string, signal?: AbortSignal): Promise<Session[]> => {
+  const sessions: Session[] = [];
+  let page = 1;
+  while (true) {
+    const result = await api<Page<Session>>(
+      `/sessions?page=${page}&pageSize=100&agentId=${agentId}`,
+      signal === undefined ? undefined : { signal }
+    );
+    sessions.push(...result.items.filter((item) => item.storageCleanedAt == null));
+    if (page >= result.totalPages) return sessions;
+    page += 1;
+  }
 };
 
 const McpToolRow = ({ tool, checked, disabled, onCheckedChange }: {
@@ -88,20 +102,20 @@ export const AgentMcpPage = () => {
   const load = () => Promise.all([
     api<AgentMcpServerSummary[]>(`/agents/${id}/mcp-servers`),
     api<SharedMcpServerSummary[]>(`/agents/${id}/mcp-catalog`),
-    api<Session[]>("/sessions")
+    listAgentSessions(id)
   ]).then(([serverItems, catalogItems, sessionItems]) => {
     setServers(serverItems); setCatalog(catalogItems);
-    setSessions(sessionItems.filter((item) => item.agentId === Number(id)));
+    setSessions(sessionItems);
   });
   useEffect(() => {
     const controller = new AbortController();
     void Promise.all([
       api<AgentMcpServerSummary[]>(`/agents/${id}/mcp-servers`, { signal: controller.signal }),
       api<SharedMcpServerSummary[]>(`/agents/${id}/mcp-catalog`, { signal: controller.signal }),
-      api<Session[]>("/sessions", { signal: controller.signal })
+      listAgentSessions(id, controller.signal)
     ]).then(([serverItems, catalogItems, sessionItems]) => {
       setServers(serverItems); setCatalog(catalogItems);
-      setSessions(sessionItems.filter((item) => item.agentId === Number(id)));
+      setSessions(sessionItems);
     })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     void api<ProviderMcpCatalogItem[]>(`/agents/${id}/system-mcp-catalog`, { signal: controller.signal })

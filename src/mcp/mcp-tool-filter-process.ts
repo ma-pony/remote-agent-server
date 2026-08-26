@@ -7,7 +7,7 @@ import {
   type ServerCapabilities,
   type Transport as ClientTransport
 } from "@modelcontextprotocol/client";
-import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { getDefaultEnvironment } from "@modelcontextprotocol/client/stdio";
 import { INVALID_PARAMS, ProtocolError, Server, type Transport as ServerTransport } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 
@@ -17,6 +17,7 @@ import {
   requireAllowedTool,
   type McpToolFilterConfig
 } from "./mcp-tool-filter.js";
+import { ManagedStdioClientTransport } from "./managed-stdio-client-transport.js";
 
 type ForwardingMcpClient = Pick<Client, "listTools" | "callTool"> & Partial<Pick<Client,
   | "getServerCapabilities"
@@ -61,7 +62,7 @@ const upstreamTransport = (config: McpToolFilterConfig): ClientTransport => {
       requestInit: { headers: Object.fromEntries(server.headers.map(({ name, value }) => [name, value])) }
     });
   }
-  return new StdioClientTransport({
+  return new ManagedStdioClientTransport({
     command: server.command,
     args: server.args,
     env: {
@@ -166,9 +167,35 @@ export const runMcpToolFilter = async (config: McpToolFilterConfig): Promise<voi
   const client = new Client({ name: "remote-agent-mcp-filter", version: "1.0.0" });
   await client.connect(upstreamTransport(config));
   const server = createMcpToolFilterServer(config.upstream.name, config.allowedTools, client);
-  server.onclose = () => { void client.close(); };
+  const downstream = new StdioServerTransport() as ServerTransport;
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    shutdownPromise ??= Promise.resolve().then(async () => {
+      process.stdin.off("end", requestShutdown);
+      process.stdin.off("close", requestShutdown);
+      process.off("SIGINT", requestShutdown);
+      process.off("SIGTERM", requestShutdown);
+      const results = await Promise.allSettled([server.close(), client.close()]);
+      const errors = results
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map(({ reason }) => reason);
+      if (errors.length > 0) throw new AggregateError(errors, "Failed to close MCP tool filter");
+    });
+    return shutdownPromise;
+  };
+  const requestShutdown = (): void => {
+    void shutdown().catch((error: unknown) => {
+      console.error(error instanceof Error ? error.message : String(error));
+      process.exitCode = 1;
+    });
+  };
+  process.stdin.once("end", requestShutdown);
+  process.stdin.once("close", requestShutdown);
+  process.once("SIGINT", requestShutdown);
+  process.once("SIGTERM", requestShutdown);
+  server.onclose = requestShutdown;
   server.onerror = (error) => { console.error(error.message); };
-  await server.connect(new StdioServerTransport() as ServerTransport);
+  await server.connect(downstream);
 };
 
 const rawConfig = process.env[MCP_FILTER_CONFIG_ENV];

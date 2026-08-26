@@ -79,6 +79,7 @@ export type Session = {
   title: string;
   status: SessionStatus;
   providerSessionId: string | null;
+  storageCleanedAt: string | null;
   workspacePath: string;
   projectEnvironmentRevisionId: number | null;
   instructionsSnapshot: string;
@@ -98,6 +99,14 @@ export type SessionListItem = Session & {
     conversationKey: string | null;
     latestRequestId: string | null;
   } | null;
+};
+
+export type Page<T> = {
+  items: T[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 };
 
 export type Run = {

@@ -48,11 +48,25 @@ const createHarness = () => {
 };
 
 describe("SessionCleanupScheduler", () => {
-  it("按最后活动时间删除过期空闲会话并保留近期或运行中的会话", async () => {
+  it("按最后活动时间清理过期会话的大体积存储并保留记录和统计", async () => {
     const { db, manager, root, insertSession } = createHarness();
     insertSession(101, "idle", "2026-08-01T00:00:00.000Z");
     insertSession(102, "idle", "2026-08-23T00:00:00.000Z");
     insertSession(103, "running", "2026-08-01T00:00:00.000Z");
+    db.prepare(`
+      UPDATE sessions SET provider_session_id = 'provider-101', input_tokens = 100, output_tokens = 23, total_tokens = 123
+      WHERE id = 101
+    `).run();
+    const runId = Number(db.prepare(`
+      INSERT INTO runs (session_id, status, input, result, created_at, input_tokens, output_tokens, total_tokens)
+      VALUES (101, 'succeeded', 'hello', 'world', '2026-08-01T00:00:00.000Z', 100, 23, 123)
+    `).run().lastInsertRowid);
+    db.prepare(`
+      INSERT INTO events (run_id, seq, type, content_json, created_at)
+      VALUES (?, 1, 'message', '{"text":"world"}', '2026-08-01T00:00:00.000Z')
+    `).run(runId);
+    const providerSessionPath = join(root, "agents", String(1), "provider-home", "codex", "sessions", "101");
+    mkdirSync(providerSessionPath, { recursive: true });
     const scheduler = new SessionCleanupScheduler({
       sessionManager: manager,
       retentionMs: 7 * 24 * 60 * 60 * 1000,
@@ -62,12 +76,21 @@ describe("SessionCleanupScheduler", () => {
 
     await scheduler.runCleanup();
 
-    expect(manager.get(101)).toBeUndefined();
+    expect(manager.get(101)).toMatchObject({
+      id: 101,
+      providerSessionId: null,
+      storageCleanedAt: "2026-08-24T00:00:00.000Z",
+      usage: { inputTokens: 100, outputTokens: 23, totalTokens: 123 }
+    });
     expect(manager.get(102)?.status).toBe("idle");
     expect(manager.get(103)?.status).toBe("running");
     expect(existsSync(join(root, "sessions", "101"))).toBe(false);
+    expect(existsSync(providerSessionPath)).toBe(false);
     expect(existsSync(join(root, "sessions", "102"))).toBe(true);
     expect(existsSync(join(root, "sessions", "103"))).toBe(true);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM runs WHERE session_id = 101").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM events WHERE run_id = ?").get(runId)).toEqual({ count: 1 });
+    expect(manager.listExpiredIds("2026-08-24T00:00:00.000Z")).not.toContain(101);
     db.close();
   });
 
@@ -87,7 +110,7 @@ describe("SessionCleanupScheduler", () => {
     db.close();
   });
 
-  it("保留仍被外部接入审计记录引用的会话", async () => {
+  it("清理被外部接入审计记录引用的会话存储但保留关联记录", async () => {
     const { db, manager, root, insertSession } = createHarness();
     insertSession(101, "idle", "2026-08-01T00:00:00.000Z");
     const agent = db.prepare("SELECT id FROM agents ORDER BY id LIMIT 1").get() as { id: number };
@@ -110,8 +133,10 @@ describe("SessionCleanupScheduler", () => {
 
     await scheduler.runCleanup();
 
-    expect(manager.get(101)).toBeDefined();
-    expect(existsSync(join(root, "sessions", "101"))).toBe(true);
+    expect(manager.get(101)).toMatchObject({ storageCleanedAt: "2026-08-24T00:00:00.000Z" });
+    expect(existsSync(join(root, "sessions", "101"))).toBe(false);
+    expect(db.prepare("SELECT session_id FROM integration_conversations WHERE conversation_key = 'ticket-1'").get())
+      .toEqual({ session_id: 101 });
     db.close();
   });
 });

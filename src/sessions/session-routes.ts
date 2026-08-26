@@ -22,6 +22,12 @@ const runHistoryQuerySchema = z.object({
   beforeId: z.coerce.number().int().positive().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20)
 });
+const sessionListQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  query: z.string().trim().max(200).optional(),
+  agentId: z.coerce.number().int().positive().optional()
+});
 
 const sendError = (reply: FastifyReply, statusCode: number, code: string, message: string) =>
   reply.code(statusCode).send({ error: { code, message } });
@@ -46,12 +52,16 @@ const handleError = (reply: FastifyReply, error: unknown) => {
       return sendError(reply, 404, "not_found", "Session not found");
     case "session_busy":
       return sendError(reply, 409, error.code, "Session is running");
+    case "session_storage_cleaned":
+      return sendError(reply, 410, error.code, "Session storage has been cleaned");
     case "session_create_failed":
       return sendError(reply, 500, error.code, "Failed to save session");
     case "runtime_reset_failed":
       return sendError(reply, 500, error.code, "Failed to reset runtime session");
     case "session_delete_failed":
       return sendError(reply, 500, error.code, "Failed to delete session");
+    case "session_cleanup_failed":
+      return sendError(reply, 500, error.code, "Failed to clean session storage");
   }
 };
 
@@ -63,7 +73,15 @@ export const registerSessionRoutes = (
   sessionManager: SessionManager,
   runRepository: RunRepository
 ): void => {
-  app.get("/sessions", () => sessionManager.list());
+  app.get<{ Querystring: { page?: string; pageSize?: string; query?: string; agentId?: string } }>(
+    "/sessions",
+    (request, reply) => {
+      const parsed = sessionListQuerySchema.safeParse(request.query);
+      return parsed.success
+        ? sessionManager.list(parsed.data)
+        : sendError(reply, 400, "invalid_request", "Invalid Session list query");
+    }
+  );
 
   app.post("/sessions", async (request, reply) => {
     const parsed = createSessionSchema.safeParse(request.body);

@@ -497,7 +497,7 @@ curl --fail-with-body \
 | `MAX_CONCURRENT_RUNS` | No | `4` | Maximum concurrently executing runs. |
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | No | `3` | Remote repository check interval. |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | No | `30` | Per-repository preparation timeout. |
-| `SESSION_RETENTION_HOURS` | No | `168` | Retention for idle sessions. Cleanup runs hourly; set to `0` to disable it. Sessions referenced by external-integration audit records are retained. |
+| `SESSION_RETENTION_HOURS` | No | `168` | Retention for large idle-session storage. Hourly cleanup removes the workspace, browser data, and native provider conversation while retaining Session, Run, event, integration, and token-usage records. Set to `0` to disable it. |
 | `DISPLAY` / `XAUTHORITY` | Browser use | None | Desktop/X display for headed browsers. |
 
 On first startup, the server creates `DATA_DIR/secret.key` with mode `0600`. The AES-256-GCM master key encrypts MCP secrets, endpoint fixed values, Webhook credentials, and sensitive session parameters. Back it up together with the SQLite database.

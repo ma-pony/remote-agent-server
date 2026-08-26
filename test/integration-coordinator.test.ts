@@ -119,7 +119,7 @@ describe("IntegrationCoordinator", () => {
 
     expect(second.id).toBe(first.id);
     expect(first.effectivePrompt).toBe("Process this ticket.\n\n处理工单");
-    expect(sessionManager.list()).toHaveLength(1);
+    expect(sessionManager.list({ page: 1, pageSize: 20 }).items).toHaveLength(1);
     expect(db.prepare("SELECT count(*) AS count FROM runs").get()).toEqual({ count: 0 });
     db.close();
   });
@@ -184,7 +184,22 @@ describe("IntegrationCoordinator", () => {
     }));
 
     expect(repeated.id).toBe(first.id);
-    expect(sessionManager.list()).toHaveLength(1);
+    expect(sessionManager.list({ page: 1, pageSize: 20 }).items).toHaveLength(1);
+    db.close();
+  });
+
+  it("外部对话的旧 Session 存储已清理时创建新 Session 继续接收任务", async () => {
+    const { db, endpoint, coordinator, sessionManager, store } = createHarness();
+    const first = await coordinator.submit(endpoint, request("req-1", "ticket-2084", "第一次处理"));
+    db.prepare("UPDATE sessions SET storage_cleaned_at = ? WHERE id = ?")
+      .run("2026-08-24T00:00:00.000Z", first.sessionId);
+
+    const second = await coordinator.submit(endpoint, request("req-2", "ticket-2084", "继续处理"));
+
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(sessionManager.list({ page: 1, pageSize: 20 }).total).toBe(2);
+    expect(store.getConversation(first.conversationId!)).toMatchObject({ status: "ended", sessionId: first.sessionId });
+    expect(store.getConversation(second.conversationId!)).toMatchObject({ status: "active", sessionId: second.sessionId });
     db.close();
   });
 

@@ -7,7 +7,7 @@ import type Database from "better-sqlite3";
 
 import type { AgentManager } from "../agents/agent-manager.js";
 import { insertedId } from "../db.js";
-import type { Agent, Provider, Session, SessionListItem, SessionStatus, TokenUsageTotals } from "../domain.js";
+import type { Agent, Page, Provider, Session, SessionListItem, SessionStatus, TokenUsageTotals } from "../domain.js";
 import { McpManager } from "../mcp/mcp-manager.js";
 import { SecretStore } from "../mcp/secret-store.js";
 import type { SessionMcpStatus } from "../mcp/mcp-types.js";
@@ -17,6 +17,10 @@ import {
 } from "../project-environments/project-environment-commands.js";
 import { ProjectEnvironmentStore } from "../project-environments/project-environment-store.js";
 import type { AgentRuntime } from "../runtime/agent-runtime.js";
+import {
+  SystemProviderSessionCleaner,
+  type ProviderSessionCleaner
+} from "../runtime/provider-session-cleaner.js";
 import { WorkspaceCreateError, type WorkspaceManager } from "../workspaces/workspace-manager.js";
 
 type SessionRow = {
@@ -25,6 +29,7 @@ type SessionRow = {
   title: string;
   status: SessionStatus;
   provider_session_id: string | null;
+  storage_cleaned_at: string | null;
   workspace_path: string;
   project_environment_revision_id: number | null;
   instructions_snapshot: string;
@@ -55,6 +60,7 @@ const toSession = (row: SessionRow): Session => ({
   title: row.title,
   status: row.status,
   providerSessionId: row.provider_session_id,
+  storageCleanedAt: row.storage_cleaned_at,
   workspacePath: row.workspace_path,
   projectEnvironmentRevisionId: row.project_environment_revision_id,
   instructionsSnapshot: row.instructions_snapshot,
@@ -99,10 +105,11 @@ export type CreateSessionInput = {
 export type SessionWithMcpStatus = Session & SessionMcpStatus;
 export type SessionListItemWithMcpStatus = SessionListItem & SessionMcpStatus;
 export type SessionRuntimeContext = { agent: Agent; session: Session };
+export type ListSessionsInput = { page: number; pageSize: number; query?: string; agentId?: number };
 
 export class SessionManagerError extends Error {
   constructor(
-    readonly code: "agent_not_found" | "agent_disabled" | "project_environment_unavailable" | "session_not_found" | "session_busy" | "session_create_failed" | "runtime_reset_failed" | "session_delete_failed",
+    readonly code: "agent_not_found" | "agent_disabled" | "project_environment_unavailable" | "session_not_found" | "session_busy" | "session_storage_cleaned" | "session_create_failed" | "runtime_reset_failed" | "session_delete_failed" | "session_cleanup_failed",
     options?: ErrorOptions
   ) {
     super(code, options);
@@ -120,6 +127,7 @@ export type SessionManagerDependencies = {
   projectEnvironmentCommands?: ProjectEnvironmentCommands;
   projectPrepareTimeoutMs?: number;
   mcpManager?: McpManager;
+  providerSessionCleaner?: ProviderSessionCleaner;
 };
 
 const ENVIRONMENT_PREPARED_MARKER = ".project-environment-prepared-v1";
@@ -160,6 +168,7 @@ export class SessionManager {
   private readonly projectEnvironmentCommands: ProjectEnvironmentCommands;
   private readonly projectPrepareTimeoutMs: number;
   private readonly mcpManager: McpManager;
+  private readonly providerSessionCleaner: ProviderSessionCleaner;
 
   constructor({
     db,
@@ -171,7 +180,8 @@ export class SessionManager {
     projectEnvironmentRevisionCleaner,
     projectEnvironmentCommands,
     projectPrepareTimeoutMs,
-    mcpManager
+    mcpManager,
+    providerSessionCleaner
   }: SessionManagerDependencies) {
     this.db = db;
     this.dataDir = dataDir;
@@ -183,6 +193,7 @@ export class SessionManager {
     this.projectEnvironmentCommands = projectEnvironmentCommands ?? new SystemProjectEnvironmentCommands();
     this.projectPrepareTimeoutMs = projectPrepareTimeoutMs ?? DEFAULT_PROJECT_PREPARE_TIMEOUT_MS;
     this.mcpManager = mcpManager ?? new McpManager({ db, secrets: SecretStore.open({ dataDir }) });
+    this.providerSessionCleaner = providerSessionCleaner ?? new SystemProviderSessionCleaner(dataDir);
   }
 
   /**
@@ -263,6 +274,7 @@ export class SessionManager {
       title: input.title,
       status: "idle",
       providerSessionId: null,
+      storageCleanedAt: null,
       workspacePath: workspace.workspacePath,
       projectEnvironmentRevisionId: revision.id,
       instructionsSnapshot: agent.instructions,
@@ -272,18 +284,9 @@ export class SessionManager {
     });
   }
 
-  /** Lists persisted Sessions with the newest first. */
-  list(): SessionListItemWithMcpStatus[] {
-    const rows = this.db.prepare(`
-      SELECT session.*,
-        agent.name AS agent_name,
-        agent.provider AS agent_provider,
-        environment.name AS project_environment_name,
-        endpoint.id AS integration_endpoint_id,
-        endpoint.name AS integration_endpoint_name,
-        endpoint.slug AS integration_endpoint_slug,
-        conversation.conversation_key AS integration_conversation_key,
-        latest_task.request_id AS integration_latest_request_id
+  /** Lists one page of persisted Sessions with the newest first. */
+  list(input: ListSessionsInput): Page<SessionListItemWithMcpStatus> {
+    const joins = `
       FROM sessions session
       JOIN agents agent ON agent.id = session.agent_id
       LEFT JOIN project_environment_revisions revision
@@ -304,11 +307,50 @@ export class SessionManager {
       )
       LEFT JOIN integration_endpoints endpoint
         ON endpoint.id = COALESCE(latest_task.endpoint_id, conversation.endpoint_id)
+    `;
+    const clauses: string[] = [];
+    const parameters: Array<string | number> = [];
+    if (input.agentId !== undefined) {
+      clauses.push("session.agent_id = ?");
+      parameters.push(input.agentId);
+    }
+    const query = input.query?.trim().toLowerCase();
+    if (query !== undefined && query !== "") {
+      clauses.push(`
+        LOWER(
+          session.title || ' ' || CAST(session.id AS TEXT) || ' ' || agent.name || ' ' || agent.provider || ' ' ||
+          COALESCE(environment.name, '') || ' ' || COALESCE(endpoint.name, '') || ' ' || COALESCE(endpoint.slug, '') || ' ' ||
+          COALESCE(conversation.conversation_key, '') || ' ' || COALESCE(latest_task.request_id, '')
+        ) LIKE ?
+      `);
+      parameters.push(`%${query}%`);
+    }
+    const where = clauses.length === 0 ? "" : `WHERE ${clauses.join(" AND ")}`;
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count ${joins} ${where}`).get(...parameters) as { count: number }).count;
+    const rows = this.db.prepare(`
+      SELECT session.*,
+        agent.name AS agent_name,
+        agent.provider AS agent_provider,
+        environment.name AS project_environment_name,
+        endpoint.id AS integration_endpoint_id,
+        endpoint.name AS integration_endpoint_name,
+        endpoint.slug AS integration_endpoint_slug,
+        conversation.conversation_key AS integration_conversation_key,
+        latest_task.request_id AS integration_latest_request_id
+      ${joins}
+      ${where}
       ORDER BY session.created_at DESC, session.id DESC
-    `).all() as SessionListRow[];
+      LIMIT ? OFFSET ?
+    `).all(...parameters, input.pageSize, (input.page - 1) * input.pageSize) as SessionListRow[];
     const sessions = rows.map(toSessionListItem);
     const statuses = this.mcpManager.getSessionsStatus(sessions.map(({ id, agentId }) => ({ id, agentId })));
-    return sessions.map((session) => ({ ...session, ...statuses.get(session.id)! }));
+    return {
+      items: sessions.map((session) => ({ ...session, ...statuses.get(session.id)! })),
+      page: input.page,
+      pageSize: input.pageSize,
+      total,
+      totalPages: Math.ceil(total / input.pageSize)
+    };
   }
 
   /**
@@ -324,6 +366,7 @@ export class SessionManager {
     if (!this.db.inTransaction) throw new Error("session_mcp_transaction_required");
     const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
     if (row === undefined) throw new SessionManagerError("session_not_found");
+    if (row.storage_cleaned_at !== null) throw new SessionManagerError("session_storage_cleaned");
     if (row.status !== "running") throw new SessionManagerError("session_busy");
 
     const normalized = this.mcpManager.normalizeSessionValues(row.agent_id, values, true);
@@ -336,6 +379,7 @@ export class SessionManager {
     return this.inImmediateTransaction(() => {
       const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
       if (row === undefined) throw new SessionManagerError("session_not_found");
+      if (row.storage_cleaned_at !== null) throw new SessionManagerError("session_storage_cleaned");
       const active = this.db.prepare(
         "SELECT 1 FROM runs WHERE session_id = ? AND status IN ('queued', 'running') LIMIT 1"
       ).get(id);
@@ -368,13 +412,11 @@ export class SessionManager {
   listExpiredIds(cutoff: string): number[] {
     const rows = this.db.prepare(`
       SELECT id FROM sessions
-      WHERE status = 'idle' AND updated_at < ?
+      WHERE status = 'idle' AND storage_cleaned_at IS NULL AND updated_at < ?
         AND NOT EXISTS (
           SELECT 1 FROM runs
           WHERE session_id = sessions.id AND status IN ('queued', 'running')
         )
-        AND NOT EXISTS (SELECT 1 FROM integration_conversations WHERE session_id = sessions.id)
-        AND NOT EXISTS (SELECT 1 FROM integration_tasks WHERE session_id = sessions.id)
       ORDER BY updated_at ASC, id ASC
     `).all(cutoff) as Array<{ id: number }>;
     return rows.map(({ id }) => id);
@@ -386,6 +428,7 @@ export class SessionManager {
   getRuntimeContext(id: number): SessionRuntimeContext {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
+    if (session.storageCleanedAt !== null) throw new SessionManagerError("session_storage_cleaned");
     const agent = this.agentManager.get(session.agentId);
     if (agent === undefined) throw new SessionManagerError("agent_not_found");
     if (!agent.enabled) throw new SessionManagerError("agent_disabled");
@@ -436,6 +479,7 @@ export class SessionManager {
   async resetProviderSession(id: number): Promise<Session> {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
+    if (session.storageCleanedAt !== null) throw new SessionManagerError("session_storage_cleaned");
 
     const agent = this.agentManager.get(session.agentId);
     if (agent === undefined) throw new SessionManagerError("agent_not_found");
@@ -487,6 +531,20 @@ export class SessionManager {
     }
 
     try {
+      const agent = this.agentManager.get(session.agentId);
+      if (agent !== undefined) {
+        await this.providerSessionCleaner.purge({
+          agentId: agent.id,
+          provider: agent.provider,
+          sessionId: session.id,
+          providerSessionId: session.providerSessionId
+        });
+      }
+    } catch {
+      // Provider cleanup is best-effort and must not block deletion of local resources.
+    }
+
+    try {
       await this.workspaceManager.deleteSession(id);
     } catch (error) {
       this.releaseDeleteClaim(id, true, error);
@@ -525,6 +583,71 @@ export class SessionManager {
         console.error(error);
       }
     }
+  }
+
+  /** Releases Workspace and Provider conversation storage while retaining the Session and its statistics. */
+  async cleanupStorage(id: number, cleanedAt = new Date().toISOString()): Promise<void> {
+    const session = this.get(id);
+    if (session === undefined) throw new SessionManagerError("session_not_found");
+    if (session.storageCleanedAt !== null) return;
+    const agent = this.agentManager.get(session.agentId);
+    if (agent === undefined) throw new SessionManagerError("agent_not_found");
+    this.claimForStorageCleanup(id);
+
+    try {
+      await this.runtime.forgetSession(id);
+      await this.providerSessionCleaner.purge({
+        agentId: agent.id,
+        provider: agent.provider,
+        sessionId: session.id,
+        providerSessionId: session.providerSessionId
+      });
+      await this.workspaceManager.deleteSession(id);
+      const updated = this.db.prepare(`
+        UPDATE sessions
+        SET status = 'idle', provider_session_id = NULL, storage_cleaned_at = ?
+        WHERE id = ? AND status = 'running' AND storage_cleaned_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM runs
+            WHERE session_id = sessions.id AND status IN ('queued', 'running')
+          )
+      `).run(cleanedAt, id);
+      if (updated.changes !== 1) throw new Error("session_cleanup_claim_lost");
+    } catch (error) {
+      try {
+        this.db.prepare(`
+          UPDATE sessions SET status = 'idle'
+          WHERE id = ? AND status = 'running' AND storage_cleaned_at IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM runs
+              WHERE session_id = sessions.id AND status IN ('queued', 'running')
+            )
+        `).run(id);
+      } catch (releaseError) {
+        throw new SessionManagerError("session_cleanup_failed", {
+          cause: new AggregateError([error, releaseError], "Session storage cleanup and claim release failed")
+        });
+      }
+      throw new SessionManagerError("session_cleanup_failed", { cause: error });
+    }
+  }
+
+  private claimForStorageCleanup(id: number): void {
+    this.inImmediateTransaction(() => {
+      const result = this.db.prepare(`
+        UPDATE sessions SET status = 'running'
+        WHERE id = ? AND status = 'idle' AND storage_cleaned_at IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM runs
+            WHERE session_id = sessions.id AND status IN ('queued', 'running')
+          )
+      `).run(id);
+      if (result.changes === 1) return;
+      const session = this.get(id);
+      if (session === undefined) throw new SessionManagerError("session_not_found");
+      if (session.storageCleanedAt !== null) return;
+      throw new SessionManagerError("session_busy");
+    });
   }
 
   private claimForDelete(id: number): void {

@@ -25,6 +25,12 @@ const session = {
 const response = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), {
   status, headers: { "content-type": "application/json" }
 });
+const sessionPage = (
+  items: unknown[],
+  overrides: Partial<{ page: number; pageSize: number; total: number; totalPages: number }> = {}
+) => ({
+  items, page: 1, pageSize: 100, total: items.length, totalPages: items.length === 0 ? 0 : 1, ...overrides
+});
 
 beforeEach(() => {
   sessionStorage.setItem("apiToken", "secret-token");
@@ -42,7 +48,9 @@ it("Agent MCP 独立页面展示服务器和连接检查", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) {
+      return response(sessionPage([session]));
+    }
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
     if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
@@ -82,7 +90,7 @@ it("MCP 列表可选择只删除当前配置或整个共享组", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/sessions") return response([]);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([]));
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response(servers);
     if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
@@ -109,7 +117,7 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([session]));
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
     if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
@@ -128,12 +136,39 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
   await waitFor(() => expect(checkBody).toEqual({ sessionId: session.id }));
 });
 
+it("MCP 检查选择器加载 Agent 的全部有效 Session", async () => {
+  const olderSession = { ...session, id: 101, title: "第二页租户" };
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) {
+      return response(sessionPage([session], { total: 101, totalPages: 2 }));
+    }
+    if (url === `/api/sessions?page=2&pageSize=100&agentId=${agent.id}`) {
+      return response(sessionPage([olderSession], { page: 2, total: 101, totalPages: 2 }));
+    }
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+
+  expect(await screen.findByRole("option", { name: olderSession.title })).toBeInTheDocument();
+  expect(fetchMock).toHaveBeenCalledWith(
+    `/api/sessions?page=2&pageSize=100&agentId=${agent.id}`,
+    expect.objectContaining({ signal: expect.any(AbortSignal) })
+  );
+});
+
 it("点击工具数量后实时检查并展示全部工具", async () => {
   const checkedServer = { ...server, lastCheckStatus: "passed", lastToolCount: 2 };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([session]));
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([checkedServer]);
     if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
@@ -163,7 +198,7 @@ it("工具说明默认单行折叠，并可独立展开和收起", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([session]));
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([checkedServer]);
     if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
@@ -205,7 +240,7 @@ it("可在工具列表中选择当前 Agent 暴露的 MCP 工具", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/sessions") return response([session]);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([session]));
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([currentServer]);
     if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
@@ -246,7 +281,7 @@ it("从共享 MCP 区域一键添加并启用", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/sessions") return response([]);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([]));
     if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response(installed ? [{ ...server, id: 9, name: shared.name }] : []);
     if (url === `/api/agents/${agent.id}/mcp-catalog`) return response(installed ? [] : [shared]);
@@ -284,7 +319,7 @@ it("从当前 Provider 的系统配置中发现并导入 MCP", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/sessions") return response([]);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([]));
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([]);
     if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
     if (url === `/api/agents/${agent.id}/system-mcp-catalog`) {
@@ -446,7 +481,7 @@ it("编辑时可保留未回显的敏感值", async () => {
       return response({ ...server, url: "https://example.test/mcp", headers: [] });
     }
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/sessions") return response([]);
+    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([]));
     if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });

@@ -111,7 +111,7 @@ export type RunRepositoryDependencies = {
 };
 
 export class RunRepositoryError extends Error {
-  constructor(readonly code: "session_busy" | "run_not_found" | "invalid_run_state" | "invalid_finish_status") {
+  constructor(readonly code: "session_busy" | "session_storage_cleaned" | "run_not_found" | "invalid_run_state" | "invalid_finish_status") {
     super(code);
   }
 }
@@ -143,9 +143,17 @@ export class RunRepository {
     try {
       return this.inImmediateTransaction(() => {
         const claimed = this.db
-          .prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? AND status = ?")
+          .prepare("UPDATE sessions SET status = ?, updated_at = ? WHERE id = ? AND status = ? AND storage_cleaned_at IS NULL")
           .run("running", createdAt, input.sessionId, "idle");
-        if (claimed.changes !== 1) throw new RunRepositoryError("session_busy");
+        if (claimed.changes !== 1) {
+          const session = this.db.prepare("SELECT storage_cleaned_at FROM sessions WHERE id = ?").get(input.sessionId) as
+            | { storage_cleaned_at: string | null }
+            | undefined;
+          if (session?.storage_cleaned_at !== null && session?.storage_cleaned_at !== undefined) {
+            throw new RunRepositoryError("session_storage_cleaned");
+          }
+          throw new RunRepositoryError("session_busy");
+        }
         const id = insertedId(this.db
           .prepare("INSERT INTO runs (session_id, status, input, created_at) VALUES (?, ?, ?, ?)")
           .run(input.sessionId, "queued", input.input, createdAt));

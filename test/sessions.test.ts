@@ -136,18 +136,40 @@ describe("Session API", () => {
     db.close();
   });
 
-  it("列表按创建时间倒序返回最新会话", async () => {
+  it("列表按创建时间倒序分页，并在全部会话中搜索", async () => {
     const { app, db } = await createTestApp();
     const agent = await createAgent(app);
-    const older = await createSession(app, agent.id);
-    const newer = await createSession(app, agent.id);
-    db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-08-18T00:00:00.000Z", older.id);
-    db.prepare("UPDATE sessions SET created_at = ? WHERE id = ?").run("2026-08-19T00:00:00.000Z", newer.id);
+    const ids: number[] = [];
+    for (let index = 1; index <= 23; index += 1) {
+      const session = await createSession(app, agent.id);
+      ids.push(session.id);
+      db.prepare("UPDATE sessions SET title = ?, created_at = ? WHERE id = ?").run(
+        index === 2 ? "跨页命中" : `会话 ${index}`,
+        `2026-08-${String(index).padStart(2, "0")}T00:00:00.000Z`,
+        session.id
+      );
+    }
 
-    const response = await app.inject({ method: "GET", url: "/api/sessions", headers: authHeaders() });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/sessions?page=2&pageSize=10",
+      headers: authHeaders()
+    });
 
     expect(response.statusCode).toBe(200);
-    expect((response.json() as Array<{ id: number }>).map(({ id }) => id)).toEqual([newer.id, older.id]);
+    expect(response.json()).toMatchObject({ page: 2, pageSize: 10, total: 23, totalPages: 3 });
+    expect((response.json() as { items: Array<{ id: number }> }).items.map(({ id }) => id))
+      .toEqual(ids.toReversed().slice(10, 20));
+
+    const searched = await app.inject({
+      method: "GET",
+      url: "/api/sessions?page=1&pageSize=10&query=%E8%B7%A8%E9%A1%B5",
+      headers: authHeaders()
+    });
+
+    expect(searched.statusCode).toBe(200);
+    expect(searched.json()).toMatchObject({ total: 1, totalPages: 1 });
+    expect((searched.json() as { items: Array<{ id: number }> }).items.map(({ id }) => id)).toEqual([ids[1]]);
   });
 
   it("列表返回可区分外部接入会话的摘要和累计 Token", async () => {
@@ -180,8 +202,8 @@ describe("Session API", () => {
     const response = await app.inject({ method: "GET", url: "/api/sessions", headers: authHeaders() });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual([
-      expect.objectContaining({
+    expect(response.json()).toMatchObject({
+      items: [expect.objectContaining({
         id: session.id,
         agentName: "Codex",
         agentProvider: "codex",
@@ -194,8 +216,12 @@ describe("Session API", () => {
           conversationKey: "ticket-2084",
           latestRequestId: "dispatch-2084-2"
         }
-      })
-    ]);
+      })],
+      page: 1,
+      pageSize: 20,
+      total: 1,
+      totalPages: 1
+    });
   });
 
   it("列表批量计算 MCP 状态而不逐条查询 Session", async () => {
@@ -208,7 +234,7 @@ describe("Session API", () => {
     const response = await app.inject({ method: "GET", url: "/api/sessions", headers: authHeaders() });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toHaveLength(2);
+    expect((response.json() as { items: unknown[] }).items).toHaveLength(2);
     expect(perSession).not.toHaveBeenCalled();
   });
 
@@ -248,6 +274,33 @@ describe("Session API", () => {
     expect(older.json()).toEqual({
       items: runIds.slice(0, 5).map((id, index) => expect.objectContaining({ id, input: `run-${index + 1}` })),
       hasMore: false
+    });
+  });
+
+  it("已清理存储的会话保留详情但拒绝创建新 Run", async () => {
+    const { app, db } = await createTestApp();
+    const agent = await createAgent(app);
+    const session = await createSession(app, agent.id);
+    db.prepare("UPDATE sessions SET storage_cleaned_at = ? WHERE id = ?")
+      .run("2026-08-24T00:00:00.000Z", session.id);
+
+    const detail = await app.inject({
+      method: "GET",
+      url: `/api/sessions/${session.id}`,
+      headers: authHeaders()
+    });
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/sessions/${session.id}/runs`,
+      headers: authHeaders(),
+      payload: { input: "继续处理" }
+    });
+
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject({ storageCleanedAt: "2026-08-24T00:00:00.000Z" });
+    expect(created.statusCode).toBe(410);
+    expect(created.json()).toEqual({
+      error: { code: "session_storage_cleaned", message: "Session storage has been cleaned" }
     });
   });
 
@@ -466,7 +519,7 @@ describe("Session API", () => {
 
     const list = await app.inject({ method: "GET", url: "/api/sessions", headers: authHeaders() });
     expect(list.statusCode).toBe(200);
-    expect(list.json()).toMatchObject([{ id: session.id, title: "修复工单 1332" }]);
+    expect(list.json()).toMatchObject({ items: [{ id: session.id, title: "修复工单 1332" }] });
   });
 
   it("创建 Session 后直接使用项目环境快照并写入就绪标记", async () => {

@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
@@ -13,9 +15,26 @@ import {
   wrapMcpServerWithToolFilter
 } from "../src/mcp/mcp-tool-filter.js";
 import { createMcpToolFilterServer } from "../src/mcp/mcp-tool-filter-process.js";
+import { ManagedStdioClientTransport } from "../src/mcp/managed-stdio-client-transport.js";
 
 const closeCallbacks: Array<() => Promise<void>> = [];
 afterEach(async () => Promise.all(closeCallbacks.splice(0).map((close) => close())));
+
+const processExists = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const waitForProcessExit = async (pid: number, timeoutMs = 3_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (processExists(pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+};
 
 describe("MCP tool filter", () => {
   it("从 Session 工作目录启动开发版代理时仍能加载 tsx", () => {
@@ -79,6 +98,160 @@ describe("MCP tool filter", () => {
         content: [{ type: "text", text: "allowed_tool" }]
       });
     }
+  );
+
+  it.runIf(process.env.REMOTE_AGENT_MCP_PROCESS_TEST === "1")(
+    "关闭过滤器时回收 stdio MCP 的完整进程树",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "remote-agent-mcp-tree-"));
+      const pidFile = join(root, "pids.json");
+      const fixture = fileURLToPath(new URL("./fixtures/mcp-filter-upstream.mjs", import.meta.url));
+      const wrapped = wrapMcpServerWithToolFilter({
+        type: "stdio",
+        name: "fixture-tree",
+        command: process.execPath,
+        args: [fixture],
+        env: [{ name: "MCP_TEST_PID_FILE", value: pidFile }]
+      }, ["allowed_tool"], 30);
+      expect(wrapped.type).toBe("stdio");
+      if (wrapped.type !== "stdio") return;
+
+      const transport = new StdioClientTransport({
+        command: wrapped.command,
+        args: wrapped.args,
+        cwd: tmpdir(),
+        env: {
+          ...getDefaultEnvironment(),
+          ...Object.fromEntries(wrapped.env.map(({ name, value }) => [name, value]))
+        },
+        stderr: "pipe"
+      });
+      const client = new Client({ name: "spawned-tree-test", version: "1.0.0" });
+      await client.connect(transport);
+
+      let pids: { upstream: number; descendant: number } | undefined;
+      await vi.waitFor(async () => {
+        pids = JSON.parse(await readFile(pidFile, "utf8")) as { upstream: number; descendant: number };
+        expect(processExists(pids.upstream)).toBe(true);
+        expect(processExists(pids.descendant)).toBe(true);
+      });
+      closeCallbacks.push(async () => {
+        for (const pid of [pids?.descendant, pids?.upstream]) {
+          if (pid !== undefined && processExists(pid)) {
+            try { process.kill(pid, "SIGKILL"); } catch {}
+          }
+        }
+        await rm(root, { recursive: true, force: true });
+      });
+
+      await client.close();
+      await Promise.all([
+        waitForProcessExit(pids!.upstream),
+        waitForProcessExit(pids!.descendant)
+      ]);
+
+      expect(processExists(pids!.upstream)).toBe(false);
+      expect(processExists(pids!.descendant)).toBe(false);
+    },
+    15_000
+  );
+
+  it.runIf(process.env.REMOTE_AGENT_MCP_PROCESS_TEST === "1")(
+    "stdio MCP 入口异常退出时回收仍存活的孙进程",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "remote-agent-mcp-crash-"));
+      const pidFile = join(root, "pids.json");
+      const fixture = fileURLToPath(new URL("./fixtures/mcp-filter-upstream.mjs", import.meta.url));
+      const wrapped = wrapMcpServerWithToolFilter({
+        type: "stdio",
+        name: "fixture-crash",
+        command: process.execPath,
+        args: [fixture],
+        env: [
+          { name: "MCP_TEST_PID_FILE", value: pidFile },
+          { name: "MCP_TEST_EXIT_AFTER_START", value: "1" }
+        ]
+      }, ["allowed_tool"], 30);
+      expect(wrapped.type).toBe("stdio");
+      if (wrapped.type !== "stdio") return;
+
+      const transport = new StdioClientTransport({
+        command: wrapped.command,
+        args: wrapped.args,
+        cwd: tmpdir(),
+        env: {
+          ...getDefaultEnvironment(),
+          ...Object.fromEntries(wrapped.env.map(({ name, value }) => [name, value]))
+        },
+        stderr: "pipe"
+      });
+      const client = new Client({ name: "spawned-crash-test", version: "1.0.0" });
+      await client.connect(transport);
+
+      let pids: { upstream: number; descendant: number } | undefined;
+      await vi.waitFor(async () => {
+        pids = JSON.parse(await readFile(pidFile, "utf8")) as { upstream: number; descendant: number };
+        expect(processExists(pids.descendant)).toBe(true);
+      });
+      closeCallbacks.push(async () => {
+        await client.close().catch(() => undefined);
+        for (const pid of [pids?.descendant, pids?.upstream]) {
+          if (pid !== undefined && processExists(pid)) {
+            try { process.kill(pid, "SIGKILL"); } catch {}
+          }
+        }
+        await rm(root, { recursive: true, force: true });
+      });
+
+      await Promise.all([
+        waitForProcessExit(pids!.upstream),
+        waitForProcessExit(pids!.descendant)
+      ]);
+
+      expect(processExists(pids!.upstream)).toBe(false);
+      expect(processExists(pids!.descendant)).toBe(false);
+    },
+    10_000
+  );
+
+  it.runIf(process.env.REMOTE_AGENT_MCP_PROCESS_TEST === "1")(
+    "强制终止后进程组仍存活时报告回收失败",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "remote-agent-mcp-stuck-"));
+      const pidFile = join(root, "pids.json");
+      const fixture = fileURLToPath(new URL("./fixtures/mcp-filter-upstream.mjs", import.meta.url));
+      const transport = new ManagedStdioClientTransport({
+        command: process.execPath,
+        args: [fixture],
+        env: { ...getDefaultEnvironment(), MCP_TEST_PID_FILE: pidFile },
+        stderr: "pipe"
+      });
+      await transport.start();
+
+      let pids: { upstream: number; descendant: number } | undefined;
+      await vi.waitFor(async () => {
+        pids = JSON.parse(await readFile(pidFile, "utf8")) as { upstream: number; descendant: number };
+        expect(processExists(pids.upstream)).toBe(true);
+        expect(processExists(pids.descendant)).toBe(true);
+      });
+
+      const kill = process.kill.bind(process);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+        if (pid === -pids!.upstream) return true;
+        return kill(pid, signal);
+      });
+      try {
+        await expect(transport.close()).rejects.toThrow(
+          `MCP process group ${pids!.upstream} did not exit after SIGKILL`
+        );
+      } finally {
+        killSpy.mockRestore();
+        try { kill(-pids!.upstream, "SIGKILL"); } catch {}
+        await waitForProcessExit(pids!.descendant);
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+    10_000
   );
 
   it("只过滤 tools/list 的工具数组并保留完整工具元数据和结果元数据", () => {

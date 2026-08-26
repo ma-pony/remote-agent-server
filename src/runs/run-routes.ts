@@ -46,6 +46,9 @@ const handleRunError = (reply: FastifyReply, error: unknown) => {
   if (error.code === "session_busy") {
     return sendError(reply, 409, error.code, "Session already has an active Run");
   }
+  if (error.code === "session_storage_cleaned") {
+    return sendError(reply, 410, error.code, "Session storage has been cleaned");
+  }
   return sendError(reply, 409, error.code, "Run state changed");
 };
 

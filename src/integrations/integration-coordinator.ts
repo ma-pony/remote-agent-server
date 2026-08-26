@@ -73,27 +73,40 @@ export class IntegrationCoordinator {
       const activeConversation = input.conversationKey === undefined
         ? undefined
         : this.dependencies.store.getActiveConversation(endpoint.id, input.conversationKey);
-      const createdSession = activeConversation === undefined
-        ? await this.dependencies.sessionManager.create({
+      const activeSession = activeConversation === undefined
+        ? undefined
+        : this.dependencies.sessionManager.get(activeConversation.sessionId);
+      const activeConversationReusable = activeConversation !== undefined
+        && activeSession !== undefined
+        && activeSession.storageCleanedAt == null;
+      const createdSession = activeConversationReusable
+        ? undefined
+        : await this.dependencies.sessionManager.create({
           agentId: endpoint.agentId,
           title: endpoint.name,
           mcpParameters: resolvedParameters
-        })
-        : undefined;
+        });
 
       try {
         const task = this.inImmediateTransaction(() => {
           const duplicate = this.idempotentTask(endpoint.id, input.requestId, fingerprint);
           if (duplicate !== undefined) return duplicate;
 
-          const conversation = input.conversationKey === undefined
+          let conversation = input.conversationKey === undefined
             ? undefined
-            : this.dependencies.store.getActiveConversation(endpoint.id, input.conversationKey)
-              ?? this.dependencies.store.createConversationInTransaction({
-                endpointId: endpoint.id,
-                conversationKey: input.conversationKey,
-                sessionId: createdSession!.id
-              });
+            : this.dependencies.store.getActiveConversation(endpoint.id, input.conversationKey);
+          if (conversation !== undefined && !activeConversationReusable
+            && activeConversation?.id === conversation.id && createdSession !== undefined) {
+            this.dependencies.store.endConversationInTransaction(conversation.id);
+            conversation = undefined;
+          }
+          if (conversation === undefined && input.conversationKey !== undefined) {
+            conversation = this.dependencies.store.createConversationInTransaction({
+              endpointId: endpoint.id,
+              conversationKey: input.conversationKey,
+              sessionId: createdSession!.id
+            });
+          }
           const sessionId = conversation?.sessionId ?? createdSession!.id;
           const createdTask = this.dependencies.store.createTaskInTransaction({
             endpointId: endpoint.id,

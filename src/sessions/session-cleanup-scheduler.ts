@@ -6,14 +6,14 @@ export interface SessionCleanupSchedulerLike {
   stop(): void;
 }
 
-/** Periodically removes idle Sessions after their configured retention period. */
+/** Periodically releases large storage owned by idle Sessions after their retention period. */
 export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
   private timer: ReturnType<typeof setInterval> | undefined;
   private stopped = false;
   private running: Promise<void> | undefined;
 
   constructor(private readonly dependencies: {
-    sessionManager: Pick<SessionManager, "listExpiredIds" | "delete">;
+    sessionManager: Pick<SessionManager, "listExpiredIds" | "cleanupStorage">;
     retentionMs: number;
     intervalMs: number;
     now?: () => Date;
@@ -43,7 +43,7 @@ export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
     const cutoff = new Date(now.getTime() - this.dependencies.retentionMs).toISOString();
     for (const id of this.dependencies.sessionManager.listExpiredIds(cutoff)) {
       try {
-        await this.dependencies.sessionManager.delete(id);
+        await this.dependencies.sessionManager.cleanupStorage(id, now.toISOString());
       } catch (error) {
         if (error instanceof SessionManagerError && (error.code === "session_not_found" || error.code === "session_busy")) {
           continue;

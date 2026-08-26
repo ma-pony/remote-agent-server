@@ -1,5 +1,17 @@
+import { spawn } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+
 import { Server } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+
+const pidFile = process.env.MCP_TEST_PID_FILE;
+if (pidFile !== undefined) {
+  const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], {
+    stdio: ["ignore", "inherit", "inherit"]
+  });
+  await writeFile(pidFile, JSON.stringify({ upstream: process.pid, descendant: descendant.pid }));
+}
+if (process.env.MCP_TEST_EXIT_AFTER_START === "1") setTimeout(() => process.exit(0), 250);
 
 const server = new Server(
   { name: "filter-test-upstream", version: "1.0.0" },

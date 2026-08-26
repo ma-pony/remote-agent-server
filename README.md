@@ -505,7 +505,7 @@ curl --fail-with-body \
 | `MAX_CONCURRENT_RUNS` | 否 | `4` | 同时执行的 Run 数量上限。 |
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | 否 | `3` | 远程仓库检查间隔。 |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | 否 | `30` | 单个仓库准备命令超时时间。 |
-| `SESSION_RETENTION_HOURS` | 否 | `168` | 空闲 Session 的保留时间；服务每小时清理一次，设为 `0` 关闭。被外部接入审计记录引用的 Session 不会自动删除。 |
+| `SESSION_RETENTION_HOURS` | 否 | `168` | 空闲 Session 的大体积存储保留时间；服务每小时清理 Workspace、浏览器数据和执行器原生会话，但继续保留 Session、Run、事件、外部接入记录与 Token 统计。设为 `0` 关闭。 |
 | `DISPLAY` / `XAUTHORITY` | 浏览器场景 | 无 | 有头浏览器使用的桌面或 X display。 |
 
 首次启动会创建权限为 `0600` 的 `DATA_DIR/secret.key`。该 AES-256-GCM 主密钥用于加密 MCP 敏感值、端点固定参数、Webhook 凭证和 Session 敏感参数。请把它和 SQLite 数据库一起备份。

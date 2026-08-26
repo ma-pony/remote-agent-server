@@ -483,6 +483,7 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
       title TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('idle', 'running')),
       provider_session_id TEXT,
+      storage_cleaned_at TEXT,
       workspace_path TEXT NOT NULL UNIQUE,
       project_environment_revision_id INTEGER REFERENCES project_environment_revisions(id),
       instructions_snapshot TEXT NOT NULL DEFAULT '',
@@ -704,6 +705,14 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
   if (!hasColumn("sessions", "instructions_snapshot")) {
     db.exec("ALTER TABLE sessions ADD COLUMN instructions_snapshot TEXT NOT NULL DEFAULT ''");
   }
+  if (!hasColumn("sessions", "storage_cleaned_at")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN storage_cleaned_at TEXT");
+  }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS sessions_storage_cleanup_due
+    ON sessions(updated_at, id)
+    WHERE status = 'idle' AND storage_cleaned_at IS NULL
+  `);
   for (const column of [
     "input_tokens",
     "output_tokens",
