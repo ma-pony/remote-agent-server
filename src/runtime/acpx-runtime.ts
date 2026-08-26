@@ -20,6 +20,7 @@ import {
 
 import type { AppConfig } from "../config.js";
 import type { Provider, TokenUsage, TokenUsageTotals } from "../domain.js";
+import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 import { SkillManager } from "../skills/skill-manager.js";
 import type {
   AgentRuntime,
@@ -32,6 +33,7 @@ import type {
   RuntimeTurnResult
 } from "./agent-runtime.js";
 import { settleBestEffort } from "./bounded-operation.js";
+import { ProviderExtensionProjector } from "./provider-extension-projector.js";
 
 export const ACP_AGENT = {
   claude_code: "claude",
@@ -172,7 +174,8 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
   constructor(
     private readonly dataDir: string,
     private readonly skillManager: SkillManager,
-    private readonly providerHomePreparations: Map<string, Promise<void>>
+    private readonly providerHomePreparations: Map<string, Promise<void>>,
+    private readonly extensionProjector?: ProviderExtensionProjector
   ) {}
 
   register(target: RuntimeTarget): string {
@@ -199,6 +202,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const home = join(agentHome, "sessions", String(target.sessionId));
       const hostHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
       await this.prepareProviderHome(hostHome, home);
+      await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home });
       const disabledSkills = this.skillManager.hostSkillFiles().map((path) => [
         "[[skills.config]]",
         `path = ${JSON.stringify(path)}`,
@@ -215,6 +219,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const home = join(providerHome, "claude");
       const hostHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
       await this.prepareProviderHome(hostHome, home);
+      await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home });
       environment.push(`CLAUDE_CONFIG_DIR=${shellQuote(home)}`);
     }
     this.commands.set(agentName, `env ${environment.join(" ")} ${acpCommand(target.provider)}`);
@@ -418,6 +423,7 @@ const configurationFingerprint = (input: RuntimeSessionInput): string => createH
     instructions: input.instructions,
     memory: input.memory,
     skillsRevision: input.skillsRevision ?? "",
+    extensionsRevision: input.extensionsRevision ?? "",
     mcpServers: input.mcpServers
   }))
   .digest("hex");
@@ -433,8 +439,17 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private shutdownPromise: Promise<void> | undefined;
   private readonly shutdownFailures: RuntimeShutdownFailure[] = [];
   private readonly providerHomePreparations = new Map<string, Promise<void>>();
+  private readonly extensionProjector: ProviderExtensionProjector | undefined;
 
-  constructor(private readonly config: AppConfig, private readonly skillManager = new SkillManager({ dataDir: config.dataDir })) {}
+  constructor(
+    private readonly config: AppConfig,
+    private readonly skillManager = new SkillManager({ dataDir: config.dataDir }),
+    providerExtensionManager?: ProviderExtensionManager
+  ) {
+    this.extensionProjector = providerExtensionManager === undefined
+      ? undefined
+      : new ProviderExtensionProjector(providerExtensionManager);
+  }
 
   async ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession> {
     this.assertRunning();
@@ -457,7 +472,12 @@ export class AcpxAgentRuntime implements AgentRuntime {
       existing.registry.unregister(existing.target);
     }
 
-    const registry = new RemoteAgentRegistry(this.config.dataDir, this.skillManager, this.providerHomePreparations);
+    const registry = new RemoteAgentRegistry(
+      this.config.dataDir,
+      this.skillManager,
+      this.providerHomePreparations,
+      this.extensionProjector
+    );
     const agent = registry.register({
       provider: input.provider,
       agentId: input.agentId,
@@ -649,7 +669,12 @@ export class AcpxAgentRuntime implements AgentRuntime {
     this.assertRunning();
     const sessionId = 0;
     assertTarget(provider, agentId, sessionId);
-    const registry = new RemoteAgentRegistry(this.config.dataDir, this.skillManager, this.providerHomePreparations);
+    const registry = new RemoteAgentRegistry(
+      this.config.dataDir,
+      this.skillManager,
+      this.providerHomePreparations,
+      this.extensionProjector
+    );
     const probeAgent = registry.register({
       provider,
       agentId,

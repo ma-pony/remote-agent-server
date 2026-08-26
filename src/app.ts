@@ -37,6 +37,8 @@ import {
   type ProjectEnvironmentCheckScheduler
 } from "./project-environments/project-environment-scheduler.js";
 import { ProjectEnvironmentStore } from "./project-environments/project-environment-store.js";
+import { ProviderExtensionManager } from "./provider-extensions/provider-extension-manager.js";
+import { ProviderMcpCatalog } from "./provider-extensions/provider-mcp-catalog.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { SkillProjector } from "./runtime/skill-projector.js";
@@ -70,6 +72,7 @@ export type AppDependencies = {
   sessionCleanupScheduler?: SessionCleanupSchedulerLike;
   mcpManager?: McpManager;
   mcpChecker?: McpChecker;
+  providerExtensionManager?: ProviderExtensionManager;
   integrationStore?: IntegrationStore;
   integrationProjection?: IntegrationProjection;
   webhookDispatcher?: WebhookDispatcher;
@@ -83,14 +86,16 @@ export type AppDependencies = {
 export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const app = Fastify({ forceCloseConnections: true });
   const skillManager = deps.skillManager ?? new SkillManager({ dataDir: deps.config.dataDir });
+  const providerExtensionManager = deps.providerExtensionManager ?? new ProviderExtensionManager({ db: deps.db });
   const secrets = SecretStore.open({ dataDir: deps.config.dataDir });
   const mcpManager = deps.mcpManager ?? new McpManager({
     db: deps.db,
     secrets
   });
   const mcpChecker = deps.mcpChecker ?? new SdkMcpChecker();
+  const providerMcpCatalog = new ProviderMcpCatalog({ db: deps.db, mcpManager });
   const mcpPreparer = new RunMcpPreparer({ manager: mcpManager, checker: mcpChecker });
-  const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config, skillManager);
+  const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config, skillManager, providerExtensionManager);
   const projectEnvironmentStore = deps.projectEnvironmentStore ?? new ProjectEnvironmentStore({ db: deps.db });
   const projectEnvironmentCommands = deps.projectEnvironmentCommands ?? new SystemProjectEnvironmentCommands();
   const agentManager = new AgentManager({
@@ -153,7 +158,15 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     builder: projectEnvironmentBuilder,
     intervalMs: deps.config.projectEnvironmentCheckIntervalMs
   });
-  const executor = new RunExecutor({ runtime, skillProjector, runRepository, eventStore, sessionManager, mcpPreparer });
+  const executor = new RunExecutor({
+    runtime,
+    skillProjector,
+    runRepository,
+    eventStore,
+    sessionManager,
+    mcpPreparer,
+    providerExtensionManager
+  });
   const scheduler = new RunScheduler({
     runRepository,
     executor,
@@ -186,8 +199,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
     api.get("/auth/verify", async (_request, reply) => reply.code(204).send());
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
-    registerAgentRoutes(api, agentManager, skillManager, runRepository);
-    registerMcpRoutes(api, { mcpManager, mcpChecker });
+    registerAgentRoutes(api, agentManager, skillManager, runRepository, providerExtensionManager);
+    registerMcpRoutes(api, { mcpManager, mcpChecker, providerMcpCatalog });
     registerIntegrationAdminRoutes(api, {
       manager: integrationEndpointManager,
       store: integrationStore,

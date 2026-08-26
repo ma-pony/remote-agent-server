@@ -1,10 +1,11 @@
 import { FormEvent, useEffect, useState } from "react";
-import { ArrowLeft, CheckCircle2, ChevronDown, Pencil, Plus, RefreshCw, SlidersHorizontal, Trash2, XCircle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, ChevronDown, Download, Pencil, Plus, RefreshCw, SlidersHorizontal, Trash2, XCircle } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
 
 import {
   api, errorMessage, type AgentMcpServerDetail, type AgentMcpServerSummary,
-  type AgentSessionParameter, type McpValueView, type Session, type SharedMcpServerSummary
+  type AgentSessionParameter, type McpValueView, type ProviderMcpCatalogItem, type Session,
+  type SharedMcpServerSummary
 } from "@/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -76,6 +77,7 @@ export const AgentMcpPage = () => {
   const { id = "" } = useParams();
   const [servers, setServers] = useState<AgentMcpServerSummary[] | null>(null);
   const [catalog, setCatalog] = useState<SharedMcpServerSummary[] | null>(null);
+  const [systemCatalog, setSystemCatalog] = useState<ProviderMcpCatalogItem[] | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [checkSessionId, setCheckSessionId] = useState("");
   const [busy, setBusy] = useState("");
@@ -102,6 +104,9 @@ export const AgentMcpPage = () => {
       setSessions(sessionItems.filter((item) => item.agentId === Number(id)));
     })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    void api<ProviderMcpCatalogItem[]>(`/agents/${id}/system-mcp-catalog`, { signal: controller.signal })
+      .then(setSystemCatalog)
+      .catch(() => { if (!controller.signal.aborted) setSystemCatalog([]); });
     return () => controller.abort();
   }, [id]);
 
@@ -139,6 +144,19 @@ export const AgentMcpPage = () => {
     try {
       await api(`/agents/${id}/mcp-catalog/${server.id}/install`, { method: "POST" });
       await load();
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
+  };
+  const installSystemMcp = async (server: ProviderMcpCatalogItem) => {
+    setBusy(`system-install-${server.id}`); setError("");
+    try {
+      const created = await api<AgentMcpServerSummary>(
+        `/agents/${id}/system-mcp-catalog/${encodeURIComponent(server.id)}/install`,
+        { method: "POST" }
+      );
+      setServers((items) => [...(items ?? []), created]);
+      setSystemCatalog((items) => (items ?? []).map((item) => item.id === server.id
+        ? { ...item, installed: true }
+        : item));
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
   const toggle = async (server: AgentMcpServerSummary) => {
@@ -208,6 +226,7 @@ export const AgentMcpPage = () => {
       <CardContent className="flex flex-col gap-4"><Field><FieldLabel htmlFor="check-session">{text("检查使用的会话", "Session used for checks")}</FieldLabel><NativeSelect id="check-session" className="max-w-sm" value={checkSessionId} onChange={(event) => setCheckSessionId(event.target.value)}><NativeSelectOption value="">{text("不使用会话参数", "Do not use session parameters")}</NativeSelectOption>{sessions.map((session) => <NativeSelectOption key={session.id} value={session.id}>{session.title}</NativeSelectOption>)}</NativeSelect><FieldDescription>{text("只有 MCP 引用了会话参数时才需要选择。", "Select a session only when the MCP configuration references session parameters.")}</FieldDescription></Field>{servers === null ? <Skeleton className="h-36" /> : servers.length === 0 ? <div className="rounded-lg border border-dashed py-10 text-center text-sm text-muted-foreground">{text("尚未配置 MCP。", "No MCP servers configured.")}</div> : <div className="divide-y rounded-lg border">{servers.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><Link className="font-medium hover:underline" to={`/agents/${id}/mcp/${server.id}`}>{server.name}</Link><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant={server.enabled ? "default" : "secondary"}>{server.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge><Badge variant="outline">{server.allowedTools === null ? text("全部工具", "All tools") : text(`已选择 ${server.allowedTools.length} 个工具`, `${server.allowedTools.length} selected tools`)}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{server.lastCheckStatus === null ? text("尚未检查", "Not checked") : server.lastCheckStatus === "passed" ? <>{text("最近检查通过 · ", "Last check passed · ")}<button type="button" className="font-medium underline underline-offset-4 hover:text-foreground" aria-label={text(`查看 ${server.lastToolCount ?? 0} 个工具`, `View ${server.lastToolCount ?? 0} tools`)} disabled={busy !== ""} onClick={() => void showTools(server)}>{text(`${server.lastToolCount ?? 0} 个工具`, `${server.lastToolCount ?? 0} tools`)}</button></> : text("最近检查失败", "Last check failed")}</p></div><div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy !== ""} aria-label={text(`设置 ${server.name} 的工具范围`, `Set tool scope for ${server.name}`)} onClick={() => void showTools(server)}><SlidersHorizontal />{text("工具范围", "Tool scope")}</Button><Button variant="outline" size="sm" asChild><Link aria-label={text(`编辑 ${server.name}`, `Edit ${server.name}`)} to={`/agents/${id}/mcp/${server.id}`}><Pencil />{text("编辑", "Edit")}</Link></Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void toggle(server)}>{server.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void check(server)}><RefreshCw className={busy === `check-${server.id}` ? "animate-spin" : ""} />{text("检查连接", "Check connection")}</Button><AlertDialog><AlertDialogTrigger asChild><Button variant="ghost" size="sm" disabled={busy !== ""} aria-label={text(`删除 ${server.name}`, `Delete ${server.name}`)}><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${server.name}”？`, `Delete “${server.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("仅删除当前配置只影响当前智能体；从所有智能体删除会同时删除共享源和全部副本。", "Deleting only the current configuration affects this agent. Deleting from all agents also removes the shared source and every copy.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="outline" onClick={() => void remove(server, "current")}>{text("仅删除当前", "Current agent only")}</AlertDialogAction><AlertDialogAction variant="destructive" onClick={() => void remove(server, "all")}>{text("从所有智能体删除", "Delete from all agents")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></div>)}</div>}</CardContent>
     </Card>
     <Card><CardHeader><CardTitle>{text("可添加的 MCP", "Available MCP servers")}</CardTitle><CardDescription>{text("其他智能体创建的 MCP。添加后配置独立，可单独编辑或停用。", "MCP servers created by other agents. Installed copies can be edited or disabled independently.")}</CardDescription></CardHeader><CardContent>{catalog === null ? <Skeleton className="h-24" /> : catalog.length === 0 ? <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">{text("所有共享 MCP 均已添加。", "All shared MCP servers are installed.")}</div> : <div className="divide-y rounded-lg border">{catalog.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2"><p className="font-medium">{server.name}</p><Badge variant="outline">{server.transport.toUpperCase()}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{text(`来自 ${server.sourceAgentName}`, `From ${server.sourceAgentName}`)}</p></div><Button size="sm" disabled={busy !== ""} aria-label={text(`添加并启用 ${server.name}`, `Install and enable ${server.name}`)} onClick={() => void install(server)}><Plus />{text("添加并启用", "Install and enable")}</Button></div>)}</div>}</CardContent></Card>
+    <Card><CardHeader><CardTitle>{text("系统配置中的 MCP", "MCP from system configuration")}</CardTitle><CardDescription>{text("从当前执行器的全局配置中发现。导入后成为当前智能体的独立 MCP 配置，运行时不会直接继承系统配置。", "Discovered from the current provider's global configuration. Imported servers become independent Agent MCP configurations; system configuration is never inherited directly at runtime.")}</CardDescription></CardHeader><CardContent>{systemCatalog === null ? <Skeleton className="h-24" /> : systemCatalog.length === 0 ? <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">{text("当前执行器没有可导入的系统 MCP。", "This provider has no system MCP servers to import.")}</div> : <div className="divide-y rounded-lg border">{systemCatalog.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{server.name}</p><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant="secondary">{server.provider === "codex" ? "Codex" : "Claude Code"}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{text(`来自 ${server.provider === "codex" ? "Codex" : "Claude Code"} 系统配置`, `From ${server.provider === "codex" ? "Codex" : "Claude Code"} system configuration`)}</p></div>{server.installed ? <Badge className="self-start sm:self-center" variant="secondary">{text("已导入", "Imported")}</Badge> : <Button size="sm" disabled={busy !== ""} aria-label={text(`导入并启用 ${server.name}`, `Import and enable ${server.name}`)} onClick={() => void installSystemMcp(server)}><Download />{text("导入并启用", "Import and enable")}</Button>}</div>)}</div>}</CardContent></Card>
   </div>;
 };
 

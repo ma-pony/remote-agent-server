@@ -449,6 +449,19 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
       UNIQUE(agent_id, key)
     );
 
+    CREATE TABLE IF NOT EXISTS agent_provider_extensions (
+      agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex')),
+      kind TEXT NOT NULL CHECK (kind IN ('plugin', 'hook')),
+      extension_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      source_fingerprint TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(agent_id, extension_id)
+    );
+
     CREATE TABLE IF NOT EXISTS agent_mcp_values (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       mcp_server_id INTEGER NOT NULL REFERENCES agent_mcp_servers(id) ON DELETE CASCADE,

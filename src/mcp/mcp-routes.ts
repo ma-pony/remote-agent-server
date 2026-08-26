@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import type { McpChecker } from "./mcp-checker.js";
 import { McpManager, McpManagerError } from "./mcp-manager.js";
+import { ProviderMcpCatalog, ProviderMcpCatalogError } from "../provider-extensions/provider-mcp-catalog.js";
 
 const fixedSchema = z.object({
   id: z.number().int().positive().optional(), source: z.literal("fixed"), value: z.string().optional(), secret: z.boolean().optional()
@@ -71,10 +72,17 @@ const handleMcpError = (reply: FastifyReply, error: unknown) => {
   return reply.code(400).send({ error: { code: error.code, message: "Invalid MCP configuration" } });
 };
 
-export type McpRouteDependencies = { mcpManager: McpManager; mcpChecker: McpChecker };
+export type McpRouteDependencies = {
+  mcpManager: McpManager;
+  mcpChecker: McpChecker;
+  providerMcpCatalog: ProviderMcpCatalog;
+};
 
 /** Registers Agent MCP and Agent Session parameter routes. */
-export const registerMcpRoutes = (app: FastifyInstance, { mcpManager, mcpChecker }: McpRouteDependencies): void => {
+export const registerMcpRoutes = (
+  app: FastifyInstance,
+  { mcpManager, mcpChecker, providerMcpCatalog }: McpRouteDependencies
+): void => {
   app.get<{ Params: { agentId: string } }>("/agents/:agentId/mcp-servers", (request, reply) => {
     const agentId = parseId(request.params.agentId);
     if (agentId === undefined) return notFound(reply, "Agent not found");
@@ -104,6 +112,29 @@ export const registerMcpRoutes = (app: FastifyInstance, { mcpManager, mcpChecker
         const server = mcpManager.installFromCatalog(agentId, sourceId);
         return server === undefined ? notFound(reply, "MCP server not found") : reply.code(201).send(server);
       } catch (error) { return handleMcpError(reply, error); }
+    }
+  );
+  app.get<{ Params: { agentId: string } }>("/agents/:agentId/system-mcp-catalog", (request, reply) => {
+    const agentId = parseId(request.params.agentId);
+    if (agentId === undefined) return notFound(reply, "Agent not found");
+    try { return providerMcpCatalog.list(agentId); }
+    catch (error) {
+      if (error instanceof ProviderMcpCatalogError) return notFound(reply, "Agent not found");
+      throw error;
+    }
+  });
+  app.post<{ Params: { agentId: string; sourceId: string } }>(
+    "/agents/:agentId/system-mcp-catalog/:sourceId/install",
+    (request, reply) => {
+      const agentId = parseId(request.params.agentId);
+      if (agentId === undefined) return notFound(reply, "MCP server not found");
+      try {
+        const server = providerMcpCatalog.install(agentId, request.params.sourceId);
+        return server === undefined ? notFound(reply, "MCP server not found") : reply.code(201).send(server);
+      } catch (error) {
+        if (error instanceof ProviderMcpCatalogError) return notFound(reply, "Agent not found");
+        return handleMcpError(reply, error);
+      }
     }
   );
   app.get<{ Params: { agentId: string; id: string } }>("/agents/:agentId/mcp-servers/:id", (request, reply) => {

@@ -29,6 +29,25 @@ export type AgentSkill = {
   available: boolean;
 };
 
+export type ProviderExtensionCatalogItem = {
+  id: string;
+  provider: "codex" | "claude_code";
+  kind: "plugin" | "hook";
+  name: string;
+  description: string;
+  version: string | null;
+  enabled: boolean;
+  available: boolean;
+};
+
+export type ProviderMcpCatalogItem = {
+  id: string;
+  provider: "codex" | "claude_code";
+  name: string;
+  transport: "http" | "stdio";
+  installed: boolean;
+};
+
 export type EnvironmentRepository = {
   id: number;
   projectEnvironmentId: number;

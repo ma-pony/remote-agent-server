@@ -14,7 +14,8 @@ Remote Agent Server 是一个自托管的 Agent 运行服务。它把 Claude Cod
 - **多轮 Agent 对话**：同一 Session 可以连续执行多个 Run，并在 Provider 支持时续接 ACP Session。
 - **完整执行记录**：在 SQLite 中保存用户消息、Agent 输出、工具调用、状态、错误和最终结果。
 - **Skills 管理**：发现本机 Skills、上传 Skill ZIP，并控制每个 Agent 启用的 Skills。
-- **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，并可查看服务器公开的工具。
+- **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
+- **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
 - **外部系统接入**：通过 HTTP 提交异步 Task，支持幂等、查询、SSE、取消、多轮会话和签名 Webhook。
 - **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
 
@@ -33,7 +34,7 @@ Remote Agent Server 是一个自托管的 Agent 运行服务。它把 Claude Cod
 ```text
 外部系统 -> 接入端点 -> Task -> Session -> Run -> Agent
                 |                  |
-                |                  +-> Workspace / Skills / MCP
+                |                  +-> Workspace / Skills / 执行器扩展 / MCP
                 |
                 +-> 状态查询 / Event 查询 / SSE / Webhook
 ```
@@ -41,7 +42,7 @@ Remote Agent Server 是一个自托管的 Agent 运行服务。它把 Claude Cod
 | 对象 | 作用 |
 | --- | --- |
 | 项目环境 | 保存一个或多个 Git 项目及准备完成的依赖，按版本发布。 |
-| Agent | 绑定 Provider、项目环境、Agent 指令、Skills 和 MCP。 |
+| Agent | 绑定 Provider、项目环境、Agent 指令、Skills、执行器扩展和 MCP。 |
 | Session | 一个隔离的 Workspace，也是一段可继续的 Agent 对话。 |
 | Run | Session 中的一次输入和完整执行记录。 |
 | 接入端点 | 其他系统调用服务的认证入口，绑定一个 Agent。 |
@@ -143,7 +144,7 @@ hermes --version
 
 只需选择实际使用的 Provider，在运行服务的系统用户下完成认证和模型配置。
 
-服务启动时读取登录 Shell 的 PATH，并合并当前 Node 目录和进程 PATH。每个 Agent 使用独立的 Provider Home；启动 Codex、Claude Code 或 Hermes 时，服务会复制系统用户的配置、认证、模型、插件和 Skills，但不复制历史会话、缓存、日志和临时运行数据。
+服务启动时读取登录 Shell 的 PATH，并合并当前 Node 目录和进程 PATH。每个 Agent 使用独立的 Provider Home。服务会从运行用户的 Provider Home 准备基础配置、认证与模型信息，不复制历史会话、日志和临时运行数据。Codex 和 Claude Code 的系统插件、Hook 与全局 MCP 只作为可选配置来源，不会被 Agent 隐式继承。
 
 ### 2. 创建项目环境
 
@@ -170,9 +171,14 @@ hermes --version
 Agent 页面还可以配置：
 
 - **Skills**：发现本机 Skill、上传 ZIP，并明确启用需要的 Skill。
-- **MCP**：添加 HTTP 或 stdio MCP，检查连接并查看工具。
+- **执行器扩展**：查看当前 Provider 系统配置中发现的插件和 Hook，并为这个 Agent 启用需要的项。
+- **MCP**：添加 HTTP 或 stdio MCP，检查连接并查看工具；也可将 Codex 或 Claude Code 的系统全局 MCP 导入当前 Agent。
 
-Skill 变更从下一次 Run 生效。MCP 值可以来自固定配置、创建 Session 时提供的参数，或 `agent_id`、`session_id`、`run_id`、`workspace_path`、`browser_profile_path` 等运行时值。敏感值加密保存，管理接口不返回明文。
+Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Session 检测到配置变化后会刷新执行器连接；Provider 支持时，会继续原有 Provider Session 和对话上下文。
+
+执行器扩展遵循“发现 → Agent 选择 → 运行时投影”流程。在服务运行用户的 Codex 或 Claude Code 配置中安装新插件、添加 Hook 后，它们会出现在 Agent 的 **执行器扩展** 页面，默认不启用。启用的项只投影到当前 Agent。Hermes 目前不提供这项扩展管理能力。
+
+Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选择“导入并启用”后，系统把当前配置复制为 Agent 自己的 MCP。后续可以在 Agent 中单独编辑、检查、限制工具范围或删除，不会直接修改 Provider 的系统配置。MCP 值可以来自固定配置、创建 Session 时提供的参数，或 `agent_id`、`session_id`、`run_id`、`workspace_path`、`browser_profile_path` 等运行时值。敏感值加密保存，管理接口不返回明文。
 
 ### 4. 创建 Session 并发送消息
 

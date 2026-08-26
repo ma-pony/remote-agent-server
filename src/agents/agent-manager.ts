@@ -207,6 +207,16 @@ export class AgentManager {
           }
         }
 
+        this.db.prepare(`
+          INSERT INTO agent_provider_extensions
+            (agent_id, provider, kind, extension_id, name, description,
+             source_fingerprint, created_at, updated_at)
+          SELECT ?, provider, kind, extension_id, name, description,
+                 source_fingerprint, ?, ?
+          FROM agent_provider_extensions
+          WHERE agent_id = ?
+        `).run(clonedId, createdAt, createdAt, id);
+
         this.initializeAgentDirectory(clonedId);
         this.copySkillConfiguration(id, clonedId);
       }).immediate();

@@ -33,7 +33,8 @@ const setup = (
   runtime: AgentRuntime,
   prepare = vi.fn(() => ({ memory: "remember this", revision: "skills-v1" })),
   mcpPrepare = vi.fn(async () => []),
-  runRepositoryOptions: Record<string, unknown> = {}
+  runRepositoryOptions: Record<string, unknown> = {},
+  providerExtensionRevision = vi.fn(() => "extensions-v1")
 ) => {
   const root = mkdtempSync(join(tmpdir(), "remote-agent-executor-"));
   tempDirectories.push(root);
@@ -68,9 +69,20 @@ const setup = (
     runRepository,
     eventStore,
     sessionManager,
-    mcpPreparer: { prepare: mcpPrepare }
+    mcpPreparer: { prepare: mcpPrepare },
+    providerExtensionManager: { revision: providerExtensionRevision }
   });
-  return { db, eventStore, executor, prepare, run, runRepository, sessionManager, workspacePath };
+  return {
+    db,
+    eventStore,
+    executor,
+    prepare,
+    providerExtensionRevision,
+    run,
+    runRepository,
+    sessionManager,
+    workspacePath
+  };
 };
 
 afterEach(() => {
@@ -78,6 +90,20 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("把当前 Agent 的 Provider 扩展版本传给 Runtime", async () => {
+    const runtime = createFakeRuntime({ result: { status: "completed" } });
+    runtime.ensureSession = vi.fn(runtime.ensureSession);
+    const setupResult = setup(runtime);
+
+    await setupResult.executor.execute(setupResult.run.id);
+
+    expect(setupResult.providerExtensionRevision).toHaveBeenCalledTimes(1);
+    expect(runtime.ensureSession).toHaveBeenCalledWith(expect.objectContaining({
+      extensionsRevision: "extensions-v1"
+    }));
+    setupResult.db.close();
+  });
+
   it("启动 Runtime 前确保旧 Session 的项目环境已经修复", async () => {
     const runtime = createFakeRuntime({ result: { status: "completed" } });
     runtime.startTurn = vi.fn(runtime.startTurn);

@@ -272,6 +272,41 @@ it("从共享 MCP 区域一键添加并启用", async () => {
   await waitFor(() => expect(screen.getByText("所有共享 MCP 均已添加。")) .toBeInTheDocument());
 });
 
+it("从当前 Provider 的系统配置中发现并导入 MCP", async () => {
+  const systemMcp = {
+    id: "system-mcp-1",
+    provider: "codex",
+    name: "local-tools",
+    transport: "stdio",
+    installed: false
+  };
+  let installed = false;
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === "/api/sessions") return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog`) {
+      return response([{ ...systemMcp, installed }]);
+    }
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog/${systemMcp.id}/install` && init?.method === "POST") {
+      installed = true;
+      return response({ ...server, id: 7, name: systemMcp.name, transport: "stdio" }, 201);
+    }
+    throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+
+  expect(await screen.findByText("系统配置中的 MCP")).toBeVisible();
+  expect(await screen.findByText("local-tools")).toBeVisible();
+  expect(screen.getByText("来自 Codex 系统配置")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "导入并启用 local-tools" }));
+  await waitFor(() => expect(screen.getByText("已导入")).toBeVisible());
+});
+
 it("从独立页面创建带敏感 Header 的 HTTP MCP", async () => {
   window.history.replaceState({}, "", `/agents/${agent.id}/mcp/new`);
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

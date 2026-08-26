@@ -16,6 +16,7 @@ import { McpManager } from "./mcp/mcp-manager.js";
 import { SecretStore } from "./mcp/secret-store.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import { ProjectEnvironmentStore } from "./project-environments/project-environment-store.js";
+import { ProviderExtensionManager } from "./provider-extensions/provider-extension-manager.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { applyServicePath, removeServiceSecretsFromEnvironment } from "./runtime/service-path.js";
 import { RunRepository } from "./runs/run-repository.js";
@@ -105,7 +106,8 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       fetch: options.webhookFetch
     });
     webhookDispatcher.recover();
-    const runtime = options.runtime ?? new AcpxAgentRuntime(config);
+    const providerExtensionManager = new ProviderExtensionManager({ db });
+    const runtime = options.runtime ?? new AcpxAgentRuntime(config, undefined, providerExtensionManager);
     const mcpManager = new McpManager({ db, secrets });
     app = buildApp({
       config,
@@ -116,6 +118,7 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       eventStore,
       projectEnvironmentStore,
       mcpManager,
+      providerExtensionManager,
       integrationStore,
       integrationProjection,
       webhookDispatcher

@@ -11,6 +11,7 @@ export type RuntimeSessionInput = {
   instructions: string;
   memory: string;
   skillsRevision?: string;
+  extensionsRevision?: string;
   mcpServers: RuntimeMcpServer[];
 };
 

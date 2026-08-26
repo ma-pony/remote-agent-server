@@ -78,7 +78,7 @@ describe("database migration", () => {
     db.close();
   });
 
-  it("创建执行记录、项目环境、MCP 和 Integration 十六张业务表", () => {
+  it("创建执行记录、项目环境、MCP、执行器扩展和 Integration 业务表", () => {
     const { db } = createTestDatabase();
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
@@ -88,6 +88,7 @@ describe("database migration", () => {
     expect(tables).toEqual([
       "agent_mcp_servers",
       "agent_mcp_values",
+      "agent_provider_extensions",
       "agent_session_parameters",
       "agents",
       "environment_repositories",

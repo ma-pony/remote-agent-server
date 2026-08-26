@@ -720,6 +720,26 @@ describe("AcpxAgentRuntime", () => {
     }]);
   });
 
+  it("已有 Provider Session 的插件或 Hook 选择变化时刷新 Handle", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    const handle = await acp.ensureSession();
+    acp.ensureSession.mockReset();
+    acp.ensureSession.mockResolvedValue(handle);
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+
+    await runtime.ensureSession(sessionInput(root, { extensionsRevision: "extensions-v1" }));
+    await runtime.ensureSession(sessionInput(root, {
+      providerSessionId: "provider-session-1",
+      extensionsRevision: "extensions-v2"
+    }));
+
+    expect(acp.close).toHaveBeenCalledWith({ handle, reason: "session_handle_refreshed" });
+    expect(acp.ensureSession).toHaveBeenCalledTimes(2);
+    expect(acp.ensureSession.mock.calls[1]?.[0]).toMatchObject({ resumeSessionId: "provider-session-1" });
+  });
+
   it("并发 ensure 按 Session 串行并复用同一 Handle", async () => {
     const root = makeRoot();
     const acp = runtimeStub();

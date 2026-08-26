@@ -14,7 +14,8 @@ The execution layer uses [acpx](https://github.com/openclaw/acpx) and the [Agent
 - **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
 - **Recorded executions:** persist user messages, agent output, tool activity, statuses, errors, and results in SQLite.
 - **Skill management:** discover host Skills, upload Skill ZIP files, and choose which Skills each agent receives.
-- **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values and inspect exposed tools.
+- **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
+- **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
 - **External integrations:** submit asynchronous HTTP tasks with idempotency, polling, SSE, cancellation, conversations, and signed Webhooks.
 - **Headed browser support:** run agents in a real desktop session without requiring containers.
 
@@ -33,7 +34,7 @@ From another system:
 ```text
 External system -> Integration endpoint -> Task -> Session -> Run -> Agent
                          |                            |
-                         |                            +-> workspace / Skills / MCP
+                         |                            +-> workspace / Skills / provider extensions / MCP
                          |
                          +-> status query / event query / SSE / Webhook
 ```
@@ -41,7 +42,7 @@ External system -> Integration endpoint -> Task -> Session -> Run -> Agent
 | Object | Purpose |
 | --- | --- |
 | Project environment | A versioned, prepared set of one or more Git repositories. |
-| Agent | A provider, project environment, instructions, Skills, and MCP configuration. |
+| Agent | A provider, project environment, instructions, Skills, provider extensions, and MCP configuration. |
 | Session | An isolated workspace and a continuing agent conversation. |
 | Run | One input and its recorded execution inside a session. |
 | Integration endpoint | An authenticated external entry point bound to one agent. |
@@ -143,7 +144,7 @@ hermes --version
 
 Authenticate and configure models only for the providers you intend to use, under the operating-system user that runs the service.
 
-At startup, the server reads the login-shell PATH and merges it with the current Node directory and process PATH. Each agent has its own provider home. When Codex, Claude Code, or Hermes starts, the server copies the service user's configuration, authentication, models, plugins, and Skills while excluding session history, caches, logs, and temporary runtime data.
+At startup, the server reads the login-shell PATH and merges it with the current Node directory and process PATH. Each agent has its own Provider Home. The server prepares baseline configuration, authentication, and model information from the service user's Provider Home while excluding session history, logs, and temporary runtime data. System plugins, hooks, and global MCP from Codex and Claude Code are optional configuration sources; agents never inherit them implicitly.
 
 ### 2. Create a project environment
 
@@ -170,9 +171,14 @@ Open **Agents → New agent**:
 The agent page also provides:
 
 - **Skills:** discover host Skills, upload a ZIP archive, and enable only the Skills this agent should receive.
-- **MCP:** add HTTP or stdio servers, check connectivity, and inspect their tools.
+- **Provider extensions:** review plugins and hooks discovered in the current provider's system configuration and enable the ones this agent needs.
+- **MCP:** add HTTP or stdio servers, check connectivity, inspect their tools, or import a system-global MCP from Codex or Claude Code.
 
-Skill changes apply on the next run. MCP values may come from saved values, declared session parameters, or runtime values such as `agent_id`, `session_id`, `run_id`, `workspace_path`, and `browser_profile_path`. Secrets are encrypted and are never returned in plaintext by management APIs.
+Changes to Skills, provider extensions, and MCP apply on the next run. When an existing session detects a configuration change, it refreshes the provider connection. If the provider supports resumption, the original Provider Session and conversation context continue.
+
+Provider extensions follow a discover, select, and runtime projection flow. After a plugin or hook is added to the service user's Codex or Claude Code configuration, it appears on the agent's **Provider extensions** page and remains disabled by default. Enabled items are projected only to that agent. Hermes does not currently support this extension-management flow.
+
+Provider-global MCP uses a separate import flow. Selecting **Import and enable** on the agent's **MCP** page copies the current system configuration into an MCP owned by that agent. The imported configuration can then be edited, checked, restricted to selected tools, or deleted without changing the provider's system configuration. MCP values may come from saved values, declared session parameters, or runtime values such as `agent_id`, `session_id`, `run_id`, `workspace_path`, and `browser_profile_path`. Secrets are encrypted and are never returned in plaintext by management APIs.
 
 ### 4. Create a session and send a message
 

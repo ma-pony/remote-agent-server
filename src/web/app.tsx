@@ -15,6 +15,7 @@ const AgentListPage = lazy(async () => ({ default: (await agentPages()).AgentLis
 const AgentOverviewPage = lazy(async () => ({ default: (await agentPages()).AgentOverviewPage }));
 const AgentSettingsPage = lazy(async () => ({ default: (await agentPages()).AgentSettingsPage }));
 const AgentSkillsPage = lazy(async () => ({ default: (await agentPages()).AgentSkillsPage }));
+const AgentExtensionPage = lazy(async () => ({ default: (await import("./pages/agent-extension-page.js")).AgentExtensionPage }));
 
 const agentMcpPages = () => import("./pages/agent-mcp-pages.js");
 const AgentMcpEditorPage = lazy(async () => ({ default: (await agentMcpPages()).AgentMcpEditorPage }));
@@ -102,6 +103,7 @@ const Application = () => {
       <Route path="/agents/:id" element={<AgentDetailLayout />}>
         <Route index element={<AgentOverviewPage />} />
         <Route path="skills" element={<AgentSkillsPage />} />
+        <Route path="extensions" element={<AgentExtensionPage />} />
         <Route path="parameters" element={<AgentParameterPage />} />
         <Route path="mcp" element={<AgentMcpPage />} />
         <Route path="settings" element={<AgentSettingsPage />} />

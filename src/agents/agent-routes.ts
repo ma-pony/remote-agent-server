@@ -4,6 +4,7 @@ import { z } from "zod";
 import { AgentManager, AgentManagerError } from "./agent-manager.js";
 import type { RunRepository } from "../runs/run-repository.js";
 import { SkillManagerError, type SkillManager } from "../skills/skill-manager.js";
+import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 
 const createAgentSchema = z.object({
   name: z.string().trim().min(1),
@@ -29,6 +30,7 @@ const cloneAgentSchema = z.object({
 }).strict();
 
 const updateSkillSchema = z.object({ enabled: z.boolean() }).strict();
+const updateExtensionSchema = z.object({ enabled: z.boolean() }).strict();
 const deleteSkillQuerySchema = z.object({ scope: z.enum(["current", "all"]).default("current") }).strict();
 const uploadSkillSchema = z.object({
   fileName: z.string().trim().min(1).max(255).regex(/\.zip$/i),
@@ -76,7 +78,8 @@ export const registerAgentRoutes = (
   app: FastifyInstance,
   agentManager: AgentManager,
   skillManager: SkillManager,
-  runRepository: RunRepository
+  runRepository: RunRepository,
+  providerExtensionManager: ProviderExtensionManager
 ): void => {
   app.get("/agents", () => agentManager.list());
 
@@ -154,6 +157,26 @@ export const registerAgentRoutes = (
     if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
     return skillManager.list(id);
   });
+
+  app.get<{ Params: { id: string } }>("/agents/:id/extensions", (request, reply) => {
+    const id = parseId(request.params.id);
+    if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
+    return providerExtensionManager.list(id);
+  });
+
+  app.put<{ Params: { id: string; extensionId: string } }>(
+    "/agents/:id/extensions/:extensionId",
+    (request, reply) => {
+      const id = parseId(request.params.id);
+      if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
+      const parsed = updateExtensionSchema.safeParse(request.body);
+      if (!parsed.success) return badRequest(reply, "Invalid Provider extension update");
+      const extension = providerExtensionManager.setEnabled(id, request.params.extensionId, parsed.data.enabled);
+      return extension === undefined
+        ? reply.code(404).send({ error: { code: "provider_extension_not_found", message: "Provider extension not found" } })
+        : extension;
+    }
+  );
 
   app.put<{ Params: { id: string; skillId: string } }>("/agents/:id/skills/:skillId", (request, reply) => {
     const id = parseId(request.params.id);

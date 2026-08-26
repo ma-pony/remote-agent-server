@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import type { EventType, Run, TokenUsage } from "../domain.js";
 import type { EventStore } from "../events/event-store.js";
 import type { RunMcpPreparer } from "../mcp/run-mcp-preparer.js";
+import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 import type { AgentRuntime, RuntimeEvent, RuntimeTurn, RuntimeTurnResult } from "../runtime/agent-runtime.js";
 import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { SkillProjector } from "../runtime/skill-projector.js";
@@ -16,6 +17,7 @@ export type RunExecutorDependencies = {
   eventStore: EventStore;
   sessionManager: SessionManager;
   mcpPreparer: Pick<RunMcpPreparer, "prepare">;
+  providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
 };
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -56,15 +58,25 @@ export class RunExecutor {
   private readonly eventStore: EventStore;
   private readonly sessionManager: SessionManager;
   private readonly mcpPreparer: Pick<RunMcpPreparer, "prepare">;
+  private readonly providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
   private readonly cancellationIntents = new Set<number>();
 
-  constructor({ runtime, skillProjector, runRepository, eventStore, sessionManager, mcpPreparer }: RunExecutorDependencies) {
+  constructor({
+    runtime,
+    skillProjector,
+    runRepository,
+    eventStore,
+    sessionManager,
+    mcpPreparer,
+    providerExtensionManager
+  }: RunExecutorDependencies) {
     this.runtime = runtime;
     this.skillProjector = skillProjector;
     this.runRepository = runRepository;
     this.eventStore = eventStore;
     this.sessionManager = sessionManager;
     this.mcpPreparer = mcpPreparer;
+    this.providerExtensionManager = providerExtensionManager;
   }
 
   /**
@@ -131,6 +143,7 @@ export class RunExecutor {
         throw error;
       }
       const { memory, revision: skillsRevision } = this.skillProjector.prepare(agent, session);
+      const extensionsRevision = this.providerExtensionManager.revision(agent.id);
       const runtimeSession = await this.runtime.ensureSession({
         sessionId: session.id,
         agentId: agent.id,
@@ -141,6 +154,7 @@ export class RunExecutor {
         instructions: session.instructionsSnapshot,
         memory,
         skillsRevision,
+        extensionsRevision,
         mcpServers
       });
       this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
