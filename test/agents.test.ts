@@ -9,6 +9,7 @@ import { buildApp } from "../src/app.js";
 import { constantTimeTokenEqual } from "../src/auth.js";
 import { SecretStore } from "../src/mcp/secret-store.js";
 import type { AgentRuntime, RuntimeDoctor, RuntimeSession, RuntimeSessionInput, RuntimeTurn, RuntimeTurnInput } from "../src/runtime/agent-runtime.js";
+import { ConcurrencySettingsStore } from "../src/settings/concurrency-settings-store.js";
 import { createTestDatabase } from "./helpers.js";
 
 const apiToken = "test-token";
@@ -38,9 +39,11 @@ const createTestApp = async (): Promise<{
   dataDir: string;
   db: ReturnType<typeof createTestDatabase>["db"];
   projectEnvironmentId: string;
+  concurrencySettingsStore: ConcurrencySettingsStore;
 }> => {
   const { db, seed } = createTestDatabase();
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-server-"));
+  const concurrencySettingsStore = new ConcurrencySettingsStore(db);
   const app = buildApp({
     config: {
       host: "127.0.0.1",
@@ -51,12 +54,15 @@ const createTestApp = async (): Promise<{
       projectEnvironmentsRoot: "/unused/environments",
       sessionsRoot: "/unused/sessions",
       maxConcurrentRuns: 4,
+      maxConcurrentWebhookDeliveries: 4,
+      maxConcurrentEnvironmentBuilds: 1,
       projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
       projectPrepareTimeoutMs: 30 * 60 * 1000,
       sessionRetentionMs: 0
     },
     db,
-    runtime: createFakeRuntime()
+    runtime: createFakeRuntime(),
+    concurrencySettingsStore
   });
 
   apps.push({
@@ -69,7 +75,7 @@ const createTestApp = async (): Promise<{
   });
 
   await app.ready();
-  return { app, dataDir, db, projectEnvironmentId: seed.projectEnvironment.id };
+  return { app, dataDir, db, projectEnvironmentId: seed.projectEnvironment.id, concurrencySettingsStore };
 };
 
 afterEach(async () => {
@@ -77,6 +83,110 @@ afterEach(async () => {
 });
 
 describe("Agent API", () => {
+  it("支持继承或覆盖全局 Run 并发，并返回当前有效值", async () => {
+    const { app, projectEnvironmentId, concurrencySettingsStore } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "限流 Agent", provider: "codex", projectEnvironmentId }
+    });
+    const agent = created.json() as { id: number };
+
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({
+      maxConcurrentRuns: null,
+      effectiveMaxConcurrentRuns: 4
+    });
+
+    let limitChangeNotifications = 0;
+    const unsubscribe = concurrencySettingsStore.subscribe(() => { limitChangeNotifications += 1; });
+
+    const overridden = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: { maxConcurrentRuns: 2 }
+    });
+    expect(overridden.statusCode).toBe(200);
+    expect(overridden.json()).toMatchObject({
+      maxConcurrentRuns: 2,
+      effectiveMaxConcurrentRuns: 2
+    });
+    expect(limitChangeNotifications).toBe(1);
+    unsubscribe();
+
+    await app.inject({
+      method: "PUT",
+      url: "/api/system-settings/concurrency",
+      headers: authHeaders(),
+      payload: {
+        globalRunConcurrency: 1,
+        webhookConcurrency: 4,
+        environmentBuildConcurrency: 1
+      }
+    });
+    const globallyCapped = await app.inject({
+      method: "GET",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders()
+    });
+    expect(globallyCapped.json()).toMatchObject({
+      maxConcurrentRuns: 2,
+      effectiveMaxConcurrentRuns: 1
+    });
+
+    const inherited = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: { maxConcurrentRuns: null }
+    });
+    expect(inherited.json()).toMatchObject({
+      maxConcurrentRuns: null,
+      effectiveMaxConcurrentRuns: 1
+    });
+  });
+
+  it("校验 Agent Run 并发范围并在克隆时复制覆盖值", async () => {
+    const { app, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: {
+        name: "源 Agent",
+        provider: "codex",
+        projectEnvironmentId,
+        maxConcurrentRuns: 3
+      }
+    });
+    const agent = created.json() as { id: number };
+    const cloned = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agent.id}/clone`,
+      headers: authHeaders(),
+      payload: { name: "源 Agent 副本" }
+    });
+
+    expect(created.statusCode).toBe(201);
+    expect(cloned.statusCode).toBe(201);
+    expect(cloned.json()).toMatchObject({
+      maxConcurrentRuns: 3,
+      effectiveMaxConcurrentRuns: 3
+    });
+
+    for (const maxConcurrentRuns of [0, 65]) {
+      const response = await app.inject({
+        method: "PATCH",
+        url: `/api/agents/${agent.id}`,
+        headers: authHeaders(),
+        payload: { maxConcurrentRuns }
+      });
+      expect(response.statusCode).toBe(400);
+    }
+  });
+
   it("提供无副作用的 API Token 校验端点", async () => {
     const { app } = await createTestApp();
 

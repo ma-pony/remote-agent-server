@@ -100,6 +100,8 @@ const fixture = async (): Promise<{
       projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot: join(root, "sessions"),
       maxConcurrentRuns: 1,
+      maxConcurrentWebhookDeliveries: 4,
+      maxConcurrentEnvironmentBuilds: 1,
       projectEnvironmentCheckIntervalMs: 60_000,
       projectPrepareTimeoutMs: 60_000,
       sessionRetentionMs: 0

@@ -68,6 +68,8 @@ export type Agent = {
   provider: AgentProvider;
   enabled: boolean;
   instructions: string;
+  maxConcurrentRuns: number | null;
+  effectiveMaxConcurrentRuns: number;
   projectEnvironmentId: number | null;
   createdAt: string;
   updatedAt: string;

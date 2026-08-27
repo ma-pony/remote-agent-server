@@ -19,6 +19,7 @@ type ManifestRepository = {
 type EnvironmentManifest = { preparationVersion?: number; repositories: ManifestRepository[] };
 
 type InspectedRepository = { repository: EnvironmentRepository; state: RemoteRepositoryState };
+type BuildResult = { outcome: "unchanged" | "published"; revisionId?: number };
 
 const MANIFEST_NAME = ".remote-agent-environment.json";
 const PREPARATION_VERSION = 3;
@@ -74,38 +75,35 @@ export type ProjectEnvironmentBuilderDependencies = {
 
 /** Builds immutable project-environment revisions and atomically publishes successful output. */
 export class ProjectEnvironmentBuilder {
-  private activeAbortController: AbortController | undefined;
-  private activeBuild: Promise<{ outcome: "unchanged" | "published"; revisionId?: number }> | undefined;
+  private readonly activeBuilds = new Map<number, {
+    controller: AbortController;
+    promise: Promise<BuildResult>;
+  }>();
 
   constructor(private readonly dependencies: ProjectEnvironmentBuilderDependencies) {}
 
-  async checkAndBuild(environmentId: number): Promise<{ outcome: "unchanged" | "published"; revisionId?: number }> {
-    if (this.activeAbortController !== undefined) throw new Error("environment_builder_busy");
+  async checkAndBuild(environmentId: number): Promise<BuildResult> {
+    if (this.activeBuilds.has(environmentId)) throw new Error("environment_builder_busy");
     const controller = new AbortController();
-    this.activeAbortController = controller;
     const build = this.build(environmentId, controller.signal);
-    this.activeBuild = build;
+    this.activeBuilds.set(environmentId, { controller, promise: build });
     try {
       return await build;
     } finally {
-      if (this.activeAbortController === controller) this.activeAbortController = undefined;
-      if (this.activeBuild === build) this.activeBuild = undefined;
+      if (this.activeBuilds.get(environmentId)?.promise === build) this.activeBuilds.delete(environmentId);
     }
   }
 
   async stop(): Promise<void> {
-    this.activeAbortController?.abort();
-    try {
-      await this.activeBuild;
-    } catch (_error) {
-      // The active request receives the build failure; shutdown only waits for cleanup.
-    }
+    const active = [...this.activeBuilds.values()];
+    for (const { controller } of active) controller.abort();
+    await Promise.allSettled(active.map(({ promise }) => promise));
   }
 
   private async build(
     environmentId: number,
     signal: AbortSignal
-  ): Promise<{ outcome: "unchanged" | "published"; revisionId?: number }> {
+  ): Promise<BuildResult> {
     const environment = this.dependencies.store.get(environmentId);
     if (environment === undefined) throw new Error("environment_not_found");
     if (environment.repositories.length === 0) throw new Error("environment_has_no_repositories");

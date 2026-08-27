@@ -334,6 +334,8 @@ export const AgentSettingsPage = () => {
   const [name, setName] = useState(agent.name);
   const [instructions, setInstructions] = useState(agent.instructions);
   const [projectEnvironmentId, setProjectEnvironmentId] = useState(agent.projectEnvironmentId ?? "");
+  const [concurrencyMode, setConcurrencyMode] = useState(agent.maxConcurrentRuns == null ? "inherit" : "custom");
+  const [maxConcurrentRuns, setMaxConcurrentRuns] = useState(String(agent.maxConcurrentRuns ?? agent.effectiveMaxConcurrentRuns ?? ""));
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
@@ -342,11 +344,14 @@ export const AgentSettingsPage = () => {
     return () => controller.abort();
   }, []);
   const save = async (event: FormEvent) => {
-    event.preventDefault(); if (name.trim() === "" || projectEnvironmentId === "") return;
+    event.preventDefault();
+    const customLimit = Number(maxConcurrentRuns);
+    if (name.trim() === "" || projectEnvironmentId === "" || (concurrencyMode === "custom" && (!Number.isInteger(customLimit) || customLimit < 1 || customLimit > 64))) return;
     setBusy("save"); setError("");
     try { setAgent(await api<Agent>(`/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({
       name: name.trim(), projectEnvironmentId,
-      instructions: agent.provider === "hermes" ? "" : instructions
+      instructions: agent.provider === "hermes" ? "" : instructions,
+      maxConcurrentRuns: concurrencyMode === "inherit" ? null : customLimit
     }) })); }
     catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
@@ -360,10 +365,12 @@ export const AgentSettingsPage = () => {
       <Field><FieldLabel htmlFor="settings-agent-name">{text("名称", "Name")}</FieldLabel><Input id="settings-agent-name" value={name} onChange={(event) => setName(event.target.value)} /></Field>
       <Field data-disabled><FieldLabel htmlFor="settings-provider">{text("执行器", "Provider")}</FieldLabel><Input id="settings-provider" value={providerNames[agent.provider]} disabled /></Field>
       <Field><FieldLabel htmlFor="settings-environment">{text("项目环境", "Project environment")}</FieldLabel><NativeSelect id="settings-environment" className="w-full" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}>{environments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></Field>
+      <Field><FieldLabel htmlFor="settings-concurrency-mode">{text("运行并发策略", "Run concurrency policy")}</FieldLabel><NativeSelect id="settings-concurrency-mode" className="w-full" value={concurrencyMode} onChange={(event) => setConcurrencyMode(event.target.value)}><NativeSelectOption value="inherit">{text("继承系统上限", "Inherit system limit")}</NativeSelectOption><NativeSelectOption value="custom">{text("自定义上限", "Custom limit")}</NativeSelectOption></NativeSelect><FieldDescription>{text(`当前有效上限：${agent.effectiveMaxConcurrentRuns}`, `Current effective limit: ${agent.effectiveMaxConcurrentRuns}`)}</FieldDescription></Field>
+      {concurrencyMode === "custom" ? <Field><FieldLabel htmlFor="settings-max-concurrent-runs">{text("自定义 Run 并发上限", "Custom run concurrency limit")}</FieldLabel><Input id="settings-max-concurrent-runs" type="number" min={1} max={64} step={1} value={maxConcurrentRuns} onChange={(event) => setMaxConcurrentRuns(event.target.value)} /><FieldDescription>{text("最终有效值不会超过系统的全局 Run 并发上限。", "The effective value never exceeds the global run concurrency limit.")}</FieldDescription></Field> : null}
       <Field data-disabled={agent.provider === "hermes" || undefined}><FieldLabel htmlFor="settings-agent-instructions">{text("智能体指令", "Agent instructions")}</FieldLabel><Textarea id="settings-agent-instructions" rows={8} value={instructions} disabled={agent.provider === "hermes"} placeholder={text("说明这个智能体长期遵循的角色、边界和工作方式", "Describe the agent's persistent role, boundaries, and working style")} onChange={(event) => setInstructions(event.target.value)} />
         <FieldDescription>{agent.provider === "hermes" ? text("Hermes 当前不支持智能体指令", "Hermes does not currently support agent instructions") : text("创建会话时保存快照；之后修改只影响新会话。", "Instructions are snapshotted at session creation; later edits affect new sessions only.")}</FieldDescription>
       </Field>
-      <Button type="submit" disabled={busy !== ""}>{busy === "save" ? text("保存中…", "Saving…") : text("保存设置", "Save settings")}</Button>
+      <Button type="submit" disabled={busy !== "" || (concurrencyMode === "custom" && (!Number.isInteger(Number(maxConcurrentRuns)) || Number(maxConcurrentRuns) < 1 || Number(maxConcurrentRuns) > 64))}>{busy === "save" ? text("保存中…", "Saving…") : text("保存设置", "Save settings")}</Button>
     </FieldGroup></form></CardContent></Card>
     <Card className="border-destructive/40"><CardHeader><CardTitle className="flex items-center gap-2 text-destructive"><ShieldCheck className="size-5" />{text("危险操作", "Danger zone")}</CardTitle><CardDescription>{text("只有从未创建过会话的智能体才能删除；否则请停用智能体。", "Only agents with no sessions can be deleted. Disable the agent otherwise.")}</CardDescription></CardHeader><CardContent>
       <AlertDialog><AlertDialogTrigger asChild><Button variant="destructive" disabled={busy !== ""}>{text("删除智能体", "Delete agent")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`确定删除“${agent.name}”？`, `Delete “${agent.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("智能体配置和专属目录会被永久删除。已有会话时服务端会拒绝此操作。", "The agent configuration and private directory will be permanently deleted. The server rejects deletion when sessions exist.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={() => void remove()}>{text("确认删除", "Delete")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>

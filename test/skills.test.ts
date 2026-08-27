@@ -205,7 +205,8 @@ describe("Agent Skills API", () => {
       config: {
         host: "127.0.0.1", port: 3000, apiToken, dataDir, databasePath: ":memory:",
         projectEnvironmentsRoot: "/unused/environments", sessionsRoot: "/unused/sessions",
-        maxConcurrentRuns: 1, projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
+        maxConcurrentRuns: 1, maxConcurrentWebhookDeliveries: 4, maxConcurrentEnvironmentBuilds: 1,
+        projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
         projectPrepareTimeoutMs: 30 * 60 * 1000,
         sessionRetentionMs: 0
       },
@@ -280,6 +281,8 @@ describe("Agent Skills API", () => {
         projectEnvironmentsRoot: "/unused/environments",
         sessionsRoot: "/unused/sessions",
         maxConcurrentRuns: 1,
+        maxConcurrentWebhookDeliveries: 4,
+        maxConcurrentEnvironmentBuilds: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
         projectPrepareTimeoutMs: 30 * 60 * 1000,
         sessionRetentionMs: 0

@@ -35,6 +35,8 @@ const createTestApp = async () => {
       projectEnvironmentsRoot: "/unused/environments",
       sessionsRoot: "/unused/sessions",
       maxConcurrentRuns: 4,
+      maxConcurrentWebhookDeliveries: 4,
+      maxConcurrentEnvironmentBuilds: 1,
       projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
       projectPrepareTimeoutMs: 30 * 60 * 1000,
       sessionRetentionMs: 0

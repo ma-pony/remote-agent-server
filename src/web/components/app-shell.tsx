@@ -1,4 +1,4 @@
-import { Bot, Boxes, Cable, Languages, LogOut, MessagesSquare } from "lucide-react";
+import { Bot, Boxes, Cable, Languages, LogOut, MessagesSquare, SlidersHorizontal } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router";
 
 import { Button } from "@/components/ui/button";
@@ -24,7 +24,8 @@ const navigation = [
   { label: ["智能体", "Agents"], path: "/agents", icon: Bot },
   { label: ["项目环境", "Project environments"], path: "/project-environments", icon: Boxes },
   { label: ["会话", "Sessions"], path: "/sessions", icon: MessagesSquare },
-  { label: ["接入端点", "Integration endpoints"], path: "/integration-endpoints", icon: Cable }
+  { label: ["接入端点", "Integration endpoints"], path: "/integration-endpoints", icon: Cable },
+  { label: ["系统设置", "System settings"], path: "/system-settings", icon: SlidersHorizontal }
 ] as const;
 
 export const AppShellLayout = ({ onDisconnect }: { onDisconnect(): void }) => {

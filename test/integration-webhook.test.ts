@@ -40,7 +40,13 @@ const listenHttp = async (handler: Parameters<typeof createServer>[0]): Promise<
   return `http://127.0.0.1:${address.port}`;
 };
 
-const createHarness = (fetchImpl: typeof fetch = vi.fn(async () => new Response(null, { status: 204 }))) => {
+const createHarness = (
+  fetchImpl: typeof fetch = vi.fn(async () => new Response(null, { status: 204 })),
+  concurrencySettings?: {
+    get(): { globalRunConcurrency: number; webhookConcurrency: number; environmentBuildConcurrency: number };
+    subscribe(listener: () => void): () => void;
+  }
+) => {
   const { db, seed } = createTestDatabase();
   const root = mkdtempSync(join(tmpdir(), "remote-agent-webhook-"));
   temporaryDirectories.push(root);
@@ -55,7 +61,7 @@ const createHarness = (fetchImpl: typeof fetch = vi.fn(async () => new Response(
     promptPrefix: "",
     parameterMappings: []
   }).endpoint;
-  const dispatcher = new WebhookDispatcher({ store, secrets, fetch: fetchImpl });
+  const dispatcher = new WebhookDispatcher({ store, secrets, fetch: fetchImpl, concurrencySettings });
 
   const createSubscription = (name: string, signingSecret: string, enabled = true) => store.createSubscription({
     endpointId: endpoint.id,
@@ -123,6 +129,52 @@ afterEach(async () => {
 });
 
 describe("WebhookDispatcher", () => {
+  it("限制不同订阅的全局并发，并在在线调高后立即继续投递", async () => {
+    let current = { globalRunConcurrency: 4, webhookConcurrency: 1, environmentBuildConcurrency: 1 };
+    const listeners = new Set<() => void>();
+    const concurrencySettings = {
+      get: () => current,
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      update: (webhookConcurrency: number) => {
+        current = { ...current, webhookConcurrency };
+        for (const listener of listeners) listener();
+      }
+    };
+    const requests = new Map<string, ReturnType<typeof deferred<Response>>>();
+    const started: string[] = [];
+    const harness = createHarness(vi.fn<typeof fetch>(async (_url, init) => {
+      const eventId = new Headers(init?.headers).get("x-remote-agent-event-id")!;
+      started.push(eventId);
+      const request = deferred<Response>();
+      requests.set(eventId, request);
+      return request.promise;
+    }), concurrencySettings);
+    const deliveries = ["a", "b", "c"].map((name, index) => {
+      const subscription = harness.createSubscription(name, `secret-${name}`);
+      return harness.createDelivery(subscription.id, index + 1);
+    });
+
+    harness.dispatcher.start();
+    await vi.waitFor(() => expect(started).toHaveLength(1));
+    concurrencySettings.update(2);
+    await vi.waitFor(() => expect(started).toHaveLength(2));
+
+    requests.get(started[0]!)!.resolve(new Response(null, { status: 204 }));
+    await vi.waitFor(() => expect(started).toHaveLength(3));
+    for (const eventId of started.slice(1)) {
+      requests.get(eventId)!.resolve(new Response(null, { status: 204 }));
+    }
+    await vi.waitFor(() => expect(deliveries.every((delivery) =>
+      harness.store.getDelivery(delivery.id)?.status === "succeeded"
+    )).toBe(true));
+
+    await harness.dispatcher.stop();
+    harness.db.close();
+  });
+
   it("发送前再次过滤数据库直写的受管 Header", async () => {
     const requests: Headers[] = [];
     const harness = createHarness(vi.fn(async (_url, init) => {
@@ -1047,6 +1099,8 @@ describe("Webhook management API", () => {
         projectEnvironmentsRoot: "/unused/environments",
         sessionsRoot: "/unused/sessions",
         maxConcurrentRuns: 1,
+        maxConcurrentWebhookDeliveries: 4,
+        maxConcurrentEnvironmentBuilds: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
         projectPrepareTimeoutMs: 30 * 60 * 1000,
         sessionRetentionMs: 0
@@ -1290,6 +1344,7 @@ describe("Webhook management API", () => {
       config: {
         host: "127.0.0.1", port: 3000, apiToken, dataDir: harness.root, databasePath: ":memory:",
         projectEnvironmentsRoot: "/unused/environments", sessionsRoot: "/unused/sessions", maxConcurrentRuns: 1,
+        maxConcurrentWebhookDeliveries: 4, maxConcurrentEnvironmentBuilds: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000, projectPrepareTimeoutMs: 30 * 60 * 1000,
         sessionRetentionMs: 0
       },

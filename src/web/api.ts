@@ -3,12 +3,20 @@ import { fetchEventSource } from "@microsoft/fetch-event-source";
 export type Provider = "claude_code" | "codex" | "hermes";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
+export type ConcurrencySettings = {
+  globalRunConcurrency: number;
+  webhookConcurrency: number;
+  environmentBuildConcurrency: number;
+};
+
 export type Agent = {
   id: number;
   name: string;
   provider: Provider;
   enabled: boolean;
   instructions: string;
+  maxConcurrentRuns: number | null;
+  effectiveMaxConcurrentRuns: number;
   projectEnvironmentId: number | null;
   createdAt: string;
   updatedAt: string;

@@ -16,6 +16,7 @@ The execution layer uses [acpx](https://github.com/openclaw/acpx) and the [Agent
 - **Skill management:** discover host Skills, upload Skill ZIP files, and choose which Skills each agent receives.
 - **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
 - **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
+- **Concurrency and queue control:** adjust run, Webhook-delivery, and project-environment build concurrency from the console, with an optional run limit per agent.
 - **External integrations:** submit asynchronous HTTP tasks with idempotency, polling, SSE, cancellation, conversations, and signed Webhooks.
 - **Headed browser support:** run agents in a real desktop session without requiring containers.
 
@@ -173,12 +174,25 @@ The agent page also provides:
 - **Skills:** discover host Skills, upload a ZIP archive, and enable only the Skills this agent should receive.
 - **Provider extensions:** review plugins and hooks discovered in the current provider's system configuration and enable the ones this agent needs.
 - **MCP:** add HTTP or stdio servers, check connectivity, inspect their tools, or import a system-global MCP from Codex or Claude Code.
+- **Run concurrency policy:** inherit the system run limit by default, or set an Agent-specific cap. The smaller limit is effective.
 
 Changes to Skills, provider extensions, and MCP apply on the next run. When an existing session detects a configuration change, it refreshes the provider connection. If the provider supports resumption, the original Provider Session and conversation context continue.
 
 Provider extensions follow a discover, select, and runtime projection flow. After a plugin or hook is added to the service user's Codex or Claude Code configuration, it appears on the agent's **Provider extensions** page and remains disabled by default. Enabled items are projected only to that agent. Hermes does not currently support this extension-management flow.
 
 Provider-global MCP uses a separate import flow. Selecting **Import and enable** on the agent's **MCP** page copies the current system configuration into an MCP owned by that agent. The imported configuration can then be edited, checked, restricted to selected tools, or deleted without changing the provider's system configuration. MCP values may come from saved values, declared session parameters, or runtime values such as `agent_id`, `session_id`, `run_id`, `workspace_path`, and `browser_profile_path`. Secrets are encrypted and are never returned in plaintext by management APIs.
+
+### Concurrency and queues
+
+Open **System settings → Concurrency and queues** to adjust:
+
+- global run concurrency;
+- Webhook delivery concurrency;
+- project-environment build concurrency.
+
+The database stores these settings and changes take effect immediately. Raising a limit starts more queued work; lowering it does not cancel active work and only constrains later dispatch. The service always keeps runs in one Session serial, keeps one external Conversation serial, delivers each Webhook subscription in order, and coalesces duplicate synchronization requests for the same project environment.
+
+These limits control the current Remote Agent Server process. The project is designed for single-process deployment and does not provide distributed concurrency quotas across multiple service instances.
 
 ### 4. Create a session and send a message
 
@@ -494,7 +508,9 @@ curl --fail-with-body \
 | `DATABASE_PATH` | No | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite database path. |
 | `PROJECT_ENVIRONMENTS_ROOT` | No | `/srv/remote-agent/environments` | Project-environment revision directory. |
 | `SESSIONS_ROOT` | No | `/srv/remote-agent/sessions` | Session workspace directory. |
-| `MAX_CONCURRENT_RUNS` | No | `4` | Maximum concurrently executing runs. |
+| `MAX_CONCURRENT_RUNS` | No | `4` | Initial global run concurrency for a new database, from 1–64. Manage later changes in System settings. |
+| `MAX_CONCURRENT_WEBHOOK_DELIVERIES` | No | `4` | Initial Webhook-delivery concurrency for a new database, from 1–64. |
+| `MAX_CONCURRENT_ENVIRONMENT_BUILDS` | No | `1` | Initial project-environment build concurrency for a new database, from 1–64. |
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | No | `3` | Remote repository check interval. |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | No | `30` | Per-repository preparation timeout. |
 | `SESSION_RETENTION_HOURS` | No | `168` | Retention for large idle-session storage. Hourly cleanup removes the workspace, browser data, and native provider conversation while retaining Session, Run, event, integration, and token-usage records. Set to `0` to disable it. |

@@ -5,6 +5,7 @@ import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type { WebhookDelivery } from "./integration-types.js";
 import { isCurrentWebhookPayload, isManagedWebhookHeader } from "./webhook-contract.js";
+import type { ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 
 const RETRY_DELAYS_MS = [10_000, 60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000] as const;
 const MAX_ATTEMPTS = RETRY_DELAYS_MS.length + 1;
@@ -14,6 +15,7 @@ type WebhookDispatcherDependencies = {
   store: IntegrationStore;
   secrets: Pick<SecretStore, "decrypt">;
   fetch?: typeof fetch;
+  concurrencySettings?: Pick<ConcurrencySettingsStore, "get" | "subscribe">;
 };
 
 const customHeaders = (serialized: string | null, secrets: Pick<SecretStore, "decrypt">): Record<string, string> => {
@@ -44,6 +46,7 @@ export class WebhookDispatcher {
   private notifiedWhileDraining = false;
   private deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   private unsubscribe: (() => void) | undefined;
+  private unsubscribeSettings: (() => void) | undefined;
   private readonly active = new Map<number, { deliveryId: number; promise: Promise<void>; controller: AbortController }>();
 
   constructor(private readonly dependencies: WebhookDispatcherDependencies) {
@@ -54,6 +57,7 @@ export class WebhookDispatcher {
     if (this.started) return;
     this.started = true;
     this.unsubscribe = this.dependencies.store.subscribeDeliveries(() => this.notify());
+    this.unsubscribeSettings = this.dependencies.concurrencySettings?.subscribe(() => this.notify());
     this.notify();
   }
 
@@ -70,6 +74,7 @@ export class WebhookDispatcher {
         this.notifiedWhileDraining = false;
         const due = this.dependencies.store.listDueDeliveries(new Date().toISOString());
         for (const delivery of due) {
+          if (this.active.size >= this.webhookConcurrency()) break;
           if (!this.active.has(delivery.subscriptionId)) this.startDelivery(delivery);
         }
       } while (this.notifiedWhileDraining && this.started);
@@ -81,7 +86,8 @@ export class WebhookDispatcher {
 
   async deliver(id: number): Promise<void> {
     const current = this.dependencies.store.getDelivery(id);
-    if (current === undefined || this.active.has(current.subscriptionId)) return;
+    if (current === undefined || this.active.has(current.subscriptionId)
+      || this.active.size >= this.webhookConcurrency()) return;
     const controller = new AbortController();
     const promise = this.runDelivery(id, controller).finally(() => {
       const active = this.active.get(current.subscriptionId);
@@ -101,6 +107,8 @@ export class WebhookDispatcher {
     this.started = false;
     this.unsubscribe?.();
     this.unsubscribe = undefined;
+    this.unsubscribeSettings?.();
+    this.unsubscribeSettings = undefined;
     this.clearDeadline();
     const active = [...this.active.values()];
     for (const { controller } of active) controller.abort("dispatcher_stopped");
@@ -122,6 +130,10 @@ export class WebhookDispatcher {
       if (this.started) this.notify();
     });
     this.active.set(delivery.subscriptionId, { deliveryId: delivery.id, promise, controller });
+  }
+
+  private webhookConcurrency(): number {
+    return this.dependencies.concurrencySettings?.get().webhookConcurrency ?? Number.MAX_SAFE_INTEGER;
   }
 
   private async runDelivery(id: number, controller: AbortController): Promise<void> {

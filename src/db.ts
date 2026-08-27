@@ -230,7 +230,23 @@ const columnNames = (db: Database.Database, table: string): string[] =>
 
 const quote = (identifier: string): string => `"${identifier.replaceAll('"', '""')}"`;
 
-const migrateTextIds = (db: Database.Database, storage?: MigrationStorage): void => {
+export type ConcurrencyDefaults = {
+  globalRunConcurrency: number;
+  webhookConcurrency: number;
+  environmentBuildConcurrency: number;
+};
+
+const DEFAULT_CONCURRENCY: ConcurrencyDefaults = {
+  globalRunConcurrency: 4,
+  webhookConcurrency: 4,
+  environmentBuildConcurrency: 1
+};
+
+const migrateTextIds = (
+  db: Database.Database,
+  storage: MigrationStorage | undefined,
+  concurrencyDefaults: ConcurrencyDefaults
+): void => {
   const existingTables = BUSINESS_TABLES.filter((table) => tableExists(db, table));
   const moved: Array<[string, string]> = [];
   const rewrittenFiles: Array<[string, string]> = [];
@@ -260,7 +276,7 @@ const migrateTextIds = (db: Database.Database, storage?: MigrationStorage): void
         db.exec(`ALTER TABLE ${quote(table)} RENAME TO ${quote(`legacy_${table}`)}`);
       }
 
-      migrate(db);
+      migrate(db, undefined, concurrencyDefaults);
 
       const mappedTables = existingTables.filter((table) =>
         columnNames(db, `legacy_${table}`).includes("id")
@@ -359,12 +375,16 @@ export const insertedId = (result: Database.RunResult): number => Number(result.
 /**
  * Creates the first-version database schema.
  */
-export const migrate = (db: Database.Database, storage?: MigrationStorage): void => {
+export const migrate = (
+  db: Database.Database,
+  storage?: MigrationStorage,
+  concurrencyDefaults: ConcurrencyDefaults = DEFAULT_CONCURRENCY
+): void => {
   if (tableExists(db, "agents")) {
     const idColumn = (db.prepare("PRAGMA table_info(agents)").all() as Array<{ name: string; type: string }>)
       .find(({ name }) => name === "id");
     if (idColumn?.type.toUpperCase() === "TEXT") {
-      migrateTextIds(db, storage);
+      migrateTextIds(db, storage, concurrencyDefaults);
       return;
     }
   }
@@ -411,8 +431,17 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
       provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'hermes')),
       enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
       instructions TEXT NOT NULL DEFAULT '',
+      max_concurrent_runs INTEGER CHECK (max_concurrent_runs BETWEEN 1 AND 64),
       project_environment_id INTEGER REFERENCES project_environments(id),
       created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS system_settings (
+      scope TEXT PRIMARY KEY CHECK (scope = 'global'),
+      global_run_concurrency INTEGER NOT NULL CHECK (global_run_concurrency BETWEEN 1 AND 64),
+      webhook_concurrency INTEGER NOT NULL CHECK (webhook_concurrency BETWEEN 1 AND 64),
+      environment_build_concurrency INTEGER NOT NULL CHECK (environment_build_concurrency BETWEEN 1 AND 64),
       updated_at TEXT NOT NULL
     );
 
@@ -681,6 +710,18 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
     ON webhook_deliveries(subscription_id, dispatch_order, id, status);
   `);
 
+  db.prepare(`
+    INSERT INTO system_settings
+      (scope, global_run_concurrency, webhook_concurrency, environment_build_concurrency, updated_at)
+    VALUES ('global', ?, ?, ?, ?)
+    ON CONFLICT(scope) DO NOTHING
+  `).run(
+    concurrencyDefaults.globalRunConcurrency,
+    concurrencyDefaults.webhookConcurrency,
+    concurrencyDefaults.environmentBuildConcurrency,
+    new Date().toISOString()
+  );
+
   const hasColumn = (table: string, column: string): boolean =>
     (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((item) => item.name === column);
 
@@ -689,6 +730,9 @@ export const migrate = (db: Database.Database, storage?: MigrationStorage): void
   }
   if (!hasColumn("agents", "instructions")) {
     db.exec("ALTER TABLE agents ADD COLUMN instructions TEXT NOT NULL DEFAULT ''");
+  }
+  if (!hasColumn("agents", "max_concurrent_runs")) {
+    db.exec("ALTER TABLE agents ADD COLUMN max_concurrent_runs INTEGER CHECK (max_concurrent_runs BETWEEN 1 AND 64)");
   }
   if (!hasColumn("agent_mcp_servers", "source_mcp_server_id")) {
     db.exec("ALTER TABLE agent_mcp_servers ADD COLUMN source_mcp_server_id INTEGER");

@@ -33,6 +33,8 @@ const deferred = <T>() => {
 
 const createApiTestApp = async (options: { runtime?: AgentRuntime; maxConcurrentRuns?: number } = {}) => {
   const { db } = createTestDatabase();
+  db.prepare("UPDATE system_settings SET global_run_concurrency = ? WHERE scope = 'global'")
+    .run(options.maxConcurrentRuns ?? 2);
   const root = mkdtempSync(join(tmpdir(), "remote-agent-runs-"));
   tempDirectories.push(root);
   const app = buildApp({
@@ -45,6 +47,8 @@ const createApiTestApp = async (options: { runtime?: AgentRuntime; maxConcurrent
       projectEnvironmentsRoot: join(root, "environments"),
       sessionsRoot: join(root, "sessions"),
       maxConcurrentRuns: options.maxConcurrentRuns ?? 2,
+      maxConcurrentWebhookDeliveries: 4,
+      maxConcurrentEnvironmentBuilds: 1,
       projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
       projectPrepareTimeoutMs: 30 * 60 * 1000,
       sessionRetentionMs: 0
@@ -340,6 +344,98 @@ describe("RunRepository", () => {
 });
 
 describe("RunScheduler", () => {
+  const mutableConcurrencySettings = (globalRunConcurrency: number) => {
+    let current = {
+      globalRunConcurrency,
+      webhookConcurrency: 4,
+      environmentBuildConcurrency: 1
+    };
+    const listeners = new Set<(settings: typeof current) => void>();
+    return {
+      get: () => current,
+      subscribe: (listener: (settings: typeof current) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      update: (nextGlobalRunConcurrency: number) => {
+        current = { ...current, globalRunConcurrency: nextGlobalRunConcurrency };
+        for (const listener of listeners) listener(current);
+      }
+    };
+  };
+
+  it("Agent 满额时跳过其队首 Run 并让其他 Agent 使用剩余全局槽位", async () => {
+    const settings = mutableConcurrencySettings(2);
+    const queued = [{ id: 1 }, { id: 2 }, { id: 3 }] as Run[];
+    const contexts = new Map([
+      [1, { agentId: 10, maxConcurrentRuns: 1 }],
+      [2, { agentId: 10, maxConcurrentRuns: 1 }],
+      [3, { agentId: 20, maxConcurrentRuns: null }]
+    ]);
+    const releases = new Map<number, () => void>();
+    const execute = vi.fn((runId: number) => new Promise<Run>((resolve) => {
+      releases.set(runId, () => resolve({ id: runId } as Run));
+    }));
+    const scheduler = new RunScheduler({
+      runRepository: {
+        get: (id) => queued.find((run) => run.id === id),
+        listQueued: () => queued,
+        failQueued: () => ({}) as Run,
+        getSchedulingContext: (id) => contexts.get(id)
+      },
+      executor: { execute, cancel: async () => ({}) as Run },
+      concurrencySettings: settings
+    });
+
+    scheduler.start();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    expect(execute.mock.calls.map(([runId]) => runId)).toEqual([1, 3]);
+
+    releases.get(1)?.();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(3));
+    expect(execute.mock.calls[2]?.[0]).toBe(2);
+    releases.get(2)?.();
+    releases.get(3)?.();
+    await scheduler.stop();
+  });
+
+  it("在线调高立即 drain，调低不取消 active 且只限制后续启动", async () => {
+    const settings = mutableConcurrencySettings(1);
+    const queued = [1, 2, 3, 4].map((id) => ({ id })) as Run[];
+    const releases = new Map<number, () => void>();
+    const execute = vi.fn((runId: number) => new Promise<Run>((resolve) => {
+      releases.set(runId, () => resolve({ id: runId } as Run));
+    }));
+    const scheduler = new RunScheduler({
+      runRepository: {
+        get: (id) => queued.find((run) => run.id === id),
+        listQueued: () => queued.slice(0, 3),
+        failQueued: () => ({}) as Run,
+        getSchedulingContext: () => ({ agentId: 10, maxConcurrentRuns: null })
+      },
+      executor: { execute, cancel: async () => ({}) as Run },
+      concurrencySettings: settings
+    });
+
+    scheduler.start();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(1));
+    settings.update(3);
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(3));
+
+    settings.update(1);
+    scheduler.enqueue(4);
+    releases.get(1)?.();
+    releases.get(2)?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(execute).toHaveBeenCalledTimes(3);
+
+    releases.get(3)?.();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(4));
+    expect(execute.mock.calls[3]?.[0]).toBe(4);
+    releases.get(4)?.();
+    await scheduler.stop();
+  });
+
   it("每个 queued Run 最多自动重试 3 次，exhausted 后写入失败终态", async () => {
     vi.useFakeTimers();
     try {

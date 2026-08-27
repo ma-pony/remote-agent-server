@@ -16,6 +16,7 @@ Remote Agent Server 是一个自托管的 Agent 运行服务。它把 Claude Cod
 - **Skills 管理**：发现本机 Skills、上传 Skill ZIP，并控制每个 Agent 启用的 Skills。
 - **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
 - **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
+- **并发与队列控制**：在管理台统一调整 Run、Webhook 投递和项目环境构建并发，并可为单个 Agent 设置 Run 上限。
 - **外部系统接入**：通过 HTTP 提交异步 Task，支持幂等、查询、SSE、取消、多轮会话和签名 Webhook。
 - **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
 
@@ -173,12 +174,25 @@ Agent 页面还可以配置：
 - **Skills**：发现本机 Skill、上传 ZIP，并明确启用需要的 Skill。
 - **执行器扩展**：查看当前 Provider 系统配置中发现的插件和 Hook，并为这个 Agent 启用需要的项。
 - **MCP**：添加 HTTP 或 stdio MCP，检查连接并查看工具；也可将 Codex 或 Claude Code 的系统全局 MCP 导入当前 Agent。
+- **运行并发策略**：默认继承系统 Run 并发，也可以设置当前 Agent 的独立上限；实际上限取两者较小值。
 
 Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Session 检测到配置变化后会刷新执行器连接；Provider 支持时，会继续原有 Provider Session 和对话上下文。
 
 执行器扩展遵循“发现 → Agent 选择 → 运行时投影”流程。在服务运行用户的 Codex 或 Claude Code 配置中安装新插件、添加 Hook 后，它们会出现在 Agent 的 **执行器扩展** 页面，默认不启用。启用的项只投影到当前 Agent。Hermes 目前不提供这项扩展管理能力。
 
 Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选择“导入并启用”后，系统把当前配置复制为 Agent 自己的 MCP。后续可以在 Agent 中单独编辑、检查、限制工具范围或删除，不会直接修改 Provider 的系统配置。MCP 值可以来自固定配置、创建 Session 时提供的参数，或 `agent_id`、`session_id`、`run_id`、`workspace_path`、`browser_profile_path` 等运行时值。敏感值加密保存，管理接口不返回明文。
+
+### 并发与队列
+
+进入 **系统设置 → 并发与队列**，可以在线调整：
+
+- 全局 Run 并发；
+- Webhook 投递并发；
+- 项目环境构建并发。
+
+设置保存在数据库中，修改后立即生效。提高上限会立即继续派发排队工作；降低上限不会取消正在运行的工作，只约束后续派发。系统始终保证同一 Session 的 Run 串行、同一外部 Conversation 串行、同一 Webhook 订阅按顺序投递，并合并同一项目环境的重复同步请求。
+
+这些上限控制当前 Remote Agent Server 进程。项目当前按单进程部署设计，不提供跨多个服务实例的分布式并发配额。
 
 ### 4. 创建 Session 并发送消息
 
@@ -502,7 +516,9 @@ curl --fail-with-body \
 | `DATABASE_PATH` | 否 | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite 数据库路径。 |
 | `PROJECT_ENVIRONMENTS_ROOT` | 否 | `/srv/remote-agent/environments` | 项目环境版本目录。 |
 | `SESSIONS_ROOT` | 否 | `/srv/remote-agent/sessions` | Session Workspace 目录。 |
-| `MAX_CONCURRENT_RUNS` | 否 | `4` | 同时执行的 Run 数量上限。 |
+| `MAX_CONCURRENT_RUNS` | 否 | `4` | 首次创建数据库时写入的全局 Run 并发默认值，范围 1–64。之后在系统设置中管理。 |
+| `MAX_CONCURRENT_WEBHOOK_DELIVERIES` | 否 | `4` | 首次创建数据库时写入的 Webhook 投递并发默认值，范围 1–64。 |
+| `MAX_CONCURRENT_ENVIRONMENT_BUILDS` | 否 | `1` | 首次创建数据库时写入的项目环境构建并发默认值，范围 1–64。 |
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | 否 | `3` | 远程仓库检查间隔。 |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | 否 | `30` | 单个仓库准备命令超时时间。 |
 | `SESSION_RETENTION_HOURS` | 否 | `168` | 空闲 Session 的大体积存储保留时间；服务每小时清理 Workspace、浏览器数据和执行器原生会话，但继续保留 Session、Run、事件、外部接入记录与 Token 统计。设为 `0` 关闭。 |

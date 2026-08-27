@@ -321,6 +321,27 @@ describe("SystemProjectEnvironmentCommands", () => {
 });
 
 describe("ProjectEnvironmentBuilder", () => {
+  it("允许同时构建不同项目环境", async () => {
+    const { db, store, builder } = createBuilderFixture();
+    const first = store.create({ name: "并发环境一" });
+    const second = store.create({ name: "并发环境二" });
+    store.addRepository(first.id, { name: "api", gitUrl: "git:first-api", prepareCommand: null });
+    store.addRepository(second.id, { name: "api", gitUrl: "git:second-api", prepareCommand: null });
+
+    const results = await Promise.all([
+      builder.checkAndBuild(first.id),
+      builder.checkAndBuild(second.id)
+    ]);
+
+    expect(results).toEqual([
+      expect.objectContaining({ outcome: "published" }),
+      expect.objectContaining({ outcome: "published" })
+    ]);
+    expect(store.get(first.id)?.currentRevisionId).not.toBeNull();
+    expect(store.get(second.id)?.currentRevisionId).not.toBeNull();
+    db.close();
+  });
+
   it("首次构建多个项目，成功后原子发布版本", async () => {
     const { db, store, calls, builder } = createBuilderFixture();
     const environment = store.create({ name: "研发环境" });
@@ -628,6 +649,65 @@ describe("ProjectEnvironmentBuilder", () => {
 });
 
 describe("ProjectEnvironmentScheduler", () => {
+  it("按动态上限并行不同环境并继续合并同一环境请求", async () => {
+    const { db, store } = createBuilderFixture();
+    const environments = ["环境一", "环境二", "环境三"].map((name) => store.create({ name }));
+    let current = { globalRunConcurrency: 4, webhookConcurrency: 4, environmentBuildConcurrency: 1 };
+    const listeners = new Set<() => void>();
+    const concurrencySettings = {
+      get: () => current,
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+      update: (environmentBuildConcurrency: number) => {
+        current = { ...current, environmentBuildConcurrency };
+        for (const listener of listeners) listener();
+      }
+    };
+    const releases = new Map<number, () => void>();
+    const started: number[] = [];
+    const scheduler = new ProjectEnvironmentScheduler({
+      store,
+      builder: {
+        checkAndBuild: (id) => new Promise((resolve) => {
+          started.push(id);
+          releases.set(id, () => resolve({ outcome: "unchanged" as const }));
+        }),
+        stop: async () => { for (const release of releases.values()) release(); }
+      },
+      intervalMs: 3 * 60 * 60 * 1000,
+      concurrencySettings
+    });
+    const first = scheduler.requestCheck(environments[0]!.id);
+    const duplicate = scheduler.requestCheck(environments[0]!.id);
+    const second = scheduler.requestCheck(environments[1]!.id);
+    const third = scheduler.requestCheck(environments[2]!.id);
+
+    expect(duplicate).toBe(first);
+    await vi.waitFor(() => expect(started).toEqual([environments[0]!.id]));
+    expect(scheduler.getState(environments[0]!.id).status).toBe("running");
+    expect(scheduler.getState(environments[1]!.id).status).toBe("queued");
+
+    concurrencySettings.update(2);
+    await vi.waitFor(() => expect(started).toEqual([environments[0]!.id, environments[1]!.id]));
+    expect(scheduler.getState(environments[1]!.id).status).toBe("running");
+
+    concurrencySettings.update(1);
+    releases.get(environments[0]!.id)?.();
+    await first;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(started).toHaveLength(2);
+
+    releases.get(environments[1]!.id)?.();
+    await second;
+    await vi.waitFor(() => expect(started).toHaveLength(3));
+    releases.get(environments[2]!.id)?.();
+    await third;
+    await scheduler.stop();
+    db.close();
+  });
+
   it("展示运行、排队和下一次自动同步时间", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-13T00:00:00.000Z"));
@@ -790,6 +870,8 @@ describe("Project environment API", () => {
         projectEnvironmentsRoot: fixture.root,
         sessionsRoot: join(fixture.root, "sessions"),
         maxConcurrentRuns: 1,
+        maxConcurrentWebhookDeliveries: 4,
+        maxConcurrentEnvironmentBuilds: 1,
         projectEnvironmentCheckIntervalMs: 10_800_000,
         projectPrepareTimeoutMs: 1_800_000,
         sessionRetentionMs: 0

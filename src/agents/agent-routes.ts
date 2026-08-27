@@ -10,17 +10,20 @@ const createAgentSchema = z.object({
   name: z.string().trim().min(1),
   provider: z.enum(["claude_code", "codex", "hermes"]),
   projectEnvironmentId: z.number().int().positive(),
-  instructions: z.string().max(20_000).default("")
+  instructions: z.string().max(20_000).default(""),
+  maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional()
 }).strict();
 
 const updateAgentSchema = z.object({
   name: z.string().trim().min(1).optional(),
   enabled: z.boolean().optional(),
   projectEnvironmentId: z.number().int().positive().optional(),
-  instructions: z.string().max(20_000).optional()
+  instructions: z.string().max(20_000).optional(),
+  maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional()
 }).strict().refine(
   (input) => input.name !== undefined || input.enabled !== undefined
-    || input.projectEnvironmentId !== undefined || input.instructions !== undefined,
+    || input.projectEnvironmentId !== undefined || input.instructions !== undefined
+    || input.maxConcurrentRuns !== undefined,
   {
   message: "At least one field must be provided"
   }

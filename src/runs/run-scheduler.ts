@@ -2,11 +2,14 @@ import type { Run } from "../domain.js";
 import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { RunExecutor } from "./run-executor.js";
 import type { RunRepository } from "./run-repository.js";
+import type { ConcurrencySettings, ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 
 export type RunSchedulerDependencies = {
-  runRepository: Pick<RunRepository, "get" | "listQueued" | "failQueued">;
+  runRepository: Pick<RunRepository, "get" | "listQueued" | "failQueued"> &
+    Partial<Pick<RunRepository, "getSchedulingContext">>;
   executor: Pick<RunExecutor, "execute" | "cancel">;
-  maxConcurrentRuns: number;
+  concurrencySettings?: Pick<ConcurrencySettingsStore, "get" | "subscribe">;
+  maxConcurrentRuns?: number;
   onExecutionError?: (error: unknown, runId: number) => void;
   retryDelayMs?: number;
 };
@@ -28,10 +31,11 @@ export class RunSchedulerError extends Error {
  */
 export class RunScheduler {
   private readonly pending: number[] = [];
-  private readonly active = new Set<number>();
-  private readonly runRepository: Pick<RunRepository, "get" | "listQueued" | "failQueued">;
+  private readonly active = new Map<number, number>();
+  private readonly activeByAgent = new Map<number, number>();
+  private readonly runRepository: RunSchedulerDependencies["runRepository"];
   private readonly executor: Pick<RunExecutor, "execute" | "cancel">;
-  private readonly maxConcurrentRuns: number;
+  private readonly concurrencySettings: Pick<ConcurrencySettingsStore, "get" | "subscribe">;
   private readonly onExecutionError: (error: unknown, runId: number) => void;
   private readonly retryDelayMs: number;
   private readonly retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
@@ -39,17 +43,27 @@ export class RunScheduler {
   private readonly exhaustedRuns = new Set<number>();
   private started = false;
   private loadedQueued = false;
+  private unsubscribeSettings: (() => void) | undefined;
 
   constructor({
     runRepository,
     executor,
+    concurrencySettings,
     maxConcurrentRuns,
     onExecutionError = defaultExecutionErrorReporter,
     retryDelayMs = 1_000
   }: RunSchedulerDependencies) {
     this.runRepository = runRepository;
     this.executor = executor;
-    this.maxConcurrentRuns = maxConcurrentRuns;
+    const staticConcurrency: ConcurrencySettings = {
+      globalRunConcurrency: maxConcurrentRuns ?? 4,
+      webhookConcurrency: 4,
+      environmentBuildConcurrency: 1
+    };
+    this.concurrencySettings = concurrencySettings ?? {
+      get: () => staticConcurrency,
+      subscribe: () => () => undefined
+    };
     this.onExecutionError = onExecutionError;
     this.retryDelayMs = retryDelayMs;
   }
@@ -64,6 +78,7 @@ export class RunScheduler {
       this.loadedQueued = true;
       for (const run of this.runRepository.listQueued()) this.addPending(run.id);
     }
+    this.unsubscribeSettings = this.concurrencySettings.subscribe(() => this.drain());
     this.drain();
   }
 
@@ -80,12 +95,14 @@ export class RunScheduler {
    */
   async stop(): Promise<void> {
     this.started = false;
+    this.unsubscribeSettings?.();
+    this.unsubscribeSettings = undefined;
     this.pending.splice(0);
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
     this.retryAttempts.clear();
     this.exhaustedRuns.clear();
-    await Promise.all([...this.active].map(async (runId) => {
+    await Promise.all([...this.active.keys()].map(async (runId) => {
       await settleBestEffort(() => this.executor.cancel(runId));
     }));
   }
@@ -98,19 +115,44 @@ export class RunScheduler {
 
   private drain(): void {
     if (!this.started) return;
-    while (this.active.size < this.maxConcurrentRuns) {
-      const runId = this.pending.shift();
-      if (runId === undefined) return;
-
-      this.active.add(runId);
+    const globalLimit = this.concurrencySettings.get().globalRunConcurrency;
+    while (this.active.size < globalLimit) {
+      const next = this.nextRunnable(globalLimit);
+      if (next === undefined) return;
+      const { pendingIndex, runId, agentId } = next;
+      this.pending.splice(pendingIndex, 1);
+      this.active.set(runId, agentId);
+      this.activeByAgent.set(agentId, (this.activeByAgent.get(agentId) ?? 0) + 1);
       void this.executor.execute(runId)
         .then((run) => this.handleExecutionSuccess(runId, run))
         .catch((error: unknown) => this.handleExecutionError(error, runId))
         .finally(() => {
           this.active.delete(runId);
+          const activeForAgent = (this.activeByAgent.get(agentId) ?? 1) - 1;
+          if (activeForAgent === 0) this.activeByAgent.delete(agentId);
+          else this.activeByAgent.set(agentId, activeForAgent);
           this.drain();
         });
     }
+  }
+
+  private nextRunnable(globalLimit: number): {
+    pendingIndex: number;
+    runId: number;
+    agentId: number;
+  } | undefined {
+    for (let pendingIndex = 0; pendingIndex < this.pending.length; pendingIndex += 1) {
+      const runId = this.pending[pendingIndex]!;
+      const context = this.runRepository.getSchedulingContext?.(runId) ?? {
+        agentId: 0,
+        maxConcurrentRuns: null
+      };
+      const agentLimit = Math.min(globalLimit, context.maxConcurrentRuns ?? globalLimit);
+      if ((this.activeByAgent.get(context.agentId) ?? 0) < agentLimit) {
+        return { pendingIndex, runId, agentId: context.agentId };
+      }
+    }
+    return undefined;
   }
 
   private handleExecutionError(error: unknown, runId: number): void {

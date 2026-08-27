@@ -230,6 +230,20 @@ export class RunRepository {
     return rows.map(toRun);
   }
 
+  /** Returns the Agent-level scheduling limit for one Run. */
+  getSchedulingContext(id: number): { agentId: number; maxConcurrentRuns: number | null } | undefined {
+    const row = this.db.prepare(`
+      SELECT sessions.agent_id, agents.max_concurrent_runs
+      FROM runs
+      JOIN sessions ON sessions.id = runs.session_id
+      JOIN agents ON agents.id = sessions.agent_id
+      WHERE runs.id = ?
+    `).get(id) as { agent_id: number; max_concurrent_runs: number | null } | undefined;
+    return row === undefined
+      ? undefined
+      : { agentId: row.agent_id, maxConcurrentRuns: row.max_concurrent_runs };
+  }
+
   /** Returns the exact cumulative usage stored for one Session. */
   summarizeBySession(sessionId: number): TokenUsageSummary {
     return toUsageSummary(this.db.prepare(`

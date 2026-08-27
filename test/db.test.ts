@@ -22,8 +22,23 @@ describe("configuration", () => {
     expect(() => loadConfig(envWithoutToken)).toThrow(/API_TOKEN/);
   });
 
-  it("默认最大并发为 4", () => {
-    expect(loadConfig(validEnv).maxConcurrentRuns).toBe(4);
+  it("为三类全局并发提供首次初始化默认值", () => {
+    expect(loadConfig(validEnv)).toMatchObject({
+      maxConcurrentRuns: 4,
+      maxConcurrentWebhookDeliveries: 4,
+      maxConcurrentEnvironmentBuilds: 1
+    });
+  });
+
+  it("并发初始值只接受 1 到 64 的整数", () => {
+    for (const key of [
+      "MAX_CONCURRENT_RUNS",
+      "MAX_CONCURRENT_WEBHOOK_DELIVERIES",
+      "MAX_CONCURRENT_ENVIRONMENT_BUILDS"
+    ]) {
+      expect(() => loadConfig({ ...validEnv, [key]: "0" })).toThrow();
+      expect(() => loadConfig({ ...validEnv, [key]: "65" })).toThrow();
+    }
   });
 
   it("项目环境默认每三小时检查且准备命令最多运行三十分钟", () => {
@@ -103,9 +118,49 @@ describe("database migration", () => {
       "session_mcp_parameter_values",
       "sessions",
       "sqlite_sequence",
+      "system_settings",
       "webhook_deliveries",
       "webhook_subscriptions"
     ]);
+  });
+
+  it("用 scope 自然主键保存全局并发设置且只在首次迁移写入默认值", () => {
+    const db = openDatabase(":memory:");
+    migrate(db, undefined, {
+      globalRunConcurrency: 6,
+      webhookConcurrency: 7,
+      environmentBuildConcurrency: 2
+    });
+
+    expect(db.prepare("SELECT * FROM system_settings WHERE scope = 'global'").get()).toMatchObject({
+      scope: "global",
+      global_run_concurrency: 6,
+      webhook_concurrency: 7,
+      environment_build_concurrency: 2
+    });
+    expect(() => db.prepare(`
+      INSERT INTO system_settings
+        (scope, global_run_concurrency, webhook_concurrency, environment_build_concurrency, updated_at)
+      VALUES ('tenant', 1, 1, 1, ?)
+    `).run("2026-08-27T00:00:00.000Z")).toThrow();
+
+    db.prepare(`
+      UPDATE system_settings
+      SET global_run_concurrency = 3, webhook_concurrency = 5, environment_build_concurrency = 4
+      WHERE scope = 'global'
+    `).run();
+    migrate(db, undefined, {
+      globalRunConcurrency: 10,
+      webhookConcurrency: 11,
+      environmentBuildConcurrency: 12
+    });
+
+    expect(db.prepare("SELECT * FROM system_settings WHERE scope = 'global'").get()).toMatchObject({
+      global_run_concurrency: 3,
+      webhook_concurrency: 5,
+      environment_build_concurrency: 4
+    });
+    db.close();
   });
 
   it("将现有 UUID 业务数据一次性映射为数字主键并保持外键关系", () => {

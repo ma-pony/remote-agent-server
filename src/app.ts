@@ -53,6 +53,8 @@ import {
   type SessionCleanupSchedulerLike
 } from "./sessions/session-cleanup-scheduler.js";
 import { registerSessionRoutes } from "./sessions/session-routes.js";
+import { registerConcurrencySettingsRoutes } from "./settings/concurrency-settings-routes.js";
+import { ConcurrencySettingsStore } from "./settings/concurrency-settings-store.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import { type CommandRunner, type WorkspaceManager } from "./workspaces/workspace-manager.js";
 
@@ -76,6 +78,7 @@ export type AppDependencies = {
   integrationStore?: IntegrationStore;
   integrationProjection?: IntegrationProjection;
   webhookDispatcher?: WebhookDispatcher;
+  concurrencySettingsStore?: ConcurrencySettingsStore;
   webhookFetch?: typeof fetch;
   webRoot?: string;
 };
@@ -85,6 +88,7 @@ export type AppDependencies = {
  */
 export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const app = Fastify({ forceCloseConnections: true });
+  const concurrencySettingsStore = deps.concurrencySettingsStore ?? new ConcurrencySettingsStore(deps.db);
   const skillManager = deps.skillManager ?? new SkillManager({ dataDir: deps.config.dataDir });
   const providerExtensionManager = deps.providerExtensionManager ?? new ProviderExtensionManager({ db: deps.db });
   const secrets = SecretStore.open({ dataDir: deps.config.dataDir });
@@ -102,7 +106,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     db: deps.db,
     dataDir: deps.config.dataDir,
     runtime,
-    projectEnvironmentStore
+    projectEnvironmentStore,
+    concurrencySettingsStore
   });
   const integrationStore = deps.integrationStore ?? new IntegrationStore({ db: deps.db });
   const integrationEndpointManager = new IntegrationEndpointManager({
@@ -113,7 +118,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const webhookDispatcher = deps.webhookDispatcher ?? new WebhookDispatcher({
     store: integrationStore,
     secrets,
-    fetch: deps.webhookFetch
+    fetch: deps.webhookFetch,
+    concurrencySettings: concurrencySettingsStore
   });
   const workspaceManager = deps.workspaceManager ?? createWorkspaceManager({
     projectEnvironmentsRoot: deps.config.projectEnvironmentsRoot,
@@ -156,7 +162,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const projectEnvironmentScheduler = deps.projectEnvironmentScheduler ?? new ProjectEnvironmentScheduler({
     store: projectEnvironmentStore,
     builder: projectEnvironmentBuilder,
-    intervalMs: deps.config.projectEnvironmentCheckIntervalMs
+    intervalMs: deps.config.projectEnvironmentCheckIntervalMs,
+    concurrencySettings: concurrencySettingsStore
   });
   const executor = new RunExecutor({
     runtime,
@@ -170,7 +177,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const scheduler = new RunScheduler({
     runRepository,
     executor,
-    maxConcurrentRuns: deps.config.maxConcurrentRuns
+    concurrencySettings: concurrencySettingsStore
   });
   const integrationTaskScheduler = new IntegrationTaskScheduler({
     store: integrationStore,
@@ -198,6 +205,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   app.register((api) => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
     api.get("/auth/verify", async (_request, reply) => reply.code(204).send());
+    registerConcurrencySettingsRoutes(api, concurrencySettingsStore);
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager, skillManager, runRepository, providerExtensionManager);
     registerMcpRoutes(api, { mcpManager, mcpChecker, providerMcpCatalog });

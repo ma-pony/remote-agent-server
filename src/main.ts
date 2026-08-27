@@ -14,6 +14,7 @@ import { IntegrationStore } from "./integrations/integration-store.js";
 import { WebhookDispatcher } from "./integrations/webhook-dispatcher.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { SecretStore } from "./mcp/secret-store.js";
+import { ConcurrencySettingsStore } from "./settings/concurrency-settings-store.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import { ProjectEnvironmentStore } from "./project-environments/project-environment-store.js";
 import { ProviderExtensionManager } from "./provider-extensions/provider-extension-manager.js";
@@ -66,6 +67,10 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       dataDir: config.dataDir,
       projectEnvironmentsRoot: config.projectEnvironmentsRoot,
       sessionsRoot: config.sessionsRoot
+    }, {
+      globalRunConcurrency: config.maxConcurrentRuns,
+      webhookConcurrency: config.maxConcurrentWebhookDeliveries,
+      environmentBuildConcurrency: config.maxConcurrentEnvironmentBuilds
     });
     const workspaceManager = createWorkspaceManager({
       platform: options.platform,
@@ -89,6 +94,7 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       }
     }
     const integrationStore = new IntegrationStore({ db });
+    const concurrencySettingsStore = new ConcurrencySettingsStore(db);
     const secrets = SecretStore.open({ dataDir: config.dataDir });
     let eventStore!: EventStore;
     const integrationProjection = new IntegrationProjection({
@@ -103,7 +109,8 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     const webhookDispatcher = new WebhookDispatcher({
       store: integrationStore,
       secrets,
-      fetch: options.webhookFetch
+      fetch: options.webhookFetch,
+      concurrencySettings: concurrencySettingsStore
     });
     webhookDispatcher.recover();
     const providerExtensionManager = new ProviderExtensionManager({ db });
@@ -121,7 +128,8 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       providerExtensionManager,
       integrationStore,
       integrationProjection,
-      webhookDispatcher
+      webhookDispatcher,
+      concurrencySettingsStore
     });
 
     let closing: Promise<void> | undefined;

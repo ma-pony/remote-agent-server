@@ -80,6 +80,88 @@ afterEach(() => {
 });
 
 describe("最小管理界面", () => {
+  it("在系统设置页读取并一次保存三类并发配置", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", "/system-settings/concurrency");
+    let savedBody = "";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url !== "/api/system-settings/concurrency") throw new Error(`Unexpected request: ${url}`);
+      if (init?.method === "PUT") {
+        savedBody = String(init.body);
+        return jsonResponse(JSON.parse(savedBody));
+      }
+      return jsonResponse({
+        globalRunConcurrency: 4,
+        webhookConcurrency: 3,
+        environmentBuildConcurrency: 1
+      });
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "并发与队列" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("全局 Run 并发"), { target: { value: "8" } });
+    fireEvent.change(screen.getByLabelText("Webhook 投递并发"), { target: { value: "6" } });
+    fireEvent.change(screen.getByLabelText("项目环境构建并发"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => expect(JSON.parse(savedBody)).toEqual({
+      globalRunConcurrency: 8,
+      webhookConcurrency: 6,
+      environmentBuildConcurrency: 2
+    }));
+    expect(screen.getByText("设置已保存并立即生效")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "系统设置" })).toBeInTheDocument();
+  });
+
+  it("在 Agent 设置页选择继承或自定义 Run 并发", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", "/agents/3/settings");
+    const currentAgent = {
+      id: 3,
+      name: "Crawler Agent",
+      provider: "codex",
+      enabled: true,
+      instructions: "保持简洁",
+      maxConcurrentRuns: null,
+      effectiveMaxConcurrentRuns: 4,
+      projectEnvironmentId: 2,
+      createdAt: now,
+      updatedAt: now
+    };
+    let patchBody = "";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/api/agents/3" && init?.method === "PATCH") {
+        patchBody = String(init.body);
+        return jsonResponse({ ...currentAgent, ...JSON.parse(patchBody), effectiveMaxConcurrentRuns: 2 });
+      }
+      if (url === "/api/agents/3") return jsonResponse(currentAgent);
+      if (url === "/api/project-environments") return jsonResponse([{
+        id: 2,
+        name: "Crawler environment",
+        currentRevisionId: 7,
+        lastCheckedAt: now,
+        workspacePath: "/workspace",
+        sync: { status: "idle", automatic: true, intervalMs: 1000, nextScheduledAt: now },
+        repositories: [], currentRevision: null, latestRevision: null,
+        createdAt: now, updatedAt: now
+      }]);
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByText("当前有效上限：4")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("运行并发策略"), { target: { value: "custom" } });
+    fireEvent.change(screen.getByLabelText("自定义 Run 并发上限"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => expect(JSON.parse(patchBody)).toMatchObject({ maxConcurrentRuns: 2 }));
+    expect(await screen.findByText("当前有效上限：2")).toBeInTheDocument();
+  });
+
   it("Fastify 对前端深层路由回退 index.html，但不把 API 404 伪装成页面", async () => {
     const webRoot = mkdtempSync(join(tmpdir(), "remote-agent-web-"));
     mkdirSync(join(webRoot, "assets"));
@@ -96,6 +178,8 @@ describe("最小管理界面", () => {
         projectEnvironmentsRoot: "/unused/environments",
         sessionsRoot: "/unused/sessions",
         maxConcurrentRuns: 1,
+        maxConcurrentWebhookDeliveries: 4,
+        maxConcurrentEnvironmentBuilds: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
         projectPrepareTimeoutMs: 30 * 60 * 1000,
         sessionRetentionMs: 0
@@ -162,6 +246,8 @@ describe("最小管理界面", () => {
         projectEnvironmentsRoot: "/unused/environments",
         sessionsRoot: "/unused/sessions",
         maxConcurrentRuns: 1,
+        maxConcurrentWebhookDeliveries: 4,
+        maxConcurrentEnvironmentBuilds: 1,
         projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
         projectPrepareTimeoutMs: 30 * 60 * 1000,
         sessionRetentionMs: 0
