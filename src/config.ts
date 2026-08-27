@@ -14,6 +14,8 @@ export type AppConfig = {
   projectEnvironmentCheckIntervalMs: number;
   projectPrepareTimeoutMs: number;
   sessionRetentionMs: number;
+  runTimeoutMs?: number;
+  runtimeIdleMs?: number;
 };
 
 const configSchema = z.object({
@@ -29,7 +31,9 @@ const configSchema = z.object({
   MAX_CONCURRENT_ENVIRONMENT_BUILDS: z.coerce.number().int().min(1).max(64).default(1),
   PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS: z.coerce.number().positive().default(3),
   PROJECT_PREPARE_TIMEOUT_MINUTES: z.coerce.number().positive().default(30),
-  SESSION_RETENTION_HOURS: z.coerce.number().nonnegative().default(7 * 24)
+  SESSION_RETENTION_HOURS: z.coerce.number().nonnegative().default(7 * 24),
+  RUN_TIMEOUT_MINUTES: z.coerce.number().positive().default(60),
+  RUNTIME_IDLE_MINUTES: z.coerce.number().nonnegative().default(15)
 });
 
 /**
@@ -51,6 +55,8 @@ export const loadConfig = (env: Record<string, string | undefined>): AppConfig =
     maxConcurrentEnvironmentBuilds: config.MAX_CONCURRENT_ENVIRONMENT_BUILDS,
     projectEnvironmentCheckIntervalMs: config.PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS * 60 * 60 * 1000,
     projectPrepareTimeoutMs: config.PROJECT_PREPARE_TIMEOUT_MINUTES * 60 * 1000,
-    sessionRetentionMs: config.SESSION_RETENTION_HOURS * 60 * 60 * 1000
+    sessionRetentionMs: config.SESSION_RETENTION_HOURS * 60 * 60 * 1000,
+    runTimeoutMs: config.RUN_TIMEOUT_MINUTES * 60 * 1000,
+    runtimeIdleMs: config.RUNTIME_IDLE_MINUTES * 60 * 1000
   };
 };

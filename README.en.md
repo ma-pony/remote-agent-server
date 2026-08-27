@@ -532,6 +532,8 @@ curl --fail-with-body \
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | No | `3` | Remote repository check interval. |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | No | `30` | Per-repository preparation timeout. |
 | `SESSION_RETENTION_HOURS` | No | `168` | Retention for large idle-session storage. Hourly cleanup removes the workspace, browser data, and native provider conversation while retaining Session, Run, event, integration, and token-usage records. Set to `0` to disable it. |
+| `RUN_TIMEOUT_MINUTES` | No | `60` | Maximum duration of one Run. On timeout the current Turn is terminated, its Runtime is released, and the Run fails with `run_timed_out`. |
+| `RUNTIME_IDLE_MINUTES` | No | `15` | How long an idle Runtime stays resident. Expiry closes ACP/MCP processes while preserving Provider state for the next Run. Set to `0` to disable it. |
 | `DISPLAY` / `XAUTHORITY` | Browser use | None | Desktop/X display for headed browsers. |
 
 On first startup, the server creates `DATA_DIR/secret.key` with mode `0600`. The AES-256-GCM master key encrypts MCP secrets, endpoint fixed values, Webhook credentials, and sensitive session parameters. Back it up together with the SQLite database.

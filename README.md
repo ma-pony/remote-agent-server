@@ -540,6 +540,8 @@ curl --fail-with-body \
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | 否 | `3` | 远程仓库检查间隔。 |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | 否 | `30` | 单个仓库准备命令超时时间。 |
 | `SESSION_RETENTION_HOURS` | 否 | `168` | 空闲 Session 的大体积存储保留时间；服务每小时清理 Workspace、浏览器数据和执行器原生会话，但继续保留 Session、Run、事件、外部接入记录与 Token 统计。设为 `0` 关闭。 |
+| `RUN_TIMEOUT_MINUTES` | 否 | `60` | 单个 Run 的最大执行时间；超时后终止当前 Turn、释放执行器并将 Run 标记为 `run_timed_out`。 |
+| `RUNTIME_IDLE_MINUTES` | 否 | `15` | 空闲执行器的驻留时间；到期后关闭 ACP/MCP 进程但保留 Provider 会话，下次 Run 自动恢复。设为 `0` 关闭。 |
 | `DISPLAY` / `XAUTHORITY` | 浏览器场景 | 无 | 有头浏览器使用的桌面或 X display。 |
 
 首次启动会创建权限为 `0600` 的 `DATA_DIR/secret.key`。该 AES-256-GCM 主密钥用于加密 MCP 敏感值、端点固定参数、Webhook 凭证和 Session 敏感参数。请把它和 SQLite 数据库一起备份。

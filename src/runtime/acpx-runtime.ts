@@ -35,6 +35,8 @@ import type {
 import { settleBestEffort } from "./bounded-operation.js";
 import { ProviderExtensionProjector } from "./provider-extension-projector.js";
 
+export const RUNTIME_RELEASE_RETRY_MS = 5_000;
+
 export const ACP_AGENT = {
   claude_code: "claude",
   codex: "codex",
@@ -435,6 +437,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private readonly sessions = new Map<number, ManagedSession>();
   private readonly activeTurns = new Map<number, ActiveTurn>();
   private readonly sessionOperations = new Map<number, SessionOperation>();
+  private readonly idleTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private readonly releaseRetryTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
   private readonly shutdownFailures: RuntimeShutdownFailure[] = [];
@@ -453,6 +457,11 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   async ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession> {
     this.assertRunning();
+    this.clearIdleTimer(input.sessionId);
+    if (this.releaseRetryTimers.has(input.sessionId)) {
+      this.clearReleaseRetryTimer(input.sessionId);
+      await this.releaseSession(input.sessionId);
+    }
     return this.serializeSession(input.sessionId, () => this.ensureSessionLocked(input));
   }
 
@@ -559,7 +568,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   startTurn(input: RuntimeTurnInput): RuntimeTurn {
     this.assertRunning();
-    if (this.sessionOperations.has(input.sessionId)) {
+    this.clearIdleTimer(input.sessionId);
+    if (this.sessionOperations.has(input.sessionId) || this.releaseRetryTimers.has(input.sessionId)) {
       throw new AgentRuntimeError("session_not_ready", "Runtime session is being changed");
     }
     const session = this.sessions.get(input.sessionId);
@@ -627,8 +637,33 @@ export class AcpxAgentRuntime implements AgentRuntime {
     }
   }
 
+  async releaseSession(sessionId: number): Promise<void> {
+    this.assertRunning();
+    this.clearIdleTimer(sessionId);
+    this.clearReleaseRetryTimer(sessionId);
+    await this.serializeSession(sessionId, async () => {
+      const session = this.sessions.get(sessionId);
+      if (session === undefined) return;
+      try {
+        await session.runtime.close({
+          handle: session.handle,
+          reason: "runtime_released",
+          discardPersistentState: false
+        });
+      } catch (error) {
+        this.scheduleReleaseRetry(sessionId);
+        throw error;
+      }
+      if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId);
+      this.activeTurns.delete(sessionId);
+      session.registry.unregister(session.target);
+    });
+  }
+
   async reset(input: RuntimeSessionInput): Promise<void> {
     this.assertRunning();
+    this.clearIdleTimer(input.sessionId);
+    this.clearReleaseRetryTimer(input.sessionId);
     await this.serializeSession(input.sessionId, async () => {
       await this.ensureSessionLocked(input);
       const session = this.sessions.get(input.sessionId);
@@ -648,6 +683,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   async forgetSession(sessionId: number): Promise<void> {
     this.assertRunning();
+    this.clearIdleTimer(sessionId);
+    this.clearReleaseRetryTimer(sessionId);
     await this.serializeSession(sessionId, async () => {
       const session = this.sessions.get(sessionId);
       if (session === undefined) return;
@@ -724,6 +761,10 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   private async performShutdown(): Promise<void> {
     this.shuttingDown = true;
+    for (const timer of this.idleTimers.values()) clearTimeout(timer);
+    this.idleTimers.clear();
+    for (const timer of this.releaseRetryTimers.values()) clearTimeout(timer);
+    this.releaseRetryTimers.clear();
 
     const activeTurns = [...this.activeTurns.entries()];
     await Promise.all(activeTurns.map(async ([sessionId, { turn }]) => {
@@ -801,7 +842,46 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   private clearActiveTurn(sessionId: number, activeTurn: ActiveTurn): void {
-    if (this.activeTurns.get(sessionId) === activeTurn) this.activeTurns.delete(sessionId);
+    if (this.activeTurns.get(sessionId) !== activeTurn) return;
+    this.activeTurns.delete(sessionId);
+    this.scheduleIdleRelease(sessionId);
+  }
+
+  private scheduleIdleRelease(sessionId: number): void {
+    const idleMs = this.config.runtimeIdleMs ?? 0;
+    if (idleMs === 0 || this.shuttingDown || !this.sessions.has(sessionId) || this.activeTurns.has(sessionId)) return;
+    this.clearIdleTimer(sessionId);
+    const timer = setTimeout(() => {
+      this.idleTimers.delete(sessionId);
+      if (this.shuttingDown || this.activeTurns.has(sessionId) || !this.sessions.has(sessionId)) return;
+      void this.releaseSession(sessionId).catch((error: unknown) => console.error(error));
+    }, idleMs);
+    timer.unref();
+    this.idleTimers.set(sessionId, timer);
+  }
+
+  private scheduleReleaseRetry(sessionId: number): void {
+    if (this.shuttingDown || !this.sessions.has(sessionId)) return;
+    this.clearReleaseRetryTimer(sessionId);
+    const timer = setTimeout(() => {
+      this.releaseRetryTimers.delete(sessionId);
+      if (this.shuttingDown || !this.sessions.has(sessionId)) return;
+      void this.releaseSession(sessionId).catch((error: unknown) => console.error(error));
+    }, RUNTIME_RELEASE_RETRY_MS);
+    timer.unref();
+    this.releaseRetryTimers.set(sessionId, timer);
+  }
+
+  private clearIdleTimer(sessionId: number): void {
+    const timer = this.idleTimers.get(sessionId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.idleTimers.delete(sessionId);
+  }
+
+  private clearReleaseRetryTimer(sessionId: number): void {
+    const timer = this.releaseRetryTimers.get(sessionId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.releaseRetryTimers.delete(sessionId);
   }
 
   private serializeSession<T>(sessionId: number, operation: () => Promise<T>): Promise<T> {

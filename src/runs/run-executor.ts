@@ -18,12 +18,20 @@ export type RunExecutorDependencies = {
   sessionManager: SessionManager;
   mcpPreparer: Pick<RunMcpPreparer, "prepare">;
   providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
+  runTimeoutMs?: number;
 };
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 const MESSAGE_BATCH_INTERVAL_MS = 100;
 const MESSAGE_BATCH_MAX_BYTES = 4 * 1024;
+const DEFAULT_RUN_TIMEOUT_MS = 60 * 60 * 1000;
+
+class RunTimedOutError extends Error {
+  constructor() {
+    super("run_timed_out");
+  }
+}
 
 const persistedEvent = (event: Exclude<RuntimeEvent, { type: "usage" }>): { type: EventType; content: unknown } => {
   switch (event.type) {
@@ -46,7 +54,8 @@ type TurnRace =
   | { source: "event_error"; error: unknown }
   | { source: "result"; result: RuntimeTurnResult }
   | { source: "result_error"; error: unknown }
-  | { source: "message_flush" };
+  | { source: "message_flush" }
+  | { source: "timeout" };
 
 /**
  * Executes one persisted Run against the provider-neutral Runtime boundary.
@@ -59,6 +68,7 @@ export class RunExecutor {
   private readonly sessionManager: SessionManager;
   private readonly mcpPreparer: Pick<RunMcpPreparer, "prepare">;
   private readonly providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
+  private readonly runTimeoutMs: number;
   private readonly cancellationIntents = new Set<number>();
 
   constructor({
@@ -68,7 +78,8 @@ export class RunExecutor {
     eventStore,
     sessionManager,
     mcpPreparer,
-    providerExtensionManager
+    providerExtensionManager,
+    runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS
   }: RunExecutorDependencies) {
     this.runtime = runtime;
     this.skillProjector = skillProjector;
@@ -77,6 +88,7 @@ export class RunExecutor {
     this.sessionManager = sessionManager;
     this.mcpPreparer = mcpPreparer;
     this.providerExtensionManager = providerExtensionManager;
+    this.runTimeoutMs = runTimeoutMs;
   }
 
   /**
@@ -86,11 +98,12 @@ export class RunExecutor {
     const run = this.runRepository.markRunning(runId);
     let liveTurn: RuntimeTurn | undefined;
     let liveIterator: AsyncIterator<RuntimeEvent> | undefined;
-    let publicNoticeCode: "mcp_preflight_failed" | undefined;
+    let publicNoticeCode: "mcp_preflight_failed" | "run_timed_out" | undefined;
     let usage: Partial<TokenUsage> = {};
     let messageBatch: { stream: "output" | "thought"; text: string; bytes: number } | undefined;
     let messageFlushTimer: ReturnType<typeof setTimeout> | undefined;
     let messageFlushSignal: Promise<TurnRace> | undefined;
+    let runTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
 
     const clearMessageFlushTimer = (): void => {
       if (messageFlushTimer !== undefined) clearTimeout(messageFlushTimer);
@@ -171,6 +184,10 @@ export class RunExecutor {
         (result) => ({ source: "result", result }),
         (error: unknown) => ({ source: "result_error", error })
       );
+      const timeoutOutcome = new Promise<TurnRace>((resolve) => {
+        runTimeoutTimer = setTimeout(() => resolve({ source: "timeout" }), this.runTimeoutMs);
+        runTimeoutTimer.unref();
+      });
       let nextEvent = this.nextEvent(iterator);
       let result: RuntimeTurnResult | undefined;
 
@@ -178,8 +195,13 @@ export class RunExecutor {
         const outcome = await Promise.race([
           nextEvent,
           resultOutcome,
+          timeoutOutcome,
           ...(messageFlushSignal === undefined ? [] : [messageFlushSignal])
         ]);
+        if (outcome.source === "timeout") {
+          publicNoticeCode = "run_timed_out";
+          throw new RunTimedOutError();
+        }
         if (outcome.source === "message_flush") {
           flushMessageBatch();
           continue;
@@ -187,8 +209,11 @@ export class RunExecutor {
         if (outcome.source === "result") {
           flushMessageBatch();
           result = outcome.result;
-          await settleBestEffort(() => turn.closeEvents());
-          await settleBestEffort(async () => iterator.return?.());
+          const closeOutcome = await settleBestEffort(() => turn.closeEvents());
+          const iteratorOutcome = await settleBestEffort(async () => iterator.return?.());
+          if (closeOutcome.status !== "fulfilled" || iteratorOutcome.status !== "fulfilled") {
+            await this.releaseSessionBestEffort(run.sessionId);
+          }
           liveTurn = undefined;
           liveIterator = undefined;
           break;
@@ -203,7 +228,11 @@ export class RunExecutor {
         }
         if (outcome.iteration.done) {
           flushMessageBatch();
-          const canonical = await resultOutcome;
+          const canonical = await Promise.race([resultOutcome, timeoutOutcome]);
+          if (canonical.source === "timeout") {
+            publicNoticeCode = "run_timed_out";
+            throw new RunTimedOutError();
+          }
           if (canonical.source === "result") result = canonical.result;
           else if (canonical.source === "result_error") throw canonical.error;
           else throw new Error("Unexpected turn outcome");
@@ -237,6 +266,7 @@ export class RunExecutor {
     } catch (error) {
       clearMessageFlushTimer();
       await this.cleanupFailedTurn(liveTurn, liveIterator);
+      if (error instanceof RunTimedOutError) await this.releaseSessionBestEffort(run.sessionId);
       const message = errorMessage(error);
       const stableNoticeCode = publicNoticeCode
         ?? (error instanceof SessionManagerError && error.code === "agent_disabled" ? "agent_disabled" : undefined);
@@ -247,6 +277,7 @@ export class RunExecutor {
       return this.finishRun(run.id, { status: "failed", error: message }, usage);
     } finally {
       clearMessageFlushTimer();
+      if (runTimeoutTimer !== undefined) clearTimeout(runTimeoutTimer);
       this.cancellationIntents.delete(run.id);
     }
   }
@@ -328,6 +359,11 @@ export class RunExecutor {
       settleBestEffort(() => turn.closeEvents())
     ]);
     if (iterator !== undefined) await settleBestEffort(async () => iterator.return?.());
+  }
+
+  private async releaseSessionBestEffort(sessionId: number): Promise<void> {
+    if (this.runtime.releaseSession === undefined) return;
+    await settleBestEffort(() => this.runtime.releaseSession!(sessionId));
   }
 
   private requireRun(id: number): Run {

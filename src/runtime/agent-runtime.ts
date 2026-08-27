@@ -41,6 +41,8 @@ export interface AgentRuntime {
   ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession>;
   startTurn(input: RuntimeTurnInput): RuntimeTurn;
   cancel(sessionId: number): Promise<void>;
+  /** Closes the live Runtime handle while preserving Provider persistent state. */
+  releaseSession?(sessionId: number): Promise<void>;
   reset(input: RuntimeSessionInput): Promise<void>;
   forgetSession(sessionId: number): Promise<void>;
   doctor(provider: Provider, agentId: number): Promise<RuntimeDoctor>;

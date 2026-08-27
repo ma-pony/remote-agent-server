@@ -645,6 +645,8 @@ describe("IntegrationProjection", () => {
     const mcpSecret = "mcp-private-error-must-not-leak";
     const mcpTask = harness.createTask();
     finishFailedTask(mcpTask, mcpSecret, "mcp_preflight_failed");
+    const timedOutTask = harness.createTask();
+    finishFailedTask(timedOutTask, "run_timed_out", "run_timed_out");
     const restartedTask = harness.createTask();
     const restartedRun = harness.runRepository.create(
       { sessionId: restartedTask.sessionId, input: restartedTask.effectivePrompt },
@@ -670,13 +672,14 @@ describe("IntegrationProjection", () => {
       sequence: delivery.sequence,
       payload: JSON.parse(delivery.payloadJson) as Record<string, unknown>
     }));
-    expect(notices).toHaveLength(3);
+    expect(notices).toHaveLength(4);
     expect(notices.map(({ payload }) => payload.notice)).toEqual([
       { code: "agent_disabled", message: "Agent is disabled" },
       { code: "mcp_preflight_failed", message: "MCP preflight failed" },
+      { code: "run_timed_out", message: "Agent Run exceeded its configured time limit" },
       { code: "server_restarted", message: "Agent Run was interrupted by a server restart" }
     ]);
-    expect(new Set(notices.map(({ eventKey }) => eventKey)).size).toBe(3);
+    expect(new Set(notices.map(({ eventKey }) => eventKey)).size).toBe(4);
     expect(notices.every(({ sequence }) => sequence === 3)).toBe(true);
     expect(harness.store.listDeliveries(noticeSubscription.id).map((delivery) => ({
       id: delivery.id,
@@ -686,8 +689,8 @@ describe("IntegrationProjection", () => {
     }))).toEqual(firstRecovery);
     expect(JSON.stringify(notices)).not.toContain(mcpSecret);
     expect(harness.store.listDeliveries(taskOnlySubscription.id).map(({ eventType }) => eventType))
-      .toEqual(["task.failed", "task.failed", "task.failed"]);
-    for (const task of [agentTask, mcpTask, restartedTask]) {
+      .toEqual(["task.failed", "task.failed", "task.failed", "task.failed"]);
+    for (const task of [agentTask, mcpTask, timedOutTask, restartedTask]) {
       const publicNotices = listIntegrationTaskEvents(
         harness.store,
         harness.eventStore,

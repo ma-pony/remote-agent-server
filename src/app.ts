@@ -172,7 +172,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     eventStore,
     sessionManager,
     mcpPreparer,
-    providerExtensionManager
+    providerExtensionManager,
+    runTimeoutMs: deps.config.runTimeoutMs
   });
   const scheduler = new RunScheduler({
     runRepository,

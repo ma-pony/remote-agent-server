@@ -26,7 +26,11 @@ const acpxMocks = vi.hoisted(() => ({
 
 vi.mock("acpx/runtime", () => acpxMocks);
 
-import { AcpxAgentRuntime, AgentRuntimeError } from "../src/runtime/acpx-runtime.js";
+import {
+  AcpxAgentRuntime,
+  AgentRuntimeError,
+  RUNTIME_RELEASE_RETRY_MS
+} from "../src/runtime/acpx-runtime.js";
 import { BEST_EFFORT_TIMEOUT_MS, settleBestEffort } from "../src/runtime/bounded-operation.js";
 import { SkillProjector } from "../src/runtime/skill-projector.js";
 import { SkillManager } from "../src/skills/skill-manager.js";
@@ -1030,6 +1034,81 @@ describe("AcpxAgentRuntime", () => {
     }));
     expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" }))
       .toThrow(expect.objectContaining({ code: "session_not_ready" }));
+  });
+
+  it("释放已缓存的 Session 时保留 Provider 持久状态", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+    runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
+
+    await runtime.releaseSession(SESSION_ID);
+
+    expect(acp.close).toHaveBeenCalledWith({
+      handle: expect.any(Object),
+      reason: "runtime_released",
+      discardPersistentState: false
+    });
+    expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" }))
+      .toThrow(expect.objectContaining({ code: "session_not_ready" }));
+  });
+
+  it("Runtime 释放失败时保留 Handle 并自动重试", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = makeRoot();
+      const acp = runtimeStub();
+      acp.close.mockRejectedValueOnce(new Error("close failed"));
+      acpxMocks.createAcpRuntime.mockReturnValue(acp);
+      const runtime = new AcpxAgentRuntime(makeConfig(root));
+      await runtime.ensureSession(sessionInput(root));
+
+      await expect(runtime.releaseSession(SESSION_ID)).rejects.toThrow("close failed");
+      expect(acp.close).toHaveBeenCalledTimes(1);
+      expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" }))
+        .toThrow(expect.objectContaining({ code: "session_not_ready" }));
+
+      await vi.advanceTimersByTimeAsync(RUNTIME_RELEASE_RETRY_MS);
+
+      expect(acp.close).toHaveBeenCalledTimes(2);
+      expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" }))
+        .toThrow(expect.objectContaining({ code: "session_not_ready" }));
+      await runtime.shutdown();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Turn 完成并空闲到期后自动释放 Runtime Handle", async () => {
+    vi.useFakeTimers();
+    try {
+      const root = makeRoot();
+      const acp = runtimeStub();
+      acpxMocks.createAcpRuntime.mockReturnValue(acp);
+      const runtime = new AcpxAgentRuntime({ ...makeConfig(root), runtimeIdleMs: 60_000 });
+      await runtime.ensureSession(sessionInput(root));
+      const turn = runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
+      for await (const _event of turn.events) {
+        // Consume the stream so the Runtime can observe the completed Turn.
+      }
+      await turn.result;
+
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({
+        reason: "runtime_released",
+        discardPersistentState: false
+      }));
+      expect(() => runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "again" }))
+        .toThrow(expect.objectContaining({ code: "session_not_ready" }));
+      await runtime.shutdown();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("session cancel 绑定 active turn 而不是可变 Handle cache", async () => {

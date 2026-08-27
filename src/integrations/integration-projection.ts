@@ -46,6 +46,10 @@ const PUBLIC_FAILURE_NOTICES = {
   server_restarted: {
     code: "server_restarted",
     message: "Agent Run was interrupted by a server restart"
+  },
+  run_timed_out: {
+    code: "run_timed_out",
+    message: "Agent Run exceeded its configured time limit"
   }
 } as const;
 
@@ -128,8 +132,8 @@ export class IntegrationProjection implements RunStateProjection, RunEventProjec
       ? "agent_disabled"
       : run.error === "server_restarted"
         ? "server_restarted"
-        : marker === "mcp_preflight_failed"
-          ? "mcp_preflight_failed"
+        : marker === "mcp_preflight_failed" || marker === "run_timed_out"
+          ? marker
           : undefined;
     if (code === undefined) return undefined;
     const notice = PUBLIC_FAILURE_NOTICES[code as PublicFailureNoticeCode];

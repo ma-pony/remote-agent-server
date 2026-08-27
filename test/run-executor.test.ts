@@ -34,7 +34,8 @@ const setup = (
   prepare = vi.fn(() => ({ memory: "remember this", revision: "skills-v1" })),
   mcpPrepare = vi.fn(async () => []),
   runRepositoryOptions: Record<string, unknown> = {},
-  providerExtensionRevision = vi.fn(() => "extensions-v1")
+  providerExtensionRevision = vi.fn(() => "extensions-v1"),
+  runTimeoutMs?: number
 ) => {
   const root = mkdtempSync(join(tmpdir(), "remote-agent-executor-"));
   tempDirectories.push(root);
@@ -70,7 +71,8 @@ const setup = (
     eventStore,
     sessionManager,
     mcpPreparer: { prepare: mcpPrepare },
-    providerExtensionManager: { revision: providerExtensionRevision }
+    providerExtensionManager: { revision: providerExtensionRevision },
+    runTimeoutMs
   });
   return {
     db,
@@ -90,6 +92,84 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("超过 Run 硬超时后终止 Turn、释放 Runtime 并稳定失败", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(async () => undefined);
+      const closeEvents = vi.fn(async () => undefined);
+      const releaseSession = vi.fn(async () => undefined);
+      const runtime = createFakeRuntime();
+      runtime.releaseSession = releaseSession;
+      runtime.startTurn = (): RuntimeTurn => ({
+        events: {
+          [Symbol.asyncIterator]() {
+            return { next: () => new Promise<IteratorResult<RuntimeEvent>>(() => undefined) };
+          }
+        },
+        result: new Promise<RuntimeTurnResult>(() => undefined),
+        cancel,
+        closeEvents
+      });
+      const setupResult = setup(runtime, undefined, undefined, undefined, undefined, 60_000);
+
+      const execution = setupResult.executor.execute(setupResult.run.id);
+      await vi.advanceTimersByTimeAsync(60_000 + BEST_EFFORT_TIMEOUT_MS * 3);
+      await execution;
+
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(closeEvents).toHaveBeenCalledTimes(1);
+      expect(releaseSession).toHaveBeenCalledWith(TEST_SESSION_ID);
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+        status: "failed",
+        error: "run_timed_out"
+      });
+      expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
+      expect(vi.getTimerCount()).toBe(0);
+      setupResult.db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("事件流已结束但最终结果挂起时仍受 Run 硬超时约束", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(async () => undefined);
+      const closeEvents = vi.fn(async () => undefined);
+      const releaseSession = vi.fn(async () => undefined);
+      const runtime = createFakeRuntime();
+      runtime.releaseSession = releaseSession;
+      runtime.startTurn = (): RuntimeTurn => ({
+        events: {
+          async *[Symbol.asyncIterator]() {
+            // The ACP event stream may end before its canonical result settles.
+          }
+        },
+        result: new Promise<RuntimeTurnResult>(() => undefined),
+        cancel,
+        closeEvents
+      });
+      const setupResult = setup(runtime, undefined, undefined, undefined, undefined, 60_000);
+
+      const execution = setupResult.executor.execute(setupResult.run.id);
+      await vi.advanceTimersByTimeAsync(60_000 + BEST_EFFORT_TIMEOUT_MS * 3);
+      await execution;
+
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(closeEvents).toHaveBeenCalledTimes(1);
+      expect(releaseSession).toHaveBeenCalledWith(TEST_SESSION_ID);
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+        status: "failed",
+        error: "run_timed_out"
+      });
+      expect(setupResult.sessionManager.get(TEST_SESSION_ID)?.status).toBe("idle");
+      expect(vi.getTimerCount()).toBe(0);
+      setupResult.db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("把当前 Agent 的 Provider 扩展版本传给 Runtime", async () => {
     const runtime = createFakeRuntime({ result: { status: "completed" } });
     runtime.ensureSession = vi.fn(runtime.ensureSession);
@@ -307,8 +387,10 @@ describe("RunExecutor", () => {
       const result = deferred<RuntimeTurnResult>();
       const returnIterator = vi.fn(() => new Promise<IteratorResult<RuntimeEvent>>(() => undefined));
       const closeEvents = vi.fn(() => new Promise<void>(() => undefined));
+      const releaseSession = vi.fn(async () => undefined);
       let nextCalls = 0;
       const runtime = createFakeRuntime();
+      runtime.releaseSession = releaseSession;
       runtime.startTurn = (): RuntimeTurn => ({
         events: {
           [Symbol.asyncIterator]() {
@@ -340,6 +422,7 @@ describe("RunExecutor", () => {
 
       expect(closeEvents).toHaveBeenCalledTimes(1);
       expect(returnIterator).toHaveBeenCalledTimes(1);
+      expect(releaseSession).toHaveBeenCalledWith(TEST_SESSION_ID);
       expect(closeEvents.mock.invocationCallOrder[0]).toBeLessThan(returnIterator.mock.invocationCallOrder[0]!);
       expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
         status: "succeeded",
