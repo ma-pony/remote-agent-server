@@ -2,12 +2,25 @@
 
 [简体中文](README.md)
 
-Remote Agent Server is a self-hosted runtime for command-line agents such as Claude Code and Codex. It provides one web interface and HTTP API for preparing projects, isolating workspaces, continuing multi-turn conversations, recording executions, and accepting asynchronous work from other systems.
+Remote Agent Server is a self-hosted ACP agent execution gateway for business applications. Callers submit asynchronous tasks over HTTP. The server runs command-line agents such as Claude Code and Codex in isolated workspaces, then returns progress and results through status queries, events, SSE, or signed Webhooks.
+
+It turns existing agent CLIs into a durable backend for ticketing systems, CI/CD, internal platforms, and automation services. Operators use the web console to configure agents, project environments, Skills, provider extensions, MCP, concurrency, and integration endpoints. External callers need only an endpoint token and the stable Task API.
 
 The execution layer uses [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol). The current provider adapters support Claude Code, Codex, and Hermes.
 
+Each provider remains responsible for reasoning, tool use, and its native session. Remote Agent Server owns the execution lifecycle, workspace isolation, configuration projection, durable events, and external delivery. Business approvals, ticket state machines, and deployment rules stay in the calling system.
+
+## Use cases
+
+- Ticketing, issue, or operations platforms that dispatch work to an agent and consume the result asynchronously.
+- CI/CD and internal automation that need queryable, cancellable, auditable long-running tasks.
+- Teams that want to reuse existing Claude Code or Codex authentication while managing project environments, MCP, and Skills centrally.
+- Self-hosted deployments that need control over source code, credentials, execution records, and workspaces.
+
 ## Features
 
+- **Asynchronous Task API:** submit work over HTTP, prevent duplicate execution with idempotency keys, query or cancel tasks, and continue multi-turn conversations.
+- **Reliable event delivery:** consume incremental event history, resumable SSE, or signed Webhooks without tying task execution to a live connection.
 - **Agent management:** configure providers, instructions, project environments, Skills, and MCP in one place.
 - **Reusable project environments:** prepare one or more Git repositories and their dependencies before sessions start.
 - **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
@@ -17,27 +30,32 @@ The execution layer uses [acpx](https://github.com/openclaw/acpx) and the [Agent
 - **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
 - **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
 - **Concurrency and queue control:** adjust run, Webhook-delivery, and project-environment build concurrency from the console, with an optional run limit per agent.
-- **External integrations:** submit asynchronous HTTP tasks with idempotency, polling, SSE, cancellation, conversations, and signed Webhooks.
 - **Headed browser support:** run agents in a real desktop session without requiring containers.
 
-## How a request runs
+## Execution model
 
-From the web interface:
+The external integration API is the primary service interface:
+
+```text
+External system
+   |
+   v
+Integration endpoint (auth / parameter mapping / idempotency)
+   |
+   v
+Task -> Conversation -> Session -> isolated Workspace -> acpx/ACP -> Provider
+   |                         |
+   |                         +-> Skills / provider extensions / MCP
+   |
+   +-> status / event history / SSE / signed Webhook
+```
+
+Operators can also create Sessions and Runs directly from the web console:
 
 ```text
 Project environment -> Agent -> Session -> Run -> acpx/ACP -> Provider
                                |
                                +-> messages, tool activity, status, result
-```
-
-From another system:
-
-```text
-External system -> Integration endpoint -> Task -> Session -> Run -> Agent
-                         |                            |
-                         |                            +-> workspace / Skills / provider extensions / MCP
-                         |
-                         +-> status query / event query / SSE / Webhook
 ```
 
 | Object | Purpose |
@@ -546,3 +564,12 @@ pnpm smoke:integrations
 ## Deployment
 
 The [deployment guide](docs/deployment.md) covers macOS APFS/LaunchAgent, Linux Btrfs/systemd, headed browsers, PATH, provider authentication, backup and restore, and real acceptance checks.
+
+## Documentation
+
+- [Product and architecture](docs/design.en.md): positioning, system boundaries, core objects, execution paths, and reliability design.
+- [Deployment and acceptance](docs/deployment.md): production deployment, provider authentication, filesystems, reverse proxies, and real smoke tests.
+
+## License
+
+Released under the [MIT License](LICENSE).

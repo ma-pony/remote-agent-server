@@ -1,6 +1,8 @@
-# Remote Agent Server 部署与真实 Provider 验收
+# Remote Agent Server 部署与验收
 
-本服务支持两种原生写时复制 Workspace：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。运行时会根据操作系统自动选择，不提供普通目录复制回退。它以 acpx 的 `approve-all` 模式运行 Claude Code、Codex 或 Hermes。`approve-all` 只减少 Provider 的交互确认，**不是安全沙箱**；Workspace 中的代码、网络和该用户能访问的文件都应视为 Agent 可操作范围。
+Remote Agent Server 是面向业务系统的自托管 ACP Agent 执行网关。生产部署需要同时保证四条链路可用：外部 HTTP 接入、Provider/ACP 执行、项目环境与 Session Workspace、Event/Webhook 返回。本指南覆盖 macOS 和 Linux 的单机、单进程部署，并使用真实 Provider 和 Integration Task 完成验收。产品边界与执行链路见[产品与架构](design.md)。
+
+服务支持两种原生写时复制 Workspace：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。运行时会根据操作系统自动选择，不提供普通目录复制回退。它以 acpx 的 `approve-all` 模式运行 Claude Code、Codex 或 Hermes。`approve-all` 只减少 Provider 的交互确认，**不是安全沙箱**；Workspace 中的代码、网络和该用户能访问的文件都应视为 Agent 可操作范围。
 
 ## macOS：APFS 原生部署
 
@@ -289,7 +291,7 @@ test "$PNPM_NODE_BIN" = "$NODE_BIN" || {
 ```bash
 sudo tee /etc/systemd/system/remote-agent.service >/dev/null <<EOF
 [Unit]
-Description=Remote Agent Server
+Description=Remote Agent Server ACP execution gateway
 After=network-online.target
 Wants=network-online.target
 

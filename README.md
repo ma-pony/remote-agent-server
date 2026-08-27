@@ -2,12 +2,25 @@
 
 [English](README.en.md)
 
-Remote Agent Server 是一个自托管的 Agent 运行服务。它把 Claude Code、Codex 等命令行 Agent 接到统一的 Web 界面和 HTTP API，并负责准备项目、隔离工作区、续接多轮对话、保存执行记录，以及接收其他系统提交的异步任务。
+Remote Agent Server 是一个面向业务系统的自托管 ACP Agent 执行网关。调用方通过 HTTP 提交异步任务，服务在隔离 Workspace 中运行 Claude Code、Codex 等命令行 Agent，并通过状态查询、Event、SSE 或签名 Webhook 返回执行过程和结果。
+
+它把现有 Agent CLI 变成可嵌入工单系统、CI/CD、内部平台和自动化服务的持久化后端。Web 管理台负责配置 Agent、项目环境、Skills、执行器扩展、MCP、并发和接入端点；外部调用方只需要 Endpoint Token 和稳定的 Task API。
 
 执行层基于 [acpx](https://github.com/openclaw/acpx) 和 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol)。目前支持 Claude Code、Codex 和 Hermes Provider。
 
+Agent 的推理、工具使用和原生会话仍由对应 Provider 负责。Remote Agent Server 管理执行生命周期、Workspace 隔离、配置投影、持久化事件和外部回调。业务审批、工单状态机与部署规则由调用方维护。
+
+## 适用场景
+
+- 工单、Issue 或运维平台把任务派发给 Agent，并异步接收执行结果。
+- CI/CD 或内部自动化服务需要可查询、可取消、可审计的长任务。
+- 团队希望复用现有 Claude Code、Codex 登录状态，同时集中管理项目环境、MCP 和 Skills。
+- 自托管环境需要保留代码、凭证、执行记录和 Workspace 的控制权。
+
 ## 主要功能
 
+- **异步 Task API**：外部系统通过 HTTP 提交任务，使用幂等键避免重复执行，并可查询、取消或继续多轮 Conversation。
+- **可靠事件出口**：支持增量 Event 查询、可续读 SSE 和签名 Webhook；断线不影响正在执行的 Task。
 - **统一管理 Agent**：集中配置 Provider、Agent 指令、项目环境、Skills 和 MCP。
 - **可复用项目环境**：提前准备一个或多个 Git 仓库及依赖，Session 创建时无需重新安装。
 - **隔离 Workspace**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot，为每个 Session 快速创建写时复制环境。
@@ -17,27 +30,32 @@ Remote Agent Server 是一个自托管的 Agent 运行服务。它把 Claude Cod
 - **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
 - **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
 - **并发与队列控制**：在管理台统一调整 Run、Webhook 投递和项目环境构建并发，并可为单个 Agent 设置 Run 上限。
-- **外部系统接入**：通过 HTTP 提交异步 Task，支持幂等、查询、SSE、取消、多轮会话和签名 Webhook。
 - **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
 
-## 一次请求如何执行
+## 执行模型
 
-从 Web 界面发起：
+外部系统接入是项目的主要服务接口：
+
+```text
+外部系统
+   |
+   v
+接入端点（鉴权 / 参数映射 / 幂等）
+   |
+   v
+Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
+   |                         |
+   |                         +-> Skills / 执行器扩展 / MCP
+   |
+   +-> 状态查询 / Event 查询 / SSE / 签名 Webhook
+```
+
+管理人员也可以从 Web 界面直接创建 Session 和 Run：
 
 ```text
 项目环境 -> Agent -> Session -> Run -> acpx/ACP -> Provider
                          |
                          +-> 消息、工具调用、状态和结果
-```
-
-从其他系统发起：
-
-```text
-外部系统 -> 接入端点 -> Task -> Session -> Run -> Agent
-                |                  |
-                |                  +-> Workspace / Skills / 执行器扩展 / MCP
-                |
-                +-> 状态查询 / Event 查询 / SSE / Webhook
 ```
 
 | 对象 | 作用 |
@@ -554,3 +572,12 @@ pnpm smoke:integrations
 ## 部署
 
 [部署文档](docs/deployment.md)包含 macOS APFS/LaunchAgent、Linux Btrfs/systemd、有头浏览器、PATH、Provider 登录、备份恢复和真实验收步骤。
+
+## 文档
+
+- [产品与架构](docs/design.md)：定位、系统边界、核心对象、执行链路和可靠性设计。
+- [部署与验收](docs/deployment.md)：生产部署、Provider 登录、文件系统、反向代理和真实 Smoke Test。
+
+## 许可证
+
+本项目使用 [MIT License](LICENSE)。

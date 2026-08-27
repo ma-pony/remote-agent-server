@@ -1,6 +1,13 @@
 {
   "name": "remote-agent-server",
+  "description": "Self-hosted ACP execution gateway for running coding agents through HTTP, SSE, and signed webhooks.",
   "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ma-pony/remote-agent-server.git"
+  },
+  "homepage": "https://github.com/ma-pony/remote-agent-server#readme",
   "type": "module",
   "packageManager": "pnpm@10.28.2",
   "engines": {

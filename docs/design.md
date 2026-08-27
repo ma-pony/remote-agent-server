@@ -1,244 +1,193 @@
-# Remote Agent Server 第一版设计
+# Remote Agent Server 产品与架构
 
-## 1. 目标
+[English](design.en.md)
 
-Remote Agent Server 是部署在 Agent 服务器上的远程执行服务。调用方可以选择一个 Agent 创建长期 Session，持续发送多轮消息，并实时查看 Agent 的回复和工具调用。
+## 1. 产品定位
 
-第一版支持 Claude Code、Codex 和 Hermes。底层通过 acpx/ACP 统一执行，不承载工单、审核、部署等业务工作流。
+Remote Agent Server 是一个面向业务系统的自托管 ACP Agent 执行网关。外部系统通过 HTTP 提交异步任务，服务在隔离 Workspace 中运行 Claude Code、Codex 等命令行 Agent，并通过状态查询、Event、SSE 或签名 Webhook 返回执行过程和结果。
 
-## 2. 第一版范围
+项目服务于需要把 Coding Agent 接入现有系统的团队。典型调用方包括工单平台、CI/CD、运维后台、内部研发平台和自动化服务。调用方无需实现 ACP 进程管理、项目依赖准备、会话恢复、MCP 注入或执行记录存储。
 
-第一版必须支持：
+Agent 的推理、工具和原生会话由 Provider 负责。Remote Agent Server 管理以下平台职责：
 
-- 创建和配置 Claude Code、Codex、Hermes Agent。
-- 创建 Session 并向 Agent 发送消息。
-- 在同一 Session 中继续多轮对话，优先恢复原 ACP Session。
-- 持久化 Agent 回复、工具调用、运行状态和错误。
-- 通过 SSE 实时查看执行过程，断开后可以重新读取已有记录。
-- 不同 Session 并行执行，同一 Session 串行执行。
-- Agent 绑定系统维护的多项目环境；Session 从当时的不可变环境版本创建独立 APFS/Btrfs 可写快照。
-- 在具有桌面环境的服务器上运行有头浏览器。
-- 从具体 Agent 的目录加载原生 Skills 和简单 Memory 文件。
+- Agent 与 Provider 配置；
+- 项目环境准备和版本发布；
+- Session Workspace 隔离；
+- ACP Session 创建、恢复、取消和重置；
+- Skills、执行器扩展和 MCP 投影；
+- Run、Event、Token 用量和错误记录；
+- 外部 Task、Conversation、SSE 和 Webhook；
+- 进程内并发、队列和保留策略。
 
-第一版不实现：
+业务审批、工单状态机、代码审核规则和部署流程留在调用方。调用方使用 Task API 派发工作，并根据公开事件更新自己的业务状态。
 
-- 业务 Workflow 或 DAG。
-- 多 Host 选择、SSH 部署和 Host 连接池。
-- Redis、Sidekiq、独立 Worker 或独立 Runner daemon。
-- Webhook、Outbox 和回调重试。
-- 向量知识库、自动记忆和自动生成 Skill。
-- Skill 市场、Skill 数据库和复杂版本管理。
-- 服务重启后接管执行中的 Run。
-- 容器或强安全沙箱。
+## 2. 适用场景
 
-## 3. 技术结构
+- 工单系统把缺陷修复、排查或代码修改派发给指定 Agent。
+- CI/CD 在构建失败后创建可追踪、可取消的 Agent Task。
+- 内部平台统一管理多个 Coding Agent 的项目环境、MCP、Skills 和并发。
+- 后端服务通过 Webhook 接收 Agent 最终回复和工具生命周期事件。
+- 管理人员通过 Web 控制台直接创建 Session，进行多轮排查或开发。
 
-项目采用一个仓库、一个服务进程和一个部署单元：
-
-- Fastify：HTTP API 和 SSE。
-- React + Vite：管理界面。
-- SQLite WAL：Agent、Session、Run 和事件记录。
-- acpx Runtime：Claude Code、Codex、Hermes 的 ACP 执行层。
-- Btrfs 和本地文件系统：Workspace 快照、Skills、Memory、浏览器 Profile 和运行时目录。
-
-服务内部只保留四个核心模块：
-
-- `AgentManager`：Agent 配置和运行环境检查。
-- `SessionManager`：Session 生命周期和多轮接续。
-- `RunExecutor`：封装 acpx，执行、恢复和取消 Agent Run。
-- `EventStore`：保存并读取执行事件。
-
-业务代码只能通过 `RunExecutor` 使用 acpx，避免 acpx 的接口变化扩散到整个项目。
-
-## 4. 数据模型
-
-第一版只使用四张表。
-
-### 4.1 agents
+## 3. 执行模型
 
 ```text
-id
-name
-provider          # claude_code / codex / hermes
-enabled
-created_at
-updated_at
+外部系统
+   |
+   v
+接入端点（Endpoint Token / 参数映射 / 幂等）
+   |
+   v
+Task -> Conversation -> Session -> Run -> acpx/ACP -> Provider
+   |                         |                 |
+   |                         |                 +-> Claude Code / Codex / Hermes
+   |                         |
+   |                         +-> Workspace / Skills / 执行器扩展 / MCP
+   |
+   +-> Task 状态 / Event 查询 / SSE / 签名 Webhook
 ```
 
-Agent 第一版只表示一个可选择的 Provider 档案：名称、Provider 类型和是否启用。Agent 的 Skills 和 Memory 使用第 8 节约定的文件目录。
+HTTP 提交只负责创建 Task，成功响应使用 `202 Accepted`。Run 在后台排队和执行，调用方无需保持连接。Task 状态与 Event 历史是持久化事实；SSE 提供实时增量，Webhook 提供主动通知。
 
-模型、权限模式和 MCP 等 Provider 参数沿用 Claude Code、Codex、Hermes 各自的原生配置；API Key 等敏感凭证使用 `.env` 或 Agent CLI 自己的登录状态；Provider 执行命令在代码中固定映射。Workspace、仓库和浏览器目录属于 Session，并发数、数据目录和服务鉴权属于服务配置。
+Web 控制台复用同一套 Session、Run 和 Event 模型。控制台创建的 Run 不经过外部 Endpoint，也不会产生业务 Task。
 
-出现明确需求后再增加对应字段，不使用通用 JSON 配置承载未知参数。
+## 4. 核心对象
 
-### 4.2 sessions
+| 对象 | 职责 |
+| --- | --- |
+| 项目环境 | 保存一个或多个 Git 仓库、准备命令和当前可用版本。 |
+| 项目环境版本 | 一次完整构建的结果；发布后作为 Session Workspace 的快照来源。 |
+| Agent | 绑定 Provider、项目环境、指令、Skills、执行器扩展、MCP 和并发策略。 |
+| Session | 一个隔离 Workspace 和一段可续接的 Provider 对话。 |
+| Run | Session 中的一次输入、执行状态、结果和 Token 用量。 |
+| Event | Run 产生的消息、工具、状态与错误记录，按 `seq` 追加。 |
+| 接入端点 | 外部系统的认证与参数映射入口，固定绑定一个 Agent。 |
+| Conversation | 调用方提供的业务会话键，负责复用 Session 并串行多轮 Task。 |
+| Task | 外部系统提交的一次异步请求，调度后关联一个 Run。 |
+| Webhook 订阅 | 按事件类型投递签名消息，并记录每次 Delivery。 |
+
+这些对象使用公开数字 ID。Endpoint `slug` 和调用方的 `requestId`、`conversationKey` 承担外部业务标识职责。
+
+## 5. 系统结构
+
+服务采用单个 Node.js 进程和一个部署单元：
+
+- **Fastify API**：管理 API、外部 Integration API、Event 查询与 SSE。
+- **React 管理台**：Agent、项目环境、Session、MCP、Skills、执行器扩展、接入端点和系统并发设置。
+- **SQLite WAL**：配置、队列状态、执行记录、外部 Task、Webhook Delivery 和 Token 统计。
+- **acpx/ACP Runtime**：统一驱动 Claude Code、Codex 和 Hermes，并把 Provider 事件归一化。
+- **Workspace 层**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。
+- **进程内调度器**：分别调度 Run、项目环境构建和 Webhook Delivery。
+
+主要代码边界：
+
+- `src/agents/`：Agent 配置、复制和运行检查。
+- `src/project-environments/`：仓库同步、依赖准备、版本发布和清理。
+- `src/sessions/`：Session 创建、重置、删除和大体积数据保留策略。
+- `src/runs/`：Run 入队、并发控制、执行、取消和事件落库。
+- `src/runtime/`：acpx/ACP 适配、Provider Session 与配置投影。
+- `src/mcp/`、`src/skills/`、`src/provider-extensions/`：Agent 能力发现、选择和运行时投影。
+- `src/integrations/`：Endpoint、Conversation、Task、公开事件和 Webhook。
+
+业务模块通过 Runtime 接口使用 acpx，Provider 或 ACP 适配变化集中在 `src/runtime/` 内。
+
+## 6. Agent 运行流程
+
+### 6.1 管理台直接运行
+
+1. 管理员选择 Agent 创建 Session。
+2. 服务固化 Agent 当前项目环境版本，并创建写时复制 Workspace。
+3. 用户发送消息，服务创建 `queued` Run。
+4. Run 调度器检查全局、Agent 和 Session 并发约束。
+5. 服务准备 Agent Provider Home，投影 Skills、执行器扩展和 MCP。
+6. Runtime 创建或恢复 ACP Session，发送本轮输入。
+7. Provider 事件归一化后写入 Event Store，并实时提供给页面。
+8. Runtime 返回后，服务保存结果和 Token 用量，更新 Run 与 Session 状态。
+
+同一 Session 的 Run 严格串行。不同 Session 可以在全局和 Agent 上限内并行。
+
+### 6.2 外部 Task
+
+1. 调用方使用 Endpoint Token 提交 `requestId`、可选 `conversationKey`、消息和声明过的参数。
+2. 服务在 Endpoint 范围内执行幂等检查。
+3. Conversation 存在时复用其 Session；首次调用创建新 Session。
+4. Task 入队后立即返回 ID，Integration 调度器随后创建 Run。
+5. Run Event 被投影为公开 Integration Event，敏感工具参数和 Provider 私有字段不会暴露。
+6. 调用方通过 Task 查询、Event 查询、SSE 或 Webhook 获取进度与结果。
+7. Conversation 结束后保留历史记录；以后使用相同 Key 会创建新 Session。
+
+相同 Conversation 的 Task 严格串行，避免多个 Run 并发修改同一个 Workspace 或 Provider 上下文。
+
+## 7. 项目环境与 Workspace
+
+项目环境把 Git 仓库和依赖准备从每次 Agent 执行中移出：
+
+1. 构建器同步一个或多个仓库。
+2. 依赖发生变化时执行准备命令；依赖指纹未变化时只更新源码。
+3. 所有仓库准备成功后发布新版本。
+4. Session 从当前版本创建 APFS Clone 或 Btrfs Snapshot。
+
+Session 创建不重复 clone、`git clean` 或依赖安装。Workspace 是可写副本，Session 内的修改不会回写项目环境。项目环境同步失败时继续保留上一可用版本。
+
+Python `uv` 项目使用可迁移虚拟环境。服务器要求 uv `>= 0.10.8`，在项目包含 `uv.lock` 时准备 relocatable `.venv`。
+
+Session 保留策略只清理占用空间较大的 Workspace、浏览器数据和 Provider 原生会话。Session、Run、Event、外部接入关联和 Token 统计继续保留。
+
+## 8. Agent 能力投影
+
+每个 Agent 使用独立 Provider Home。服务从运行用户的 Provider 配置中发现可复用能力，再由管理员明确选择：
 
 ```text
-id
-agent_id
-title
-status            # idle / running
-provider_session_id
-workspace_path
-created_at
-updated_at
+系统 Provider 配置 -> 发现 -> Agent 选择 -> 下一次 Run 投影
 ```
 
-Session 表示一个长期任务，拥有固定 Workspace、浏览器目录和 Provider Session。
+- **Skills**：发现本机 Skill 或上传 ZIP，按 Agent 启用。
+- **执行器扩展**：发现 Codex、Claude Code 插件和 Hook，按 Agent 投影。
+- **MCP**：管理 HTTP 和 stdio Server、固定值、Session 参数、运行时参数、密钥和工具过滤。
 
-### 4.3 runs
+Provider 的历史会话、日志和缓存不会复制到 Agent Provider Home。敏感值使用 `DATA_DIR/secret.key` 加密，管理 API 不返回明文。
 
-```text
-id
-session_id
-status            # queued / running / succeeded / failed / cancelled
-input
-result
-error
-created_at
-started_at
-finished_at
-```
+配置变化从下一次 Run 生效。已有 Session 会刷新 Runtime 连接；Provider 支持恢复时继续原有 Provider Session。
 
-一条用户消息对应一个 Run。Run 成功只表示 Agent 正常结束这一轮执行，不表示调用方的业务任务已经完成。
+## 9. 可靠性与并发
 
-### 4.4 events
+- 全局 Run、Agent Run、Webhook Delivery 和项目环境构建并发可以在线调整。
+- Session 和 Conversation 内部串行执行。
+- 同一 Webhook 订阅按顺序投递。
+- 同一项目环境的重复同步请求会被合并。
+- Event 先持久化再提供查询，`seq` 支持断线续读。
+- SSE 连接断开不会取消 Run。
+- Webhook 使用至少一次投递，接收方按稳定 `eventId` 去重。
+- 服务重启后，排队任务继续调度；中断的 Run 标记失败且不自动重放输入。
+- Provider Session 恢复失败时保留 Workspace 和历史，等待用户明确重建执行器会话。
 
-```text
-id
-run_id
-seq
-type              # message / tool / status / error
-content_json
-created_at
-```
+当前并发控制属于单进程范围。多个服务实例不会共享运行配额，也不能同时操作同一个 SQLite 和 Workspace 根目录。
 
-事件只追加，不修改。`seq` 用于 SSE 断线后的继续读取。
+## 10. 安全边界
 
-## 5. 执行流程
+管理 API 使用全局 `API_TOKEN`。每个接入端点使用独立 Endpoint Token，服务端只保存哈希。Webhook 使用独立签名密钥和 HMAC-SHA256。
 
-1. 用户选择 Agent 创建 Session，服务从 Agent 当前项目环境版本创建 APFS/Btrfs 可写快照。
-2. 用户发送消息，服务创建 `queued` Run。
-3. Session 空闲且未超过全局并发数时，Run 进入 `running`。
-4. 服务将 Skills、Memory 和 Provider 配置放入已经准备好的 Session Workspace。
-5. 有 `provider_session_id` 时通过 acpx 恢复原 Session，否则创建新 Session。
-6. acpx 执行当前 Turn，服务将归一化事件写入 SQLite。
-7. 页面通过 SSE 读取已保存的事件。
-8. acpx 正常返回后保存最终回复，Run 进入 `succeeded`，Session 回到 `idle`。
-9. 下一条消息创建新的 Run，并继续使用原 Provider Session。
+Agent 运行在服务操作系统用户权限下，可以执行命令、修改 Workspace、调用 MCP 和访问该用户能够访问的网络与文件。`approve-all` 是 Provider 交互策略，不是安全沙箱。生产部署必须使用专用无特权用户、可信仓库和 MCP，并把服务放在可信网络或 TLS 反向代理后。
 
-同一 Session 只允许一个活动 Run。不同 Session 的总并发数由环境变量控制：
+## 11. 部署边界
 
-```env
-MAX_CONCURRENT_RUNS=4
-```
+当前版本面向单机、单进程、自托管部署：
 
-浏览器关闭、HTTP 请求结束或 SSE 断开都不终止 Run。
+- macOS 使用登录用户、APFS 和 LaunchAgent；
+- Linux 使用专用服务用户、Btrfs 和 systemd；
+- SQLite、加密主密钥、项目环境与 Session 根目录需要持久化；
+- 有头浏览器依赖真实桌面或 X display。
 
-如果 ACP Session 恢复失败，本次 Run 进入 `failed`。用户可以明确重置 Agent 上下文后继续使用原 Workspace，服务不得静默创建新上下文并伪装成成功接续。
+具体命令、文件系统预检、Provider 登录和 Smoke Test 见[部署与验收文档](deployment.md)。
 
-## 6. 项目环境、Workspace 和多仓库
+## 12. 当前范围
 
-管理员在“项目环境”页面登记一个或多个 Git 项目及可选准备命令。系统首次构建时 clone 项目并安装依赖，之后每三小时检查远程默认分支；只有构建全部成功才发布新的不可变环境版本。
+Remote Agent Server 当前专注于单机 Agent 执行网关。以下能力留给调用方或后续独立系统：
 
-Agent 绑定项目环境。创建 Session 时，服务固化 Agent 当时的环境版本，并通过 APFS Clone 或 Btrfs Snapshot 生成独立 Workspace：
+- 业务 Workflow、工单状态机和审批规则；
+- 多主机调度和跨实例分布式配额；
+- 不受信任租户的强安全沙箱；
+- Agent 推理框架、模型路由和自研工具循环；
+- Git 托管平台的业务规则和部署编排。
 
-```text
-/srv/remote-agent/environments/<environment-id>/revisions/<revision-id>/workspace/
-  example-service/
-  example-web/
-  example-crawler/
-
-/srv/remote-agent/sessions/<session-id>/
-  workspace/     # 从不可变项目环境版本创建的独立副本
-  runtime/       # ACP Provider 运行目录
-  browser/       # 独立浏览器 Profile
-```
-
-Agent 启动时项目和基础依赖已经可用，自行判断任务涉及哪些项目。Session 创建不 clone 仓库、不安装基础依赖，也不创建 Git worktree。
-
-项目环境发布新版本只影响之后创建的 Session；已有 Session 永远复用自己的 Workspace。第一版不提供环境池、仓库 MCP、任意分支选择或自动升级 Session。
-
-## 7. 有头浏览器
-
-Remote Agent Server 运行在有桌面环境的专用系统用户下。每个 Session 拥有独立的 `browser/` 目录，目录路径通过环境变量传给 Agent。
-
-浏览器的启动、操作和关闭由各 Agent 的工具或 Skill 负责。第一版不实现浏览器调度、代理或 Profile 管理界面。
-
-## 8. Skills、Memory 和知识库
-
-Skills 和 Memory 属于具体 Agent，第一版使用文件目录：
-
-```text
-data/agents/<agent-id>/
-  skills/
-  MEMORY.md
-```
-
-每次 Run 开始前，服务将 `skills/` 中的内容同步到对应 Provider 的原生 Skills 目录。运行中的 Run 不接受 Skill 变更，文件修改从下一 Run 生效。
-
-`MEMORY.md` 只保存长期稳定的事实、偏好和约束，由人工维护。执行轨迹保存在事件表中，不写入 Memory。
-
-第一版不开发 Skills 和 Memory 编辑界面，也不集成 IWE。后续可以通过 MCP 增加 IWE 的 `search` 和 `read`，无需修改当前核心数据模型。
-
-## 9. API
-
-所有 `/api` 接口使用 `.env` 中配置的固定 Bearer Token 鉴权。第一版不实现用户、角色和权限系统。
-
-第一版提供以下接口：
-
-```text
-GET  /api/agents
-POST /api/agents
-PATCH /api/agents/:id
-GET  /api/agents/:id/doctor
-
-GET  /api/sessions
-POST /api/sessions
-GET  /api/sessions/:id
-POST /api/sessions/:id/reset
-
-POST /api/sessions/:id/runs
-GET  /api/runs/:id
-POST /api/runs/:id/cancel
-
-GET  /api/runs/:id/events
-GET  /api/runs/:id/events/stream
-```
-
-调用方通过 Run 查询执行状态和最终结果。第一版不提供业务完成状态，也不主动回调调用方。
-
-`reset` 只清除失效的 Provider Session ID，不删除 Workspace、历史 Run 和事件。
-
-## 10. 管理界面
-
-第一版只实现三个页面：
-
-- Agent 页面：创建 Agent、配置 Provider 和检查运行环境。
-- Session 列表：查看 Session、Agent 和当前状态。
-- Session 详情：查看多轮消息、工具调用、错误和当前 Run，并继续发送消息或取消执行。
-
-不实现工作流画布、Host 管理、知识库编辑器和复杂 Dashboard。
-
-## 11. 故障处理
-
-- Agent 或 acpx 异常：当前 Run 进入 `failed`，保存错误事件。
-- ACP Session 无法恢复：当前 Run 失败，等待用户明确重置上下文。
-- SSE 断开：Run 继续执行，客户端根据 `seq` 重新读取事件。
-- 服务重启：`queued` Run 可以重新调度，原来处于 `running` 的 Run 标记为 `failed`。
-- Run 失败后不自动重放用户输入，避免重复修改代码、重复提交或重复操作外部系统。
-
-Session 的 Workspace 和 Provider Session ID 在 Run 失败后仍然保留。
-
-## 12. 第一版完成条件
-
-第一版完成必须通过以下实际流程验证：
-
-1. Claude Code、Codex、Hermes 分别能够创建 Session 并完成一轮 Run。
-2. 三种 Agent 都能够在同一 Session 中继续第二轮对话。
-3. 页面能够实时展示回复、工具调用、状态和错误。
-4. SSE 断开后能够继续读取未展示的事件。
-5. 两个不同 Session 能够并行执行，同一 Session 不会并行执行两个 Run。
-6. 新 Session 能够直接使用项目环境中的两个以上项目，并在后续 Run 中保留自己的代码和环境变更。
-7. Agent 能够在独立浏览器目录下完成一次有头浏览器操作。
-8. 服务重启后不会把中断的 Run 错误标记为成功，也不会自动重放。
+保持这些边界可以让外部系统通过稳定 API 使用现有 Coding Agent，同时保留各自的业务模型。
