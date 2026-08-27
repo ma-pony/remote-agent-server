@@ -74,7 +74,7 @@ describe("RunMcpPreparer", () => {
     const check = vi.fn(async () => ({ status: "passed" as const, toolCount: 2, message: "2 tools available" }));
     const fixture = setup({ check });
     const created = fixture.manager.createServer(fixture.agentId, {
-      name: "grab-manager",
+      name: "project-tools",
       transport: "http",
       enabled: true,
       url: "https://example.test/mcp",
@@ -93,13 +93,13 @@ describe("RunMcpPreparer", () => {
 
     expect(check).toHaveBeenCalledWith({
       type: "http",
-      name: "grab-manager",
+      name: "project-tools",
       url: "https://example.test/mcp",
       headers: [{ name: "Authorization", value: "Bearer runtime-secret" }]
     }, 7000);
     expect(server).toMatchObject({
       type: "stdio",
-      name: "grab-manager",
+      name: "project-tools",
       command: process.execPath,
       startupTimeoutSeconds: 7
     });
@@ -111,7 +111,7 @@ describe("RunMcpPreparer", () => {
       allowedTools: ["ticket_get"],
       upstream: {
         type: "http",
-        name: "grab-manager",
+        name: "project-tools",
         url: "https://example.test/mcp",
         headers: [{ name: "Authorization", value: "Bearer runtime-secret" }]
       }
@@ -121,10 +121,10 @@ describe("RunMcpPreparer", () => {
 
   it("任一启用 MCP 检查失败时阻止 Run 且不暴露配置明文", async () => {
     const fixture = setup({
-      check: async () => ({ status: "failed", code: "mcp_check_failed", message: "MCP grab-manager check failed" })
+      check: async () => ({ status: "failed", code: "mcp_check_failed", message: "MCP project-tools check failed" })
     });
     const created = fixture.manager.createServer(fixture.agentId, {
-      name: "grab-manager",
+      name: "project-tools",
       transport: "http",
       enabled: true,
       url: "https://example.test/mcp?token=url-secret",
@@ -139,7 +139,7 @@ describe("RunMcpPreparer", () => {
       browserProfilePath: "/browser"
     }).catch((caught: unknown) => caught);
 
-    expect(error).toEqual(new RunMcpPreparationError("MCP grab-manager check failed"));
+    expect(error).toEqual(new RunMcpPreparationError("MCP project-tools check failed"));
     expect(JSON.stringify(error)).not.toMatch(/url-secret|header-secret|Authorization/i);
     fixture.db.close();
   });

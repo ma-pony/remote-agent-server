@@ -64,7 +64,7 @@ describe("Agent MCP API", () => {
     const created = await app.inject({
       method: "POST", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders(),
       payload: {
-        name: "grab-manager", transport: "http", enabled: true,
+        name: "project-tools", transport: "http", enabled: true,
         url: "https://example.test/mcp", checkTimeoutSeconds: 20, headers: []
       }
     });
@@ -89,7 +89,7 @@ describe("Agent MCP API", () => {
     const created = await app.inject({
       method: "POST", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders(),
       payload: {
-        name: "grab-manager", transport: "http", enabled: true,
+        name: "project-tools", transport: "http", enabled: true,
         url: "https://example.test/mcp", checkTimeoutSeconds: 20, headers: []
       }
     });
@@ -100,16 +100,16 @@ describe("Agent MCP API", () => {
       method: "PATCH",
       url: `/api/agents/${agentId}/mcp-servers/${serverId}/tools`,
       headers: authHeaders(),
-      payload: { allowedTools: ["ticket_get", "grab_run_task"] }
+      payload: { allowedTools: ["ticket_get", "project_run_task"] }
     });
     expect(selected.statusCode).toBe(200);
-    expect(selected.json()).toMatchObject({ allowedTools: ["ticket_get", "grab_run_task"] });
+    expect(selected.json()).toMatchObject({ allowedTools: ["ticket_get", "project_run_task"] });
 
     const listed = await app.inject({
       method: "GET", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders()
     });
     expect(listed.json()).toEqual([
-      expect.objectContaining({ id: serverId, allowedTools: ["ticket_get", "grab_run_task"] })
+      expect.objectContaining({ id: serverId, allowedTools: ["ticket_get", "project_run_task"] })
     ]);
 
     const all = await app.inject({

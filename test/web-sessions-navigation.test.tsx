@@ -10,7 +10,7 @@ const agent = { id: "agent-1", name: "主力 Codex", provider: "codex", enabled:
 const session = {
   id: "session-1",
   agentId: agent.id,
-  title: "Grab Manager 爬虫开发",
+  title: "Crawler development",
   status: "idle",
   providerSessionId: null,
   workspacePath: "/tmp/session-1",
@@ -21,8 +21,8 @@ const session = {
   projectEnvironmentName: "爬虫项目环境",
   integration: {
     endpointId: 2,
-    endpointName: "Grab Manager 爬虫开发",
-    endpointSlug: "grab-impl",
+    endpointName: "Crawler development",
+    endpointSlug: "crawler-dev",
     conversationKey: "ticket-2084",
     latestRequestId: "dispatch-2084-2"
   },
@@ -55,7 +55,7 @@ afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 
 it("Session 列表与创建表单分离", async () => {
   render(<App />);
-  expect((await screen.findAllByRole("link", { name: "Grab Manager 爬虫开发" }))[0]).toBeInTheDocument();
+  expect((await screen.findAllByRole("link", { name: "Crawler development" }))[0]).toBeInTheDocument();
   expect(screen.queryByLabelText("会话标题")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("link", { name: "新建会话" }));
   await waitFor(() => expect(window.location.pathname).toBe("/sessions/new"));
@@ -66,7 +66,7 @@ it("列表展示会话来源、项目环境和累计 Token，并支持按外部�
   render(<App />);
 
   expect(await screen.findByText("ticket-2084")).toBeInTheDocument();
-  expect(screen.getByText("/grab-impl")).toBeInTheDocument();
+  expect(screen.getByText("/crawler-dev")).toBeInTheDocument();
   expect(screen.getByText("爬虫项目环境")).toBeInTheDocument();
   expect(screen.getByText("12,345")).toBeInTheDocument();
   expect(screen.getByText("会话 #session-1")).toBeInTheDocument();

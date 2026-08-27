@@ -186,7 +186,7 @@ describe("Session API", () => {
     const endpointId = Number(db.prepare(`
       INSERT INTO integration_endpoints
         (name, slug, agent_id, enabled, token_hash, created_at, updated_at)
-      VALUES ('Grab Manager 爬虫开发', 'grab-impl', ?, 1, 'list-summary-token', ?, ?)
+      VALUES ('Crawler development', 'crawler-dev', ?, 1, 'list-summary-token', ?, ?)
     `).run(agent.id, now, now).lastInsertRowid);
     const conversationId = Number(db.prepare(`
       INSERT INTO integration_conversations
@@ -213,8 +213,8 @@ describe("Session API", () => {
         usage: expect.objectContaining({ totalTokens: 12345 }),
         integration: {
           endpointId,
-          endpointName: "Grab Manager 爬虫开发",
-          endpointSlug: "grab-impl",
+          endpointName: "Crawler development",
+          endpointSlug: "crawler-dev",
           conversationKey: "ticket-2084",
           latestRequestId: "dispatch-2084-2"
         }

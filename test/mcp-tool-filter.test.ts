@@ -40,7 +40,7 @@ describe("MCP tool filter", () => {
   it("从 Session 工作目录启动开发版代理时仍能加载 tsx", () => {
     const wrapped = wrapMcpServerWithToolFilter({
       type: "http",
-      name: "grab-manager",
+      name: "project-tools",
       url: "https://example.test/mcp",
       headers: []
     }, ["ticket_get"], 30);
@@ -298,7 +298,7 @@ describe("MCP tool filter", () => {
         _meta: { upstreamResult: { nested: true } }
       }))
     };
-    const server = createMcpToolFilterServer("grab-manager", ["ticket_get"], upstream);
+    const server = createMcpToolFilterServer("project-tools", ["ticket_get"], upstream);
     const client = new Client({ name: "filter-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -358,7 +358,7 @@ describe("MCP tool filter", () => {
       complete: vi.fn(async () => ({ completion: { values: ["guide"], total: 1, hasMore: false } })),
       setLoggingLevel: vi.fn(async () => ({}))
     };
-    const server = createMcpToolFilterServer("grab-manager", ["ticket_get"], upstream);
+    const server = createMcpToolFilterServer("project-tools", ["ticket_get"], upstream);
     const client = new Client({ name: "filter-capabilities-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);

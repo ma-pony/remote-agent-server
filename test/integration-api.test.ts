@@ -210,8 +210,8 @@ describe("Integration endpoint API", () => {
       url: `/api/integration-endpoints/${endpointId}`,
       headers: authHeaders(),
       payload: {
-        name: "grab-manager-spider-dev",
-        slug: "grab-impl",
+        name: "crawler-development",
+        slug: "crawler-dev",
         agentId,
         enabled: true,
         promptPrefix: ""
@@ -221,8 +221,8 @@ describe("Integration endpoint API", () => {
     expect(updated.statusCode).toBe(200);
     expect(updated.json()).toMatchObject({
       id: endpointId,
-      name: "grab-manager-spider-dev",
-      slug: "grab-impl",
+      name: "crawler-development",
+      slug: "crawler-dev",
       agentId,
       enabled: true,
       parameterMappings: []

@@ -402,7 +402,7 @@ describe("AcpxAgentRuntime", () => {
       "# remote-agent-mcp-exposure-start",
       "[features.code_mode]",
       "enabled = true",
-      'direct_only_tool_namespaces = ["mcp__grab-manager"]',
+      'direct_only_tool_namespaces = ["mcp__project-tools"]',
       "# remote-agent-mcp-exposure-end",
       "[model_providers.deepseek]",
       'base_url = "https://api.deepseek.com"',
@@ -531,7 +531,7 @@ describe("AcpxAgentRuntime", () => {
     await runtime.ensureSession(sessionInput(root, {
       providerSessionId: "provider-session-1",
       mcpServers: [{
-        type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
+        type: "http", name: "project-tools", url: "https://example.test/mcp", headers: []
       }]
     }));
 
@@ -579,7 +579,7 @@ describe("AcpxAgentRuntime", () => {
     const mcpServers = [
       {
         type: "http",
-        name: "grab-manager",
+        name: "project-tools",
         url: "https://example.test/mcp",
         headers: [{ name: "X-Api-Key", value: "secret" }],
         startupTimeoutSeconds: 30
@@ -602,13 +602,13 @@ describe("AcpxAgentRuntime", () => {
       makeConfig(root).dataDir, "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", SESSION_PATH_ID
     );
     const configToml = readFileSync(join(home, "config.toml"), "utf8");
-    expect(configToml).not.toContain('[mcp_servers."grab-manager"]');
+    expect(configToml).not.toContain('[mcp_servers."project-tools"]');
     expect(configToml).not.toContain("# remote-agent-mcp-exposure-start");
     expect(configToml).not.toContain("[features.code_mode]");
     expect(configToml).not.toContain("direct_only_tool_namespaces");
     expect(options.mcpServers).toEqual([
       {
-        type: "http", name: "grab-manager", url: "https://example.test/mcp",
+        type: "http", name: "project-tools", url: "https://example.test/mcp",
         headers: [{ name: "X-Api-Key", value: "secret" }]
       },
       { type: "stdio", name: "optional-local", command: "npx", args: ["-y", "example-mcp"], env: [] }
@@ -679,7 +679,7 @@ describe("AcpxAgentRuntime", () => {
     const runtime = new AcpxAgentRuntime(makeConfig(root));
 
     const mcpServers = [{
-      type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
+      type: "http", name: "project-tools", url: "https://example.test/mcp", headers: []
     }] as RuntimeMcpServer[];
     await runtime.ensureSession({ ...sessionInput(root, { mcpServers }), skillsRevision: "skills-v1" } as RuntimeSessionInput);
     await runtime.ensureSession({
@@ -705,7 +705,7 @@ describe("AcpxAgentRuntime", () => {
       ...sessionInput(root, {
         providerSessionId: "provider-session-1",
         mcpServers: [{
-          type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
+          type: "http", name: "project-tools", url: "https://example.test/mcp", headers: []
         }]
       }),
       skillsRevision: "skills-v1"
@@ -718,7 +718,7 @@ describe("AcpxAgentRuntime", () => {
     });
     const refreshedOptions = acpxMocks.createAcpRuntime.mock.calls[1]?.[0] as AcpRuntimeOptions;
     expect(refreshedOptions.mcpServers).toEqual([{
-      type: "http", name: "grab-manager", url: "https://example.test/mcp", headers: []
+      type: "http", name: "project-tools", url: "https://example.test/mcp", headers: []
     }]);
   });
 
