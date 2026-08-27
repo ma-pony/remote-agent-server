@@ -54,9 +54,9 @@ describe("configuration", () => {
     expect(loadConfig({ ...validEnv, SESSION_RETENTION_HOURS: "0" }).sessionRetentionMs).toBe(0);
   });
 
-  it("Run 默认最多执行一小时，Runtime 默认空闲十五分钟后释放", () => {
+  it("Run 默认最多执行一小时，Runtime 默认空闲五分钟后释放", () => {
     expect(loadConfig(validEnv).runTimeoutMs).toBe(60 * 60 * 1000);
-    expect(loadConfig(validEnv).runtimeIdleMs).toBe(15 * 60 * 1000);
+    expect(loadConfig(validEnv).runtimeIdleMs).toBe(5 * 60 * 1000);
     expect(loadConfig({ ...validEnv, RUN_TIMEOUT_MINUTES: "90" }).runTimeoutMs).toBe(90 * 60 * 1000);
     expect(loadConfig({ ...validEnv, RUNTIME_IDLE_MINUTES: "0" }).runtimeIdleMs).toBe(0);
   });

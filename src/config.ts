@@ -33,7 +33,7 @@ const configSchema = z.object({
   PROJECT_PREPARE_TIMEOUT_MINUTES: z.coerce.number().positive().default(30),
   SESSION_RETENTION_HOURS: z.coerce.number().nonnegative().default(7 * 24),
   RUN_TIMEOUT_MINUTES: z.coerce.number().positive().default(60),
-  RUNTIME_IDLE_MINUTES: z.coerce.number().nonnegative().default(15)
+  RUNTIME_IDLE_MINUTES: z.coerce.number().nonnegative().default(5)
 });
 
 /**
