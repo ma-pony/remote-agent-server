@@ -1,3 +1,4 @@
+import type { ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 import { SessionManagerError, type SessionManager } from "./session-manager.js";
 
 export interface SessionCleanupSchedulerLike {
@@ -14,6 +15,7 @@ export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
 
   constructor(private readonly dependencies: {
     sessionManager: Pick<SessionManager, "listExpiredIds" | "cleanupStorage">;
+    runtimeSettings?: Pick<ConcurrencySettingsStore, "getRuntime">;
     retentionMs: number;
     intervalMs: number;
     now?: () => Date;
@@ -21,14 +23,18 @@ export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
   }) {}
 
   start(): void {
-    if (this.stopped || this.timer !== undefined || this.dependencies.retentionMs === 0) return;
-    this.timer = setInterval(() => void this.runCleanup(), this.dependencies.intervalMs);
+    if (this.stopped || this.timer !== undefined || this.retentionMs() === 0 && this.dependencies.runtimeSettings === undefined) return;
+    void this.runCleanup().catch((error: unknown) => (this.dependencies.onError ?? console.error)(error));
+    this.timer = setInterval(() => {
+      void this.runCleanup().catch((error: unknown) => (this.dependencies.onError ?? console.error)(error));
+    }, this.dependencies.intervalMs);
     this.timer.unref();
   }
 
   runCleanup(): Promise<void> {
-    if (this.dependencies.retentionMs === 0) return Promise.resolve();
-    this.running ??= this.cleanup().finally(() => { this.running = undefined; });
+    const retentionMs = this.retentionMs();
+    if (retentionMs === 0) return Promise.resolve();
+    this.running ??= this.cleanup(retentionMs).finally(() => { this.running = undefined; });
     return this.running;
   }
 
@@ -38,9 +44,9 @@ export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
     this.timer = undefined;
   }
 
-  private async cleanup(): Promise<void> {
+  private async cleanup(retentionMs: number): Promise<void> {
     const now = this.dependencies.now?.() ?? new Date();
-    const cutoff = new Date(now.getTime() - this.dependencies.retentionMs).toISOString();
+    const cutoff = new Date(now.getTime() - retentionMs).toISOString();
     for (const id of this.dependencies.sessionManager.listExpiredIds(cutoff)) {
       try {
         await this.dependencies.sessionManager.cleanupStorage(id, now.toISOString());
@@ -51,5 +57,10 @@ export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
         (this.dependencies.onError ?? console.error)(error);
       }
     }
+  }
+
+  private retentionMs(): number {
+    if (this.dependencies.runtimeSettings === undefined) return this.dependencies.retentionMs;
+    return this.dependencies.runtimeSettings.getRuntime().sessionStorageRetentionHours * 60 * 60 * 1000;
   }
 }

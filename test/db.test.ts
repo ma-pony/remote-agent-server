@@ -136,14 +136,18 @@ describe("database migration", () => {
     migrate(db, undefined, {
       globalRunConcurrency: 6,
       webhookConcurrency: 7,
-      environmentBuildConcurrency: 2
+      environmentBuildConcurrency: 2,
+      runTimeoutMinutes: 120,
+      sessionStorageRetentionHours: 24
     });
 
     expect(db.prepare("SELECT * FROM system_settings WHERE scope = 'global'").get()).toMatchObject({
       scope: "global",
       global_run_concurrency: 6,
       webhook_concurrency: 7,
-      environment_build_concurrency: 2
+      environment_build_concurrency: 2,
+      run_timeout_minutes: 120,
+      session_storage_retention_hours: 24
     });
     expect(() => db.prepare(`
       INSERT INTO system_settings
@@ -159,14 +163,44 @@ describe("database migration", () => {
     migrate(db, undefined, {
       globalRunConcurrency: 10,
       webhookConcurrency: 11,
-      environmentBuildConcurrency: 12
+      environmentBuildConcurrency: 12,
+      runTimeoutMinutes: 240,
+      sessionStorageRetentionHours: 48
     });
 
     expect(db.prepare("SELECT * FROM system_settings WHERE scope = 'global'").get()).toMatchObject({
       global_run_concurrency: 3,
       webhook_concurrency: 5,
-      environment_build_concurrency: 4
+      environment_build_concurrency: 4,
+      run_timeout_minutes: 120,
+      session_storage_retention_hours: 24
     });
+    db.close();
+  });
+
+  it("为现有系统设置补齐运行超时和会话存储保留配置", () => {
+    const db = openDatabase(":memory:");
+    db.exec(`
+      CREATE TABLE system_settings (
+        scope TEXT PRIMARY KEY CHECK (scope = 'global'),
+        global_run_concurrency INTEGER NOT NULL,
+        webhook_concurrency INTEGER NOT NULL,
+        environment_build_concurrency INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO system_settings VALUES ('global', 4, 4, 1, '2026-08-27T00:00:00.000Z');
+    `);
+
+    migrate(db, undefined, {
+      globalRunConcurrency: 4,
+      webhookConcurrency: 4,
+      environmentBuildConcurrency: 1,
+      runTimeoutMinutes: 90,
+      sessionStorageRetentionHours: 12
+    });
+
+    expect(db.prepare("SELECT run_timeout_minutes, session_storage_retention_hours FROM system_settings").get())
+      .toEqual({ run_timeout_minutes: 90, session_storage_retention_hours: 12 });
     db.close();
   });
 

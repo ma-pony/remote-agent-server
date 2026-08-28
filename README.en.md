@@ -29,7 +29,7 @@ Each provider remains responsible for reasoning, tool use, and its native sessio
 - **Skill management:** discover host Skills, upload Skill ZIP files, and choose which Skills each agent receives.
 - **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
 - **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
-- **Concurrency and queue control:** adjust run, Webhook-delivery, and project-environment build concurrency from the console, with an optional run limit per agent.
+- **Runtime, storage, and concurrency control:** adjust run timeout, large idle-session storage retention, and three service concurrency limits from the console, with an optional run limit per agent.
 - **Headed browser support:** run agents in a real desktop session without requiring containers.
 
 ## Execution model
@@ -200,15 +200,19 @@ Provider extensions follow a discover, select, and runtime projection flow. Afte
 
 Provider-global MCP uses a separate import flow. Selecting **Import and enable** on the agent's **MCP** page copies the current system configuration into an MCP owned by that agent. The imported configuration can then be edited, checked, restricted to selected tools, or deleted without changing the provider's system configuration. MCP values may come from saved values, declared session parameters, or runtime values such as `agent_id`, `session_id`, `run_id`, `workspace_path`, and `browser_profile_path`. Secrets are encrypted and are never returned in plaintext by management APIs.
 
-### Concurrency and queues
+### Runtime and concurrency
 
-Open **System settings → Concurrency and queues** to adjust:
+Open **System settings → Runtime and concurrency** to adjust:
 
+- the hard timeout for one run;
+- large idle-Session storage retention;
 - global run concurrency;
 - Webhook delivery concurrency;
 - project-environment build concurrency.
 
-The database stores these settings and changes take effect immediately. Raising a limit starts more queued work; lowering it does not cancel active work and only constrains later dispatch. The service always keeps runs in one Session serial, keeps one external Conversation serial, delivers each Webhook subscription in order, and coalesces duplicate synchronization requests for the same project environment.
+The database stores these settings. Run timeout applies to newly started runs, storage retention applies at the next cleanup, and concurrency changes affect later scheduling immediately. Raising a limit dispatches queued work; lowering one does not cancel active work. The service always keeps runs in one Session serial, reuses one Session for one external Conversation, delivers each Webhook subscription in order, and coalesces duplicate synchronization requests for the same project environment.
+
+The service runs storage cleanup once at startup and then every ten minutes. Expired idle Sessions lose only their Workspace, browser data, and provider-native conversation; Session, Run, event, integration, and token-usage records remain available.
 
 These limits control the current Remote Agent Server process. The project is designed for single-process deployment and does not provide distributed concurrency quotas across multiple service instances.
 
@@ -531,8 +535,8 @@ curl --fail-with-body \
 | `MAX_CONCURRENT_ENVIRONMENT_BUILDS` | No | `1` | Initial project-environment build concurrency for a new database, from 1–64. |
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | No | `3` | Remote repository check interval. |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | No | `30` | Per-repository preparation timeout. |
-| `SESSION_RETENTION_HOURS` | No | `168` | Retention for large idle-session storage. Hourly cleanup removes the workspace, browser data, and native provider conversation while retaining Session, Run, event, integration, and token-usage records. Set to `0` to disable it. |
-| `RUN_TIMEOUT_MINUTES` | No | `60` | Maximum duration of one Run. On timeout the current Turn is terminated, its Runtime is released, and the Run fails with `run_timed_out`. |
+| `SESSION_RETENTION_HOURS` | No | `168` | Initial large idle-Session storage retention for a new database. Manage later changes under **System settings → Runtime and concurrency**. Set to `0` to disable automatic cleanup. |
+| `RUN_TIMEOUT_MINUTES` | No | `60` | Initial maximum Run duration for a new database. Manage later changes under **System settings → Runtime and concurrency**. |
 | `RUNTIME_IDLE_MINUTES` | No | `5` | How long an idle Runtime stays resident. Expiry closes ACP/MCP processes while preserving Provider state for the next Run. Set to `0` to disable it. |
 | `DISPLAY` / `XAUTHORITY` | Browser use | None | Desktop/X display for headed browsers. |
 

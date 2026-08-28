@@ -35,7 +35,8 @@ const setup = (
   mcpPrepare = vi.fn(async () => []),
   runRepositoryOptions: Record<string, unknown> = {},
   providerExtensionRevision = vi.fn(() => "extensions-v1"),
-  runTimeoutMs?: number
+  runTimeoutMs?: number,
+  runtimeSettings?: { getRuntime(): { runTimeoutMinutes: number; sessionStorageRetentionHours: number } }
 ) => {
   const root = mkdtempSync(join(tmpdir(), "remote-agent-executor-"));
   tempDirectories.push(root);
@@ -72,6 +73,7 @@ const setup = (
     sessionManager,
     mcpPreparer: { prepare: mcpPrepare },
     providerExtensionManager: { revision: providerExtensionRevision },
+    runtimeSettings,
     runTimeoutMs
   });
   return {
@@ -92,7 +94,7 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
-  it("超过 Run 硬超时后终止 Turn、释放 Runtime 并稳定失败", async () => {
+  it("使用在线配置的 Run 硬超时终止 Turn、释放 Runtime 并稳定失败", async () => {
     vi.useFakeTimers();
     try {
       const cancel = vi.fn(async () => undefined);
@@ -110,7 +112,10 @@ describe("RunExecutor", () => {
         cancel,
         closeEvents
       });
-      const setupResult = setup(runtime, undefined, undefined, undefined, undefined, 60_000);
+      const runtimeSettings = {
+        getRuntime: vi.fn(() => ({ runTimeoutMinutes: 1, sessionStorageRetentionHours: 168 }))
+      };
+      const setupResult = setup(runtime, undefined, undefined, undefined, undefined, 10 * 60_000, runtimeSettings);
 
       const execution = setupResult.executor.execute(setupResult.run.id);
       await vi.advanceTimersByTimeAsync(60_000 + BEST_EFFORT_TIMEOUT_MS * 3);
@@ -118,6 +123,7 @@ describe("RunExecutor", () => {
 
       expect(cancel).toHaveBeenCalledTimes(1);
       expect(closeEvents).toHaveBeenCalledTimes(1);
+      expect(runtimeSettings.getRuntime).toHaveBeenCalledTimes(1);
       expect(releaseSession).toHaveBeenCalledWith(TEST_SESSION_ID);
       expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
         status: "failed",
@@ -127,6 +133,102 @@ describe("RunExecutor", () => {
       expect(vi.getTimerCount()).toBe(0);
       setupResult.db.close();
     } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Run 硬超时覆盖 Workspace 和 MCP 等 Turn 前准备阶段", async () => {
+    vi.useFakeTimers();
+    const preparation = deferred<void>();
+    let execution: Promise<unknown> | undefined;
+    try {
+      const runtime = createFakeRuntime({ result: { status: "completed" } });
+      runtime.startTurn = vi.fn(runtime.startTurn);
+      const setupResult = setup(runtime, undefined, undefined, undefined, undefined, 60_000);
+      const revision = setupResult.db.prepare(
+        "SELECT current_revision_id AS id FROM project_environments LIMIT 1"
+      ).get() as { id: number };
+      setupResult.db.prepare("UPDATE sessions SET project_environment_revision_id = ? WHERE id = ?")
+        .run(revision.id, TEST_SESSION_ID);
+      const ensureWorkspacePrepared = vi.spyOn(setupResult.sessionManager, "ensureWorkspacePrepared")
+        .mockImplementation(() => preparation.promise);
+
+      execution = setupResult.executor.execute(setupResult.run.id);
+      await vi.waitFor(() => expect(ensureWorkspacePrepared).toHaveBeenCalledWith(TEST_SESSION_ID, expect.any(AbortSignal)));
+      await vi.advanceTimersByTimeAsync(60_000 + BEST_EFFORT_TIMEOUT_MS);
+
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+        status: "failed",
+        error: "run_timed_out"
+      });
+      expect(runtime.startTurn).not.toHaveBeenCalled();
+      setupResult.db.close();
+    } finally {
+      preparation.resolve();
+      await execution;
+      vi.useRealTimers();
+    }
+  });
+
+  it("Runtime Session 在 Run 超时后才创建完成时仍会被释放", async () => {
+    vi.useFakeTimers();
+    const ensured = deferred<RuntimeSession>();
+    try {
+      const runtime = createFakeRuntime();
+      runtime.ensureSession = vi.fn(() => ensured.promise);
+      runtime.releaseSession = vi.fn(async () => undefined);
+      runtime.startTurn = vi.fn(runtime.startTurn);
+      const setupResult = setup(runtime, undefined, undefined, undefined, undefined, 60_000);
+
+      const execution = setupResult.executor.execute(setupResult.run.id);
+      await vi.waitFor(() => expect(runtime.ensureSession).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(60_000 + BEST_EFFORT_TIMEOUT_MS);
+      await execution;
+
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+        status: "failed",
+        error: "run_timed_out"
+      });
+      expect(runtime.releaseSession).toHaveBeenCalledTimes(1);
+      ensured.resolve({ providerSessionId: "late-provider-session" });
+      await vi.waitFor(() => expect(runtime.releaseSession).toHaveBeenCalledTimes(2));
+      expect(runtime.startTurn).not.toHaveBeenCalled();
+      setupResult.db.close();
+    } finally {
+      ensured.resolve({ providerSessionId: "late-provider-session" });
+      vi.useRealTimers();
+    }
+  });
+
+  it("MCP 预检阶段触发 Run 硬超时时保留 run_timed_out 分类", async () => {
+    vi.useFakeTimers();
+    const preparation = deferred<[]>();
+    try {
+      const runtime = createFakeRuntime();
+      runtime.ensureSession = vi.fn(runtime.ensureSession);
+      const setupResult = setup(
+        runtime,
+        undefined,
+        vi.fn(() => preparation.promise),
+        undefined,
+        undefined,
+        60_000
+      );
+
+      const execution = setupResult.executor.execute(setupResult.run.id);
+      await vi.advanceTimersByTimeAsync(60_000 + BEST_EFFORT_TIMEOUT_MS);
+      await execution;
+
+      expect(runtime.ensureSession).not.toHaveBeenCalled();
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({
+        status: "failed",
+        error: "run_timed_out"
+      });
+      expect(setupResult.eventStore.list(setupResult.run.id, 0).map((event) => JSON.parse(event.contentJson)))
+        .toContainEqual({ status: "failed", publicNoticeCode: "run_timed_out" });
+      setupResult.db.close();
+    } finally {
+      preparation.resolve([]);
       vi.useRealTimers();
     }
   });
@@ -203,7 +305,7 @@ describe("RunExecutor", () => {
 
     await setupResult.executor.execute(setupResult.run.id);
 
-    expect(ensureWorkspacePrepared).toHaveBeenCalledWith(TEST_SESSION_ID);
+    expect(ensureWorkspacePrepared).toHaveBeenCalledWith(TEST_SESSION_ID, expect.any(AbortSignal));
     expect(runtime.startTurn).toHaveBeenCalledTimes(1);
     setupResult.db.close();
   });
@@ -592,7 +694,7 @@ describe("RunExecutor", () => {
       const setupResult = setup(runtime);
       const execution = setupResult.executor.execute(setupResult.run.id);
 
-      for (let iteration = 0; iteration < 10 && nextCalls < 2; iteration += 1) await Promise.resolve();
+      for (let iteration = 0; iteration < 100 && nextCalls < 2; iteration += 1) await Promise.resolve();
       expect(nextCalls).toBeGreaterThanOrEqual(2);
       await vi.advanceTimersByTimeAsync(99);
       expect(setupResult.eventStore.list(setupResult.run.id, 0).filter(({ type }) => type === "message"))

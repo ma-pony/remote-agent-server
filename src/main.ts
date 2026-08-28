@@ -70,7 +70,9 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     }, {
       globalRunConcurrency: config.maxConcurrentRuns,
       webhookConcurrency: config.maxConcurrentWebhookDeliveries,
-      environmentBuildConcurrency: config.maxConcurrentEnvironmentBuilds
+      environmentBuildConcurrency: config.maxConcurrentEnvironmentBuilds,
+      runTimeoutMinutes: Math.round((config.runTimeoutMs ?? 60 * 60 * 1000) / (60 * 1000)),
+      sessionStorageRetentionHours: Math.round(config.sessionRetentionMs / (60 * 60 * 1000))
     });
     const workspaceManager = createWorkspaceManager({
       platform: options.platform,

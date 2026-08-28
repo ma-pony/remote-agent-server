@@ -29,7 +29,7 @@ Agent 的推理、工具使用和原生会话仍由对应 Provider 负责。Remo
 - **Skills 管理**：发现本机 Skills、上传 Skill ZIP，并控制每个 Agent 启用的 Skills。
 - **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
 - **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
-- **并发与队列控制**：在管理台统一调整 Run、Webhook 投递和项目环境构建并发，并可为单个 Agent 设置 Run 上限。
+- **运行、存储与并发控制**：在管理台调整 Run 超时、空闲 Session 大文件保留期和三类服务并发，并可为单个 Agent 设置 Run 上限。
 - **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
 
 ## 执行模型
@@ -200,15 +200,19 @@ Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Sessio
 
 Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选择“导入并启用”后，系统把当前配置复制为 Agent 自己的 MCP。后续可以在 Agent 中单独编辑、检查、限制工具范围或删除，不会直接修改 Provider 的系统配置。MCP 值可以来自固定配置、创建 Session 时提供的参数，或 `agent_id`、`session_id`、`run_id`、`workspace_path`、`browser_profile_path` 等运行时值。敏感值加密保存，管理接口不返回明文。
 
-### 并发与队列
+### 运行与并发
 
-进入 **系统设置 → 并发与队列**，可以在线调整：
+进入 **系统设置 → 运行与并发**，可以在线调整：
 
+- 单个 Run 的硬超时；
+- 空闲 Session 大文件的保留时间；
 - 全局 Run 并发；
 - Webhook 投递并发；
 - 项目环境构建并发。
 
-设置保存在数据库中，修改后立即生效。提高上限会立即继续派发排队工作；降低上限不会取消正在运行的工作，只约束后续派发。系统始终保证同一 Session 的 Run 串行、同一外部 Conversation 串行、同一 Webhook 订阅按顺序投递，并合并同一项目环境的重复同步请求。
+设置保存在数据库中。Run 超时作用于新启动的 Run；存储保留期在下一次清理时生效；并发修改立即作用于后续调度。提高上限会继续派发排队工作，降低上限不会取消正在运行的工作。系统始终保证同一 Session 的 Run 串行、同一外部 Conversation 复用同一 Session 且串行、同一 Webhook 订阅按顺序投递，并合并同一项目环境的重复同步请求。
+
+服务启动时会立即执行一次存储清理，之后每 10 分钟检查一次。达到保留期的空闲 Session 只删除 Workspace、浏览器数据和 Provider 原生会话；Session、Run、事件、外部接入记录和 Token 统计继续保留。
 
 这些上限控制当前 Remote Agent Server 进程。项目当前按单进程部署设计，不提供跨多个服务实例的分布式并发配额。
 
@@ -539,8 +543,8 @@ curl --fail-with-body \
 | `MAX_CONCURRENT_ENVIRONMENT_BUILDS` | 否 | `1` | 首次创建数据库时写入的项目环境构建并发默认值，范围 1–64。 |
 | `PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS` | 否 | `3` | 远程仓库检查间隔。 |
 | `PROJECT_PREPARE_TIMEOUT_MINUTES` | 否 | `30` | 单个仓库准备命令超时时间。 |
-| `SESSION_RETENTION_HOURS` | 否 | `168` | 空闲 Session 的大体积存储保留时间；服务每小时清理 Workspace、浏览器数据和执行器原生会话，但继续保留 Session、Run、事件、外部接入记录与 Token 统计。设为 `0` 关闭。 |
-| `RUN_TIMEOUT_MINUTES` | 否 | `60` | 单个 Run 的最大执行时间；超时后终止当前 Turn、释放执行器并将 Run 标记为 `run_timed_out`。 |
+| `SESSION_RETENTION_HOURS` | 否 | `168` | 首次创建数据库时写入的空闲 Session 大文件保留时间。之后在“系统设置 → 运行与并发”中管理；设为 `0` 关闭自动清理。 |
+| `RUN_TIMEOUT_MINUTES` | 否 | `60` | 首次创建数据库时写入的单个 Run 最大执行时间。之后在“系统设置 → 运行与并发”中管理。 |
 | `RUNTIME_IDLE_MINUTES` | 否 | `5` | 空闲执行器的驻留时间；到期后关闭 ACP/MCP 进程但保留 Provider 会话，下次 Run 自动恢复。设为 `0` 关闭。 |
 | `DISPLAY` / `XAUTHORITY` | 浏览器场景 | 无 | 有头浏览器使用的桌面或 X display。 |
 

@@ -31,8 +31,8 @@ const configSchema = z.object({
   MAX_CONCURRENT_ENVIRONMENT_BUILDS: z.coerce.number().int().min(1).max(64).default(1),
   PROJECT_ENVIRONMENT_CHECK_INTERVAL_HOURS: z.coerce.number().positive().default(3),
   PROJECT_PREPARE_TIMEOUT_MINUTES: z.coerce.number().positive().default(30),
-  SESSION_RETENTION_HOURS: z.coerce.number().nonnegative().default(7 * 24),
-  RUN_TIMEOUT_MINUTES: z.coerce.number().positive().default(60),
+  SESSION_RETENTION_HOURS: z.coerce.number().int().min(0).max(8760).default(7 * 24),
+  RUN_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(1440).default(60),
   RUNTIME_IDLE_MINUTES: z.coerce.number().nonnegative().default(5)
 });
 

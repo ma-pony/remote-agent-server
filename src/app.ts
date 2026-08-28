@@ -147,8 +147,9 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   });
   const sessionCleanupScheduler = deps.sessionCleanupScheduler ?? new SessionCleanupScheduler({
     sessionManager,
+    runtimeSettings: concurrencySettingsStore,
     retentionMs: deps.config.sessionRetentionMs,
-    intervalMs: 60 * 60 * 1000
+    intervalMs: 10 * 60 * 1000
   });
   let eventStore = deps.eventStore;
   const integrationProjection = deps.integrationProjection ?? new IntegrationProjection({
@@ -173,6 +174,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     sessionManager,
     mcpPreparer,
     providerExtensionManager,
+    runtimeSettings: concurrencySettingsStore,
     runTimeoutMs: deps.config.runTimeoutMs
   });
   const scheduler = new RunScheduler({

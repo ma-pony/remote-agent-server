@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
 import { SessionCleanupScheduler } from "../src/sessions/session-cleanup-scheduler.js";
@@ -67,6 +67,15 @@ describe("SessionCleanupScheduler", () => {
     `).run(runId);
     const providerSessionPath = join(root, "agents", String(1), "provider-home", "codex", "sessions", "101");
     mkdirSync(providerSessionPath, { recursive: true });
+    const acpxSessionPath = join(root, "acpx", "sessions", "remote-agent%3A101.json");
+    const acpxEventDirectory = join(root, "acpx", "events");
+    const acpxEventPath = join(acpxEventDirectory, "remote-agent%3A101.stream.jsonl");
+    const acpxEventRolloverPath = join(acpxEventDirectory, "remote-agent%3A101.stream.1.jsonl");
+    mkdirSync(join(root, "acpx", "sessions"), { recursive: true });
+    mkdirSync(acpxEventDirectory, { recursive: true });
+    writeFileSync(acpxEventPath, "event\n", "utf8");
+    writeFileSync(acpxEventRolloverPath, "event\n", "utf8");
+    writeFileSync(acpxSessionPath, `${JSON.stringify({ event_log: { active_path: acpxEventPath } })}\n`, "utf8");
     const scheduler = new SessionCleanupScheduler({
       sessionManager: manager,
       retentionMs: 7 * 24 * 60 * 60 * 1000,
@@ -86,6 +95,9 @@ describe("SessionCleanupScheduler", () => {
     expect(manager.get(103)?.status).toBe("running");
     expect(existsSync(join(root, "sessions", "101"))).toBe(false);
     expect(existsSync(providerSessionPath)).toBe(false);
+    expect(existsSync(acpxSessionPath)).toBe(false);
+    expect(existsSync(acpxEventPath)).toBe(false);
+    expect(existsSync(acpxEventRolloverPath)).toBe(false);
     expect(existsSync(join(root, "sessions", "102"))).toBe(true);
     expect(existsSync(join(root, "sessions", "103"))).toBe(true);
     expect(db.prepare("SELECT COUNT(*) AS count FROM runs WHERE session_id = 101").get()).toEqual({ count: 1 });
@@ -108,6 +120,39 @@ describe("SessionCleanupScheduler", () => {
 
     expect(manager.get(101)).toBeDefined();
     db.close();
+  });
+
+  it("启动时立即清理，并在后续执行读取最新的在线保留时间", async () => {
+    vi.useFakeTimers();
+    try {
+      const { db, manager, root, insertSession } = createHarness();
+      insertSession(101, "idle", "2026-08-23T00:00:00.000Z");
+      let retentionHours = 24;
+      const runtimeSettings = {
+        getRuntime: vi.fn(() => ({ runTimeoutMinutes: 60, sessionStorageRetentionHours: retentionHours }))
+      };
+      const scheduler = new SessionCleanupScheduler({
+        sessionManager: manager,
+        runtimeSettings,
+        retentionMs: 0,
+        intervalMs: 60 * 60 * 1000,
+        now: () => new Date("2026-08-24T00:00:00.000Z")
+      });
+
+      scheduler.start();
+      await vi.waitFor(() => expect(runtimeSettings.getRuntime).toHaveBeenCalled());
+      expect(existsSync(join(root, "sessions", "101"))).toBe(true);
+
+      retentionHours = 1;
+      await vi.advanceTimersByTimeAsync(60 * 60 * 1000);
+      await vi.waitFor(() => expect(existsSync(join(root, "sessions", "101"))).toBe(false));
+
+      expect(manager.get(101)?.storageCleanedAt).toBe("2026-08-24T00:00:00.000Z");
+      scheduler.stop();
+      db.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("清理被外部接入审计记录引用的会话存储但保留关联记录", async () => {

@@ -9,6 +9,11 @@ export type ConcurrencySettings = {
   environmentBuildConcurrency: number;
 };
 
+export type RuntimeSettings = {
+  runTimeoutMinutes: number;
+  sessionStorageRetentionHours: number;
+};
+
 export type Agent = {
   id: number;
   name: string;

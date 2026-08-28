@@ -48,7 +48,7 @@ afterEach(async () => {
 });
 
 describe("Concurrency settings API", () => {
-  it("鉴权后读取并一次保存三类全局并发", async () => {
+  it("鉴权后以一个事务读取并保存运行、存储和并发设置", async () => {
     const { app } = await createApp();
 
     const initial = await app.inject({
@@ -63,7 +63,9 @@ describe("Concurrency settings API", () => {
       payload: {
         globalRunConcurrency: 8,
         webhookConcurrency: 6,
-        environmentBuildConcurrency: 2
+        environmentBuildConcurrency: 2,
+        runTimeoutMinutes: 120,
+        sessionStorageRetentionHours: 24
       }
     });
     const loaded = await app.inject({
@@ -76,13 +78,17 @@ describe("Concurrency settings API", () => {
     expect(initial.json()).toEqual({
       globalRunConcurrency: 4,
       webhookConcurrency: 4,
-      environmentBuildConcurrency: 1
+      environmentBuildConcurrency: 1,
+      runTimeoutMinutes: 60,
+      sessionStorageRetentionHours: 168
     });
     expect(updated.statusCode).toBe(200);
     expect(updated.json()).toEqual({
       globalRunConcurrency: 8,
       webhookConcurrency: 6,
-      environmentBuildConcurrency: 2
+      environmentBuildConcurrency: 2,
+      runTimeoutMinutes: 120,
+      sessionStorageRetentionHours: 24
     });
     expect(loaded.json()).toEqual(updated.json());
   });
@@ -91,9 +97,11 @@ describe("Concurrency settings API", () => {
     const { app } = await createApp();
     const payloads = [
       { globalRunConcurrency: 8, webhookConcurrency: 6 },
-      { globalRunConcurrency: 0, webhookConcurrency: 6, environmentBuildConcurrency: 2 },
-      { globalRunConcurrency: 8, webhookConcurrency: 65, environmentBuildConcurrency: 2 },
-      { globalRunConcurrency: 8, webhookConcurrency: 6, environmentBuildConcurrency: 2, extra: true }
+      { globalRunConcurrency: 0, webhookConcurrency: 6, environmentBuildConcurrency: 2, runTimeoutMinutes: 60, sessionStorageRetentionHours: 168 },
+      { globalRunConcurrency: 8, webhookConcurrency: 65, environmentBuildConcurrency: 2, runTimeoutMinutes: 60, sessionStorageRetentionHours: 168 },
+      { globalRunConcurrency: 8, webhookConcurrency: 6, environmentBuildConcurrency: 2, runTimeoutMinutes: 0, sessionStorageRetentionHours: 168 },
+      { globalRunConcurrency: 8, webhookConcurrency: 6, environmentBuildConcurrency: 2, runTimeoutMinutes: 60, sessionStorageRetentionHours: 8761 },
+      { globalRunConcurrency: 8, webhookConcurrency: 6, environmentBuildConcurrency: 2, runTimeoutMinutes: 60, sessionStorageRetentionHours: 168, extra: true }
     ];
 
     for (const payload of payloads) {
@@ -117,7 +125,9 @@ describe("Concurrency settings API", () => {
     expect(loaded.json()).toEqual({
       globalRunConcurrency: 4,
       webhookConcurrency: 4,
-      environmentBuildConcurrency: 1
+      environmentBuildConcurrency: 1,
+      runTimeoutMinutes: 60,
+      sessionStorageRetentionHours: 168
     });
   });
 

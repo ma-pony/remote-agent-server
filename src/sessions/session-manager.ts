@@ -391,7 +391,7 @@ export class SessionManager {
   }
 
   /** Repairs ignored generated files once when an older Session is first reused. */
-  async ensureWorkspacePrepared(id: number): Promise<void> {
+  async ensureWorkspacePrepared(id: number, signal = new AbortController().signal): Promise<void> {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
     if (session.projectEnvironmentRevisionId === null) return;
@@ -403,7 +403,7 @@ export class SessionManager {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
     }
-    if (await this.prepareWorkspaceRevision(session.workspacePath, session.projectEnvironmentRevisionId)) {
+    if (await this.prepareWorkspaceRevision(session.workspacePath, session.projectEnvironmentRevisionId, signal)) {
       await writeFile(join(runtimePath, ENVIRONMENT_PREPARED_MARKER), "ready\n", "utf8");
     }
   }
@@ -667,13 +667,16 @@ export class SessionManager {
     });
   }
 
-  private async prepareWorkspaceRevision(workspacePath: string, revisionId: number | null): Promise<boolean> {
+  private async prepareWorkspaceRevision(
+    workspacePath: string,
+    revisionId: number | null,
+    signal: AbortSignal
+  ): Promise<boolean> {
     if (revisionId === null) return false;
     const revision = this.projectEnvironmentStore.getRevision(revisionId);
     if (revision === undefined) throw new SessionManagerError("project_environment_unavailable");
     const repositories = this.projectEnvironmentStore.listRepositories(revision.projectEnvironmentId);
     if (repositories.length === 0) return false;
-    const signal = new AbortController().signal;
     for (const repository of repositories) {
       const destination = join(workspacePath, repository.name);
       await this.projectEnvironmentCommands.cleanIgnored(repository, destination, signal);

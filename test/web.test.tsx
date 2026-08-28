@@ -80,38 +80,44 @@ afterEach(() => {
 });
 
 describe("最小管理界面", () => {
-  it("在系统设置页读取并一次保存三类并发配置", async () => {
+  it("在系统设置页读取并保存运行、存储和并发配置", async () => {
     sessionStorage.setItem("apiToken", "secret-token");
     window.history.replaceState({}, "", "/system-settings/concurrency");
-    let savedBody = "";
+    const savedBodies: Record<string, string> = {};
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url !== "/api/system-settings/concurrency") throw new Error(`Unexpected request: ${url}`);
       if (init?.method === "PUT") {
-        savedBody = String(init.body);
-        return jsonResponse(JSON.parse(savedBody));
+        savedBodies[url] = String(init.body);
+        return jsonResponse(JSON.parse(savedBodies[url]));
       }
-      return jsonResponse({
+      if (url === "/api/system-settings/concurrency") return jsonResponse({
         globalRunConcurrency: 4,
         webhookConcurrency: 3,
-        environmentBuildConcurrency: 1
+        environmentBuildConcurrency: 1,
+        runTimeoutMinutes: 60,
+        sessionStorageRetentionHours: 168
       });
+      throw new Error(`Unexpected request: ${url}`);
     }));
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "并发与队列" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "运行与并发" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Run 超时（分钟）"), { target: { value: "120" } });
+    fireEvent.change(screen.getByLabelText("会话大文件保留（小时）"), { target: { value: "24" } });
     fireEvent.change(screen.getByLabelText("全局 Run 并发"), { target: { value: "8" } });
     fireEvent.change(screen.getByLabelText("Webhook 投递并发"), { target: { value: "6" } });
     fireEvent.change(screen.getByLabelText("项目环境构建并发"), { target: { value: "2" } });
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
 
-    await waitFor(() => expect(JSON.parse(savedBody)).toEqual({
+    await waitFor(() => expect(JSON.parse(savedBodies["/api/system-settings/concurrency"] ?? "null")).toEqual({
       globalRunConcurrency: 8,
       webhookConcurrency: 6,
-      environmentBuildConcurrency: 2
+      environmentBuildConcurrency: 2,
+      runTimeoutMinutes: 120,
+      sessionStorageRetentionHours: 24
     }));
-    expect(screen.getByText("设置已保存并立即生效")).toBeInTheDocument();
+    expect(screen.getByText("设置已保存")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "系统设置" })).toBeInTheDocument();
   });
 

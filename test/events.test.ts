@@ -65,6 +65,11 @@ const createEventApp = async () => {
     db,
     runtime: createFakeRuntime(),
     eventStore,
+    sessionCleanupScheduler: {
+      start: () => undefined,
+      runCleanup: async () => undefined,
+      stop: () => undefined
+    },
     projectEnvironmentScheduler: {
       start: () => undefined,
       requestCheck: async () => undefined,

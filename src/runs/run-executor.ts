@@ -8,6 +8,7 @@ import type { AgentRuntime, RuntimeEvent, RuntimeTurn, RuntimeTurnResult } from 
 import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { SkillProjector } from "../runtime/skill-projector.js";
 import { SessionManagerError, type SessionManager } from "../sessions/session-manager.js";
+import type { ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 import { RunRepositoryError, type RunRepository } from "./run-repository.js";
 
 export type RunExecutorDependencies = {
@@ -18,6 +19,7 @@ export type RunExecutorDependencies = {
   sessionManager: SessionManager;
   mcpPreparer: Pick<RunMcpPreparer, "prepare">;
   providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
+  runtimeSettings?: Pick<ConcurrencySettingsStore, "getRuntime">;
   runTimeoutMs?: number;
 };
 
@@ -68,6 +70,7 @@ export class RunExecutor {
   private readonly sessionManager: SessionManager;
   private readonly mcpPreparer: Pick<RunMcpPreparer, "prepare">;
   private readonly providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
+  private readonly runtimeSettings: Pick<ConcurrencySettingsStore, "getRuntime"> | undefined;
   private readonly runTimeoutMs: number;
   private readonly cancellationIntents = new Set<number>();
 
@@ -79,6 +82,7 @@ export class RunExecutor {
     sessionManager,
     mcpPreparer,
     providerExtensionManager,
+    runtimeSettings,
     runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS
   }: RunExecutorDependencies) {
     this.runtime = runtime;
@@ -88,6 +92,7 @@ export class RunExecutor {
     this.sessionManager = sessionManager;
     this.mcpPreparer = mcpPreparer;
     this.providerExtensionManager = providerExtensionManager;
+    this.runtimeSettings = runtimeSettings;
     this.runTimeoutMs = runTimeoutMs;
   }
 
@@ -104,6 +109,7 @@ export class RunExecutor {
     let messageFlushTimer: ReturnType<typeof setTimeout> | undefined;
     let messageFlushSignal: Promise<TurnRace> | undefined;
     let runTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    const runAbortController = new AbortController();
 
     const clearMessageFlushTimer = (): void => {
       if (messageFlushTimer !== undefined) clearTimeout(messageFlushTimer);
@@ -136,9 +142,30 @@ export class RunExecutor {
     };
 
     try {
+      const runTimeoutMs = this.runtimeSettings === undefined
+        ? this.runTimeoutMs
+        : this.runtimeSettings.getRuntime().runTimeoutMinutes * 60 * 1000;
+      const timeoutOutcome = new Promise<{ source: "timeout" }>((resolve) => {
+        runTimeoutTimer = setTimeout(() => {
+          runAbortController.abort();
+          resolve({ source: "timeout" });
+        }, runTimeoutMs);
+        runTimeoutTimer.unref();
+      });
+      const withinRunTimeout = async <T>(operation: Promise<T>): Promise<T> => {
+        const outcome = await Promise.race([
+          operation.then((value) => ({ source: "value" as const, value })),
+          timeoutOutcome
+        ]);
+        if (outcome.source === "timeout") {
+          publicNoticeCode = "run_timed_out";
+          throw new RunTimedOutError();
+        }
+        return outcome.value;
+      };
       const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
       if (session.projectEnvironmentRevisionId !== null) {
-        await this.sessionManager.ensureWorkspacePrepared(session.id);
+        await withinRunTimeout(this.sessionManager.ensureWorkspacePrepared(session.id, runAbortController.signal));
       }
       const browserProfilePath = join(dirname(session.workspacePath), "browser");
       let mcpServers: Awaited<ReturnType<RunMcpPreparer["prepare"]>>;
@@ -150,14 +177,17 @@ export class RunExecutor {
           workspacePath: session.workspacePath,
           browserProfilePath
         });
-        mcpServers = mcpPreparation instanceof Promise ? await mcpPreparation : mcpPreparation;
+        mcpServers = mcpPreparation instanceof Promise
+          ? await withinRunTimeout(mcpPreparation)
+          : mcpPreparation;
       } catch (error) {
+        if (error instanceof RunTimedOutError) throw error;
         publicNoticeCode = "mcp_preflight_failed";
         throw error;
       }
       const { memory, revision: skillsRevision } = this.skillProjector.prepare(agent, session);
       const extensionsRevision = this.providerExtensionManager.revision(agent.id);
-      const runtimeSession = await this.runtime.ensureSession({
+      const runtimeSessionPromise = this.runtime.ensureSession({
         sessionId: session.id,
         agentId: agent.id,
         provider: agent.provider,
@@ -170,6 +200,18 @@ export class RunExecutor {
         extensionsRevision,
         mcpServers
       });
+      let runtimeSession;
+      try {
+        runtimeSession = await withinRunTimeout(runtimeSessionPromise);
+      } catch (error) {
+        if (error instanceof RunTimedOutError) {
+          void runtimeSessionPromise.then(
+            () => this.releaseSessionBestEffort(session.id),
+            () => undefined
+          );
+        }
+        throw error;
+      }
       this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
 
       if (this.cancellationIntents.has(run.id)) {
@@ -184,10 +226,6 @@ export class RunExecutor {
         (result) => ({ source: "result", result }),
         (error: unknown) => ({ source: "result_error", error })
       );
-      const timeoutOutcome = new Promise<TurnRace>((resolve) => {
-        runTimeoutTimer = setTimeout(() => resolve({ source: "timeout" }), this.runTimeoutMs);
-        runTimeoutTimer.unref();
-      });
       let nextEvent = this.nextEvent(iterator);
       let result: RuntimeTurnResult | undefined;
 

@@ -234,12 +234,16 @@ export type ConcurrencyDefaults = {
   globalRunConcurrency: number;
   webhookConcurrency: number;
   environmentBuildConcurrency: number;
+  runTimeoutMinutes?: number;
+  sessionStorageRetentionHours?: number;
 };
 
 const DEFAULT_CONCURRENCY: ConcurrencyDefaults = {
   globalRunConcurrency: 4,
   webhookConcurrency: 4,
-  environmentBuildConcurrency: 1
+  environmentBuildConcurrency: 1,
+  runTimeoutMinutes: 60,
+  sessionStorageRetentionHours: 7 * 24
 };
 
 const migrateTextIds = (
@@ -442,6 +446,8 @@ export const migrate = (
       global_run_concurrency INTEGER NOT NULL CHECK (global_run_concurrency BETWEEN 1 AND 64),
       webhook_concurrency INTEGER NOT NULL CHECK (webhook_concurrency BETWEEN 1 AND 64),
       environment_build_concurrency INTEGER NOT NULL CHECK (environment_build_concurrency BETWEEN 1 AND 64),
+      run_timeout_minutes INTEGER NOT NULL CHECK (run_timeout_minutes BETWEEN 1 AND 1440),
+      session_storage_retention_hours INTEGER NOT NULL CHECK (session_storage_retention_hours BETWEEN 0 AND 8760),
       updated_at TEXT NOT NULL
     );
 
@@ -710,20 +716,34 @@ export const migrate = (
     ON webhook_deliveries(subscription_id, dispatch_order, id, status);
   `);
 
+  const hasColumn = (table: string, column: string): boolean =>
+    (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((item) => item.name === column);
+
+  if (!hasColumn("system_settings", "run_timeout_minutes")) {
+    db.exec("ALTER TABLE system_settings ADD COLUMN run_timeout_minutes INTEGER NOT NULL DEFAULT 60 CHECK (run_timeout_minutes BETWEEN 1 AND 1440)");
+    db.prepare("UPDATE system_settings SET run_timeout_minutes = ? WHERE scope = 'global'")
+      .run(concurrencyDefaults.runTimeoutMinutes ?? DEFAULT_CONCURRENCY.runTimeoutMinutes);
+  }
+  if (!hasColumn("system_settings", "session_storage_retention_hours")) {
+    db.exec("ALTER TABLE system_settings ADD COLUMN session_storage_retention_hours INTEGER NOT NULL DEFAULT 168 CHECK (session_storage_retention_hours BETWEEN 0 AND 8760)");
+    db.prepare("UPDATE system_settings SET session_storage_retention_hours = ? WHERE scope = 'global'")
+      .run(concurrencyDefaults.sessionStorageRetentionHours ?? DEFAULT_CONCURRENCY.sessionStorageRetentionHours);
+  }
+
   db.prepare(`
     INSERT INTO system_settings
-      (scope, global_run_concurrency, webhook_concurrency, environment_build_concurrency, updated_at)
-    VALUES ('global', ?, ?, ?, ?)
+      (scope, global_run_concurrency, webhook_concurrency, environment_build_concurrency,
+       run_timeout_minutes, session_storage_retention_hours, updated_at)
+    VALUES ('global', ?, ?, ?, ?, ?, ?)
     ON CONFLICT(scope) DO NOTHING
   `).run(
     concurrencyDefaults.globalRunConcurrency,
     concurrencyDefaults.webhookConcurrency,
     concurrencyDefaults.environmentBuildConcurrency,
+    concurrencyDefaults.runTimeoutMinutes ?? DEFAULT_CONCURRENCY.runTimeoutMinutes,
+    concurrencyDefaults.sessionStorageRetentionHours ?? DEFAULT_CONCURRENCY.sessionStorageRetentionHours,
     new Date().toISOString()
   );
-
-  const hasColumn = (table: string, column: string): boolean =>
-    (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((item) => item.name === column);
 
   if (!hasColumn("agents", "project_environment_id")) {
     db.exec("ALTER TABLE agents ADD COLUMN project_environment_id INTEGER REFERENCES project_environments(id)");
