@@ -1,6 +1,7 @@
 import { Client, StreamableHTTPClientTransport, type Transport } from "@modelcontextprotocol/client";
-import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { getDefaultEnvironment } from "@modelcontextprotocol/client/stdio";
 
+import { ManagedStdioClientTransport } from "./managed-stdio-client-transport.js";
 import type { McpCheckResult, RuntimeMcpServer } from "./mcp-types.js";
 
 type ProbeClient = {
@@ -32,7 +33,7 @@ const createSdkTransport = (server: RuntimeMcpServer): Transport => {
       requestInit: { headers: Object.fromEntries(server.headers.map(({ name, value }) => [name, value])) }
     });
   }
-  return new StdioClientTransport({
+  return new ManagedStdioClientTransport({
     command: server.command,
     args: server.args,
     env: {

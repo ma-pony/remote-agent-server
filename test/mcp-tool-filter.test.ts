@@ -14,6 +14,7 @@ import {
   requireAllowedTool,
   wrapMcpServerWithToolFilter
 } from "../src/mcp/mcp-tool-filter.js";
+import { SdkMcpChecker } from "../src/mcp/mcp-checker.js";
 import { createMcpToolFilterServer } from "../src/mcp/mcp-tool-filter-process.js";
 import { ManagedStdioClientTransport } from "../src/mcp/managed-stdio-client-transport.js";
 
@@ -37,6 +38,32 @@ const waitForProcessExit = async (pid: number, timeoutMs = 3_000): Promise<void>
 };
 
 describe("MCP tool filter", () => {
+  it.runIf(process.env.REMOTE_AGENT_MCP_PROCESS_TEST === "1")(
+    "stdio MCP 预检结束后回收完整进程树",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "remote-agent-mcp-checker-tree-"));
+      const pidFile = join(root, "pids.json");
+      const fixture = fileURLToPath(new URL("./fixtures/mcp-filter-upstream.mjs", import.meta.url));
+      const checker = new SdkMcpChecker();
+
+      await expect(checker.check({
+        type: "stdio",
+        name: "fixture",
+        command: process.execPath,
+        args: [fixture],
+        env: [{ name: "MCP_TEST_PID_FILE", value: pidFile }]
+      }, 3_000)).resolves.toMatchObject({ status: "passed", toolCount: 2 });
+
+      const pids = JSON.parse(await readFile(pidFile, "utf8")) as { upstream: number; descendant: number };
+      await waitForProcessExit(pids.upstream);
+      await waitForProcessExit(pids.descendant);
+      expect(processExists(pids.upstream)).toBe(false);
+      expect(processExists(pids.descendant)).toBe(false);
+      await rm(root, { recursive: true, force: true });
+    },
+    10_000
+  );
+
   it("从 Session 工作目录启动开发版代理时仍能加载 tsx", () => {
     const wrapped = wrapMcpServerWithToolFilter({
       type: "http",

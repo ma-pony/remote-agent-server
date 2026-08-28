@@ -23,7 +23,7 @@
     "smoke:integrations": "tsx scripts/smoke-integrations.ts",
     "smoke:providers": "tsx scripts/smoke-providers.ts",
     "test": "vitest run",
-    "test:mcp-process": "REMOTE_AGENT_MCP_PROCESS_TEST=1 REMOTE_AGENT_ACPX_PROCESS_TEST=1 vitest run test/mcp-tool-filter.test.ts test/acpx-process-cleanup.test.ts",
+    "test:mcp-process": "REMOTE_AGENT_MCP_PROCESS_TEST=1 REMOTE_AGENT_ACPX_PROCESS_TEST=1 vitest run test/mcp-tool-filter.test.ts test/acpx-process-cleanup.test.ts test/project-environments.test.ts",
     "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc --ignoreConfig --noEmit --module NodeNext --moduleResolution NodeNext --target ES2022 --types node scripts/smoke-providers.ts scripts/smoke-integrations.ts"
   },
   "dependencies": {

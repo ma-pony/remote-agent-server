@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -17,6 +18,22 @@ import type { WorkspaceManager } from "../src/workspaces/workspace-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const tempDirectories: string[] = [];
+
+const processExists = (pid: number): boolean => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const waitForProcessExit = async (pid: number, timeoutMs = 3_000): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (processExists(pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+};
 
 afterEach(() => {
   vi.useRealTimers();
@@ -197,6 +214,66 @@ describe("ProjectEnvironmentStore", () => {
 });
 
 describe("SystemProjectEnvironmentCommands", () => {
+  it.runIf(process.env.REMOTE_AGENT_MCP_PROCESS_TEST === "1")(
+    "准备命令超时后回收完整进程树",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "project-environment-process-tree-"));
+      tempDirectories.push(root);
+      const pidFile = join(root, "pids.json");
+      const fixture = fileURLToPath(new URL("./fixtures/project-command-process-tree.mjs", import.meta.url));
+      const commands = new SystemProjectEnvironmentCommands();
+
+      await expect(commands.prepare({
+        id: "repository-1",
+        projectEnvironmentId: "environment-1",
+        name: "api",
+        gitUrl: "git@example.test:api.git",
+        prepareCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(fixture)} ${JSON.stringify(pidFile)}`,
+        createdAt: "2026-08-13T00:00:00.000Z",
+        updatedAt: "2026-08-13T00:00:00.000Z"
+      }, root, 1_000, new AbortController().signal)).rejects.toThrow();
+
+      const pids = JSON.parse(readFileSync(pidFile, "utf8")) as { parent: number; descendant: number };
+      await waitForProcessExit(pids.parent);
+      await waitForProcessExit(pids.descendant);
+      expect(processExists(pids.parent)).toBe(false);
+      expect(processExists(pids.descendant)).toBe(false);
+    },
+    10_000
+  );
+
+  it.runIf(process.env.REMOTE_AGENT_MCP_PROCESS_TEST === "1")(
+    "准备命令正常结束后也回收遗留后代进程",
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), "project-environment-process-tree-exit-"));
+      tempDirectories.push(root);
+      const pidFile = join(root, "pids.json");
+      const fixture = fileURLToPath(new URL("./fixtures/project-command-process-tree.mjs", import.meta.url));
+      const commands = new SystemProjectEnvironmentCommands();
+
+      await expect(commands.prepare({
+        id: "repository-1",
+        projectEnvironmentId: "environment-1",
+        name: "api",
+        gitUrl: "git@example.test:api.git",
+        prepareCommand: [
+          JSON.stringify(process.execPath),
+          JSON.stringify(fixture),
+          JSON.stringify(pidFile),
+          "--exit-parent"
+        ].join(" "),
+        createdAt: "2026-08-13T00:00:00.000Z",
+        updatedAt: "2026-08-13T00:00:00.000Z"
+      }, root, 3_000, new AbortController().signal)).resolves.toBeUndefined();
+
+      const pids = JSON.parse(readFileSync(pidFile, "utf8")) as { parent: number; descendant: number };
+      await waitForProcessExit(pids.descendant);
+      expect(processExists(pids.parent)).toBe(false);
+      expect(processExists(pids.descendant)).toBe(false);
+    },
+    10_000
+  );
+
   it("依赖指纹读取 Git HEAD，不受准备命令修改工作区锁文件影响", async () => {
     const repositoryPath = mkdtempSync(join(tmpdir(), "project-environment-git-dependency-"));
     tempDirectories.push(repositoryPath);

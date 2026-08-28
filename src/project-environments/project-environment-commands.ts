@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { delimiter, join } from "node:path";
@@ -35,6 +35,47 @@ export interface ProjectEnvironmentCommands {
 type ProcessResult = { stdout: string; stderr: string };
 
 const OUTPUT_LIMIT = 64 * 1024;
+const PROCESS_TERM_GRACE_MS = 1_000;
+const PROCESS_KILL_GRACE_MS = 1_000;
+const PROCESS_POLL_INTERVAL_MS = 25;
+
+const delay = async (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const processTreeExists = (child: ChildProcess): boolean => {
+  if (process.platform === "win32") return child.exitCode === null && child.signalCode === null;
+  const pid = child.pid;
+  if (pid === undefined) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const waitForProcessTreeExit = async (child: ChildProcess, timeoutMs: number): Promise<boolean> => {
+  const deadline = Date.now() + timeoutMs;
+  while (processTreeExists(child) && Date.now() < deadline) await delay(PROCESS_POLL_INTERVAL_MS);
+  return !processTreeExists(child);
+};
+
+const signalProcessTree = (child: ChildProcess, signal: NodeJS.Signals): void => {
+  try {
+    if (process.platform === "win32" || child.pid === undefined) child.kill(signal);
+    else process.kill(-child.pid, signal);
+  } catch {}
+};
+
+const terminateProcessTree = async (child: ChildProcess): Promise<void> => {
+  if (!processTreeExists(child)) return;
+  signalProcessTree(child, "SIGTERM");
+  if (await waitForProcessTreeExit(child, PROCESS_TERM_GRACE_MS)) return;
+  signalProcessTree(child, "SIGKILL");
+  if (!(await waitForProcessTreeExit(child, PROCESS_KILL_GRACE_MS))) {
+    throw new Error(`Project command process group ${String(child.pid)} did not exit after SIGKILL`);
+  }
+};
 
 const runProcess = (
   command: string,
@@ -44,7 +85,8 @@ const runProcess = (
   const child = spawn(command, args, {
     cwd: options.cwd,
     env: options.environment,
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    detached: process.platform !== "win32"
   });
   let stdout = "";
   let stderr = "";
@@ -61,11 +103,9 @@ const runProcess = (
     output = append(output, chunk);
   });
 
-  const terminate = () => child.kill("SIGTERM");
-  options.signal.addEventListener("abort", terminate, { once: true });
-  const timer = options.timeoutMs === undefined ? undefined : setTimeout(terminate, options.timeoutMs);
-  timer?.unref();
-
+  let terminationPromise: Promise<void> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let terminate = (): void => undefined;
   const finish = (operation: () => void) => {
     if (settled) return;
     settled = true;
@@ -73,16 +113,42 @@ const runProcess = (
     if (timer !== undefined) clearTimeout(timer);
     operation();
   };
-  child.once("error", (error) => finish(() => reject(error)));
-  child.once("close", (code, signal) => finish(() => {
-    if (options.signal.aborted) {
-      reject(new Error("project_environment_command_aborted"));
-    } else if (signal !== null || code !== 0) {
-      reject(new Error((output || `Command exited with ${String(code)}`).trim()));
-    } else {
-      resolve({ stdout, stderr });
-    }
-  }));
+  terminate = () => {
+    terminationPromise ??= terminateProcessTree(child).catch((error: unknown) => {
+      finish(() => reject(error));
+    });
+  };
+  options.signal.addEventListener("abort", terminate, { once: true });
+  timer = options.timeoutMs === undefined ? undefined : setTimeout(terminate, options.timeoutMs);
+  timer?.unref();
+  if (options.signal.aborted) terminate();
+
+  child.once("error", (error) => {
+    terminationPromise ??= terminateProcessTree(child);
+    void terminationPromise.then(
+      () => finish(() => reject(error)),
+      (cleanupError: unknown) => finish(() => reject(cleanupError))
+    );
+  });
+  child.once("close", (code, signal) => {
+    void (async () => {
+      try {
+        await (terminationPromise ?? terminateProcessTree(child));
+      } catch (error) {
+        finish(() => reject(error));
+        return;
+      }
+      finish(() => {
+        if (options.signal.aborted) {
+          reject(new Error("project_environment_command_aborted"));
+        } else if (signal !== null || code !== 0) {
+          reject(new Error((output || `Command exited with ${String(code)}`).trim()));
+        } else {
+          resolve({ stdout, stderr });
+        }
+      });
+    })();
+  });
 });
 
 /** Executes the trusted Git and project preparation commands. */
