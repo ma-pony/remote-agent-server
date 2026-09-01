@@ -1223,7 +1223,9 @@ describe("Webhook management API", () => {
       url: `/api/integration-endpoints/${endpointId}/webhook-deliveries`,
       headers: authHeaders
     });
-    const delivery = (deliveries.json() as Array<{ id: number; eventId: string; taskId: number | null }>)[0]!;
+    const delivery = (deliveries.json() as {
+      items: Array<{ id: number; eventId: string; taskId: number | null }>;
+    }).items[0]!;
     expect(delivery.taskId).toBeNull();
     expect(JSON.stringify(deliveries.json())).not.toContain("payloadJson");
 
@@ -1261,12 +1263,27 @@ describe("Webhook management API", () => {
       url: `/api/integration-endpoints/${endpointId}/webhook-deliveries`,
       headers: authHeaders
     });
-    const publicAuditDelivery = (deliveriesAfterAudit.json() as Array<Record<string, unknown>>)
+    const publicAuditDelivery = (deliveriesAfterAudit.json() as { items: Array<Record<string, unknown>> }).items
       .find((item) => item.id === auditDelivery.id)!;
     expect(Date.parse(publicAuditDelivery.createdAt as string)).toBeGreaterThanOrEqual(beforeAuditInsert);
     expect(Date.parse(publicAuditDelivery.createdAt as string)).toBeLessThanOrEqual(afterAuditInsert);
     expect(publicAuditDelivery.createdAt).not.toBe(oldOccurredAt);
     expect(publicAuditDelivery.dispatchOrder).toEqual(expect.any(Number));
+
+    const filteredDeliveries = await app.inject({
+      method: "GET",
+      url: `/api/integration-endpoints/${endpointId}/webhook-deliveries?page=1&pageSize=1&status=pending&subscriptionId=${createdBody.webhook.id}&query=${auditEventId}`,
+      headers: authHeaders
+    });
+    expect(filteredDeliveries.statusCode).toBe(200);
+    expect(filteredDeliveries.json()).toMatchObject({
+      page: 1,
+      pageSize: 1,
+      total: 1,
+      totalPages: 1,
+      items: [{ id: auditDelivery.id, eventId: auditEventId }],
+      latest: expect.any(Array)
+    });
 
     db.prepare("UPDATE webhook_deliveries SET status = 'failed', attempt_count = 6 WHERE id = ?").run(delivery.id);
     const original = db.prepare("SELECT event_id, payload_json FROM webhook_deliveries WHERE id = ?").get(delivery.id);
@@ -1279,6 +1296,14 @@ describe("Webhook management API", () => {
     expect(retried.json()).toMatchObject({ id: delivery.id, eventId: delivery.eventId, status: "pending", attemptCount: 0 });
     expect(db.prepare("SELECT event_id, payload_json FROM webhook_deliveries WHERE id = ?").get(delivery.id)).toEqual(original);
     await vi.waitFor(() => expect(requests).toHaveLength(2));
+    const redelivered = await app.inject({
+      method: "POST",
+      url: `/api/webhook-deliveries/${delivery.id}/retry`,
+      headers: authHeaders
+    });
+    expect(redelivered.statusCode).toBe(202);
+    expect(redelivered.json()).toMatchObject({ id: delivery.id, status: "pending", attemptCount: 0 });
+    await vi.waitFor(() => expect(requests).toHaveLength(3));
 
     const encryptedSigningSecret = persisted.encrypted_signing_secret;
     const updated = await app.inject({

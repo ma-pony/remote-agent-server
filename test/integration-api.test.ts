@@ -398,6 +398,8 @@ describe("Integration endpoint API", () => {
     expect(summaries.json()).toMatchObject([{
       id: endpoint.endpoint.id,
       activeConversationCount: 1,
+      queuedTaskCount: expect.any(Number),
+      runningTaskCount: expect.any(Number),
       activeTaskCount: expect.any(Number),
       latestTask: { id: taskId, requestId: "admin-browser-request" }
     }]);
@@ -537,6 +539,8 @@ describe("Integration endpoint API", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject([{
       activeConversationCount: 0,
+      queuedTaskCount: 0,
+      runningTaskCount: 0,
       activeTaskCount: 0,
       latestTask: null
     }]);

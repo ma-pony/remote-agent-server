@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, BookOpenText, Cable, Check, Clipboard, KeyRound, Pencil, Play, Plus, RefreshCw, RotateCcw, Settings2,
-  Trash2, Webhook, XCircle
+  ArrowLeft, BookOpenText, Cable, Check, ChevronLeft, ChevronRight, Clipboard, KeyRound, Pencil, Play, Plus,
+  RefreshCw, RotateCcw, Search, Settings2, Trash2, Webhook, XCircle
 } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from "react-router";
 
@@ -27,7 +27,7 @@ import {
   api, errorMessage, integrationApi, type Agent, type AgentSessionParameter,
   type IntegrationConversation, type IntegrationEndpoint, type IntegrationEndpointSummary,
   type IntegrationParameterMappingInput, type IntegrationParameterMappingUpdateInput, type IntegrationTask, type IntegrationTaskStatus,
-  type IntegrationWebhook, type IntegrationWebhookInput, type RunEvent, type WebhookDelivery,
+  type IntegrationWebhook, type IntegrationWebhookInput, type RunEvent, type WebhookDelivery, type WebhookDeliveryPage,
   type WebhookEventType
 } from "@/api";
 import { useI18n } from "@/i18n";
@@ -93,7 +93,7 @@ export const IntegrationEndpointListPage = () => {
     <ErrorAlert message={error} />
     {endpoints === null ? <div className="grid gap-4 lg:grid-cols-2">{[0, 1].map((item) => <Skeleton key={item} className="h-52" />)}</div>
       : endpoints.length === 0 ? <Card className="border-dashed"><CardContent className="py-16 text-center text-muted-foreground">{text("暂无接入端点。创建后即可让外部系统安全提交任务。", "No integration endpoints yet. Create one to accept tasks from external systems.")}</CardContent></Card>
-        : <div className="grid gap-4 lg:grid-cols-2">{endpoints.map((endpoint) => <Card key={endpoint.id} className="overflow-hidden transition-colors hover:border-primary/50"><CardHeader className="border-b bg-muted/20"><div className="flex items-start justify-between gap-4"><div><CardTitle><Link className="hover:underline" to={`/integration-endpoints/${endpoint.id}`}>{endpoint.name}</Link></CardTitle><CardDescription className="mt-2 font-mono">/{endpoint.slug}</CardDescription></div><Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div></CardHeader><CardContent className="grid gap-4 p-5 sm:grid-cols-3"><div><p className="text-xs text-muted-foreground">{text("智能体", "Agent")}</p><p className="mt-1 truncate text-sm font-medium">{agentNames.get(endpoint.agentId) ?? endpoint.agentId}</p></div><div><p className="text-xs text-muted-foreground">{text("接续中的业务对话", "Active conversations")}</p><p className="mt-1 font-mono text-xl">{endpoint.activeConversationCount}</p></div><div><p className="text-xs text-muted-foreground">{text("排队 / 运行", "Queued / running")}</p><p className="mt-1 font-mono text-xl">{endpoint.activeTaskCount}</p></div><div className="sm:col-span-3"><p className="text-xs text-muted-foreground">{text("最近任务", "Latest task")}</p>{endpoint.latestTask === null ? <p className="mt-1 text-sm">{text("尚无调用", "No calls yet")}</p> : <div className="mt-1 flex items-center justify-between gap-3"><Link className="truncate text-sm font-medium hover:underline" to={`/integration-tasks/${endpoint.latestTask.id}`}>{endpoint.latestTask.requestId}</Link><StatusBadge status={endpoint.latestTask.status} /></div>}</div></CardContent></Card>)}</div>}
+        : <div className="grid gap-4 lg:grid-cols-2">{endpoints.map((endpoint) => <Card key={endpoint.id} className="overflow-hidden transition-colors hover:border-primary/50"><CardHeader className="border-b bg-muted/20"><div className="flex items-start justify-between gap-4"><div><CardTitle><Link className="hover:underline" to={`/integration-endpoints/${endpoint.id}`}>{endpoint.name}</Link></CardTitle><CardDescription className="mt-2 font-mono">/{endpoint.slug}</CardDescription></div><Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div></CardHeader><CardContent className="grid gap-4 p-5 sm:grid-cols-3"><div><p className="text-xs text-muted-foreground">{text("智能体", "Agent")}</p><p className="mt-1 truncate text-sm font-medium">{agentNames.get(endpoint.agentId) ?? endpoint.agentId}</p></div><div><p className="text-xs text-muted-foreground">{text("接续中的业务对话", "Active conversations")}</p><p className="mt-1 font-mono text-xl">{endpoint.activeConversationCount}</p></div><div><p className="text-xs text-muted-foreground">{text("排队 / 运行", "Queued / running")}</p><p className="mt-1 font-mono text-xl">{endpoint.queuedTaskCount} / {endpoint.runningTaskCount}</p></div><div className="sm:col-span-3"><p className="text-xs text-muted-foreground">{text("最近任务", "Latest task")}</p>{endpoint.latestTask === null ? <p className="mt-1 text-sm">{text("尚无调用", "No calls yet")}</p> : <div className="mt-1 flex items-center justify-between gap-3"><Link className="truncate text-sm font-medium hover:underline" to={`/integration-tasks/${endpoint.latestTask.id}`}>{endpoint.latestTask.requestId}</Link><StatusBadge status={endpoint.latestTask.status} /></div>}</div></CardContent></Card>)}</div>}
   </div>;
 };
 
@@ -220,7 +220,7 @@ export const IntegrationEndpointOverviewPage = () => {
     return () => controller.abort();
   }, [endpoint.id]);
   const latest = summary?.latestTask ?? null;
-  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card><CardHeader><CardDescription>{text("绑定智能体", "Agent")}</CardDescription><CardTitle className="text-lg">{agentName}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("接续中的业务对话", "Active conversations")}</CardDescription><CardTitle className="font-mono text-3xl">{summary?.activeConversationCount ?? 0}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("排队 / 运行", "Queued / running")}</CardDescription><CardTitle className="font-mono text-3xl">{summary?.activeTaskCount ?? 0}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("最近任务", "Latest task")}</CardDescription><CardTitle className="text-base">{latest === null ? text("暂无", "None") : <Link className="hover:underline" to={`/integration-tasks/${latest.id}`}>{latest.requestId}</Link>}</CardTitle></CardHeader></Card></div><Card><CardHeader><CardTitle className="flex items-center gap-2"><Cable className="size-5" />{text("调用入口", "Task endpoint")}</CardTitle><CardDescription>{text("外部系统使用独立访问令牌调用此地址。", "External systems call this URL with the endpoint access token.")}</CardDescription></CardHeader><CardContent><code className="block break-all rounded-md border bg-muted/30 p-4 text-xs">POST /integration/v1/endpoints/{endpoint.slug}/tasks</code></CardContent></Card><Card><CardHeader><CardTitle>{text("固定提示", "Fixed prompt")}</CardTitle></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{endpoint.promptPrefix === "" ? text("未配置", "Not configured") : endpoint.promptPrefix}</CardContent></Card></div>;
+  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card><CardHeader><CardDescription>{text("绑定智能体", "Agent")}</CardDescription><CardTitle className="text-lg">{agentName}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("接续中的业务对话", "Active conversations")}</CardDescription><CardTitle className="font-mono text-3xl">{summary?.activeConversationCount ?? 0}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("排队 / 运行", "Queued / running")}</CardDescription><CardTitle className="font-mono text-3xl">{summary?.queuedTaskCount ?? 0} / {summary?.runningTaskCount ?? 0}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("最近任务", "Latest task")}</CardDescription><CardTitle className="text-base">{latest === null ? text("暂无", "None") : <Link className="hover:underline" to={`/integration-tasks/${latest.id}`}>{latest.requestId}</Link>}</CardTitle></CardHeader></Card></div><Card><CardHeader><CardTitle className="flex items-center gap-2"><Cable className="size-5" />{text("调用入口", "Task endpoint")}</CardTitle><CardDescription>{text("外部系统使用独立访问令牌调用此地址。", "External systems call this URL with the endpoint access token.")}</CardDescription></CardHeader><CardContent><code className="block break-all rounded-md border bg-muted/30 p-4 text-xs">POST /integration/v1/endpoints/{endpoint.slug}/tasks</code></CardContent></Card><Card><CardHeader><CardTitle>{text("固定提示", "Fixed prompt")}</CardTitle></CardHeader><CardContent className="whitespace-pre-wrap text-sm text-muted-foreground">{endpoint.promptPrefix === "" ? text("未配置", "Not configured") : endpoint.promptPrefix}</CardContent></Card></div>;
 };
 
 export const IntegrationEndpointUsagePage = () => {
@@ -398,7 +398,11 @@ export const IntegrationEndpointWebhooksPage = () => {
   const { text, formatDate } = useI18n();
   const { endpoint } = useEndpoint();
   const [webhooks, setWebhooks] = useState<IntegrationWebhook[] | null>(null);
-  const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
+  const [deliveryPage, setDeliveryPage] = useState<WebhookDeliveryPage | null>(null);
+  const [deliveryPageNumber, setDeliveryPageNumber] = useState(1);
+  const [deliveryQuery, setDeliveryQuery] = useState("");
+  const [deliveryStatus, setDeliveryStatus] = useState("");
+  const [deliverySubscriptionId, setDeliverySubscriptionId] = useState("");
   const [signingSecret, setSigningSecret] = useState("");
   const [signingSecretRotated, setSigningSecretRotated] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -411,16 +415,23 @@ export const IntegrationEndpointWebhooksPage = () => {
     let remainingPolls = 30;
     const refresh = async () => {
       try {
-        const [subscriptions, deliveryItems] = await Promise.all([
+        const [subscriptions, deliveries] = await Promise.all([
           integrationApi.listWebhooks(endpoint.id, controller.signal),
-          integrationApi.listDeliveries(endpoint.id, controller.signal)
+          integrationApi.listDeliveries(endpoint.id, {
+            page: deliveryPageNumber,
+            pageSize: 20,
+            query: deliveryQuery,
+            status: deliveryStatus === "" ? undefined : deliveryStatus as WebhookDelivery["status"],
+            subscriptionId: deliverySubscriptionId === "" ? undefined : Number(deliverySubscriptionId)
+          }, controller.signal)
         ]);
         if (disposed || controller.signal.aborted) return;
         setWebhooks(subscriptions);
-        setDeliveries(deliveryItems);
+        setDeliveryPage(deliveries);
         if (
           remainingPolls > 0
-          && deliveryItems.some(({ status }) => status === "pending" || status === "delivering")
+          && [...deliveries.items, ...deliveries.latest]
+            .some(({ status }) => status === "pending" || status === "delivering")
         ) {
           remainingPolls -= 1;
           timer = window.setTimeout(() => { void refresh(); }, 1_000);
@@ -435,7 +446,9 @@ export const IntegrationEndpointWebhooksPage = () => {
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [endpoint.id, refreshKey]);
+  }, [deliveryPageNumber, deliveryQuery, deliveryStatus, deliverySubscriptionId, endpoint.id, refreshKey]);
+  const deliveries = deliveryPage?.items ?? [];
+  const latestDeliveries = deliveryPage?.latest ?? [];
   const act = async (id: number, action: () => Promise<unknown>) => {
     setBusyId(id); setError("");
     try { await action(); setRefreshKey((value) => value + 1); } catch (reason) { setError(errorMessage(reason)); } finally { setBusyId(null); }
@@ -449,10 +462,23 @@ export const IntegrationEndpointWebhooksPage = () => {
       setSigningSecret(rotated.signingSecret);
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusyId(null); }
   };
-  return <div className="flex flex-col gap-5"><ErrorAlert message={error} />{signingSecret === "" ? null : <OneTimeSecret title={signingSecretRotated ? text("请立即保存新签名密钥，此后不会再次显示", "Save the new signing secret now. It will not be shown again.") : text("请立即保存签名密钥，此后不会再次显示", "Save the signing secret now. It will not be shown again.")} value={signingSecret} onDismiss={() => setSigningSecret("")} />}<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">{text("事件回调订阅", "Webhook subscriptions")}</h2><p className="text-sm text-muted-foreground">{text("失败投递会自动重试；最终失败后可手动重发。", "Failed deliveries retry automatically and can be resent manually after final failure.")}</p></div><WebhookEditorDialog endpointId={endpoint.id} onError={setError} onSaved={(saved, secret) => { setWebhooks((current) => [...(current ?? []), saved]); if (secret !== undefined) { setSigningSecretRotated(false); setSigningSecret(secret); } }} /></div>{webhooks === null ? <Skeleton className="h-40" /> : webhooks.length === 0 ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">{text("尚未配置事件回调。", "No webhooks configured.")}</CardContent></Card> : <div className="flex flex-col gap-4">{webhooks.map((webhook) => {
-    const recent = deliveries.find((item) => item.subscriptionId === webhook.id);
+  return <div className="flex flex-col gap-5"><ErrorAlert message={error} />{signingSecret === "" ? null : <OneTimeSecret title={signingSecretRotated ? text("请立即保存新签名密钥，此后不会再次显示", "Save the new signing secret now. It will not be shown again.") : text("请立即保存签名密钥，此后不会再次显示", "Save the signing secret now. It will not be shown again.")} value={signingSecret} onDismiss={() => setSigningSecret("")} />}<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><h2 className="text-lg font-semibold">{text("事件回调订阅", "Webhook subscriptions")}</h2><p className="text-sm text-muted-foreground">{text("失败投递会自动重试；已结束的投递可在确认后手动重新发送。", "Failed deliveries retry automatically. Completed deliveries can be resent after confirmation.")}</p></div><WebhookEditorDialog endpointId={endpoint.id} onError={setError} onSaved={(saved, secret) => { setWebhooks((current) => [...(current ?? []), saved]); if (secret !== undefined) { setSigningSecretRotated(false); setSigningSecret(secret); } }} /></div>{webhooks === null ? <Skeleton className="h-40" /> : webhooks.length === 0 ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">{text("尚未配置事件回调。", "No webhooks configured.")}</CardContent></Card> : <div className="flex flex-col gap-4">{webhooks.map((webhook) => {
+    const recent = latestDeliveries.find((item) => item.subscriptionId === webhook.id);
     return <Card key={webhook.id}><CardHeader className="border-b bg-muted/20"><div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><CardTitle className="flex items-center gap-2"><Webhook className="size-4" />{webhook.name}</CardTitle><CardDescription className="mt-2 break-all">{webhook.url}</CardDescription></div><Badge variant={webhook.enabled ? "default" : "secondary"}>{webhook.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div></CardHeader><CardContent className="flex flex-col gap-4 p-5"><div className="flex flex-wrap gap-1">{webhook.events.map((item) => <Badge key={item} variant="outline" className="font-mono">{item}</Badge>)}</div><div className="grid gap-3 text-sm sm:grid-cols-4"><div><p className="text-xs text-muted-foreground">{text("最近投递", "Latest delivery")}</p><p className="mt-1">{recent === undefined ? text("等待首次投递", "Waiting for first delivery") : <DeliveryBadge status={recent.status} />}</p></div><div><p className="text-xs text-muted-foreground">{text("状态码", "Status code")}</p><p className="mt-1 font-mono">{recent?.lastStatusCode ?? "—"}</p></div><div><p className="text-xs text-muted-foreground">{text("尝试次数", "Attempts")}</p><p className="mt-1 font-mono">{recent?.attemptCount ?? 0}</p></div><div><p className="text-xs text-muted-foreground">{text("时间", "Time")}</p><p className="mt-1">{formatDate(recent?.updatedAt ?? null)}</p></div></div>{recent?.lastError === null || recent === undefined ? null : <Alert variant="destructive"><XCircle /><AlertTitle>{text("最近错误", "Latest error")}</AlertTitle><AlertDescription>{recent.lastError}</AlertDescription></Alert>}<div className="flex flex-wrap gap-2"><WebhookEditorDialog endpointId={endpoint.id} webhook={webhook} onError={setError} onSaved={(saved) => setWebhooks((current) => (current ?? []).map((item) => item.id === saved.id ? saved : item))} /><AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="outline" disabled={busyId === webhook.id} aria-label={text(`轮换 ${webhook.name}的签名密钥`, `Rotate the signing secret for ${webhook.name}`)}><KeyRound />{text("轮换密钥", "Rotate secret")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`轮换“${webhook.name}”的签名密钥？`, `Rotate the signing secret for “${webhook.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("旧签名密钥将立即失效。接收方必须改用新密钥。", "The old signing secret will stop working immediately. The receiver must use the new secret.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={() => void rotateSigningSecret(webhook)}>{text("确认轮换", "Rotate")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog><Button size="sm" variant="outline" disabled={busyId === webhook.id || !webhook.enabled} onClick={() => void act(webhook.id, () => integrationApi.testWebhook(endpoint.id, webhook.id))}><RefreshCw />{text("发送测试", "Send test")}</Button><Button size="sm" variant="outline" disabled={busyId === webhook.id} onClick={() => void act(webhook.id, () => integrationApi.updateWebhook(endpoint.id, webhook.id, { enabled: !webhook.enabled }))}>{webhook.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button><AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="ghost"><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${webhook.name}”？`, `Delete “${webhook.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("订阅和历史投递记录将被永久删除。", "The subscription and delivery history will be permanently deleted.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void act(webhook.id, () => integrationApi.deleteWebhook(endpoint.id, webhook.id))}>{text("确认删除", "Delete")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></CardContent></Card>;
-  })}</div>}<Card><CardHeader><CardTitle>{text("最近投递", "Recent deliveries")}</CardTitle><CardDescription>{text("展示状态码、耗时、重试次数和脱敏错误。", "Shows status codes, duration, retry counts, and redacted errors.")}</CardDescription></CardHeader><CardContent>{deliveries.length === 0 ? <p className="text-sm text-muted-foreground">{text("暂无投递记录。", "No delivery records.")}</p> : <div className="divide-y rounded-lg border">{deliveries.map((delivery) => <div key={delivery.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex items-center gap-2"><DeliveryBadge status={delivery.status} /><span className="font-mono text-xs">{delivery.eventType}</span></div><p className="mt-2 text-xs text-muted-foreground">HTTP {delivery.lastStatusCode ?? "—"} · {delivery.lastDurationMs ?? "—"} ms · {text(`尝试 ${delivery.attemptCount} 次`, `${delivery.attemptCount} attempts`)} · {formatDate(delivery.updatedAt)}</p>{delivery.lastError === null ? null : <p className="mt-1 truncate text-xs text-destructive">{delivery.lastError}</p>}</div>{delivery.status === "failed" ? <Button size="sm" variant="outline" disabled={busyId === delivery.id} onClick={() => void act(delivery.id, () => integrationApi.retryDelivery(delivery.id))}><RotateCcw />{text("手动重发", "Retry")}</Button> : null}</div>)}</div>}</CardContent></Card></div>;
+  })}</div>}
+  <Card>
+    <CardHeader><CardTitle>{text("投递记录", "Delivery history")}</CardTitle><CardDescription>{text("按订阅、状态或事件筛选；已结束的记录可以手动重新投递。", "Filter by subscription, status, or event. Completed deliveries can be sent again manually.")}</CardDescription></CardHeader>
+    <CardContent className="flex flex-col gap-4">
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_12rem_12rem]">
+        <div className="flex items-center gap-2 rounded-md border px-3"><Search className="size-4 text-muted-foreground" /><Input aria-label={text("搜索投递记录", "Search deliveries")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("事件类型、事件 ID、请求 ID 或错误", "Event type, event ID, request ID, or error")} value={deliveryQuery} onChange={(event) => { setDeliveryPageNumber(1); setDeliveryQuery(event.target.value); }} /></div>
+        <NativeSelect aria-label={text("按事件回调筛选", "Filter by webhook")} value={deliverySubscriptionId} onChange={(event) => { setDeliveryPageNumber(1); setDeliverySubscriptionId(event.target.value); }}><NativeSelectOption value="">{text("全部事件回调", "All webhooks")}</NativeSelectOption>{(webhooks ?? []).map((webhook) => <NativeSelectOption key={webhook.id} value={webhook.id}>{webhook.name}</NativeSelectOption>)}</NativeSelect>
+        <NativeSelect aria-label={text("按投递状态筛选", "Filter by delivery status")} value={deliveryStatus} onChange={(event) => { setDeliveryPageNumber(1); setDeliveryStatus(event.target.value); }}><NativeSelectOption value="">{text("全部状态", "All statuses")}</NativeSelectOption><NativeSelectOption value="pending">{text("等待投递", "Pending")}</NativeSelectOption><NativeSelectOption value="delivering">{text("投递中", "Delivering")}</NativeSelectOption><NativeSelectOption value="succeeded">{text("成功", "Succeeded")}</NativeSelectOption><NativeSelectOption value="failed">{text("失败", "Failed")}</NativeSelectOption></NativeSelect>
+      </div>
+      {deliveryPage === null ? <Skeleton className="h-40" /> : deliveries.length === 0 ? <p className="py-8 text-center text-sm text-muted-foreground">{text("没有匹配的投递记录。", "No matching deliveries.")}</p> : <div className="divide-y rounded-lg border">{deliveries.map((delivery) => <div key={delivery.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex items-center gap-2"><DeliveryBadge status={delivery.status} /><span className="font-mono text-xs">{delivery.eventType}</span></div><p className="mt-2 text-xs text-muted-foreground">HTTP {delivery.lastStatusCode ?? "—"} · {delivery.lastDurationMs ?? "—"} ms · {text(`尝试 ${delivery.attemptCount} 次`, `${delivery.attemptCount} attempts`)} · {formatDate(delivery.updatedAt)}</p>{delivery.lastError === null ? null : <p className="mt-1 truncate text-xs text-destructive">{delivery.lastError}</p>}</div>{delivery.status === "failed" || delivery.status === "succeeded" ? <AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="outline" disabled={busyId === delivery.id}><RotateCcw />{text("重新投递", "Redeliver")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text("重新投递这条 Webhook？", "Redeliver this webhook?")}</AlertDialogTitle><AlertDialogDescription>{text("系统将使用原事件内容和当前订阅配置再次发送。接收方可能收到重复事件，请确认后继续。", "The original event will be sent again using the current subscription settings. The receiver may process a duplicate event.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={() => void act(delivery.id, () => integrationApi.retryDelivery(delivery.id))}>{text("确认重新投递", "Redeliver")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog> : null}</div>)}</div>}
+      {deliveryPage !== null && deliveryPage.total > 0 ? <div className="flex flex-col gap-3 border-t pt-4 text-sm sm:flex-row sm:items-center sm:justify-between"><span className="text-muted-foreground">{text(`共 ${deliveryPage.total} 条投递记录`, `${deliveryPage.total} deliveries`)}</span><div className="flex items-center justify-between gap-3 sm:justify-end"><Button type="button" size="sm" variant="outline" disabled={deliveryPage.page <= 1} onClick={() => setDeliveryPageNumber((current) => current - 1)}><ChevronLeft />{text("上一页", "Previous")}</Button><span className="min-w-24 text-center font-mono text-xs tabular-nums">{text(`第 ${deliveryPage.page} / ${deliveryPage.totalPages} 页`, `Page ${deliveryPage.page} / ${deliveryPage.totalPages}`)}</span><Button type="button" size="sm" variant="outline" disabled={deliveryPage.page >= deliveryPage.totalPages} onClick={() => setDeliveryPageNumber((current) => current + 1)}>{text("下一页", "Next")}<ChevronRight /></Button></div></div> : null}
+    </CardContent>
+  </Card>
+  </div>;
 };
 
 export const IntegrationConversationPage = () => {
@@ -537,7 +563,7 @@ export const IntegrationTaskDetailPage = () => {
         const [endpointItem, conversations, deliveryItems, eventItems] = await Promise.all([
           integrationApi.getEndpoint(item.endpointId, controller.signal),
           integrationApi.listConversations(item.endpointId, controller.signal),
-          integrationApi.listDeliveries(item.endpointId, controller.signal),
+          integrationApi.listDeliveries(item.endpointId, { page: 1, pageSize: 100, taskId: item.id }, controller.signal),
           item.runId === null
             ? Promise.resolve([])
             : api<RunEvent[]>(`/runs/${item.runId}/events?afterSeq=0`, { signal: controller.signal })
@@ -546,7 +572,7 @@ export const IntegrationTaskDetailPage = () => {
         setTask(item);
         setEndpoint(endpointItem);
         setConversation(conversations.find((value) => value.id === item.conversationId) ?? null);
-        setDeliveries(deliveryItems.filter((value) => value.taskId === item.id));
+        setDeliveries(deliveryItems.items);
         setEvents(eventItems);
         if (item.status === "queued" || item.status === "running") {
           timer = window.setTimeout(() => { void refresh(); }, 1_000);

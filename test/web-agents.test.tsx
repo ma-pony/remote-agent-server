@@ -19,7 +19,8 @@ const agent = {
 };
 const endpoint = {
   id: 7, name: "工单入口", slug: "ticket-agent", agentId: agent.id, enabled: true,
-  activeConversationCount: 0, activeTaskCount: 0, latestTask: null, createdAt: now, updatedAt: now
+  activeConversationCount: 0, queuedTaskCount: 0, runningTaskCount: 0,
+  activeTaskCount: 0, latestTask: null, createdAt: now, updatedAt: now
 };
 const usageSummary = {
   sessionCount: 0, measuredSessionCount: 0,

@@ -26,7 +26,8 @@ const sessionListQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
   query: z.string().trim().max(200).optional(),
-  agentId: z.coerce.number().int().positive().optional()
+  agentId: z.coerce.number().int().positive().optional(),
+  status: z.enum(["idle", "running"]).optional()
 });
 
 const sendError = (reply: FastifyReply, statusCode: number, code: string, message: string) =>
@@ -73,7 +74,7 @@ export const registerSessionRoutes = (
   sessionManager: SessionManager,
   runRepository: RunRepository
 ): void => {
-  app.get<{ Querystring: { page?: string; pageSize?: string; query?: string; agentId?: string } }>(
+  app.get<{ Querystring: { page?: string; pageSize?: string; query?: string; agentId?: string; status?: string } }>(
     "/sessions",
     (request, reply) => {
       const parsed = sessionListQuerySchema.safeParse(request.query);

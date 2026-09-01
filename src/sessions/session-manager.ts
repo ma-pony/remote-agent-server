@@ -105,7 +105,13 @@ export type CreateSessionInput = {
 export type SessionWithMcpStatus = Session & SessionMcpStatus;
 export type SessionListItemWithMcpStatus = SessionListItem & SessionMcpStatus;
 export type SessionRuntimeContext = { agent: Agent; session: Session };
-export type ListSessionsInput = { page: number; pageSize: number; query?: string; agentId?: number };
+export type ListSessionsInput = {
+  page: number;
+  pageSize: number;
+  query?: string;
+  agentId?: number;
+  status?: SessionStatus;
+};
 
 export class SessionManagerError extends Error {
   constructor(
@@ -313,6 +319,10 @@ export class SessionManager {
     if (input.agentId !== undefined) {
       clauses.push("session.agent_id = ?");
       parameters.push(input.agentId);
+    }
+    if (input.status !== undefined) {
+      clauses.push("session.status = ?");
+      parameters.push(input.status);
     }
     const query = input.query?.trim().toLowerCase();
     if (query !== undefined && query !== "") {

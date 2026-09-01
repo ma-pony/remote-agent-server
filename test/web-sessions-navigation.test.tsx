@@ -47,6 +47,8 @@ beforeEach(() => {
     if (url === "/api/sessions?page=1&pageSize=20") return response(page([session]));
     if (url === "/api/sessions?page=1&pageSize=20&query=ticket-2084") return response(page([session]));
     if (url === "/api/sessions?page=1&pageSize=20&query=ticket-9999") return response(page([]));
+    if (url === `/api/sessions?page=1&pageSize=20&agentId=${agent.id}`) return response(page([session]));
+    if (url === `/api/sessions?page=1&pageSize=20&agentId=${agent.id}&status=running`) return response(page([]));
     if (url === "/api/agents") return response([agent]);
     throw new Error(`Unexpected request: ${url}`);
   }));
@@ -76,6 +78,25 @@ it("列表展示会话来源、项目环境和累计 Token，并支持按外部�
   expect((await screen.findAllByRole("link", { name: session.title }))[0]).toBeInTheDocument();
   fireEvent.change(search, { target: { value: "ticket-9999" } });
   await waitFor(() => expect(screen.queryByRole("link", { name: session.title })).not.toBeInTheDocument());
+});
+
+it("会话列表支持按智能体和状态筛选", async () => {
+  const fetchMock = vi.mocked(fetch);
+  render(<App />);
+  await screen.findByRole("link", { name: session.title });
+
+  fireEvent.change(screen.getByLabelText("按智能体筛选"), { target: { value: agent.id } });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+    `/api/sessions?page=1&pageSize=20&agentId=${agent.id}`,
+    expect.objectContaining({ signal: expect.any(AbortSignal) })
+  ));
+
+  fireEvent.change(screen.getByLabelText("按会话状态筛选"), { target: { value: "running" } });
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+    `/api/sessions?page=1&pageSize=20&agentId=${agent.id}&status=running`,
+    expect.objectContaining({ signal: expect.any(AbortSignal) })
+  ));
+  expect(await screen.findByText("没有匹配的会话。")).toBeVisible();
 });
 
 it("列表支持翻页并把搜索交给服务端", async () => {

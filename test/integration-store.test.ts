@@ -319,12 +319,16 @@ describe("Integration endpoint domain", () => {
     expect(summaries).toHaveLength(2);
     expect(summaries.find((summary) => summary.endpointId === first.id)).toMatchObject({
       activeConversationCount: 0,
+      queuedTaskCount: 1,
+      runningTaskCount: 1,
       activeTaskCount: 2,
       latestTask: { id: taskIds[499], requestId: "request-499", status: "queued" }
     });
     expect(summaries.find((summary) => summary.endpointId === second.id)).toEqual({
       endpointId: second.id,
       activeConversationCount: 0,
+      queuedTaskCount: 0,
+      runningTaskCount: 0,
       activeTaskCount: 0,
       latestTask: null
     });

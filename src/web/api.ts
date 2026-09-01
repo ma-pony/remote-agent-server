@@ -282,13 +282,15 @@ export type IntegrationEndpointSummary = {
   agentId: number;
   enabled: boolean;
   activeConversationCount: number;
+  queuedTaskCount: number;
+  runningTaskCount: number;
   activeTaskCount: number;
   latestTask: Pick<IntegrationTask, "id" | "requestId" | "status" | "createdAt"> | null;
   createdAt: string;
   updatedAt: string;
 };
 export type IntegrationEndpoint = Omit<IntegrationEndpointSummary,
-  "activeConversationCount" | "activeTaskCount" | "latestTask"> & {
+  "activeConversationCount" | "queuedTaskCount" | "runningTaskCount" | "activeTaskCount" | "latestTask"> & {
     promptPrefix: string;
     parameterMappings: IntegrationParameterMapping[];
   };
@@ -353,6 +355,15 @@ export type WebhookDelivery = {
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
+};
+export type WebhookDeliveryPage = Page<WebhookDelivery> & { latest: WebhookDelivery[] };
+export type WebhookDeliveryFilters = {
+  page?: number;
+  pageSize?: number;
+  query?: string;
+  status?: WebhookDelivery["status"];
+  subscriptionId?: number;
+  taskId?: number;
 };
 
 export type ApiError = { error?: { code?: string; message?: string }; message?: string };
@@ -482,8 +493,19 @@ export const integrationApi = {
   testWebhook: (endpointId: number, id: number) => api<WebhookDelivery>(
     `/integration-endpoints/${endpointId}/webhooks/${id}/test`, { method: "POST" }
   ),
-  listDeliveries: (endpointId: number, signal?: AbortSignal) => api<WebhookDelivery[]>(
-    `/integration-endpoints/${endpointId}/webhook-deliveries`, { signal }
-  ),
+  listDeliveries: (endpointId: number, filters: WebhookDeliveryFilters = {}, signal?: AbortSignal) => {
+    const parameters = new URLSearchParams({
+      page: String(filters.page ?? 1),
+      pageSize: String(filters.pageSize ?? 20)
+    });
+    if (filters.query?.trim()) parameters.set("query", filters.query.trim());
+    if (filters.status !== undefined) parameters.set("status", filters.status);
+    if (filters.subscriptionId !== undefined) parameters.set("subscriptionId", String(filters.subscriptionId));
+    if (filters.taskId !== undefined) parameters.set("taskId", String(filters.taskId));
+    return api<WebhookDeliveryPage>(
+      `/integration-endpoints/${endpointId}/webhook-deliveries?${parameters.toString()}`,
+      { signal }
+    );
+  },
   retryDelivery: (id: number) => api<WebhookDelivery>(`/webhook-deliveries/${id}/retry`, { method: "POST" })
 };

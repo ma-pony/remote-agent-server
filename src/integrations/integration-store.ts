@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 
 import { insertedId } from "../db.js";
-import type { Run, RunStatus } from "../domain.js";
+import type { Page, Run, RunStatus } from "../domain.js";
 import type {
   IntegrationConversation,
   IntegrationConversationStatus,
@@ -128,7 +128,8 @@ type LinkedRunRow = {
 type EndpointManagementSummaryRow = {
   endpoint_id: number;
   active_conversation_count: number;
-  active_task_count: number;
+  queued_task_count: number;
+  running_task_count: number;
   latest_task_id: number | null;
   latest_task_request_id: string | null;
   latest_task_status: IntegrationTaskStatus | null;
@@ -138,6 +139,8 @@ type EndpointManagementSummaryRow = {
 export type EndpointManagementSummary = {
   endpointId: number;
   activeConversationCount: number;
+  queuedTaskCount: number;
+  runningTaskCount: number;
   activeTaskCount: number;
   latestTask: Pick<IntegrationTask, "id" | "requestId" | "status" | "createdAt"> | null;
 };
@@ -195,6 +198,17 @@ export type CreateWebhookDeliveryInput = {
 };
 
 type PersistedWebhookDeliveryInput = CreateWebhookDeliveryInput & { dispatchOrder: number };
+
+export type ListWebhookDeliveriesInput = {
+  page: number;
+  pageSize: number;
+  query?: string;
+  status?: WebhookDeliveryStatus;
+  subscriptionId?: number;
+  taskId?: number;
+};
+
+export type WebhookDeliveryPage = Page<WebhookDelivery> & { latest: WebhookDelivery[] };
 
 export type AppendTaskEventInput = {
   taskId: number;
@@ -329,8 +343,10 @@ export class IntegrationStore {
       SELECT endpoint.id AS endpoint_id,
         (SELECT COUNT(*) FROM integration_conversations conversation
           WHERE conversation.endpoint_id = endpoint.id AND conversation.status = 'active') AS active_conversation_count,
-        (SELECT COUNT(*) FROM integration_tasks active_task
-          WHERE active_task.endpoint_id = endpoint.id AND active_task.status IN ('queued', 'running')) AS active_task_count,
+        (SELECT COUNT(*) FROM integration_tasks queued_task
+          WHERE queued_task.endpoint_id = endpoint.id AND queued_task.status = 'queued') AS queued_task_count,
+        (SELECT COUNT(*) FROM integration_tasks running_task
+          WHERE running_task.endpoint_id = endpoint.id AND running_task.status = 'running') AS running_task_count,
         latest.id AS latest_task_id,
         latest.request_id AS latest_task_request_id,
         latest.status AS latest_task_status,
@@ -346,7 +362,9 @@ export class IntegrationStore {
     return rows.map((row) => ({
       endpointId: row.endpoint_id,
       activeConversationCount: row.active_conversation_count,
-      activeTaskCount: row.active_task_count,
+      queuedTaskCount: row.queued_task_count,
+      runningTaskCount: row.running_task_count,
+      activeTaskCount: row.queued_task_count + row.running_task_count,
       latestTask: row.latest_task_id === null ? null : {
         id: row.latest_task_id,
         requestId: row.latest_task_request_id!,
@@ -817,14 +835,67 @@ export class IntegrationStore {
     `).all(subscriptionId) as DeliveryRow[]).map(toDelivery);
   }
 
-  listDeliveriesForEndpoint(endpointId: number): WebhookDelivery[] {
-    return (this.db.prepare(`
+  listDeliveriesForEndpoint(endpointId: number, input: ListWebhookDeliveriesInput): WebhookDeliveryPage {
+    const joins = `
+      FROM webhook_deliveries delivery
+      JOIN webhook_subscriptions subscription ON subscription.id = delivery.subscription_id
+      LEFT JOIN integration_tasks task ON task.id = delivery.task_id
+    `;
+    const clauses = ["subscription.endpoint_id = ?"];
+    const parameters: Array<string | number> = [endpointId];
+    if (input.status !== undefined) {
+      clauses.push("delivery.status = ?");
+      parameters.push(input.status);
+    }
+    if (input.subscriptionId !== undefined) {
+      clauses.push("delivery.subscription_id = ?");
+      parameters.push(input.subscriptionId);
+    }
+    if (input.taskId !== undefined) {
+      clauses.push("delivery.task_id = ?");
+      parameters.push(input.taskId);
+    }
+    const query = input.query?.trim().toLowerCase();
+    if (query !== undefined && query !== "") {
+      clauses.push(`
+        LOWER(
+          delivery.event_type || ' ' || delivery.event_id || ' ' || delivery.status || ' ' ||
+          COALESCE(task.request_id, '') || ' ' || COALESCE(delivery.last_error, '')
+        ) LIKE ?
+      `);
+      parameters.push(`%${query}%`);
+    }
+    const where = `WHERE ${clauses.join(" AND ")}`;
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count ${joins} ${where}`)
+      .get(...parameters) as { count: number }).count;
+    const items = (this.db.prepare(`
+      SELECT delivery.*
+      ${joins}
+      ${where}
+      ORDER BY delivery.created_at DESC, delivery.id DESC
+      LIMIT ? OFFSET ?
+    `).all(...parameters, input.pageSize, (input.page - 1) * input.pageSize) as DeliveryRow[]).map(toDelivery);
+    const latest = (this.db.prepare(`
       SELECT delivery.*
       FROM webhook_deliveries delivery
       JOIN webhook_subscriptions subscription ON subscription.id = delivery.subscription_id
       WHERE subscription.endpoint_id = ?
+        AND delivery.id = (
+          SELECT recent.id FROM webhook_deliveries recent
+          WHERE recent.subscription_id = delivery.subscription_id
+          ORDER BY recent.created_at DESC, recent.id DESC
+          LIMIT 1
+        )
       ORDER BY delivery.created_at DESC, delivery.id DESC
     `).all(endpointId) as DeliveryRow[]).map(toDelivery);
+    return {
+      items,
+      latest,
+      page: input.page,
+      pageSize: input.pageSize,
+      total,
+      totalPages: Math.ceil(total / input.pageSize)
+    };
   }
 
   getDelivery(id: number): WebhookDelivery | undefined {
@@ -1092,7 +1163,7 @@ export class IntegrationStore {
         UPDATE webhook_deliveries
         SET status = 'pending', attempt_count = 0, next_attempt_at = ?, last_status_code = NULL,
             last_duration_ms = NULL, last_error = NULL, updated_at = ?
-        WHERE id = ? AND status = 'failed'
+        WHERE id = ? AND status IN ('succeeded', 'failed')
       `).run(now, now, id);
       return result.changes === 0 ? undefined : toDelivery(this.deliveryRow(id)!);
     });

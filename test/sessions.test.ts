@@ -172,6 +172,22 @@ describe("Session API", () => {
     expect(searched.statusCode).toBe(200);
     expect(searched.json()).toMatchObject({ total: 1, totalPages: 1 });
     expect((searched.json() as { items: Array<{ id: number }> }).items.map(({ id }) => id)).toEqual([ids[1]]);
+
+    db.prepare("UPDATE sessions SET status = 'running' WHERE id = ?").run(ids[4]);
+    const filtered = await app.inject({
+      method: "GET",
+      url: `/api/sessions?page=1&pageSize=10&agentId=${agent.id}&status=running`,
+      headers: authHeaders()
+    });
+    expect(filtered.statusCode).toBe(200);
+    expect(filtered.json()).toMatchObject({ total: 1, items: [{ id: ids[4], status: "running" }] });
+
+    const invalid = await app.inject({
+      method: "GET",
+      url: "/api/sessions?status=finished",
+      headers: authHeaders()
+    });
+    expect(invalid.statusCode).toBe(400);
   });
 
   it("列表返回可区分外部接入会话的摘要和累计 Token", async () => {

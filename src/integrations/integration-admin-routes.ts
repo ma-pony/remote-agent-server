@@ -106,6 +106,14 @@ const updateWebhookSchema = webhookSchema.partial().strict().refine(
   (input) => Object.keys(input).length > 0,
   { message: "At least one field must be provided" }
 );
+const webhookDeliveryListSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  query: z.string().trim().max(200).optional(),
+  status: z.enum(["pending", "delivering", "succeeded", "failed"]).optional(),
+  subscriptionId: z.coerce.number().int().positive().optional(),
+  taskId: z.coerce.number().int().positive().optional()
+});
 
 const invalidRequest = (reply: FastifyReply, message: string) =>
   reply.code(400).send({ error: { code: "invalid_request", message } });
@@ -245,6 +253,8 @@ export const registerIntegrationAdminRoutes = (
       return {
         ...endpoint,
         activeConversationCount: summary?.activeConversationCount ?? 0,
+        queuedTaskCount: summary?.queuedTaskCount ?? 0,
+        runningTaskCount: summary?.runningTaskCount ?? 0,
         activeTaskCount: summary?.activeTaskCount ?? 0,
         latestTask: summary?.latestTask ?? null
       };
@@ -484,21 +494,43 @@ export const registerIntegrationAdminRoutes = (
     }
   );
 
-  app.get<{ Params: { id: string } }>("/integration-endpoints/:id/webhook-deliveries", (request, reply) => {
+  app.get<{
+    Params: { id: string };
+    Querystring: {
+      page?: string;
+      pageSize?: string;
+      query?: string;
+      status?: string;
+      subscriptionId?: string;
+      taskId?: string;
+    };
+  }>("/integration-endpoints/:id/webhook-deliveries", (request, reply) => {
     const endpointId = numericId(request.params.id);
     if (manager.get(endpointId) === undefined) return endpointNotFound(reply);
-    return store.listDeliveriesForEndpoint(endpointId).map(publicDelivery);
+    const parsed = webhookDeliveryListSchema.safeParse(request.query);
+    if (!parsed.success) return invalidRequest(reply, "Invalid Webhook delivery list query");
+    const page = store.listDeliveriesForEndpoint(endpointId, parsed.data);
+    return {
+      ...page,
+      items: page.items.map(publicDelivery),
+      latest: page.latest.map(publicDelivery)
+    };
   });
 
   app.post<{ Params: { id: string } }>("/webhook-deliveries/:id/retry", (request, reply) => {
     const existing = store.getDelivery(numericId(request.params.id));
     if (existing === undefined) return deliveryNotFound(reply);
-    if (existing.status !== "failed") {
+    if (existing.status !== "failed" && existing.status !== "succeeded") {
       return reply.code(409).send({
-        error: { code: "delivery_not_failed", message: "Only failed Webhook deliveries can be retried" }
+        error: { code: "delivery_not_terminal", message: "Only completed Webhook deliveries can be redelivered" }
       });
     }
-    const delivery = store.retryDelivery(existing.id)!;
+    const delivery = store.retryDelivery(existing.id);
+    if (delivery === undefined) {
+      return reply.code(409).send({
+        error: { code: "delivery_not_terminal", message: "Only completed Webhook deliveries can be redelivered" }
+      });
+    }
     return reply.code(202).send(publicDelivery(delivery));
   });
 };

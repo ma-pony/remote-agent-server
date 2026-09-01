@@ -50,6 +50,16 @@ const delivery = (status: "pending" | "delivering" | "succeeded" | "failed", ove
   lastError: status === "failed" ? "Webhook request failed" : null,
   createdAt: now, updatedAt: now, ...overrides
 });
+const deliveryPage = (items: unknown[], overrides: Record<string, unknown> = {}) => ({
+  items,
+  latest: items,
+  page: 1,
+  pageSize: 20,
+  total: items.length,
+  totalPages: items.length === 0 ? 0 : 1,
+  ...overrides
+});
+const deliveryListPath = `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`;
 
 beforeEach(() => {
   sessionStorage.setItem("apiToken", "management-token");
@@ -61,6 +71,26 @@ afterEach(() => {
   sessionStorage.clear();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+});
+
+it("接入端点列表分别展示排队和运行任务数", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url === "/api/integration-endpoints") return jsonResponse([{
+      ...endpoint,
+      activeConversationCount: 124,
+      queuedTaskCount: 4,
+      runningTaskCount: 1,
+      activeTaskCount: 5,
+      latestTask: null
+    }]);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    throw new Error(`Unexpected request: GET ${url}`);
+  }));
+
+  render(<App />);
+
+  expect(await screen.findByText("4 / 1")).toBeVisible();
 });
 
 it("创建 Endpoint、一次复制 Token、配置 Webhook 并查看 Task", async () => {
@@ -85,7 +115,7 @@ it("创建 Endpoint、一次复制 Token、配置 Webhook 并查看 Task", async
     if (url === `/api/integration-endpoints/${endpoint.id}/conversations` && method === "GET") return jsonResponse([conversation]);
     if (url === `/api/integration-endpoints/${endpoint.id}/tasks` && method === "GET") return jsonResponse([task]);
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks` && method === "GET") return jsonResponse([]);
-    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries` && method === "GET") return jsonResponse(deliveries);
+    if (url.startsWith(deliveryListPath) && method === "GET") return jsonResponse(deliveryPage(deliveries));
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks` && method === "POST") {
       expect(JSON.parse(String(init?.body))).toMatchObject({
         name: "工单回调", url: "https://receiver.example.com/webhook",
@@ -209,7 +239,7 @@ it("调用说明展示动态参数和安全示例，并可发送真实测试任�
     }
     if (url === `/api/integration-tasks/${testTask.id}` && method === "GET") return jsonResponse(testTask);
     if (url === `/api/integration-endpoints/${endpoint.id}/conversations` && method === "GET") return jsonResponse([]);
-    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries` && method === "GET") return jsonResponse([]);
+    if (url.startsWith(deliveryListPath) && method === "GET") return jsonResponse(deliveryPage([]));
     throw new Error(`Unexpected request: ${method} ${url}`);
   }));
 
@@ -244,10 +274,10 @@ it("Webhook 测试投递异步完成后自动展示最终状态", async () => {
     if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
     if (url === "/api/agents") return jsonResponse([agent]);
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks`) return jsonResponse([webhook]);
-    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`) {
+    if (url.startsWith(deliveryListPath)) {
       deliveryReads += 1;
-      if (deliveryReads === 1) return jsonResponse([]);
-      return jsonResponse([delivery(deliveryReads === 2 ? "pending" : "succeeded")]);
+      if (deliveryReads === 1) return jsonResponse(deliveryPage([]));
+      return jsonResponse(deliveryPage([delivery(deliveryReads === 2 ? "pending" : "succeeded")]));
     }
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks/${webhook.id}/test` && method === "POST") {
       return jsonResponse(delivery("pending"), 202);
@@ -269,6 +299,53 @@ it("Webhook 测试投递异步完成后自动展示最终状态", async () => {
   expect(deliveryReads).toBe(3);
 });
 
+it("Webhook 投递记录支持分页筛选，并在二次确认后重新投递", async () => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/webhooks`);
+  const retryCalls: number[] = [];
+  const succeeded = delivery("succeeded");
+  const failed = delivery("failed", { id: 2, eventId: "event-2", eventType: "task.failed" });
+  const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    const method = init?.method ?? "GET";
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhooks`) return jsonResponse([webhook]);
+    if (url === `${deliveryListPath}?page=1&pageSize=20`) {
+      return jsonResponse(deliveryPage([succeeded], { total: 21, totalPages: 2 }));
+    }
+    if (url === `${deliveryListPath}?page=2&pageSize=20`) {
+      return jsonResponse(deliveryPage([failed], { page: 2, total: 21, totalPages: 2 }));
+    }
+    if (url === `${deliveryListPath}?page=1&pageSize=20&status=failed`) {
+      return jsonResponse(deliveryPage([failed]));
+    }
+    if (url === `/api/webhook-deliveries/${succeeded.id}/retry` && method === "POST") {
+      retryCalls.push(succeeded.id);
+      return jsonResponse(delivery("pending"), 202);
+    }
+    throw new Error(`Unexpected request: ${method} ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+
+  render(<App />);
+  expect(await screen.findByText("第 1 / 2 页")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  expect(await screen.findByText("task.failed")).toBeVisible();
+  fireEvent.change(screen.getByLabelText("按投递状态筛选"), { target: { value: "failed" } });
+  await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+    input === `${deliveryListPath}?page=1&pageSize=20&status=failed`
+  )).toBe(true));
+
+  fireEvent.change(screen.getByLabelText("按投递状态筛选"), { target: { value: "" } });
+  await screen.findByText("task.succeeded");
+  const redeliver = screen.getByRole("button", { name: "重新投递" });
+  fireEvent.click(redeliver);
+  expect(await screen.findByText(/接收方可能收到重复事件/)).toBeVisible();
+  expect(retryCalls).toHaveLength(0);
+  fireEvent.click(screen.getByRole("button", { name: "确认重新投递" }));
+  await waitFor(() => expect(retryCalls).toEqual([succeeded.id]));
+});
+
 it("编辑事件回调并保留未重新填写的敏感请求头", async () => {
   window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/webhooks`);
   const configuredWebhook = {
@@ -282,7 +359,7 @@ it("编辑事件回调并保留未重新填写的敏感请求头", async () => {
     if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
     if (url === "/api/agents") return jsonResponse([agent]);
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks` && method === "GET") return jsonResponse([configuredWebhook]);
-    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`) return jsonResponse([]);
+    if (url.startsWith(deliveryListPath)) return jsonResponse(deliveryPage([]));
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks/${webhook.id}` && method === "PATCH") {
       updateBody = JSON.parse(String(init?.body));
       return jsonResponse({ ...configuredWebhook, ...(updateBody as object), headers: configuredWebhook.headers });
@@ -322,7 +399,7 @@ it("确认后轮换事件回调密钥并只展示新密钥一次", async () => {
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks` && method === "GET") {
       return jsonResponse([webhook]);
     }
-    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`) return jsonResponse([]);
+    if (url.startsWith(deliveryListPath)) return jsonResponse(deliveryPage([]));
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks/${webhook.id}/rotate-secret` && method === "POST") {
       return jsonResponse({ webhook: { ...webhook, updatedAt: "2026-08-13T10:05:00.000Z" }, signingSecret: rotatedSecret });
     }
@@ -359,9 +436,9 @@ it("离开 Webhook 页面会清理待投递短轮询", async () => {
     if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
     if (url === "/api/agents") return jsonResponse([agent]);
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks`) return jsonResponse([webhook]);
-    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`) {
+    if (url.startsWith(deliveryListPath)) {
       deliveryReads += 1;
-      return jsonResponse([delivery("pending")]);
+      return jsonResponse(deliveryPage([delivery("pending")]));
     }
     if (url === `/api/integration-endpoints/${endpoint.id}/webhooks/${webhook.id}/test` && method === "POST") {
       return jsonResponse(delivery("pending"), 202);
@@ -398,9 +475,9 @@ it("运行中的 Task 自动刷新完整详情并在终态后停止", async () =
     }
     if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
     if (url === `/api/integration-endpoints/${endpoint.id}/conversations`) return jsonResponse([conversation]);
-    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`) {
+    if (url.startsWith(deliveryListPath)) {
       deliveryReads += 1;
-      return jsonResponse([delivery(deliveryReads === 1 ? "pending" : "succeeded")]);
+      return jsonResponse(deliveryPage([delivery(deliveryReads === 1 ? "pending" : "succeeded")]));
     }
     if (url === `/api/runs/${task.runId}/events?afterSeq=0`) {
       eventReads += 1;
@@ -443,7 +520,7 @@ it("取消 Task 后仍刷新到确定终态", async () => {
     if (url === `/api/integration-tasks/${task.id}/cancel` && method === "POST") return jsonResponse(runningTask);
     if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
     if (url === `/api/integration-endpoints/${endpoint.id}/conversations`) return jsonResponse([conversation]);
-    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`) return jsonResponse([]);
+    if (url.startsWith(deliveryListPath)) return jsonResponse(deliveryPage([]));
     if (url === `/api/runs/${task.runId}/events?afterSeq=0`) return jsonResponse([]);
     throw new Error(`Unexpected request: ${method} ${url}`);
   }));
@@ -477,7 +554,7 @@ it("Task 路由切换会清空旧详情、中止请求且忽略迟到响应", as
     if (url === `/api/integration-tasks/${taskB.id}`) return jsonResponse(taskB);
     if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
     if (url === `/api/integration-endpoints/${endpoint.id}/conversations`) return jsonResponse([conversation]);
-    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`) return jsonResponse([]);
+    if (url.startsWith(deliveryListPath)) return jsonResponse(deliveryPage([]));
     if (url.startsWith("/api/runs/")) return jsonResponse([]);
     throw new Error(`Unexpected request: ${url}`);
   }));
