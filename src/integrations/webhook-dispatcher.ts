@@ -47,7 +47,7 @@ export class WebhookDispatcher {
   private deadlineTimer: ReturnType<typeof setTimeout> | undefined;
   private unsubscribe: (() => void) | undefined;
   private unsubscribeSettings: (() => void) | undefined;
-  private readonly active = new Map<number, { deliveryId: number; promise: Promise<void>; controller: AbortController }>();
+  private readonly active = new Map<string, { deliveryId: number; promise: Promise<void>; controller: AbortController }>();
 
   constructor(private readonly dependencies: WebhookDispatcherDependencies) {
     this.fetch = dependencies.fetch ?? globalThis.fetch;
@@ -75,7 +75,7 @@ export class WebhookDispatcher {
         const due = this.dependencies.store.listDueDeliveries(new Date().toISOString());
         for (const delivery of due) {
           if (this.active.size >= this.webhookConcurrency()) break;
-          if (!this.active.has(delivery.subscriptionId)) this.startDelivery(delivery);
+          if (!this.active.has(this.deliveryStreamKey(delivery))) this.startDelivery(delivery);
         }
       } while (this.notifiedWhileDraining && this.started);
     } finally {
@@ -86,15 +86,16 @@ export class WebhookDispatcher {
 
   async deliver(id: number): Promise<void> {
     const current = this.dependencies.store.getDelivery(id);
-    if (current === undefined || this.active.has(current.subscriptionId)
+    if (current === undefined || this.active.has(this.deliveryStreamKey(current))
       || this.active.size >= this.webhookConcurrency()) return;
+    const streamKey = this.deliveryStreamKey(current);
     const controller = new AbortController();
     const promise = this.runDelivery(id, controller).finally(() => {
-      const active = this.active.get(current.subscriptionId);
-      if (active?.promise === promise) this.active.delete(current.subscriptionId);
+      const active = this.active.get(streamKey);
+      if (active?.promise === promise) this.active.delete(streamKey);
       if (this.started) this.notify();
     });
-    this.active.set(current.subscriptionId, { deliveryId: current.id, promise, controller });
+    this.active.set(streamKey, { deliveryId: current.id, promise, controller });
     await promise;
   }
 
@@ -123,13 +124,20 @@ export class WebhookDispatcher {
   }
 
   private startDelivery(delivery: WebhookDelivery): void {
+    const streamKey = this.deliveryStreamKey(delivery);
     const controller = new AbortController();
     const promise = this.runDelivery(delivery.id, controller).finally(() => {
-      const active = this.active.get(delivery.subscriptionId);
-      if (active?.promise === promise) this.active.delete(delivery.subscriptionId);
+      const active = this.active.get(streamKey);
+      if (active?.promise === promise) this.active.delete(streamKey);
       if (this.started) this.notify();
     });
-    this.active.set(delivery.subscriptionId, { deliveryId: delivery.id, promise, controller });
+    this.active.set(streamKey, { deliveryId: delivery.id, promise, controller });
+  }
+
+  private deliveryStreamKey(delivery: WebhookDelivery): string {
+    return delivery.taskId === null
+      ? `${delivery.subscriptionId}:delivery:${delivery.id}`
+      : `${delivery.subscriptionId}:task:${delivery.taskId}`;
   }
 
   private webhookConcurrency(): number {

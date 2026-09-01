@@ -956,7 +956,7 @@ export class IntegrationStore {
     return toDelivery(row!);
   }
 
-  /** Returns one due head Delivery for each enabled Subscription. */
+  /** Returns one due head Delivery for each Task stream in an enabled Subscription. */
   listDueDeliveries(now: string): WebhookDelivery[] {
     const rows = this.db.prepare(`
       SELECT delivery.*
@@ -969,6 +969,10 @@ export class IntegrationStore {
           SELECT earlier.id
           FROM webhook_deliveries earlier
           WHERE earlier.subscription_id = delivery.subscription_id
+            AND (
+              (delivery.task_id IS NOT NULL AND earlier.task_id = delivery.task_id)
+              OR (delivery.task_id IS NULL AND earlier.id = delivery.id)
+            )
             AND earlier.status IN ('pending', 'delivering')
           ORDER BY earlier.dispatch_order ASC, earlier.id ASC
           LIMIT 1
@@ -989,6 +993,10 @@ export class IntegrationStore {
           SELECT earlier.id
           FROM webhook_deliveries earlier
           WHERE earlier.subscription_id = delivery.subscription_id
+            AND (
+              (delivery.task_id IS NOT NULL AND earlier.task_id = delivery.task_id)
+              OR (delivery.task_id IS NULL AND earlier.id = delivery.id)
+            )
             AND earlier.status IN ('pending', 'delivering')
           ORDER BY earlier.dispatch_order ASC, earlier.id ASC
           LIMIT 1
@@ -1012,6 +1020,10 @@ export class IntegrationStore {
             SELECT earlier.id
             FROM webhook_deliveries earlier
             WHERE earlier.subscription_id = delivery.subscription_id
+              AND (
+                (delivery.task_id IS NOT NULL AND earlier.task_id = delivery.task_id)
+                OR (delivery.task_id IS NULL AND earlier.id = delivery.id)
+              )
               AND earlier.status IN ('pending', 'delivering')
             ORDER BY earlier.dispatch_order ASC, earlier.id ASC
             LIMIT 1

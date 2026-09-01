@@ -272,7 +272,8 @@ const migrateTextIds = (
         "integration_tasks_endpoint_recent",
         "integration_tasks_session_recent",
         "webhook_deliveries_task_event",
-        "webhook_deliveries_subscription_queue"
+        "webhook_deliveries_subscription_queue",
+        "webhook_deliveries_stream_queue"
       ]) {
         db.exec(`DROP INDEX IF EXISTS ${quote(index)}`);
       }
@@ -714,6 +715,9 @@ export const migrate = (
 
     CREATE INDEX IF NOT EXISTS webhook_deliveries_subscription_queue
     ON webhook_deliveries(subscription_id, dispatch_order, id, status);
+
+    CREATE INDEX IF NOT EXISTS webhook_deliveries_stream_queue
+    ON webhook_deliveries(subscription_id, task_id, status, dispatch_order, id);
   `);
 
   const hasColumn = (table: string, column: string): boolean =>

@@ -62,6 +62,19 @@ const createHarness = (
     parameterMappings: []
   }).endpoint;
   const dispatcher = new WebhookDispatcher({ store, secrets, fetch: fetchImpl, concurrencySettings });
+  const taskSessionId = seed.session().id;
+  let taskSequence = 0;
+
+  const createTask = () => store.createTask({
+    endpointId: endpoint.id,
+    conversationId: null,
+    sessionId: taskSessionId,
+    requestId: `webhook-task-${++taskSequence}`,
+    requestFingerprint: `fingerprint-${taskSequence}`,
+    message: "test",
+    effectivePrompt: "test",
+    encryptedParameters: null
+  });
 
   const createSubscription = (name: string, signingSecret: string, enabled = true) => store.createSubscription({
     endpointId: endpoint.id,
@@ -79,7 +92,8 @@ const createHarness = (
     sequence: number,
     eventType = "task.succeeded",
     occurredAt = new Date().toISOString(),
-    eventId = `event-${subscriptionId}-${sequence}`
+    eventId = `event-${subscriptionId}-${sequence}`,
+    taskId: number | null = null
   ) => {
     const payloadJson = JSON.stringify({
       eventId,
@@ -88,7 +102,7 @@ const createHarness = (
       occurredAt,
       endpoint: { id: endpoint.id, slug: endpoint.slug },
       task: {
-        id: sequence,
+        id: taskId ?? sequence,
         requestId: `request-${subscriptionId}-${sequence}`,
         conversationKey: null,
         sessionId: sequence,
@@ -101,14 +115,14 @@ const createHarness = (
       eventKey: `${subscriptionId}:${eventId}:${eventType}`,
       sequence,
       subscriptionId,
-      taskId: null,
+      taskId,
       eventType,
       payloadJson,
       nextAttemptAt: occurredAt
     });
   };
 
-  return { db, seed, root, secrets, store, endpoint, dispatcher, createSubscription, createDelivery };
+  return { db, seed, root, secrets, store, endpoint, dispatcher, createTask, createSubscription, createDelivery };
 };
 
 afterEach(async () => {
@@ -373,7 +387,7 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
-  it("同一 Subscription 严格串行且不同 Subscription 并行", async () => {
+  it("同一 Subscription 的不同 Task 并行，同一 Task 严格串行", async () => {
     const requests = new Map<string, ReturnType<typeof deferred<Response>>>();
     const started: string[] = [];
     const fetchImpl = vi.fn<typeof fetch>(async (_url, init) => {
@@ -386,16 +400,20 @@ describe("WebhookDispatcher", () => {
     const harness = createHarness(fetchImpl);
     const subscriptionA = harness.createSubscription("a", "secret-a");
     const subscriptionB = harness.createSubscription("b", "secret-b");
-    const a1 = harness.createDelivery(subscriptionA.id, 1);
-    const a2 = harness.createDelivery(subscriptionA.id, 2);
+    const orderedTaskId = harness.createTask().id;
+    const otherTaskId = harness.createTask().id;
+    const a1 = harness.createDelivery(subscriptionA.id, 1, "task.succeeded", undefined, undefined, orderedTaskId);
+    const a2 = harness.createDelivery(subscriptionA.id, 2, "task.succeeded", undefined, undefined, orderedTaskId);
+    const otherTask = harness.createDelivery(subscriptionA.id, 3, "task.succeeded", undefined, undefined, otherTaskId);
     const b1 = harness.createDelivery(subscriptionB.id, 1);
 
     harness.dispatcher.start();
-    await vi.waitFor(() => expect(started).toHaveLength(2));
-    expect(started).toEqual(expect.arrayContaining([a1.eventId, b1.eventId]));
+    await vi.waitFor(() => expect(started).toHaveLength(3));
+    expect(started).toEqual(expect.arrayContaining([a1.eventId, otherTask.eventId, b1.eventId]));
     expect(started).not.toContain(a2.eventId);
 
     requests.get(b1.eventId)!.resolve(new Response(null, { status: 204 }));
+    requests.get(otherTask.eventId)!.resolve(new Response(null, { status: 204 }));
     requests.get(a1.eventId)!.resolve(new Response(null, { status: 204 }));
     await vi.waitFor(() => expect(started).toContain(a2.eventId));
     requests.get(a2.eventId)!.resolve(new Response(null, { status: 204 }));
@@ -414,14 +432,15 @@ describe("WebhookDispatcher", () => {
       return new Response(null, { status: 204 });
     }));
     const subscription = harness.createSubscription("causal-tie", "secret");
+    const taskId = harness.createTask().id;
     const occurredAt = "2026-08-13T00:00:00.000Z";
     const candidateA = webhookEventId(harness.endpoint.id, "causal-event-a");
     const candidateB = webhookEventId(harness.endpoint.id, "causal-event-b");
     const [firstEventId, secondEventId] = candidateA > candidateB
       ? [candidateA, candidateB]
       : [candidateB, candidateA];
-    const first = harness.createDelivery(subscription.id, 1, "task.succeeded", occurredAt, firstEventId);
-    const second = harness.createDelivery(subscription.id, 1, "task.succeeded", occurredAt, secondEventId);
+    const first = harness.createDelivery(subscription.id, 1, "task.succeeded", occurredAt, firstEventId, taskId);
+    const second = harness.createDelivery(subscription.id, 1, "task.succeeded", occurredAt, secondEventId, taskId);
     expect(first.eventId > second.eventId).toBe(true);
 
     harness.dispatcher.start();
@@ -440,7 +459,7 @@ describe("WebhookDispatcher", () => {
     harness.db.close();
   });
 
-  it("系统时钟回拨不改变因果顺序，旧 head 重试仍只阻塞同订阅", async () => {
+  it("系统时钟回拨不改变因果顺序，旧 head 重试仍只阻塞同一 Task", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-13T00:00:10.000Z"));
     const started: string[] = [];
@@ -450,29 +469,30 @@ describe("WebhookDispatcher", () => {
     });
     const harness = createHarness(fetchImpl);
     const subscriptionA = harness.createSubscription("ordered-a", "secret-a");
-    const subscriptionB = harness.createSubscription("ordered-b", "secret-b");
+    const orderedTaskId = harness.createTask().id;
+    const otherTaskId = harness.createTask().id;
     const firstTask = harness.createDelivery(
-      subscriptionA.id, 2, "task.succeeded", "2026-08-13T00:00:10.000Z"
+      subscriptionA.id, 2, "task.succeeded", "2026-08-13T00:00:10.000Z", undefined, orderedTaskId
     );
     vi.setSystemTime(new Date("2026-08-13T00:00:05.000Z"));
     const rollbackTask = harness.createDelivery(
-      subscriptionA.id, 1, "task.succeeded", "2026-08-13T00:00:05.000Z"
+      subscriptionA.id, 1, "task.succeeded", "2026-08-13T00:00:05.000Z", undefined, orderedTaskId
     );
-    const otherSubscription = harness.createDelivery(
-      subscriptionB.id, 1, "task.succeeded", "2026-08-13T00:00:05.000Z"
+    const otherTask = harness.createDelivery(
+      subscriptionA.id, 3, "task.succeeded", "2026-08-13T00:00:05.000Z", undefined, otherTaskId
     );
     harness.db.prepare("UPDATE webhook_deliveries SET next_attempt_at = ? WHERE id = ?")
       .run("2026-08-13T00:00:20.000Z", firstTask.id);
 
     expect(harness.store.listDueDeliveries("2026-08-13T00:00:05.000Z").map(({ id }) => id))
-      .toEqual([otherSubscription.id]);
+      .toEqual([otherTask.id]);
     expect(harness.store.nextPendingDeliveryAt()).toBe("2026-08-13T00:00:05.000Z");
     expect(harness.store.claimDelivery(rollbackTask.id, "2026-08-13T00:00:15.000Z")).toBeUndefined();
 
     harness.dispatcher.start();
     await vi.advanceTimersByTimeAsync(0);
-    await vi.waitFor(() => expect(harness.store.getDelivery(otherSubscription.id)?.status).toBe("succeeded"));
-    expect(started).toEqual([otherSubscription.eventId]);
+    await vi.waitFor(() => expect(harness.store.getDelivery(otherTask.id)?.status).toBe("succeeded"));
+    expect(started).toEqual([otherTask.eventId]);
     expect(started).not.toContain(rollbackTask.eventId);
     expect(harness.store.nextPendingDeliveryAt()).toBe("2026-08-13T00:00:20.000Z");
 
