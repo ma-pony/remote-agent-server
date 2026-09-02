@@ -26,6 +26,8 @@ import type {
   AgentRuntime,
   RuntimeDoctor,
   RuntimeEvent,
+  RuntimeModelCatalog,
+  RuntimeModelCatalogInput,
   RuntimeSession,
   RuntimeSessionInput,
   RuntimeTurn,
@@ -60,7 +62,15 @@ type RuntimeTarget = {
 };
 
 export class AgentRuntimeError extends Error {
-  constructor(readonly code: "invalid_runtime_target" | "session_not_ready" | "session_resume_failed" | "runtime_shutdown", message: string) {
+  constructor(
+    readonly code:
+      | "invalid_runtime_target"
+      | "session_not_ready"
+      | "session_resume_failed"
+      | "runtime_shutdown"
+      | "model_selection_unsupported",
+    message: string
+  ) {
     super(message);
     this.name = "AgentRuntimeError";
   }
@@ -276,6 +286,7 @@ type ManagedSession = {
   instructions: string;
   configurationFingerprint: string;
   target: string;
+  model?: string;
 };
 
 type ActiveTurn = {
@@ -470,6 +481,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const existing = this.sessions.get(input.sessionId);
     const reusable = existing !== undefined && this.canReuse(existing, input);
     if (reusable) {
+      await this.applyModel(existing, input.model);
       return { providerSessionId: existing.providerSessionId };
     }
     if (existing !== undefined) {
@@ -496,14 +508,19 @@ export class AcpxAgentRuntime implements AgentRuntime {
     });
     await registry.prepare(agent);
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
+    const sessionOptions = {
+      ...(input.model === undefined ? {} : { model: input.model }),
+      ...(input.providerSessionId === null && input.provider === "claude_code"
+        ? { systemPrompt: { append: systemPrompt(input) } }
+        : {})
+    };
     const handle = await runtime.ensureSession({
       sessionKey: `remote-agent:${input.sessionId}`,
       agent,
       mode: "persistent",
       cwd: input.workspacePath,
-      ...(input.providerSessionId === null && input.provider === "claude_code"
-        ? { sessionOptions: { systemPrompt: { append: systemPrompt(input) } } }
-        : input.providerSessionId === null ? {} : { resumeSessionId: input.providerSessionId })
+      ...(Object.keys(sessionOptions).length === 0 ? {} : { sessionOptions }),
+      ...(input.providerSessionId === null ? {} : { resumeSessionId: input.providerSessionId })
     });
     const providerSessionId = handle.agentSessionId ?? handle.backendSessionId ?? null;
 
@@ -523,7 +540,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
           browserProfilePath: input.browserProfilePath,
           instructions: input.instructions,
           configurationFingerprint: configurationFingerprint(input),
-          target: agent
+          target: agent,
+          ...(input.model === undefined ? {} : { model: input.model })
         });
         this.recordShutdownFailure("late_handle_close", input.sessionId, outcome.reason);
       }
@@ -561,7 +579,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions,
       configurationFingerprint: configurationFingerprint(input),
-      target: agent
+      target: agent,
+      ...(input.model === undefined ? {} : { model: input.model })
     });
     return { providerSessionId };
   }
@@ -700,6 +719,55 @@ export class AcpxAgentRuntime implements AgentRuntime {
         session.registry.unregister(session.target);
       }
     });
+  }
+
+  async listModels(input: RuntimeModelCatalogInput): Promise<RuntimeModelCatalog> {
+    this.assertRunning();
+    const sessionId = 0;
+    assertTarget(input.provider, input.agentId, sessionId);
+    const registry = new RemoteAgentRegistry(
+      this.config.dataDir,
+      this.skillManager,
+      this.providerHomePreparations,
+      this.extensionProjector
+    );
+    const probeAgent = registry.register({
+      provider: input.provider,
+      agentId: input.agentId,
+      sessionId,
+      browserProfilePath: join(this.config.dataDir, "agents", String(input.agentId), "model-catalog-browser"),
+      instructions: input.instructions
+    });
+    await registry.prepare(probeAgent);
+    const runtime = this.createRuntime(registry);
+    let handle: AcpRuntimeHandle | undefined;
+    try {
+      handle = await runtime.ensureSession({
+        sessionKey: `remote-agent:model-catalog:${input.agentId}`,
+        agent: probeAgent,
+        mode: "oneshot",
+        cwd: input.workspacePath
+      });
+      const status = await runtime.getStatus?.({ handle });
+      const availableModels = [...new Set(status?.models?.availableModelIds ?? [])];
+      return {
+        supported: availableModels.length > 0,
+        currentModel: status?.models?.currentModelId ?? null,
+        availableModels
+      };
+    } finally {
+      try {
+        if (handle !== undefined) {
+          await runtime.close({
+            handle,
+            reason: "model_catalog_loaded",
+            discardPersistentState: true
+          });
+        }
+      } finally {
+        registry.clear();
+      }
+    }
   }
 
   async doctor(provider: Provider, agentId: number): Promise<RuntimeDoctor> {
@@ -882,6 +950,19 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const timer = this.releaseRetryTimers.get(sessionId);
     if (timer !== undefined) clearTimeout(timer);
     this.releaseRetryTimers.delete(sessionId);
+  }
+
+  private async applyModel(session: ManagedSession, model: string | undefined): Promise<void> {
+    if (model === undefined || model === session.model) return;
+    if (session.runtime.setConfigOption === undefined) {
+      throw new AgentRuntimeError("model_selection_unsupported", "Agent Core does not support model selection");
+    }
+    await session.runtime.setConfigOption({
+      handle: session.handle,
+      key: "model",
+      value: model
+    });
+    session.model = model;
   }
 
   private serializeSession<T>(sessionId: number, operation: () => Promise<T>): Promise<T> {

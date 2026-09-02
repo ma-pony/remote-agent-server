@@ -6,8 +6,14 @@ import type Database from "better-sqlite3";
 import type { Agent, Provider } from "../domain.js";
 import { insertedId } from "../db.js";
 import { ProjectEnvironmentStore } from "../project-environments/project-environment-store.js";
-import type { AgentRuntime, RuntimeDoctor } from "../runtime/agent-runtime.js";
+import type { AgentRuntime, RuntimeDoctor, RuntimeModelCatalog } from "../runtime/agent-runtime.js";
 import { ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
+import {
+  configuredModels,
+  parseStoredModelPolicy,
+  PROVIDER_DEFAULT_MODEL_POLICY,
+  type AgentModelPolicy
+} from "./model-policy.js";
 
 type AgentRow = {
   id: number;
@@ -16,6 +22,8 @@ type AgentRow = {
   enabled: number;
   instructions: string;
   max_concurrent_runs: number | null;
+  model_policy_json: string;
+  provider_default_model: string | null;
   project_environment_id: number | null;
   created_at: string;
   updated_at: string;
@@ -35,6 +43,7 @@ export type UpdateAgentInput = {
   projectEnvironmentId?: number;
   instructions?: string;
   maxConcurrentRuns?: number | null;
+  modelPolicy?: AgentModelPolicy;
 };
 
 export type CloneAgentInput = {
@@ -57,10 +66,17 @@ const toAgent = (row: AgentRow, globalRunConcurrency: number): Agent => ({
   instructions: row.instructions,
   maxConcurrentRuns: row.max_concurrent_runs,
   effectiveMaxConcurrentRuns: Math.min(globalRunConcurrency, row.max_concurrent_runs ?? globalRunConcurrency),
+  modelPolicy: parseStoredModelPolicy(row.model_policy_json),
+  providerDefaultModel: row.provider_default_model,
   projectEnvironmentId: row.project_environment_id,
   createdAt: row.created_at,
   updatedAt: row.updated_at
 });
+
+const selectableDefaultModel = (catalog: RuntimeModelCatalog): string | null => catalog.currentModel !== null
+  && catalog.availableModels.includes(catalog.currentModel)
+  ? catalog.currentModel
+  : null;
 
 /**
  * Stores Agent profiles and prepares their provider-specific home directories.
@@ -87,9 +103,19 @@ export class AgentManager {
     const createdAt = new Date().toISOString();
     const id = insertedId(this.db
       .prepare(
-        "INSERT INTO agents (name, provider, enabled, instructions, max_concurrent_runs, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO agents (name, provider, enabled, instructions, max_concurrent_runs, model_policy_json, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
-      .run(input.name, input.provider, 1, instructions, input.maxConcurrentRuns ?? null, input.projectEnvironmentId, createdAt, createdAt));
+      .run(
+        input.name,
+        input.provider,
+        1,
+        instructions,
+        input.maxConcurrentRuns ?? null,
+        JSON.stringify(PROVIDER_DEFAULT_MODEL_POLICY),
+        input.projectEnvironmentId,
+        createdAt,
+        createdAt
+      ));
     const agentDir = this.agentDirectory(id);
     try {
       this.initializeAgentDirectory(id);
@@ -110,6 +136,8 @@ export class AgentManager {
         globalRunConcurrency,
         input.maxConcurrentRuns ?? globalRunConcurrency
       ),
+      modelPolicy: PROVIDER_DEFAULT_MODEL_POLICY,
+      providerDefaultModel: null,
       projectEnvironmentId: input.projectEnvironmentId,
       createdAt,
       updatedAt: createdAt
@@ -128,14 +156,17 @@ export class AgentManager {
       this.db.transaction(() => {
         clonedId = insertedId(this.db.prepare(`
           INSERT INTO agents
-            (name, provider, enabled, instructions, max_concurrent_runs, project_environment_id, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (name, provider, enabled, instructions, max_concurrent_runs, model_policy_json,
+             provider_default_model, project_environment_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           input.name,
           source.provider,
           source.enabled ? 1 : 0,
           source.instructions,
           source.maxConcurrentRuns,
+          JSON.stringify(source.modelPolicy),
+          source.providerDefaultModel,
           source.projectEnvironmentId,
           createdAt,
           createdAt
@@ -249,6 +280,8 @@ export class AgentManager {
       instructions: source.instructions,
       maxConcurrentRuns: source.maxConcurrentRuns,
       effectiveMaxConcurrentRuns: source.effectiveMaxConcurrentRuns,
+      modelPolicy: source.modelPolicy,
+      providerDefaultModel: source.providerDefaultModel,
       projectEnvironmentId: source.projectEnvironmentId,
       createdAt,
       updatedAt: createdAt
@@ -268,7 +301,7 @@ export class AgentManager {
       : toAgent(row, this.concurrencySettingsStore.get().globalRunConcurrency);
   }
 
-  update(id: number, input: UpdateAgentInput): Agent | undefined {
+  async update(id: number, input: UpdateAgentInput): Promise<Agent | undefined> {
     const agent = this.get(id);
     if (agent === undefined) return undefined;
 
@@ -282,10 +315,41 @@ export class AgentManager {
       : input.maxConcurrentRuns;
     if (projectEnvironmentId === null) throw new AgentManagerError("project_environment_unavailable");
     this.requireReadyEnvironment(projectEnvironmentId);
+    const modelPolicy = input.modelPolicy ?? agent.modelPolicy;
+    let providerDefaultModel = agent.providerDefaultModel;
+    if (input.modelPolicy !== undefined) {
+      const catalog = await this.discoverModels({
+        ...agent,
+        instructions,
+        projectEnvironmentId
+      });
+      const requestedModels = configuredModels(modelPolicy);
+      if (requestedModels.length > 0 && !catalog.supported) {
+        throw new AgentManagerError("agent_model_selection_unsupported");
+      }
+      if (requestedModels.some((model) => !catalog.availableModels.includes(model))) {
+        throw new AgentManagerError("agent_model_unavailable");
+      }
+      providerDefaultModel = selectableDefaultModel(catalog);
+    }
     const updatedAt = new Date().toISOString();
     this.db
-      .prepare("UPDATE agents SET name = ?, enabled = ?, instructions = ?, max_concurrent_runs = ?, project_environment_id = ?, updated_at = ? WHERE id = ?")
-      .run(name, enabled ? 1 : 0, instructions, maxConcurrentRuns, projectEnvironmentId, updatedAt, id);
+      .prepare(`
+        UPDATE agents SET name = ?, enabled = ?, instructions = ?, max_concurrent_runs = ?,
+          model_policy_json = ?, provider_default_model = ?, project_environment_id = ?, updated_at = ?
+        WHERE id = ?
+      `)
+      .run(
+        name,
+        enabled ? 1 : 0,
+        instructions,
+        maxConcurrentRuns,
+        JSON.stringify(modelPolicy),
+        providerDefaultModel,
+        projectEnvironmentId,
+        updatedAt,
+        id
+      );
     if (maxConcurrentRuns !== agent.maxConcurrentRuns) this.concurrencySettingsStore.notify();
 
     const globalRunConcurrency = this.concurrencySettingsStore.get().globalRunConcurrency;
@@ -296,9 +360,24 @@ export class AgentManager {
       instructions,
       maxConcurrentRuns,
       effectiveMaxConcurrentRuns: Math.min(globalRunConcurrency, maxConcurrentRuns ?? globalRunConcurrency),
+      modelPolicy,
+      providerDefaultModel,
       projectEnvironmentId,
       updatedAt
     };
+  }
+
+  /** Reads the model selector advertised by the Agent Core through ACP. */
+  async models(id: number): Promise<RuntimeModelCatalog | undefined> {
+    const agent = this.get(id);
+    if (agent === undefined) return undefined;
+    const catalog = await this.discoverModels(agent);
+    const providerDefaultModel = selectableDefaultModel(catalog);
+    if (providerDefaultModel !== agent.providerDefaultModel) {
+      this.db.prepare("UPDATE agents SET provider_default_model = ? WHERE id = ?")
+        .run(providerDefaultModel, id);
+    }
+    return catalog;
   }
 
   delete(id: number): "deleted" | "not_found" {
@@ -337,6 +416,23 @@ export class AgentManager {
     }
   }
 
+  private async discoverModels(agent: Pick<Agent, "id" | "provider" | "instructions" | "projectEnvironmentId">): Promise<RuntimeModelCatalog> {
+    if (agent.projectEnvironmentId === null) throw new AgentManagerError("project_environment_unavailable");
+    const revision = this.projectEnvironmentStore.getCurrentRevision(agent.projectEnvironmentId);
+    if (revision?.status !== "ready" || revision.workspacePath === null) {
+      throw new AgentManagerError("project_environment_unavailable");
+    }
+    if (this.runtime.listModels === undefined) {
+      return { supported: false, currentModel: null, availableModels: [] };
+    }
+    return this.runtime.listModels({
+      agentId: agent.id,
+      provider: agent.provider,
+      workspacePath: revision.workspacePath,
+      instructions: agent.instructions
+    });
+  }
+
   private agentDirectory(id: number): string {
     return join(this.dataDir, "agents", String(id));
   }
@@ -368,7 +464,14 @@ export class AgentManager {
 }
 
 export class AgentManagerError extends Error {
-  constructor(readonly code: "project_environment_unavailable" | "agent_has_sessions" | "agent_has_integration_endpoints" | "agent_instructions_unsupported") {
+  constructor(readonly code:
+    | "project_environment_unavailable"
+    | "agent_has_sessions"
+    | "agent_has_integration_endpoints"
+    | "agent_instructions_unsupported"
+    | "agent_model_selection_unsupported"
+    | "agent_model_unavailable"
+  ) {
     super(code);
   }
 }

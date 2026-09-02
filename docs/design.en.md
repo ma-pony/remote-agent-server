@@ -57,7 +57,7 @@ The web console uses the same Session, Run, and Event model. Runs created in the
 | --- | --- |
 | Project environment | Stores one or more Git repositories, preparation commands, and the current ready revision. |
 | Project revision | A successful build published as the snapshot source for new session workspaces. |
-| Agent | Binds a provider, project environment, instructions, Skills, provider extensions, MCP, and concurrency policy. |
+| Agent | Binds a provider, project environment, instructions, Skills, provider extensions, MCP, model policy, and concurrency policy. |
 | Session | Owns one isolated workspace and one resumable provider conversation. |
 | Run | Records one input, execution state, result, and token usage inside a session. |
 | Event | Appends messages, tools, statuses, and errors for a run, ordered by `seq`. |
@@ -99,12 +99,14 @@ Business modules use acpx through the Runtime interface, keeping provider and AC
 2. The server pins the current project revision and creates a copy-on-write workspace.
 3. A user message creates a queued run.
 4. The run scheduler checks global, agent, and session concurrency constraints.
-5. The server prepares the agent Provider Home and projects Skills, provider extensions, and MCP.
-6. The runtime creates or resumes an ACP session and sends the input.
+5. The server prepares the agent Provider Home, projects Skills, provider extensions, and MCP, and resolves the model policy against the current UTC time.
+6. The runtime creates or resumes an ACP session. When needed, it updates the Core-advertised ACP `model` option before sending the input.
 7. Normalized provider events are persisted and streamed to the console.
 8. The server stores the result and token usage, then updates run and session state.
 
 Runs inside one session are serial. Different sessions may run concurrently within the global and agent limits.
+
+Selectable models come exclusively from the catalog advertised by Agent Core over ACP. When a Core does not advertise models, the agent can only use the Core's default behavior. A time policy does not change the Session lifecycle or create a new business Session for a model switch; the resolved model is stored on the Run.
 
 ### 6.2 External tasks
 

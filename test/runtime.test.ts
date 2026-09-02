@@ -84,6 +84,7 @@ type RuntimeStub = AcpRuntime & {
   ensureSession: ReturnType<typeof vi.fn>;
   startTurn: ReturnType<typeof vi.fn>;
   getStatus: ReturnType<typeof vi.fn>;
+  setConfigOption: ReturnType<typeof vi.fn>;
   cancel: ReturnType<typeof vi.fn>;
   close: ReturnType<typeof vi.fn>;
   doctor: ReturnType<typeof vi.fn>;
@@ -110,6 +111,7 @@ const runtimeStub = (overrides: {
     totalTokens?: number;
   }>;
   doctor?: AcpRuntimeDoctorReport;
+  models?: { currentModelId?: string; availableModelIds: string[] };
 } = {}): RuntimeStub => {
   const handle: AcpRuntimeHandle = {
     sessionKey: `remote-agent:${SESSION_ID}`,
@@ -135,6 +137,7 @@ const runtimeStub = (overrides: {
     startTurn: vi.fn(() => turn),
     runTurn: vi.fn(),
     getStatus: vi.fn(async () => ({
+      ...(overrides.models === undefined ? {} : { models: overrides.models }),
       usage: overrides.cumulativeUsage === undefined
         && overrides.perRequestUsage === undefined
         ? undefined
@@ -143,6 +146,7 @@ const runtimeStub = (overrides: {
           ...(overrides.perRequestUsage === undefined ? {} : { perRequest: overrides.perRequestUsage })
         }
     })),
+    setConfigOption: vi.fn(async () => undefined),
     cancel: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
     doctor: vi.fn(async () => overrides.doctor ?? ({ ok: true, message: "ready", details: [] }))
@@ -491,6 +495,65 @@ describe("AcpxAgentRuntime", () => {
     expect(append).toContain(input.workspacePath);
     expect(append).toContain(input.browserProfilePath);
     expect(append).toContain(input.instructions);
+  });
+
+  it("创建 Session 时传入已解析模型并在复用 Handle 时切换模型", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub({
+      models: {
+        currentModelId: "deepseek-v4-flash",
+        availableModelIds: ["deepseek-v4-flash", "glm-4.5"]
+      }
+    });
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+
+    await runtime.ensureSession(sessionInput(root, { model: "deepseek-v4-flash" }));
+    await runtime.ensureSession(sessionInput(root, {
+      providerSessionId: "provider-session-1",
+      model: "glm-4.5"
+    }));
+
+    expect(acp.ensureSession).toHaveBeenCalledTimes(1);
+    expect(acp.ensureSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionOptions: { model: "deepseek-v4-flash" }
+    }));
+    expect(acp.setConfigOption).toHaveBeenCalledWith({
+      handle: expect.objectContaining({ agentSessionId: "provider-session-1" }),
+      key: "model",
+      value: "glm-4.5"
+    });
+  });
+
+  it("通过临时 ACP Session 自动读取 Agent Core 暴露的模型", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub({
+      models: {
+        currentModelId: "deepseek-v4-flash",
+        availableModelIds: ["deepseek-v4-flash", "glm-4.5", "glm-4.5"]
+      }
+    });
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+
+    await expect(runtime.listModels?.({
+      agentId: AGENT_ID,
+      provider: "codex",
+      workspacePath: join(root, "workspace"),
+      instructions: ""
+    })).resolves.toEqual({
+      supported: true,
+      currentModel: "deepseek-v4-flash",
+      availableModels: ["deepseek-v4-flash", "glm-4.5"]
+    });
+    expect(acp.ensureSession).toHaveBeenCalledWith(expect.objectContaining({
+      mode: "oneshot",
+      cwd: join(root, "workspace")
+    }));
+    expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({
+      reason: "model_catalog_loaded",
+      discardPersistentState: true
+    }));
   });
 
   it("Codex 为每个 Session 使用独立 Home 并写入 developer instructions", async () => {

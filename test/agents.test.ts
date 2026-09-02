@@ -8,7 +8,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { constantTimeTokenEqual } from "../src/auth.js";
 import { SecretStore } from "../src/mcp/secret-store.js";
-import type { AgentRuntime, RuntimeDoctor, RuntimeSession, RuntimeSessionInput, RuntimeTurn, RuntimeTurnInput } from "../src/runtime/agent-runtime.js";
+import type {
+  AgentRuntime,
+  RuntimeDoctor,
+  RuntimeModelCatalog,
+  RuntimeSession,
+  RuntimeSessionInput,
+  RuntimeTurn,
+  RuntimeTurnInput
+} from "../src/runtime/agent-runtime.js";
 import { ConcurrencySettingsStore } from "../src/settings/concurrency-settings-store.js";
 import { createTestDatabase } from "./helpers.js";
 
@@ -16,7 +24,11 @@ const apiToken = "test-token";
 
 const authHeaders = (): Record<string, string> => ({ authorization: `Bearer ${apiToken}` });
 
-const createFakeRuntime = (): AgentRuntime => ({
+const createFakeRuntime = (models: RuntimeModelCatalog = {
+  supported: true,
+  currentModel: "deepseek-v4-flash",
+  availableModels: ["deepseek-v4-flash", "glm-4.5"]
+}): AgentRuntime => ({
   ensureSession: async (_input: RuntimeSessionInput): Promise<RuntimeSession> => ({ providerSessionId: null }),
   startTurn: (_input: RuntimeTurnInput): RuntimeTurn => {
     throw new Error("Fake Runtime does not start turns in Agent API tests");
@@ -24,6 +36,7 @@ const createFakeRuntime = (): AgentRuntime => ({
   cancel: async (_sessionId: string): Promise<void> => undefined,
   reset: async (_input: RuntimeSessionInput): Promise<void> => undefined,
   forgetSession: async (_sessionId: number): Promise<void> => undefined,
+  listModels: async () => models,
   doctor: async (provider: "claude_code" | "codex" | "hermes", _agentId: string): Promise<RuntimeDoctor> => ({
     ok: true,
     message: `${provider} ready`,
@@ -34,7 +47,7 @@ const createFakeRuntime = (): AgentRuntime => ({
 
 const apps: Array<{ app: FastifyInstance; close: () => Promise<void> }> = [];
 
-const createTestApp = async (): Promise<{
+const createTestApp = async (runtime = createFakeRuntime()): Promise<{
   app: FastifyInstance;
   dataDir: string;
   db: ReturnType<typeof createTestDatabase>["db"];
@@ -61,7 +74,7 @@ const createTestApp = async (): Promise<{
       sessionRetentionMs: 0
     },
     db,
-    runtime: createFakeRuntime(),
+    runtime,
     concurrencySettingsStore
   });
 
@@ -83,6 +96,97 @@ afterEach(async () => {
 });
 
 describe("Agent API", () => {
+  it("reads selectable models from Agent Core and only saves advertised model policies", async () => {
+    const { app, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "模型路由 Agent", provider: "codex", projectEnvironmentId }
+    });
+    const agent = created.json() as { id: number };
+
+    const catalog = await app.inject({
+      method: "GET",
+      url: `/api/agents/${agent.id}/models`,
+      headers: authHeaders()
+    });
+    expect(catalog.statusCode).toBe(200);
+    expect(catalog.json()).toEqual({
+      supported: true,
+      currentModel: "deepseek-v4-flash",
+      availableModels: ["deepseek-v4-flash", "glm-4.5"]
+    });
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: {
+        modelPolicy: {
+          mode: "schedule",
+          defaultModel: "deepseek-v4-flash",
+          windows: [{
+            start: "00:00",
+            end: "12:00",
+            model: "glm-4.5"
+          }]
+        }
+      }
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject({
+      providerDefaultModel: "deepseek-v4-flash",
+      modelPolicy: {
+        mode: "schedule",
+        defaultModel: "deepseek-v4-flash"
+      }
+    });
+
+    const unknown = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: { modelPolicy: { mode: "fixed", model: "not-configured" } }
+    });
+    expect(unknown.statusCode).toBe(400);
+    expect(unknown.json()).toMatchObject({ error: { code: "agent_model_unavailable" } });
+  });
+
+  it("disables model selection when Agent Core does not advertise configured models", async () => {
+    const runtime = createFakeRuntime({ supported: false, currentModel: "core-private-default", availableModels: [] });
+    const { app, projectEnvironmentId } = await createTestApp(runtime);
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "无模型列表 Agent", provider: "hermes", projectEnvironmentId }
+    });
+    const agent = created.json() as { id: number };
+
+    const catalog = await app.inject({
+      method: "GET",
+      url: `/api/agents/${agent.id}/models`,
+      headers: authHeaders()
+    });
+    expect(catalog.json()).toEqual({ supported: false, currentModel: "core-private-default", availableModels: [] });
+    const unchanged = await app.inject({
+      method: "GET",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders()
+    });
+    expect(unchanged.json()).toMatchObject({ providerDefaultModel: null });
+
+    const updated = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: { modelPolicy: { mode: "fixed", model: "glm-4.5" } }
+    });
+    expect(updated.statusCode).toBe(400);
+    expect(updated.json()).toMatchObject({ error: { code: "agent_model_selection_unsupported" } });
+  });
+
   it("支持继承或覆盖全局 Run 并发，并返回当前有效值", async () => {
     const { app, projectEnvironmentId, concurrencySettingsStore } = await createTestApp();
     const created = await app.inject({

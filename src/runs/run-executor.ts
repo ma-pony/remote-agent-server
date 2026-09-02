@@ -1,5 +1,6 @@
 import { dirname, join } from "node:path";
 
+import { resolveModelPolicy } from "../agents/model-policy.js";
 import type { EventType, Run, TokenUsage } from "../domain.js";
 import type { EventStore } from "../events/event-store.js";
 import type { RunMcpPreparer } from "../mcp/run-mcp-preparer.js";
@@ -187,6 +188,8 @@ export class RunExecutor {
       }
       const { memory, revision: skillsRevision } = this.skillProjector.prepare(agent, session);
       const extensionsRevision = this.providerExtensionManager.revision(agent.id);
+      const resolvedModel = resolveModelPolicy(agent.modelPolicy, new Date()) ?? agent.providerDefaultModel ?? undefined;
+      this.runRepository.setResolvedModel(run.id, resolvedModel ?? null);
       const runtimeSessionPromise = this.runtime.ensureSession({
         sessionId: session.id,
         agentId: agent.id,
@@ -198,7 +201,8 @@ export class RunExecutor {
         memory,
         skillsRevision,
         extensionsRevision,
-        mcpServers
+        mcpServers,
+        ...(resolvedModel === undefined ? {} : { model: resolvedModel })
       });
       let runtimeSession;
       try {

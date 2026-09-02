@@ -132,6 +132,8 @@ describe("最小管理界面", () => {
       instructions: "保持简洁",
       maxConcurrentRuns: null,
       effectiveMaxConcurrentRuns: 4,
+      modelPolicy: { mode: "provider_default" },
+      providerDefaultModel: null,
       projectEnvironmentId: 2,
       createdAt: now,
       updatedAt: now
@@ -144,6 +146,11 @@ describe("最小管理界面", () => {
         return jsonResponse({ ...currentAgent, ...JSON.parse(patchBody), effectiveMaxConcurrentRuns: 2 });
       }
       if (url === "/api/agents/3") return jsonResponse(currentAgent);
+      if (url === "/api/agents/3/models") return jsonResponse({
+        supported: true,
+        currentModel: "deepseek-v4-flash",
+        availableModels: ["deepseek-v4-flash", "glm-4.5"]
+      });
       if (url === "/api/project-environments") return jsonResponse([{
         id: 2,
         name: "Crawler environment",
@@ -166,6 +173,89 @@ describe("最小管理界面", () => {
 
     await waitFor(() => expect(JSON.parse(patchBody)).toMatchObject({ maxConcurrentRuns: 2 }));
     expect(await screen.findByText("当前有效上限：2")).toBeInTheDocument();
+  });
+
+  it("模型策略只使用 Agent Core 暴露的模型并按 UTC 时间段保存", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", "/agents/3/settings");
+    const currentAgent = {
+      id: 3,
+      name: "Crawler Agent",
+      provider: "codex",
+      enabled: true,
+      instructions: "保持简洁",
+      maxConcurrentRuns: null,
+      effectiveMaxConcurrentRuns: 4,
+      modelPolicy: { mode: "provider_default" },
+      providerDefaultModel: null,
+      projectEnvironmentId: 2,
+      createdAt: now,
+      updatedAt: now
+    };
+    let patchBody = "";
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      if (url === "/api/agents/3" && init?.method === "PATCH") {
+        patchBody = String(init.body);
+        return jsonResponse({ ...currentAgent, ...JSON.parse(patchBody) });
+      }
+      if (url === "/api/agents/3") return jsonResponse(currentAgent);
+      if (url === "/api/agents/3/models") return jsonResponse({
+        supported: true,
+        currentModel: "deepseek-v4-flash",
+        availableModels: ["deepseek-v4-flash", "glm-4.5"]
+      });
+      if (url === "/api/project-environments") return jsonResponse([{
+        id: 2, name: "Crawler environment", currentRevisionId: 7, lastCheckedAt: now,
+        workspacePath: "/workspace", sync: { status: "idle", automatic: true, intervalMs: 1000, nextScheduledAt: now },
+        repositories: [], currentRevision: null, latestRevision: null, createdAt: now, updatedAt: now
+      }]);
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+
+    render(<App />);
+
+    const mode = await screen.findByLabelText("选择方式");
+    await waitFor(() => expect(mode).not.toBeDisabled());
+    fireEvent.change(mode, { target: { value: "schedule" } });
+    expect(screen.getByLabelText("其他时间使用")).toHaveValue("deepseek-v4-flash");
+    fireEvent.change(screen.getByLabelText("模型"), { target: { value: "glm-4.5" } });
+    fireEvent.change(screen.getByLabelText("开始（UTC）"), { target: { value: "08:00" } });
+    fireEvent.change(screen.getByLabelText("结束（UTC）"), { target: { value: "20:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+
+    await waitFor(() => expect(JSON.parse(patchBody).modelPolicy).toEqual({
+      mode: "schedule",
+      defaultModel: "deepseek-v4-flash",
+      windows: [{ start: "08:00", end: "20:00", model: "glm-4.5" }]
+    }));
+  });
+
+  it("Agent Core 未暴露模型时禁用固定和定时模型选择", async () => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    window.history.replaceState({}, "", "/agents/3/settings");
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url === "/api/agents/3") return jsonResponse({
+        id: 3, name: "Crawler Agent", provider: "codex", enabled: true, instructions: "",
+        maxConcurrentRuns: null, effectiveMaxConcurrentRuns: 4,
+        modelPolicy: { mode: "provider_default" }, providerDefaultModel: null,
+        projectEnvironmentId: 2, createdAt: now, updatedAt: now
+      });
+      if (url === "/api/agents/3/models") return jsonResponse({ supported: false, currentModel: null, availableModels: [] });
+      if (url === "/api/project-environments") return jsonResponse([{
+        id: 2, name: "Crawler environment", currentRevisionId: 7, lastCheckedAt: now,
+        workspacePath: "/workspace", sync: { status: "idle", automatic: true, intervalMs: 1000, nextScheduledAt: now },
+        repositories: [], currentRevision: null, latestRevision: null, createdAt: now, updatedAt: now
+      }]);
+      throw new Error(`Unexpected request: ${url}`);
+    }));
+
+    render(<App />);
+
+    expect(await screen.findByText("当前 Agent Core 没有暴露可选模型，因此不支持固定模型或定时切换。")).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "固定模型" })).toBeDisabled();
+    expect(screen.getByRole("option", { name: "按 UTC 时间段切换" })).toBeDisabled();
   });
 
   it("Fastify 对前端深层路由回退 index.html，但不把 API 404 伪装成页面", async () => {
@@ -305,6 +395,7 @@ describe("最小管理界面", () => {
       input: "完成这轮",
       result: null,
       error: null,
+      resolvedModel: "glm-4.5",
       createdAt: now,
       startedAt: now,
       finishedAt: null
@@ -323,6 +414,7 @@ describe("最小管理界面", () => {
     render(<App />);
 
     expect(await screen.findByText("已经完成")).toBeInTheDocument();
+    expect(screen.getByText("glm-4.5")).toBeInTheDocument();
     expect(screen.getByText("已完成")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "取消运行" })).not.toBeInTheDocument();
     expect(screen.getByLabelText("发送给智能体")).toBeEnabled();

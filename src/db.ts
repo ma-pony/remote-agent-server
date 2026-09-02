@@ -437,6 +437,8 @@ export const migrate = (
       enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
       instructions TEXT NOT NULL DEFAULT '',
       max_concurrent_runs INTEGER CHECK (max_concurrent_runs BETWEEN 1 AND 64),
+      model_policy_json TEXT NOT NULL DEFAULT '{"mode":"provider_default"}',
+      provider_default_model TEXT,
       project_environment_id INTEGER REFERENCES project_environments(id),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -550,6 +552,7 @@ export const migrate = (
       input TEXT NOT NULL,
       result TEXT,
       error TEXT,
+      resolved_model TEXT,
       created_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
@@ -758,6 +761,12 @@ export const migrate = (
   if (!hasColumn("agents", "max_concurrent_runs")) {
     db.exec("ALTER TABLE agents ADD COLUMN max_concurrent_runs INTEGER CHECK (max_concurrent_runs BETWEEN 1 AND 64)");
   }
+  if (!hasColumn("agents", "model_policy_json")) {
+    db.exec("ALTER TABLE agents ADD COLUMN model_policy_json TEXT NOT NULL DEFAULT '{\"mode\":\"provider_default\"}'");
+  }
+  if (!hasColumn("agents", "provider_default_model")) {
+    db.exec("ALTER TABLE agents ADD COLUMN provider_default_model TEXT");
+  }
   if (!hasColumn("agent_mcp_servers", "source_mcp_server_id")) {
     db.exec("ALTER TABLE agent_mcp_servers ADD COLUMN source_mcp_server_id INTEGER");
   }
@@ -823,5 +832,8 @@ export const migrate = (
     "context_window_tokens"
   ]) {
     if (!hasColumn("runs", column)) db.exec(`ALTER TABLE runs ADD COLUMN ${column} INTEGER`);
+  }
+  if (!hasColumn("runs", "resolved_model")) {
+    db.exec("ALTER TABLE runs ADD COLUMN resolved_model TEXT");
   }
 };

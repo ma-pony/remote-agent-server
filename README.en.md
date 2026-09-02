@@ -29,6 +29,7 @@ Each provider remains responsible for reasoning, tool use, and its native sessio
 - **Skill management:** discover host Skills, upload Skill ZIP files, and choose which Skills each agent receives.
 - **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
 - **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
+- **Model policies:** discover models advertised by Agent Core over ACP, follow the Core default, pin one model, or select a model for each new run with daily UTC windows.
 - **Runtime, storage, and concurrency control:** adjust run timeout, large idle-session storage retention, and three service concurrency limits from the console, with an optional run limit per agent.
 - **Headed browser support:** run agents in a real desktop session without requiring containers.
 
@@ -193,6 +194,9 @@ The agent page also provides:
 - **Provider extensions:** review plugins and hooks discovered in the current provider's system configuration and enable the ones this agent needs.
 - **MCP:** add HTTP or stdio servers, check connectivity, inspect their tools, or import a system-global MCP from Codex or Claude Code.
 - **Run concurrency policy:** inherit the system run limit by default, or set an Agent-specific cap. The smaller limit is effective.
+- **Model policy:** model choices come from the current Agent Core; arbitrary model IDs cannot be entered. Follow the Core default, pin one model, or switch with daily UTC windows. The latter two modes are unavailable when the Core does not advertise models.
+
+The model policy is resolved when a run leaves the queue and actually starts, so queue delay cannot select a model too early. A switch reuses the same Session and provider conversation and updates only the ACP `model` option. It never interrupts an active run; the next run receives the new model. Each run records the resolved model for auditability.
 
 Changes to Skills, provider extensions, and MCP apply on the next run. When an existing session detects a configuration change, it refreshes the provider connection. If the provider supports resumption, the original Provider Session and conversation context continue.
 

@@ -11,6 +11,7 @@ type RunRow = {
   input: string;
   result: string | null;
   error: string | null;
+  resolved_model: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -45,6 +46,7 @@ const toRun = (row: RunRow): Run => ({
   input: row.input,
   result: row.result,
   error: row.error,
+  resolvedModel: row.resolved_model,
   createdAt: row.created_at,
   startedAt: row.started_at,
   finishedAt: row.finished_at,
@@ -164,6 +166,7 @@ export class RunRepository {
           input: input.input,
           result: null,
           error: null,
+          resolvedModel: null,
           createdAt,
           startedAt: null,
           finishedAt: null,
@@ -186,6 +189,14 @@ export class RunRepository {
   get(id: number): Run | undefined {
     const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as RunRow | undefined;
     return row === undefined ? undefined : toRun(row);
+  }
+
+  /** Records the model selected when a queued Run actually starts executing. */
+  setResolvedModel(id: number, model: string | null): Run {
+    const updated = this.db.prepare("UPDATE runs SET resolved_model = ? WHERE id = ? AND status = 'running'")
+      .run(model, id);
+    if (updated.changes !== 1) throw new RunRepositoryError("invalid_run_state");
+    return this.requireRun(id);
   }
 
   /**

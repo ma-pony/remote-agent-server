@@ -57,7 +57,7 @@ Web 控制台复用同一套 Session、Run 和 Event 模型。控制台创建的
 | --- | --- |
 | 项目环境 | 保存一个或多个 Git 仓库、准备命令和当前可用版本。 |
 | 项目环境版本 | 一次完整构建的结果；发布后作为 Session Workspace 的快照来源。 |
-| Agent | 绑定 Provider、项目环境、指令、Skills、执行器扩展、MCP 和并发策略。 |
+| Agent | 绑定 Provider、项目环境、指令、Skills、执行器扩展、MCP、模型策略和并发策略。 |
 | Session | 一个隔离 Workspace 和一段可续接的 Provider 对话。 |
 | Run | Session 中的一次输入、执行状态、结果和 Token 用量。 |
 | Event | Run 产生的消息、工具、状态与错误记录，按 `seq` 追加。 |
@@ -99,12 +99,14 @@ Web 控制台复用同一套 Session、Run 和 Event 模型。控制台创建的
 2. 服务固化 Agent 当前项目环境版本，并创建写时复制 Workspace。
 3. 用户发送消息，服务创建 `queued` Run。
 4. Run 调度器检查全局、Agent 和 Session 并发约束。
-5. 服务准备 Agent Provider Home，投影 Skills、执行器扩展和 MCP。
-6. Runtime 创建或恢复 ACP Session，发送本轮输入。
+5. 服务准备 Agent Provider Home，投影 Skills、执行器扩展和 MCP，并按当前 UTC 时间解析模型策略。
+6. Runtime 创建或恢复 ACP Session；需要切换时通过 ACP 更新 Core 暴露的 `model` 配置，再发送本轮输入。
 7. Provider 事件归一化后写入 Event Store，并实时提供给页面。
 8. Runtime 返回后，服务保存结果和 Token 用量，更新 Run 与 Session 状态。
 
 同一 Session 的 Run 严格串行。不同 Session 可以在全局和 Agent 上限内并行。
+
+可选模型完全以 Agent Core 通过 ACP 返回的目录为准。Core 没有暴露模型列表时，Agent 只能使用 Core 默认行为。时间策略不改变 Session 生命周期，也不会为了切换模型创建新的业务 Session；实际模型写入 Run 记录。
 
 ### 6.2 外部 Task
 

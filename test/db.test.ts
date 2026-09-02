@@ -403,6 +403,48 @@ describe("database migration", () => {
     db.close();
   });
 
+  it("为新旧 Agent 和 Run 增加模型策略与实际模型审计列", () => {
+    const fresh = createTestDatabase();
+    expect(fresh.db.prepare("PRAGMA table_info(agents)").all().map((row) => (row as { name: string }).name))
+      .toEqual(expect.arrayContaining(["model_policy_json", "provider_default_model"]));
+    expect(fresh.db.prepare("PRAGMA table_info(runs)").all().map((row) => (row as { name: string }).name))
+      .toContain("resolved_model");
+    fresh.db.close();
+
+    const existing = openDatabase(":memory:");
+    existing.exec(`
+      CREATE TABLE agents (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        instructions TEXT NOT NULL DEFAULT '',
+        project_environment_id INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        input TEXT NOT NULL,
+        result TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT
+      );
+    `);
+
+    migrate(existing);
+
+    expect(existing.prepare("PRAGMA table_info(agents)").all().map((row) => (row as { name: string }).name))
+      .toEqual(expect.arrayContaining(["model_policy_json", "provider_default_model"]));
+    expect(existing.prepare("PRAGMA table_info(runs)").all().map((row) => (row as { name: string }).name))
+      .toContain("resolved_model");
+    existing.close();
+  });
+
   it("Integration 持久化 eventKey 顺序映射和 Endpoint 投递计数器", () => {
     const { db } = createTestDatabase();
     const taskColumns = db.prepare("PRAGMA table_info(integration_tasks)").all()

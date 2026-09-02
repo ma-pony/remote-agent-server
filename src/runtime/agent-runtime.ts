@@ -13,6 +13,7 @@ export type RuntimeSessionInput = {
   skillsRevision?: string;
   extensionsRevision?: string;
   mcpServers: RuntimeMcpServer[];
+  model?: string;
 };
 
 export type RuntimeSession = { providerSessionId: string | null };
@@ -29,6 +30,17 @@ export type RuntimeTurnResult = (
   | { status: "failed"; code?: string; message: string }
 ) & { sessionUsage?: Partial<TokenUsageTotals> };
 export type RuntimeDoctor = { ok: boolean; message: string; details: string[] };
+export type RuntimeModelCatalogInput = {
+  agentId: number;
+  provider: Provider;
+  workspacePath: string;
+  instructions: string;
+};
+export type RuntimeModelCatalog = {
+  supported: boolean;
+  currentModel: string | null;
+  availableModels: string[];
+};
 
 export type RuntimeTurn = {
   events: AsyncIterable<RuntimeEvent>;
@@ -46,5 +58,6 @@ export interface AgentRuntime {
   reset(input: RuntimeSessionInput): Promise<void>;
   forgetSession(sessionId: number): Promise<void>;
   doctor(provider: Provider, agentId: number): Promise<RuntimeDoctor>;
+  listModels?(input: RuntimeModelCatalogInput): Promise<RuntimeModelCatalog>;
   shutdown(): Promise<void>;
 }

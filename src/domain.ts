@@ -1,3 +1,5 @@
+import type { AgentModelPolicy } from "./agents/model-policy.js";
+
 export type Provider = "claude_code" | "codex" | "hermes";
 export type AgentProvider = Provider;
 export type SessionStatus = "idle" | "running";
@@ -70,6 +72,8 @@ export type Agent = {
   instructions: string;
   maxConcurrentRuns: number | null;
   effectiveMaxConcurrentRuns: number;
+  modelPolicy: AgentModelPolicy;
+  providerDefaultModel: string | null;
   projectEnvironmentId: number | null;
   createdAt: string;
   updatedAt: string;
@@ -118,6 +122,7 @@ export type Run = {
   input: string;
   result: string | null;
   error: string | null;
+  resolvedModel: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

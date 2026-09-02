@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
 import { AgentManager, AgentManagerError } from "./agent-manager.js";
+import { agentModelPolicySchema } from "./model-policy.js";
 import type { RunRepository } from "../runs/run-repository.js";
 import { SkillManagerError, type SkillManager } from "../skills/skill-manager.js";
 import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
@@ -19,11 +20,12 @@ const updateAgentSchema = z.object({
   enabled: z.boolean().optional(),
   projectEnvironmentId: z.number().int().positive().optional(),
   instructions: z.string().max(20_000).optional(),
-  maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional()
+  maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional(),
+  modelPolicy: agentModelPolicySchema.optional()
 }).strict().refine(
   (input) => input.name !== undefined || input.enabled !== undefined
     || input.projectEnvironmentId !== undefined || input.instructions !== undefined
-    || input.maxConcurrentRuns !== undefined,
+    || input.maxConcurrentRuns !== undefined || input.modelPolicy !== undefined,
   {
   message: "At least one field must be provided"
   }
@@ -64,6 +66,16 @@ const handleAgentError = (reply: FastifyReply, error: unknown) => {
           message: error.code === "agent_has_sessions"
             ? "Agent has Sessions and cannot be deleted; disable it instead"
             : "Agent has Integration Endpoints and cannot be deleted; delete or reassign them first"
+        }
+      });
+    }
+    if (error.code === "agent_model_selection_unsupported" || error.code === "agent_model_unavailable") {
+      return reply.code(400).send({
+        error: {
+          code: error.code,
+          message: error.code === "agent_model_selection_unsupported"
+            ? "Agent Core does not expose selectable models"
+            : "Model is not configured by Agent Core"
         }
       });
     }
@@ -117,14 +129,14 @@ export const registerAgentRoutes = (
     }
   });
 
-  app.patch<{ Params: { id: string } }>("/agents/:id", (request, reply) => {
+  app.patch<{ Params: { id: string } }>("/agents/:id", async (request, reply) => {
     const parsed = updateAgentSchema.safeParse(request.body);
     if (!parsed.success) return badRequest(reply, "Invalid Agent update");
 
     try {
       const id = parseId(request.params.id);
       if (id === undefined) return notFound(reply);
-      const agent = agentManager.update(id, parsed.data);
+      const agent = await agentManager.update(id, parsed.data);
       return agent === undefined ? notFound(reply) : agent;
     } catch (error) {
       return handleAgentError(reply, error);
@@ -147,6 +159,17 @@ export const registerAgentRoutes = (
     if (id === undefined) return notFound(reply);
     const result = await agentManager.doctor(id);
     return result === undefined ? notFound(reply) : result;
+  });
+
+  app.get<{ Params: { id: string } }>("/agents/:id/models", async (request, reply) => {
+    const id = parseId(request.params.id);
+    if (id === undefined) return notFound(reply);
+    try {
+      const catalog = await agentManager.models(id);
+      return catalog === undefined ? notFound(reply) : catalog;
+    } catch (error) {
+      return handleAgentError(reply, error);
+    }
   });
 
   app.get<{ Params: { id: string } }>("/agents/:id/usage", (request, reply) => {

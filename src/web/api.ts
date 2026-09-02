@@ -14,6 +14,21 @@ export type RuntimeSettings = {
   sessionStorageRetentionHours: number;
 };
 
+export type AgentModelPolicy =
+  | { mode: "provider_default" }
+  | { mode: "fixed"; model: string }
+  | {
+    mode: "schedule";
+    defaultModel: string;
+    windows: Array<{ start: string; end: string; model: string }>;
+  };
+
+export type AgentModelCatalog = {
+  supported: boolean;
+  currentModel: string | null;
+  availableModels: string[];
+};
+
 export type Agent = {
   id: number;
   name: string;
@@ -22,6 +37,8 @@ export type Agent = {
   instructions: string;
   maxConcurrentRuns: number | null;
   effectiveMaxConcurrentRuns: number;
+  modelPolicy: AgentModelPolicy;
+  providerDefaultModel: string | null;
   projectEnvironmentId: number | null;
   createdAt: string;
   updatedAt: string;
@@ -212,6 +229,7 @@ export type Run = {
   input: string;
   result: string | null;
   error: string | null;
+  resolvedModel: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

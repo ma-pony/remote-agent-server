@@ -286,6 +286,37 @@ describe("RunExecutor", () => {
     setupResult.db.close();
   });
 
+  it("在 Run 实际启动时按 UTC 策略选择模型并记录到 Run", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-09-01T09:30:00Z"));
+      const runtime = createFakeRuntime({ result: { status: "completed" } });
+      runtime.ensureSession = vi.fn(runtime.ensureSession);
+      const setupResult = setup(runtime);
+      setupResult.db.prepare(`
+        UPDATE agents SET model_policy_json = ?
+        WHERE id = (SELECT agent_id FROM sessions WHERE id = ?)
+      `).run(JSON.stringify({
+        mode: "schedule",
+        defaultModel: "deepseek-v4-flash",
+        windows: [{
+          start: "08:00",
+          end: "20:00",
+          model: "glm-4.5"
+        }]
+      }), TEST_SESSION_ID);
+
+      const result = await setupResult.executor.execute(setupResult.run.id);
+
+      expect(runtime.ensureSession).toHaveBeenCalledWith(expect.objectContaining({ model: "glm-4.5" }));
+      expect(result).toMatchObject({ resolvedModel: "glm-4.5", status: "succeeded" });
+      expect(setupResult.runRepository.get(setupResult.run.id)).toMatchObject({ resolvedModel: "glm-4.5" });
+      setupResult.db.close();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("启动 Runtime 前确保旧 Session 的项目环境已经修复", async () => {
     const runtime = createFakeRuntime({ result: { status: "completed" } });
     runtime.startTurn = vi.fn(runtime.startTurn);

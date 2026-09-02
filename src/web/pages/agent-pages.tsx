@@ -22,7 +22,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { PageHeader } from "@/components/page-header";
 import { TokenUsageSummaryCard } from "@/components/token-usage";
 import {
-  api, errorMessage, type Agent, type AgentDoctorResult, type AgentSkill, type IntegrationEndpointSummary,
+  api, errorMessage, type Agent, type AgentDoctorResult, type AgentModelCatalog, type AgentModelPolicy,
+  type AgentSkill, type IntegrationEndpointSummary,
   type ProjectEnvironment, type Provider, type TokenUsageSummary
 } from "@/api";
 import { useI18n } from "@/i18n";
@@ -336,22 +337,53 @@ export const AgentSettingsPage = () => {
   const [projectEnvironmentId, setProjectEnvironmentId] = useState(agent.projectEnvironmentId ?? "");
   const [concurrencyMode, setConcurrencyMode] = useState(agent.maxConcurrentRuns == null ? "inherit" : "custom");
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState(String(agent.maxConcurrentRuns ?? agent.effectiveMaxConcurrentRuns ?? ""));
+  const [modelCatalog, setModelCatalog] = useState<AgentModelCatalog | null>(null);
+  const [modelCatalogError, setModelCatalogError] = useState("");
+  const [modelPolicy, setModelPolicy] = useState<AgentModelPolicy>(agent.modelPolicy ?? { mode: "provider_default" });
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
     void api<ProjectEnvironment[]>("/project-environments", { signal: controller.signal }).then((items) => setEnvironments(items.filter((item) => item.currentRevisionId !== null))).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    void api<AgentModelCatalog>(`/agents/${agent.id}/models`, { signal: controller.signal })
+      .then(setModelCatalog)
+      .catch((reason: unknown) => { if (!controller.signal.aborted) setModelCatalogError(errorMessage(reason)); });
     return () => controller.abort();
-  }, []);
+  }, [agent.id]);
+  const availableModels = modelCatalog?.availableModels ?? [];
+  const selectableModels = modelCatalog?.supported === true && availableModels.length > 0;
+  const selectedPolicyModels = modelPolicy.mode === "provider_default" ? [] : modelPolicy.mode === "fixed"
+    ? [modelPolicy.model]
+    : [modelPolicy.defaultModel, ...modelPolicy.windows.map((window) => window.model)];
+  const policyModelsAvailable = modelPolicy.mode === "provider_default"
+    || (selectableModels && selectedPolicyModels.every((model) => availableModels.includes(model)));
+  const scheduleValid = modelPolicy.mode !== "schedule" || (modelPolicy.windows.length > 0
+    && modelPolicy.windows.every((window) => window.start < window.end));
+  const modelPolicyValid = policyModelsAvailable && scheduleValid;
+  const setModelMode = (mode: AgentModelPolicy["mode"]): void => {
+    if (mode === "provider_default") {
+      setModelPolicy({ mode });
+      return;
+    }
+    const defaultModel = modelCatalog?.currentModel !== null && modelCatalog?.currentModel !== undefined
+      && availableModels.includes(modelCatalog.currentModel)
+      ? modelCatalog.currentModel
+      : availableModels[0];
+    if (defaultModel === undefined) return;
+    setModelPolicy(mode === "fixed"
+      ? { mode, model: defaultModel }
+      : { mode, defaultModel, windows: [{ start: "00:00", end: "12:00", model: defaultModel }] });
+  };
   const save = async (event: FormEvent) => {
     event.preventDefault();
     const customLimit = Number(maxConcurrentRuns);
-    if (name.trim() === "" || projectEnvironmentId === "" || (concurrencyMode === "custom" && (!Number.isInteger(customLimit) || customLimit < 1 || customLimit > 64))) return;
+    if (name.trim() === "" || projectEnvironmentId === "" || !modelPolicyValid || (concurrencyMode === "custom" && (!Number.isInteger(customLimit) || customLimit < 1 || customLimit > 64))) return;
     setBusy("save"); setError("");
     try { setAgent(await api<Agent>(`/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({
       name: name.trim(), projectEnvironmentId,
       instructions: agent.provider === "hermes" ? "" : instructions,
-      maxConcurrentRuns: concurrencyMode === "inherit" ? null : customLimit
+      maxConcurrentRuns: concurrencyMode === "inherit" ? null : customLimit,
+      modelPolicy
     }) })); }
     catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
@@ -367,10 +399,42 @@ export const AgentSettingsPage = () => {
       <Field><FieldLabel htmlFor="settings-environment">{text("项目环境", "Project environment")}</FieldLabel><NativeSelect id="settings-environment" className="w-full" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}>{environments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></Field>
       <Field><FieldLabel htmlFor="settings-concurrency-mode">{text("运行并发策略", "Run concurrency policy")}</FieldLabel><NativeSelect id="settings-concurrency-mode" className="w-full" value={concurrencyMode} onChange={(event) => setConcurrencyMode(event.target.value)}><NativeSelectOption value="inherit">{text("继承系统上限", "Inherit system limit")}</NativeSelectOption><NativeSelectOption value="custom">{text("自定义上限", "Custom limit")}</NativeSelectOption></NativeSelect><FieldDescription>{text(`当前有效上限：${agent.effectiveMaxConcurrentRuns}`, `Current effective limit: ${agent.effectiveMaxConcurrentRuns}`)}</FieldDescription></Field>
       {concurrencyMode === "custom" ? <Field><FieldLabel htmlFor="settings-max-concurrent-runs">{text("自定义 Run 并发上限", "Custom run concurrency limit")}</FieldLabel><Input id="settings-max-concurrent-runs" type="number" min={1} max={64} step={1} value={maxConcurrentRuns} onChange={(event) => setMaxConcurrentRuns(event.target.value)} /><FieldDescription>{text("最终有效值不会超过系统的全局 Run 并发上限。", "The effective value never exceeds the global run concurrency limit.")}</FieldDescription></Field> : null}
+      <div className="rounded-xl border bg-muted/20 p-4 sm:p-5">
+        <div className="mb-4">
+          <h3 className="font-semibold">{text("模型策略", "Model policy")}</h3>
+          <p className="mt-1 text-sm text-muted-foreground">{text("模型列表自动读取自 Agent Core。时间段统一使用 UTC，并在 Run 真正开始时选择；不会中断正在执行的 Run。", "Models are read from Agent Core. UTC windows are resolved when a Run actually starts and never interrupt an active Run.")}</p>
+        </div>
+        <div className="flex flex-col gap-4">
+          <Field><FieldLabel htmlFor="settings-model-mode">{text("选择方式", "Selection mode")}</FieldLabel><NativeSelect id="settings-model-mode" className="w-full" value={modelPolicy.mode} disabled={modelCatalog === null && modelCatalogError === ""} onChange={(event) => setModelMode(event.target.value as AgentModelPolicy["mode"])}>
+            <NativeSelectOption value="provider_default">{text("跟随 Agent Core 默认模型", "Follow Agent Core default")}</NativeSelectOption>
+            <NativeSelectOption value="fixed" disabled={!selectableModels}>{text("固定模型", "Fixed model")}</NativeSelectOption>
+            <NativeSelectOption value="schedule" disabled={!selectableModels}>{text("按 UTC 时间段切换", "Switch by UTC window")}</NativeSelectOption>
+          </NativeSelect>
+          {modelCatalog === null && modelCatalogError === "" ? <FieldDescription>{text("正在读取 Agent Core 模型…", "Loading models from Agent Core…")}</FieldDescription>
+            : modelCatalogError !== "" ? <FieldDescription className="text-destructive">{text(`Agent Core 模型读取失败：${modelCatalogError}`, `Failed to read Agent Core models: ${modelCatalogError}`)}</FieldDescription>
+            : !selectableModels ? <FieldDescription>{text("当前 Agent Core 没有暴露可选模型，因此不支持固定模型或定时切换。", "This Agent Core does not expose selectable models, so fixed and scheduled selection are unavailable.")}</FieldDescription>
+            : <FieldDescription>{text(`Core 默认：${modelCatalog.currentModel ?? "未知"}；可选 ${availableModels.length} 个模型。`, `Core default: ${modelCatalog.currentModel ?? "unknown"}; ${availableModels.length} models available.`)}</FieldDescription>}
+          </Field>
+          {modelPolicy.mode === "fixed" ? <Field><FieldLabel htmlFor="settings-fixed-model">{text("模型", "Model")}</FieldLabel><NativeSelect id="settings-fixed-model" className="w-full" value={modelPolicy.model} onChange={(event) => setModelPolicy({ mode: "fixed", model: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field> : null}
+          {modelPolicy.mode === "schedule" ? <div className="flex flex-col gap-4">
+            <Field><FieldLabel htmlFor="settings-default-model">{text("其他时间使用", "Model outside windows")}</FieldLabel><NativeSelect id="settings-default-model" className="w-full" value={modelPolicy.defaultModel} onChange={(event) => setModelPolicy({ ...modelPolicy, defaultModel: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
+            <div className="flex flex-col gap-3"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-medium">{text("UTC 时间段", "UTC windows")}</p><p className="text-xs text-muted-foreground">{text("开始时间包含，结束时间不包含。", "Start is inclusive; end is exclusive.")}</p></div><Button type="button" size="sm" variant="outline" onClick={() => setModelPolicy({ ...modelPolicy, windows: [...modelPolicy.windows, { start: "12:00", end: "18:00", model: availableModels[0] ?? modelPolicy.defaultModel }] })}><Plus />{text("增加时间段", "Add window")}</Button></div>
+              {modelPolicy.windows.map((window, index) => <div key={index} className="grid gap-3 rounded-lg border bg-background p-3 sm:grid-cols-[1fr_1fr_2fr_auto] sm:items-end">
+                <Field><FieldLabel htmlFor={`settings-model-start-${index}`}>{text("开始（UTC）", "Start (UTC)")}</FieldLabel><Input id={`settings-model-start-${index}`} type="time" value={window.start} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, start: event.target.value } : item) })} /></Field>
+                <Field><FieldLabel htmlFor={`settings-model-end-${index}`}>{text("结束（UTC）", "End (UTC)")}</FieldLabel><Input id={`settings-model-end-${index}`} type="time" value={window.end} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, end: event.target.value } : item) })} /></Field>
+                <Field><FieldLabel htmlFor={`settings-window-model-${index}`}>{text("模型", "Model")}</FieldLabel><NativeSelect id={`settings-window-model-${index}`} className="w-full" value={window.model} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, model: event.target.value } : item) })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
+                <Button type="button" variant="ghost" size="icon" aria-label={text(`删除时间段 ${index + 1}`, `Delete window ${index + 1}`)} disabled={modelPolicy.windows.length === 1} onClick={() => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.filter((_item, itemIndex) => itemIndex !== index) })}><Trash2 /></Button>
+              </div>)}
+              {!scheduleValid ? <p className="text-sm text-destructive">{text("结束时间必须晚于开始时间。跨 UTC 日期请拆成两个时间段。", "End time must be later than start time. Split windows that cross the UTC date boundary.")}</p> : null}
+            </div>
+          </div> : null}
+          {!policyModelsAvailable ? <p className="text-sm text-destructive">{text("当前策略引用的模型已不在 Agent Core 模型列表中。请选择 Core 默认模型或重新选择可用模型。", "The current policy references models no longer exposed by Agent Core. Follow the Core default or choose available models again.")}</p> : null}
+        </div>
+      </div>
       <Field data-disabled={agent.provider === "hermes" || undefined}><FieldLabel htmlFor="settings-agent-instructions">{text("智能体指令", "Agent instructions")}</FieldLabel><Textarea id="settings-agent-instructions" rows={8} value={instructions} disabled={agent.provider === "hermes"} placeholder={text("说明这个智能体长期遵循的角色、边界和工作方式", "Describe the agent's persistent role, boundaries, and working style")} onChange={(event) => setInstructions(event.target.value)} />
         <FieldDescription>{agent.provider === "hermes" ? text("Hermes 当前不支持智能体指令", "Hermes does not currently support agent instructions") : text("创建会话时保存快照；之后修改只影响新会话。", "Instructions are snapshotted at session creation; later edits affect new sessions only.")}</FieldDescription>
       </Field>
-      <Button type="submit" disabled={busy !== "" || (concurrencyMode === "custom" && (!Number.isInteger(Number(maxConcurrentRuns)) || Number(maxConcurrentRuns) < 1 || Number(maxConcurrentRuns) > 64))}>{busy === "save" ? text("保存中…", "Saving…") : text("保存设置", "Save settings")}</Button>
+      <Button type="submit" disabled={busy !== "" || !modelPolicyValid || (concurrencyMode === "custom" && (!Number.isInteger(Number(maxConcurrentRuns)) || Number(maxConcurrentRuns) < 1 || Number(maxConcurrentRuns) > 64))}>{busy === "save" ? text("保存中…", "Saving…") : text("保存设置", "Save settings")}</Button>
     </FieldGroup></form></CardContent></Card>
     <Card className="border-destructive/40"><CardHeader><CardTitle className="flex items-center gap-2 text-destructive"><ShieldCheck className="size-5" />{text("危险操作", "Danger zone")}</CardTitle><CardDescription>{text("只有从未创建过会话的智能体才能删除；否则请停用智能体。", "Only agents with no sessions can be deleted. Disable the agent otherwise.")}</CardDescription></CardHeader><CardContent>
       <AlertDialog><AlertDialogTrigger asChild><Button variant="destructive" disabled={busy !== ""}>{text("删除智能体", "Delete agent")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`确定删除“${agent.name}”？`, `Delete “${agent.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("智能体配置和专属目录会被永久删除。已有会话时服务端会拒绝此操作。", "The agent configuration and private directory will be permanently deleted. The server rejects deletion when sessions exist.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={() => void remove()}>{text("确认删除", "Delete")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog>
