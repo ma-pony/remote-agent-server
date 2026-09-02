@@ -219,14 +219,21 @@ describe("最小管理界面", () => {
     await waitFor(() => expect(mode).not.toBeDisabled());
     fireEvent.change(mode, { target: { value: "schedule" } });
     expect(screen.getByLabelText("其他时间使用")).toHaveValue("deepseek-v4-flash");
-    expect(screen.getByLabelText("开始（UTC）")).toHaveAttribute("type", "text");
-    expect(screen.getByLabelText("开始（UTC）")).toHaveAttribute("placeholder", "08:00");
+    expect(screen.getByLabelText("开始（UTC · 24h）")).toHaveAttribute("type", "text");
+    expect(screen.getByLabelText("开始（UTC · 24h）")).toHaveAttribute("placeholder", "08:00");
     expect(screen.getByText("7 天")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "工作日" }));
     expect(screen.getByText("5 天")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("模型"), { target: { value: "glm-4.5" } });
-    fireEvent.change(screen.getByLabelText("开始（UTC）"), { target: { value: "08:00" } });
-    fireEvent.change(screen.getByLabelText("结束（UTC）"), { target: { value: "20:00" } });
+    fireEvent.change(screen.getByLabelText("Run 并发上限"), { target: { value: "3" } });
+    fireEvent.change(screen.getByLabelText("开始（UTC · 24h）"), { target: { value: "20:00" } });
+    fireEvent.change(screen.getByLabelText("结束（UTC · 24h）"), { target: { value: "02:00" } });
+    fireEvent.click(screen.getByRole("button", { name: "增加时间段" }));
+    expect(screen.getAllByLabelText("开始（UTC · 24h）")).toHaveLength(2);
+    expect(screen.getAllByLabelText("模型")[1]).toHaveValue("glm-4.5");
+    expect(screen.getAllByLabelText("Run 并发上限")[1]).toHaveValue(3);
+    fireEvent.change(screen.getAllByLabelText("开始（UTC · 24h）")[1], { target: { value: "08:00" } });
+    fireEvent.change(screen.getAllByLabelText("结束（UTC · 24h）")[1], { target: { value: "10:00" } });
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
 
     await waitFor(() => expect(JSON.parse(patchBody).modelPolicy).toEqual({
@@ -234,9 +241,16 @@ describe("最小管理界面", () => {
       defaultModel: "deepseek-v4-flash",
       windows: [{
         days: ["mon", "tue", "wed", "thu", "fri"],
+        start: "20:00",
+        end: "02:00",
+        model: "glm-4.5",
+        maxConcurrentRuns: 3
+      }, {
+        days: ["mon", "tue", "wed", "thu", "fri"],
         start: "08:00",
-        end: "20:00",
-        model: "glm-4.5"
+        end: "10:00",
+        model: "glm-4.5",
+        maxConcurrentRuns: 3
       }]
     }));
   });

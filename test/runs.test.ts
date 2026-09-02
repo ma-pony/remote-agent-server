@@ -436,6 +436,92 @@ describe("RunScheduler", () => {
     await scheduler.stop();
   });
 
+  it("按当前 UTC 时间段覆盖 Agent 默认并发，仍受全局上限约束", async () => {
+    const settings = mutableConcurrencySettings(2);
+    const queued = [1, 2, 3, 4].map((id) => ({ id })) as Run[];
+    const releases = new Map<number, () => void>();
+    const execute = vi.fn((runId: number) => new Promise<Run>((resolve) => {
+      releases.set(runId, () => resolve({ id: runId } as Run));
+    }));
+    const scheduler = new RunScheduler({
+      runRepository: {
+        get: (id) => queued.find((run) => run.id === id),
+        listQueued: () => queued,
+        failQueued: () => ({}) as Run,
+        getSchedulingContext: () => ({
+          agentId: 10,
+          maxConcurrentRuns: 1,
+          modelPolicy: {
+            mode: "schedule",
+            defaultModel: "deepseek-v4-flash",
+            windows: [{
+              days: ["mon"], start: "08:00", end: "12:00", model: "glm-4.5", maxConcurrentRuns: 3
+            }]
+          }
+        })
+      },
+      executor: { execute, cancel: async () => ({}) as Run },
+      concurrencySettings: settings,
+      now: () => new Date("2026-09-07T09:00:00Z")
+    });
+
+    scheduler.start();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    expect(execute.mock.calls.map(([runId]) => runId)).toEqual([1, 2]);
+
+    releases.get(1)?.();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(3));
+    releases.get(2)?.();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(4));
+    releases.get(3)?.();
+    releases.get(4)?.();
+    await scheduler.stop();
+  });
+
+  it("UTC 时间段开始时主动重新调度排队 Run", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-07T07:59:59.990Z"));
+      const queued = [1, 2, 3].map((id) => ({ id })) as Run[];
+      const releases = new Map<number, () => void>();
+      const execute = vi.fn((runId: number) => new Promise<Run>((resolve) => {
+        releases.set(runId, () => resolve({ id: runId } as Run));
+      }));
+      const scheduler = new RunScheduler({
+        runRepository: {
+          get: (id) => queued.find((run) => run.id === id),
+          listQueued: () => queued,
+          failQueued: () => ({}) as Run,
+          getSchedulingContext: () => ({
+            agentId: 10,
+            maxConcurrentRuns: 1,
+            modelPolicy: {
+              mode: "schedule",
+              defaultModel: "deepseek-v4-flash",
+              windows: [{
+                days: ["mon"], start: "08:00", end: "12:00", model: "glm-4.5", maxConcurrentRuns: 3
+              }]
+            }
+          })
+        },
+        executor: { execute, cancel: async () => ({}) as Run },
+        maxConcurrentRuns: 4
+      });
+
+      scheduler.start();
+      expect(execute).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(20);
+      expect(execute).toHaveBeenCalledTimes(3);
+
+      releases.forEach((release) => release());
+      await scheduler.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("每个 queued Run 最多自动重试 3 次，exhausted 后写入失败终态", async () => {
     vi.useFakeTimers();
     try {

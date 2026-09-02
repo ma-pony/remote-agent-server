@@ -1,17 +1,24 @@
+import { resolveModelWindow, type AgentModelPolicy } from "../agents/model-policy.js";
 import type { Run } from "../domain.js";
 import { settleBestEffort } from "../runtime/bounded-operation.js";
+import type { ConcurrencySettings, ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 import type { RunExecutor } from "./run-executor.js";
 import type { RunRepository } from "./run-repository.js";
-import type { ConcurrencySettings, ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 
 export type RunSchedulerDependencies = {
-  runRepository: Pick<RunRepository, "get" | "listQueued" | "failQueued"> &
-    Partial<Pick<RunRepository, "getSchedulingContext">>;
+  runRepository: Pick<RunRepository, "get" | "listQueued" | "failQueued"> & {
+    getSchedulingContext?: (runId: number) => {
+      agentId: number;
+      maxConcurrentRuns: number | null;
+      modelPolicy?: AgentModelPolicy;
+    } | undefined;
+  };
   executor: Pick<RunExecutor, "execute" | "cancel">;
   concurrencySettings?: Pick<ConcurrencySettingsStore, "get" | "subscribe">;
   maxConcurrentRuns?: number;
   onExecutionError?: (error: unknown, runId: number) => void;
   retryDelayMs?: number;
+  now?: () => Date;
 };
 
 const defaultExecutionErrorReporter = (_error: unknown, runId: number): void => {
@@ -38,12 +45,14 @@ export class RunScheduler {
   private readonly concurrencySettings: Pick<ConcurrencySettingsStore, "get" | "subscribe">;
   private readonly onExecutionError: (error: unknown, runId: number) => void;
   private readonly retryDelayMs: number;
+  private readonly now: () => Date;
   private readonly retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private readonly retryAttempts = new Map<number, number>();
   private readonly exhaustedRuns = new Set<number>();
   private started = false;
   private loadedQueued = false;
   private unsubscribeSettings: (() => void) | undefined;
+  private scheduleRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor({
     runRepository,
@@ -51,7 +60,8 @@ export class RunScheduler {
     concurrencySettings,
     maxConcurrentRuns,
     onExecutionError = defaultExecutionErrorReporter,
-    retryDelayMs = 1_000
+    retryDelayMs = 1_000,
+    now = () => new Date()
   }: RunSchedulerDependencies) {
     this.runRepository = runRepository;
     this.executor = executor;
@@ -66,6 +76,7 @@ export class RunScheduler {
     };
     this.onExecutionError = onExecutionError;
     this.retryDelayMs = retryDelayMs;
+    this.now = now;
   }
 
   /**
@@ -78,7 +89,11 @@ export class RunScheduler {
       this.loadedQueued = true;
       for (const run of this.runRepository.listQueued()) this.addPending(run.id);
     }
-    this.unsubscribeSettings = this.concurrencySettings.subscribe(() => this.drain());
+    this.unsubscribeSettings = this.concurrencySettings.subscribe(() => {
+      this.scheduleNextTimeBoundary();
+      this.drain();
+    });
+    this.scheduleNextTimeBoundary();
     this.drain();
   }
 
@@ -87,6 +102,7 @@ export class RunScheduler {
    */
   enqueue(runId: number): void {
     this.addPending(runId);
+    this.scheduleNextTimeBoundary(runId);
     this.drain();
   }
 
@@ -97,6 +113,8 @@ export class RunScheduler {
     this.started = false;
     this.unsubscribeSettings?.();
     this.unsubscribeSettings = undefined;
+    if (this.scheduleRefreshTimer !== undefined) clearTimeout(this.scheduleRefreshTimer);
+    this.scheduleRefreshTimer = undefined;
     this.pending.splice(0);
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
@@ -117,7 +135,7 @@ export class RunScheduler {
     if (!this.started) return;
     const globalLimit = this.concurrencySettings.get().globalRunConcurrency;
     while (this.active.size < globalLimit) {
-      const next = this.nextRunnable(globalLimit);
+      const next = this.nextRunnable(globalLimit, this.now());
       if (next === undefined) return;
       const { pendingIndex, runId, agentId } = next;
       this.pending.splice(pendingIndex, 1);
@@ -136,7 +154,7 @@ export class RunScheduler {
     }
   }
 
-  private nextRunnable(globalLimit: number): {
+  private nextRunnable(globalLimit: number, now: Date): {
     pendingIndex: number;
     runId: number;
     agentId: number;
@@ -147,12 +165,39 @@ export class RunScheduler {
         agentId: 0,
         maxConcurrentRuns: null
       };
-      const agentLimit = Math.min(globalLimit, context.maxConcurrentRuns ?? globalLimit);
+      const windowLimit = context.modelPolicy === undefined
+        ? undefined
+        : resolveModelWindow(context.modelPolicy, now)?.maxConcurrentRuns ?? undefined;
+      const agentLimit = Math.min(globalLimit, windowLimit ?? context.maxConcurrentRuns ?? globalLimit);
       if ((this.activeByAgent.get(context.agentId) ?? 0) < agentLimit) {
         return { pendingIndex, runId, agentId: context.agentId };
       }
     }
     return undefined;
+  }
+
+  /** Re-evaluates time-window concurrency at the next UTC minute boundary. */
+  private scheduleNextTimeBoundary(runId?: number): void {
+    if (!this.started || this.scheduleRefreshTimer !== undefined) return;
+    if (runId === undefined ? !this.hasTimedConcurrencyWork() : !this.runUsesTimedConcurrency(runId)) return;
+    const delayMs = 60_000 - (Date.now() % 60_000) + 5;
+    this.scheduleRefreshTimer = setTimeout(() => {
+      this.scheduleRefreshTimer = undefined;
+      this.drain();
+      this.scheduleNextTimeBoundary();
+    }, delayMs);
+    this.scheduleRefreshTimer.unref?.();
+  }
+
+  private hasTimedConcurrencyWork(): boolean {
+    const runIds = [...this.pending, ...this.active.keys()];
+    return runIds.some((runId) => this.runUsesTimedConcurrency(runId));
+  }
+
+  private runUsesTimedConcurrency(runId: number): boolean {
+    const policy = this.runRepository.getSchedulingContext?.(runId)?.modelPolicy;
+    return policy?.mode === "schedule"
+      && policy.windows.some((window) => window.maxConcurrentRuns != null);
   }
 
   private handleExecutionError(error: unknown, runId: number): void {

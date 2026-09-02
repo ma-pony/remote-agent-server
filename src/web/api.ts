@@ -25,6 +25,7 @@ export type AgentModelPolicy =
       start: string;
       end: string;
       model: string;
+      maxConcurrentRuns?: number | null;
     }>;
   };
 

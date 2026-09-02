@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 
+import { parseStoredModelPolicy, type AgentModelPolicy } from "../agents/model-policy.js";
 import { insertedId } from "../db.js";
 import type { Run, RunStatus, TokenUsage, TokenUsageSummary } from "../domain.js";
 import { assertSynchronousTransactionHook } from "../transaction-hook.js";
@@ -241,18 +242,30 @@ export class RunRepository {
     return rows.map(toRun);
   }
 
-  /** Returns the Agent-level scheduling limit for one Run. */
-  getSchedulingContext(id: number): { agentId: number; maxConcurrentRuns: number | null } | undefined {
+  /** Returns the Agent policy needed to schedule one Run. */
+  getSchedulingContext(id: number): {
+    agentId: number;
+    maxConcurrentRuns: number | null;
+    modelPolicy: AgentModelPolicy;
+  } | undefined {
     const row = this.db.prepare(`
-      SELECT sessions.agent_id, agents.max_concurrent_runs
+      SELECT sessions.agent_id, agents.max_concurrent_runs, agents.model_policy_json
       FROM runs
       JOIN sessions ON sessions.id = runs.session_id
       JOIN agents ON agents.id = sessions.agent_id
       WHERE runs.id = ?
-    `).get(id) as { agent_id: number; max_concurrent_runs: number | null } | undefined;
+    `).get(id) as {
+      agent_id: number;
+      max_concurrent_runs: number | null;
+      model_policy_json: string;
+    } | undefined;
     return row === undefined
       ? undefined
-      : { agentId: row.agent_id, maxConcurrentRuns: row.max_concurrent_runs };
+      : {
+        agentId: row.agent_id,
+        maxConcurrentRuns: row.max_concurrent_runs,
+        modelPolicy: parseStoredModelPolicy(row.model_policy_json)
+      };
   }
 
   /** Returns the exact cumulative usage stored for one Session. */

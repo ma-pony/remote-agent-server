@@ -97,7 +97,7 @@ afterEach(async () => {
 
 describe("Agent API", () => {
   it("reads selectable models from Agent Core and only saves advertised model policies", async () => {
-    const { app, projectEnvironmentId } = await createTestApp();
+    const { app, projectEnvironmentId, concurrencySettingsStore } = await createTestApp();
     const created = await app.inject({
       method: "POST",
       url: "/api/agents",
@@ -118,6 +118,9 @@ describe("Agent API", () => {
       availableModels: ["deepseek-v4-flash", "glm-4.5"]
     });
 
+    let schedulingNotifications = 0;
+    const unsubscribe = concurrencySettingsStore.subscribe(() => { schedulingNotifications += 1; });
+
     const updated = await app.inject({
       method: "PATCH",
       url: `/api/agents/${agent.id}`,
@@ -128,9 +131,10 @@ describe("Agent API", () => {
           defaultModel: "deepseek-v4-flash",
           windows: [{
             days: ["mon", "tue", "wed", "thu", "fri"],
-            start: "00:00",
-            end: "12:00",
-            model: "glm-4.5"
+            start: "20:00",
+            end: "02:00",
+            model: "glm-4.5",
+            maxConcurrentRuns: 3
           }]
         }
       }
@@ -140,9 +144,12 @@ describe("Agent API", () => {
       providerDefaultModel: "deepseek-v4-flash",
       modelPolicy: {
         mode: "schedule",
-        defaultModel: "deepseek-v4-flash"
+        defaultModel: "deepseek-v4-flash",
+        windows: [expect.objectContaining({ maxConcurrentRuns: 3 })]
       }
     });
+    expect(schedulingNotifications).toBe(1);
+    unsubscribe();
 
     const invalidDays = await app.inject({
       method: "PATCH",
@@ -157,6 +164,22 @@ describe("Agent API", () => {
       }
     });
     expect(invalidDays.statusCode).toBe(400);
+
+    const invalidWindowConcurrency = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: {
+        modelPolicy: {
+          mode: "schedule",
+          defaultModel: "deepseek-v4-flash",
+          windows: [{
+            days: ["mon"], start: "08:00", end: "12:00", model: "glm-4.5", maxConcurrentRuns: 65
+          }]
+        }
+      }
+    });
+    expect(invalidWindowConcurrency.statusCode).toBe(400);
 
     const missingDays = await app.inject({
       method: "PATCH",

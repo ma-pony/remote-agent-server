@@ -12,10 +12,11 @@ const modelWindowSchema = z.object({
   days: weekdaysSchema,
   start: timeSchema,
   end: timeSchema,
-  model: z.string().trim().min(1).max(255)
+  model: z.string().trim().min(1).max(255),
+  maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional()
 }).strict().refine(
-  ({ start, end }) => start < end,
-  { message: "Model schedule windows must end after they start" }
+  ({ start, end }) => start !== end,
+  { message: "Model schedule windows must have different start and end times" }
 );
 
 export const agentModelPolicySchema = z.discriminatedUnion("mode", [
@@ -42,17 +43,37 @@ const parseTime = (value: string): number => {
   return hours * 60 + minutes;
 };
 const utcWeekday = (date: Date): AgentModelWeekday => AGENT_MODEL_WEEKDAYS[(date.getUTCDay() + 6) % 7];
+const previousWeekday = (weekday: AgentModelWeekday): AgentModelWeekday => {
+  const index = AGENT_MODEL_WEEKDAYS.indexOf(weekday);
+  return AGENT_MODEL_WEEKDAYS[(index + AGENT_MODEL_WEEKDAYS.length - 1) % AGENT_MODEL_WEEKDAYS.length];
+};
+
+const matchesWindow = (window: AgentModelWindow, weekday: AgentModelWeekday, minute: number): boolean => {
+  const start = parseTime(window.start);
+  const end = parseTime(window.end);
+  if (start < end) return window.days.includes(weekday) && minute >= start && minute < end;
+
+  return (window.days.includes(weekday) && minute >= start)
+    || (window.days.includes(previousWeekday(weekday)) && minute < end);
+};
+
+/** Returns the first matching UTC window, preserving configured overlap priority. */
+export const resolveModelWindow = (
+  policy: AgentModelPolicy,
+  now: Date
+): AgentModelWindow | undefined => {
+  if (policy.mode !== "schedule") return undefined;
+  const currentMinute = minuteOfDay(now);
+  const currentWeekday = utcWeekday(now);
+  return policy.windows.find((candidate) => matchesWindow(candidate, currentWeekday, currentMinute));
+};
 
 /** Resolves the model immediately before a Run starts. All policy times are UTC. */
 export const resolveModelPolicy = (policy: AgentModelPolicy, now: Date): string | undefined => {
   if (policy.mode === "provider_default") return undefined;
   if (policy.mode === "fixed") return policy.model;
 
-  const currentMinute = minuteOfDay(now);
-  const currentWeekday = utcWeekday(now);
-  const window = policy.windows.find((candidate) => candidate.days.includes(currentWeekday)
-    && currentMinute >= parseTime(candidate.start)
-    && currentMinute < parseTime(candidate.end));
+  const window = resolveModelWindow(policy, now);
   return window?.model ?? policy.defaultModel;
 };
 

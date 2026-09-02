@@ -133,7 +133,8 @@ An agent accepts three `modelPolicy` shapes:
       "days": ["mon", "tue", "wed", "thu", "fri"],
       "start": "08:00",
       "end": "20:00",
-      "model": "model-a"
+      "model": "model-a",
+      "maxConcurrentRuns": 4
     },
     {
       "days": ["sat", "sun"],
@@ -145,9 +146,9 @@ An agent accepts three `modelPolicy` shapes:
 }
 ```
 
-`days` is required and uses `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, and `sun`. Each rule must select at least one unique day. The API accepts explicit 24-hour UTC `HH:mm` values from `00:00` through `23:59`, and a window's end must be later than its start. A window includes its start and excludes its end. `defaultModel` applies unless both weekday and time match. If windows overlap, the first matching window in configuration order wins. A policy can contain at most 16 windows.
+`days` is required and uses `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, and `sun`. Each window must select at least one unique day. The API accepts 24-hour UTC `HH:mm` values from `00:00` through `23:59`, and the start and end must differ. A window includes its start and excludes its end. An end earlier than its start crosses into the next UTC day, with `days` identifying the start weekday. The same model may appear in multiple windows. `maxConcurrentRuns` may be omitted or `null` to inherit the Agent's normal limit, or set from 1–64 to override that limit for the window; the system-wide limit always remains authoritative. `defaultModel` and the normal Agent concurrency apply unless both weekday and time match, and the first matching window in configuration order wins when windows overlap. A policy can contain at most 16 windows.
 
-An active run keeps the model resolved at startup and ignores policy edits made mid-turn. A queued run uses the latest agent policy and UTC time when it actually starts. This prevents queue delay from selecting a scheduled model too early and preserves multi-turn context inside one Session.
+An active run keeps the model and concurrency slot resolved at startup and ignores policy edits made mid-turn. A queued run uses the latest Agent policy and UTC time when it actually starts. The scheduler re-evaluates the queue at the next UTC minute boundary: a higher limit starts more queued runs, while a lower limit never cancels active runs. This prevents queue delay from selecting a scheduled model too early and preserves multi-turn context inside one Session.
 
 ### 6.3 External tasks
 

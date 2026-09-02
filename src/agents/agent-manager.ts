@@ -350,7 +350,10 @@ export class AgentManager {
         updatedAt,
         id
       );
-    if (maxConcurrentRuns !== agent.maxConcurrentRuns) this.concurrencySettingsStore.notify();
+    if (maxConcurrentRuns !== agent.maxConcurrentRuns
+      || JSON.stringify(modelPolicy) !== JSON.stringify(agent.modelPolicy)) {
+      this.concurrencySettingsStore.notify();
+    }
 
     const globalRunConcurrency = this.concurrencySettingsStore.get().globalRunConcurrency;
     return {
