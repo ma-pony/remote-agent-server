@@ -35,7 +35,11 @@ const providerNames: Record<Provider, string> = {
 };
 const maxSkillArchiveBytes = 10 * 1024 * 1024;
 type SchedulePolicy = Extract<AgentModelPolicy, { mode: "schedule" }>;
+type ScheduleWindow = SchedulePolicy["windows"][number];
 type ModelWeekday = SchedulePolicy["windows"][number]["days"][number];
+type ScheduleGroup = Pick<ScheduleWindow, "days" | "model" | "maxConcurrentRuns"> & {
+  periods: Array<Pick<ScheduleWindow, "start" | "end">>;
+};
 const modelWeekdays: Array<{ value: ModelWeekday; zh: string; en: string; shortZh: string; shortEn: string }> = [
   { value: "mon", zh: "星期一", en: "Monday", shortZh: "一", shortEn: "Mon" },
   { value: "tue", zh: "星期二", en: "Tuesday", shortZh: "二", shortEn: "Tue" },
@@ -49,6 +53,43 @@ const allModelWeekdays = modelWeekdays.map(({ value }) => value);
 const businessModelWeekdays = allModelWeekdays.slice(0, 5);
 const weekendModelWeekdays = allModelWeekdays.slice(5);
 const time24Pattern = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+const sameModelWeekdays = (left: ModelWeekday[], right: ModelWeekday[]): boolean => left.length === right.length
+  && left.every((day) => right.includes(day));
+
+const scheduleWindowsToGroups = (windows: ScheduleWindow[]): ScheduleGroup[] => windows.reduce<ScheduleGroup[]>((groups, window) => {
+  const previous = groups.at(-1);
+  if (previous !== undefined
+    && sameModelWeekdays(previous.days, window.days)
+    && previous.model === window.model
+    && (previous.maxConcurrentRuns ?? null) === (window.maxConcurrentRuns ?? null)) {
+    return [...groups.slice(0, -1), {
+      ...previous,
+      periods: [...previous.periods, { start: window.start, end: window.end }]
+    }];
+  }
+  return [...groups, {
+    days: [...window.days],
+    model: window.model,
+    maxConcurrentRuns: window.maxConcurrentRuns ?? null,
+    periods: [{ start: window.start, end: window.end }]
+  }];
+}, []);
+
+const scheduleGroupsToWindows = (groups: ScheduleGroup[]): ScheduleWindow[] => groups.flatMap((group) => group.periods.map((period) => ({
+  days: [...group.days],
+  model: group.model,
+  maxConcurrentRuns: group.maxConcurrentRuns ?? null,
+  ...period
+})));
+
+const nextSchedulePeriod = (periods: ScheduleGroup["periods"]): ScheduleGroup["periods"][number] => {
+  const previousEnd = periods.at(-1)?.end ?? "12:00";
+  const start = time24Pattern.test(previousEnd) ? previousEnd : "12:00";
+  const hours = Number(start.slice(0, 2));
+  const end = `${String((hours + 6) % 24).padStart(2, "0")}:${start.slice(3)}`;
+  return { start, end };
+};
 
 const fileBase64 = (file: File, readError: string): Promise<string> => new Promise((resolve, reject) => {
   const reader = new FileReader();
@@ -417,12 +458,18 @@ export const AgentSettingsPage = () => {
     : [modelPolicy.defaultModel, ...modelPolicy.windows.map((window) => window.model)];
   const policyModelsAvailable = modelPolicy.mode === "provider_default"
     || (selectableModels && selectedPolicyModels.every((model) => availableModels.includes(model)));
+  const scheduleGroups = modelPolicy.mode === "schedule" ? scheduleWindowsToGroups(modelPolicy.windows) : [];
   const scheduleValid = modelPolicy.mode !== "schedule" || (modelPolicy.windows.length > 0
     && modelPolicy.windows.every((window) => time24Pattern.test(window.start) && time24Pattern.test(window.end)
       && window.start !== window.end && window.days.length > 0
       && (window.maxConcurrentRuns == null || (Number.isInteger(window.maxConcurrentRuns)
         && window.maxConcurrentRuns >= 1 && window.maxConcurrentRuns <= 64))));
   const modelPolicyValid = policyModelsAvailable && scheduleValid;
+  const updateScheduleGroups = (update: (groups: ScheduleGroup[]) => ScheduleGroup[]): void => {
+    setModelPolicy((current) => current.mode === "schedule"
+      ? { ...current, windows: scheduleGroupsToWindows(update(scheduleWindowsToGroups(current.windows))) }
+      : current);
+  };
   const setModelMode = (mode: AgentModelPolicy["mode"]): void => {
     if (mode === "provider_default") {
       setModelPolicy({ mode });
@@ -483,36 +530,49 @@ export const AgentSettingsPage = () => {
           {modelPolicy.mode === "fixed" ? <Field><FieldLabel htmlFor="settings-fixed-model">{text("模型", "Model")}</FieldLabel><NativeSelect id="settings-fixed-model" className="w-full" value={modelPolicy.model} onChange={(event) => setModelPolicy({ mode: "fixed", model: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field> : null}
           {modelPolicy.mode === "schedule" ? <div className="flex flex-col gap-4">
             <Field><FieldLabel htmlFor="settings-default-model">{text("其他时间使用", "Model outside windows")}</FieldLabel><NativeSelect id="settings-default-model" className="w-full" value={modelPolicy.defaultModel} onChange={(event) => setModelPolicy({ ...modelPolicy, defaultModel: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
-            <div className="flex flex-col gap-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-medium">{text("UTC 时间段", "UTC time windows")}</p><p className="mt-1 text-xs leading-5 text-muted-foreground">{text("同一个模型可以添加多个时间段，并分别设置 Run 并发；结束早于开始时自动跨到下一 UTC 日，重叠时上方时间段优先。", "A model can use multiple windows with separate run limits. An end earlier than its start crosses into the next UTC day; earlier windows take priority when they overlap.")}</p></div><Button type="button" size="sm" variant="outline" onClick={() => {
-              const previous = modelPolicy.windows.at(-1);
-              setModelPolicy({ ...modelPolicy, windows: [...modelPolicy.windows, {
-                days: [...(previous?.days ?? allModelWeekdays)],
-                start: "12:00",
-                end: "18:00",
-                model: previous?.model ?? availableModels[0] ?? modelPolicy.defaultModel,
-                maxConcurrentRuns: previous?.maxConcurrentRuns ?? null
-              }] });
-            }}><Plus />{text("增加时间段", "Add time window")}</Button></div>
-              {modelPolicy.windows.map((window, index) => <div key={index} className="overflow-hidden rounded-xl border bg-background">
+            <div className="flex flex-col gap-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><p className="text-sm font-medium">{text("UTC 规则组", "UTC rule groups")}</p><Badge variant="outline">{text(`${scheduleGroups.length} 组`, `${scheduleGroups.length} groups`)}</Badge></div><p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">{text("每组统一设置生效日、模型和 Run 并发，并可添加多个时间段。结束早于开始时跨到下一 UTC 日；规则组重叠时上方优先。", "Each group shares active days, model, and run concurrency across multiple time windows. An end earlier than its start crosses into the next UTC day; earlier groups take priority when they overlap.")}</p></div><Button type="button" size="sm" variant="outline" disabled={modelPolicy.windows.length >= 16} onClick={() => updateScheduleGroups((groups) => {
+              const previous = groups.at(-1);
+              const nextModel = availableModels.find((model) => model !== previous?.model) ?? previous?.model ?? modelPolicy.defaultModel;
+              const nextDays = previous !== undefined && nextModel === previous.model
+                ? (sameModelWeekdays(previous.days, businessModelWeekdays) ? weekendModelWeekdays : businessModelWeekdays)
+                : previous?.days ?? allModelWeekdays;
+              return [...groups, {
+                days: [...nextDays],
+                model: nextModel,
+                maxConcurrentRuns: previous?.maxConcurrentRuns ?? null,
+                periods: [{ start: "12:00", end: "18:00" }]
+              }];
+            })}><Plus />{text("添加规则组", "Add rule group")}</Button></div>
+              {scheduleGroups.map((group, groupIndex) => <div key={groupIndex} className="overflow-hidden rounded-xl border bg-background shadow-xs">
                 <div className="flex items-center justify-between gap-3 border-b bg-muted/20 px-4 py-3">
-                  <div className="flex min-w-0 items-center gap-2"><Badge variant="outline">{text(`时间段 ${index + 1}`, `Window ${index + 1}`)}</Badge><span className="truncate text-sm text-muted-foreground">{window.model}</span></div>
-                  <Button type="button" variant="ghost" size="icon-sm" aria-label={text(`删除时间段 ${index + 1}`, `Delete time window ${index + 1}`)} disabled={modelPolicy.windows.length === 1} onClick={() => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.filter((_item, itemIndex) => itemIndex !== index) })}><Trash2 /></Button>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2"><Badge>{text(`规则 ${groupIndex + 1}`, `Rule ${groupIndex + 1}`)}</Badge><span className="truncate text-sm font-medium">{group.model}</span><span className="text-xs text-muted-foreground">{text(`${group.days.length} 天 · ${group.periods.length} 个时间段`, `${group.days.length} days · ${group.periods.length} windows`)}</span></div>
+                  <Button type="button" variant="ghost" size="icon-sm" aria-label={text(`删除规则 ${groupIndex + 1}`, `Delete rule ${groupIndex + 1}`)} disabled={scheduleGroups.length === 1} onClick={() => updateScheduleGroups((groups) => groups.filter((_item, itemIndex) => itemIndex !== groupIndex))}><Trash2 /></Button>
                 </div>
-                <div className="grid gap-4 p-4 md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(220px,1.4fr)_minmax(160px,0.8fr)]">
-                  <Field><FieldLabel htmlFor={`settings-model-start-${index}`}>{text("开始（UTC · 24h）", "Start (UTC · 24h)")}</FieldLabel><Input id={`settings-model-start-${index}`} type="text" inputMode="numeric" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" maxLength={5} placeholder="08:00" value={window.start} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, start: event.target.value } : item) })} /></Field>
-                  <Field><FieldLabel htmlFor={`settings-model-end-${index}`}>{text("结束（UTC · 24h）", "End (UTC · 24h)")}</FieldLabel><Input id={`settings-model-end-${index}`} type="text" inputMode="numeric" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" maxLength={5} placeholder="20:00" value={window.end} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, end: event.target.value } : item) })} /></Field>
-                  <Field><FieldLabel htmlFor={`settings-window-model-${index}`}>{text("模型", "Model")}</FieldLabel><NativeSelect id={`settings-window-model-${index}`} className="w-full" value={window.model} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, model: event.target.value } : item) })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
-                  <Field><FieldLabel htmlFor={`settings-window-concurrency-${index}`}>{text("Run 并发上限", "Run concurrency limit")}</FieldLabel><Input id={`settings-window-concurrency-${index}`} type="number" min={1} max={64} step={1} placeholder={text("继承默认", "Use default")} value={window.maxConcurrentRuns ?? ""} onChange={(event) => {
-                    const value = event.target.value;
-                    setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? {
-                      ...item,
-                      maxConcurrentRuns: value === "" ? null : Number(value)
-                    } : item) });
-                  }} /></Field>
+                <div className="grid gap-5 p-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,1fr)]">
+                  <div className="flex min-w-0 flex-col gap-4">
+                    <ModelWeekdayPicker value={group.days} onChange={(days) => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, days } : item))} />
+                    <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(150px,0.55fr)]">
+                      <Field><FieldLabel htmlFor={`settings-group-model-${groupIndex}`}>{text("模型", "Model")}</FieldLabel><NativeSelect id={`settings-group-model-${groupIndex}`} className="w-full" value={group.model} onChange={(event) => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, model: event.target.value } : item))}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
+                      <Field><FieldLabel htmlFor={`settings-group-concurrency-${groupIndex}`}>{text("Run 并发上限", "Run concurrency limit")}</FieldLabel><Input id={`settings-group-concurrency-${groupIndex}`} type="number" min={1} max={64} step={1} placeholder={text("继承默认", "Use default")} value={group.maxConcurrentRuns ?? ""} onChange={(event) => {
+                        const value = event.target.value;
+                        updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? {
+                          ...item,
+                          maxConcurrentRuns: value === "" ? null : Number(value)
+                        } : item));
+                      }} /></Field>
+                    </div>
+                  </div>
+                  <div className="overflow-hidden rounded-lg border bg-muted/10">
+                    <div className="flex items-center justify-between gap-3 px-3 py-2.5"><div><p className="text-sm font-medium">{text("时间段（UTC · 24h）", "Time windows (UTC · 24h)")}</p><p className="mt-0.5 text-xs text-muted-foreground">{text("本组所有时间段共用模型和并发", "All windows in this group share its model and concurrency")}</p></div><Button type="button" size="xs" variant="outline" aria-label={text(`为规则 ${groupIndex + 1} 添加时间段`, `Add time window to rule ${groupIndex + 1}`)} disabled={modelPolicy.windows.length >= 16} onClick={() => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, periods: [...item.periods, nextSchedulePeriod(item.periods)] } : item))}><Plus />{text("添加", "Add")}</Button></div>
+                    <div className="divide-y border-t">{group.periods.map((period, periodIndex) => <div key={periodIndex} className="grid gap-2 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end">
+                      <Field><FieldLabel htmlFor={`settings-model-start-${groupIndex}-${periodIndex}`}>{text("开始（UTC · 24h）", "Start (UTC · 24h)")}</FieldLabel><Input id={`settings-model-start-${groupIndex}-${periodIndex}`} type="text" inputMode="numeric" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" maxLength={5} placeholder="08:00" value={period.start} onChange={(event) => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, periods: item.periods.map((entry, entryIndex) => entryIndex === periodIndex ? { ...entry, start: event.target.value } : entry) } : item))} /></Field>
+                      <Field><FieldLabel htmlFor={`settings-model-end-${groupIndex}-${periodIndex}`}>{text("结束（UTC · 24h）", "End (UTC · 24h)")}</FieldLabel><Input id={`settings-model-end-${groupIndex}-${periodIndex}`} type="text" inputMode="numeric" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" maxLength={5} placeholder="20:00" value={period.end} onChange={(event) => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, periods: item.periods.map((entry, entryIndex) => entryIndex === periodIndex ? { ...entry, end: event.target.value } : entry) } : item))} /></Field>
+                      <Button type="button" variant="ghost" size="icon-sm" className="justify-self-end" aria-label={text(`删除规则 ${groupIndex + 1} 的时间段 ${periodIndex + 1}`, `Delete window ${periodIndex + 1} from rule ${groupIndex + 1}`)} disabled={group.periods.length === 1} onClick={() => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, periods: item.periods.filter((_entry, entryIndex) => entryIndex !== periodIndex) } : item))}><Trash2 /></Button>
+                    </div>)}</div>
+                  </div>
                 </div>
-                <div className="border-t px-4 py-3"><ModelWeekdayPicker value={window.days} onChange={(days) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, days } : item) })} /></div>
               </div>)}
-              {!scheduleValid ? <p className="text-sm text-destructive">{text("请为每个时间段选择生效日，填写两个不同的 UTC 时间，并将并发上限留空或设为 1–64。", "Choose active days, enter two different UTC times, and leave the concurrency limit empty or set it to 1–64.")}</p> : null}
+              {!scheduleValid ? <p className="text-sm text-destructive" role="alert" aria-live="polite">{text("请为每个规则组选择生效日，为时间段填写两个不同的 UTC 时间，并将并发上限留空或设为 1–64。", "Choose active days for every group, enter two different UTC times per window, and leave the concurrency limit empty or set it to 1–64.")}</p> : null}
             </div>
           </div> : null}
           {!policyModelsAvailable ? <p className="text-sm text-destructive">{text("当前策略引用的模型已不在 Agent Core 模型列表中。请选择 Core 默认模型或重新选择可用模型。", "The current policy references models no longer exposed by Agent Core. Follow the Core default or choose available models again.")}</p> : null}

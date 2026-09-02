@@ -148,6 +148,8 @@ An agent accepts three `modelPolicy` shapes:
 
 `days` is required and uses `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, and `sun`. Each window must select at least one unique day. The API accepts 24-hour UTC `HH:mm` values from `00:00` through `23:59`, and the start and end must differ. A window includes its start and excludes its end. An end earlier than its start crosses into the next UTC day, with `days` identifying the start weekday. The same model may appear in multiple windows. `maxConcurrentRuns` may be omitted or `null` to inherit the Agent's normal limit, or set from 1–64 to override that limit for the window; the system-wide limit always remains authoritative. `defaultModel` and the normal Agent concurrency apply unless both weekday and time match, and the first matching window in configuration order wins when windows overlap. A policy can contain at most 16 windows.
 
+The console groups adjacent windows with identical `days`, `model`, and `maxConcurrentRuns` into one editor. Weekdays, model, and concurrency are set once, while the group can contain multiple start/end pairs. Saving expands the group back into the `windows` contract above, so the presentation model does not change runtime resolution or the external API.
+
 An active run keeps the model and concurrency slot resolved at startup and ignores policy edits made mid-turn. A queued run uses the latest Agent policy and UTC time when it actually starts. The scheduler re-evaluates the queue at the next UTC minute boundary: a higher limit starts more queued runs, while a lower limit never cancels active runs. This prevents queue delay from selecting a scheduled model too early and preserves multi-turn context inside one Session.
 
 ### 6.3 External tasks

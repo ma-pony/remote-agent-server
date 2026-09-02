@@ -175,7 +175,7 @@ describe("最小管理界面", () => {
     expect(await screen.findByText("当前有效上限：2")).toBeInTheDocument();
   });
 
-  it("模型策略只使用 Agent Core 暴露的模型并按 UTC 时间段保存", async () => {
+  it("模型策略将同一规则组的多个 UTC 时间段统一保存模型和并发", async () => {
     sessionStorage.setItem("apiToken", "secret-token");
     window.history.replaceState({}, "", "/agents/3/settings");
     const currentAgent = {
@@ -228,10 +228,12 @@ describe("最小管理界面", () => {
     fireEvent.change(screen.getByLabelText("Run 并发上限"), { target: { value: "3" } });
     fireEvent.change(screen.getByLabelText("开始（UTC · 24h）"), { target: { value: "20:00" } });
     fireEvent.change(screen.getByLabelText("结束（UTC · 24h）"), { target: { value: "02:00" } });
-    fireEvent.click(screen.getByRole("button", { name: "增加时间段" }));
+    fireEvent.click(screen.getByRole("button", { name: "为规则 1 添加时间段" }));
     expect(screen.getAllByLabelText("开始（UTC · 24h）")).toHaveLength(2);
-    expect(screen.getAllByLabelText("模型")[1]).toHaveValue("glm-4.5");
-    expect(screen.getAllByLabelText("Run 并发上限")[1]).toHaveValue(3);
+    expect(screen.getAllByLabelText("开始（UTC · 24h）")[1]).toHaveValue("02:00");
+    expect(screen.getAllByLabelText("结束（UTC · 24h）")[1]).toHaveValue("08:00");
+    expect(screen.getAllByLabelText("模型")).toHaveLength(1);
+    expect(screen.getAllByLabelText("Run 并发上限")).toHaveLength(1);
     fireEvent.change(screen.getAllByLabelText("开始（UTC · 24h）")[1], { target: { value: "08:00" } });
     fireEvent.change(screen.getAllByLabelText("结束（UTC · 24h）")[1], { target: { value: "10:00" } });
     fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
@@ -253,6 +255,9 @@ describe("最小管理界面", () => {
         maxConcurrentRuns: 3
       }]
     }));
+    fireEvent.click(screen.getByRole("button", { name: "添加规则组" }));
+    expect(screen.getByText("2 组")).toBeInTheDocument();
+    expect(screen.getAllByLabelText("模型")).toHaveLength(2);
   });
 
   it("Agent Core 未暴露模型时禁用固定和定时模型选择", async () => {
