@@ -34,6 +34,21 @@ const providerNames: Record<Provider, string> = {
   hermes: "Hermes"
 };
 const maxSkillArchiveBytes = 10 * 1024 * 1024;
+type SchedulePolicy = Extract<AgentModelPolicy, { mode: "schedule" }>;
+type ModelWeekday = SchedulePolicy["windows"][number]["days"][number];
+const modelWeekdays: Array<{ value: ModelWeekday; zh: string; en: string; shortZh: string; shortEn: string }> = [
+  { value: "mon", zh: "星期一", en: "Monday", shortZh: "一", shortEn: "Mon" },
+  { value: "tue", zh: "星期二", en: "Tuesday", shortZh: "二", shortEn: "Tue" },
+  { value: "wed", zh: "星期三", en: "Wednesday", shortZh: "三", shortEn: "Wed" },
+  { value: "thu", zh: "星期四", en: "Thursday", shortZh: "四", shortEn: "Thu" },
+  { value: "fri", zh: "星期五", en: "Friday", shortZh: "五", shortEn: "Fri" },
+  { value: "sat", zh: "星期六", en: "Saturday", shortZh: "六", shortEn: "Sat" },
+  { value: "sun", zh: "星期日", en: "Sunday", shortZh: "日", shortEn: "Sun" }
+];
+const allModelWeekdays = modelWeekdays.map(({ value }) => value);
+const businessModelWeekdays = allModelWeekdays.slice(0, 5);
+const weekendModelWeekdays = allModelWeekdays.slice(5);
+const time24Pattern = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const fileBase64 = (file: File, readError: string): Promise<string> => new Promise((resolve, reject) => {
   const reader = new FileReader();
@@ -47,6 +62,51 @@ const fileBase64 = (file: File, readError: string): Promise<string> => new Promi
 const ErrorAlert = ({ message }: { message: string }) => { const { text } = useI18n(); return message === "" ? null : (
   <Alert variant="destructive"><XCircle /><AlertTitle>{text("操作失败", "Operation failed")}</AlertTitle><AlertDescription>{message}</AlertDescription></Alert>
 ); };
+
+const ModelWeekdayPicker = ({ value, onChange }: {
+  value: ModelWeekday[];
+  onChange: (days: ModelWeekday[]) => void;
+}) => {
+  const { text } = useI18n();
+  const selected = value;
+  const selectedSet = new Set(selected);
+  const matchesPreset = (days: ModelWeekday[]) => selected.length === days.length
+    && days.every((day) => selectedSet.has(day));
+  const toggle = (day: ModelWeekday) => {
+    if (selectedSet.has(day)) {
+      if (selected.length === 1) return;
+      onChange(selected.filter((item) => item !== day));
+      return;
+    }
+    onChange(allModelWeekdays.filter((item) => selectedSet.has(item) || item === day));
+  };
+  return <div className="rounded-lg border bg-muted/20 p-3">
+    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+      <div className="flex items-center gap-2"><span className="text-sm font-medium">{text("生效日（UTC）", "Active days (UTC)")}</span><Badge variant="outline">{text(`${selected.length} 天`, `${selected.length} days`)}</Badge></div>
+      <div className="flex flex-wrap gap-1">
+        <Button type="button" size="xs" variant={matchesPreset(businessModelWeekdays) ? "secondary" : "ghost"} onClick={() => onChange([...businessModelWeekdays])}>{text("工作日", "Weekdays")}</Button>
+        <Button type="button" size="xs" variant={matchesPreset(weekendModelWeekdays) ? "secondary" : "ghost"} onClick={() => onChange([...weekendModelWeekdays])}>{text("周末", "Weekend")}</Button>
+        <Button type="button" size="xs" variant={matchesPreset(allModelWeekdays) ? "secondary" : "ghost"} onClick={() => onChange([...allModelWeekdays])}>{text("每天", "Every day")}</Button>
+      </div>
+    </div>
+    <div className="grid grid-cols-7 gap-1" role="group" aria-label={text("选择生效日", "Select active days")}>
+      {modelWeekdays.map((day) => {
+        const active = selectedSet.has(day.value);
+        return <Button
+          key={day.value}
+          type="button"
+          size="sm"
+          variant={active ? "default" : "outline"}
+          className="min-w-0 px-1 disabled:opacity-100"
+          aria-label={text(day.zh, day.en)}
+          aria-pressed={active}
+          disabled={active && selected.length === 1}
+          onClick={() => toggle(day.value)}
+        >{text(day.shortZh, day.shortEn)}</Button>;
+      })}
+    </div>
+  </div>;
+};
 
 export const AgentListPage = () => {
   const { text } = useI18n();
@@ -358,7 +418,8 @@ export const AgentSettingsPage = () => {
   const policyModelsAvailable = modelPolicy.mode === "provider_default"
     || (selectableModels && selectedPolicyModels.every((model) => availableModels.includes(model)));
   const scheduleValid = modelPolicy.mode !== "schedule" || (modelPolicy.windows.length > 0
-    && modelPolicy.windows.every((window) => window.start < window.end));
+    && modelPolicy.windows.every((window) => time24Pattern.test(window.start) && time24Pattern.test(window.end)
+      && window.start < window.end && window.days.length > 0));
   const modelPolicyValid = policyModelsAvailable && scheduleValid;
   const setModelMode = (mode: AgentModelPolicy["mode"]): void => {
     if (mode === "provider_default") {
@@ -372,7 +433,7 @@ export const AgentSettingsPage = () => {
     if (defaultModel === undefined) return;
     setModelPolicy(mode === "fixed"
       ? { mode, model: defaultModel }
-      : { mode, defaultModel, windows: [{ start: "00:00", end: "12:00", model: defaultModel }] });
+      : { mode, defaultModel, windows: [{ days: [...allModelWeekdays], start: "00:00", end: "12:00", model: defaultModel }] });
   };
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -402,13 +463,13 @@ export const AgentSettingsPage = () => {
       <div className="rounded-xl border bg-muted/20 p-4 sm:p-5">
         <div className="mb-4">
           <h3 className="font-semibold">{text("模型策略", "Model policy")}</h3>
-          <p className="mt-1 text-sm text-muted-foreground">{text("模型列表自动读取自 Agent Core。时间段统一使用 UTC，并在 Run 真正开始时选择；不会中断正在执行的 Run。", "Models are read from Agent Core. UTC windows are resolved when a Run actually starts and never interrupt an active Run.")}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{text("模型列表自动读取自 Agent Core。星期和时间统一使用 UTC，并在 Run 真正开始时选择；不会中断正在执行的 Run。", "Models are read from Agent Core. UTC weekdays and times are resolved when a Run actually starts and never interrupt an active Run.")}</p>
         </div>
         <div className="flex flex-col gap-4">
           <Field><FieldLabel htmlFor="settings-model-mode">{text("选择方式", "Selection mode")}</FieldLabel><NativeSelect id="settings-model-mode" className="w-full" value={modelPolicy.mode} disabled={modelCatalog === null && modelCatalogError === ""} onChange={(event) => setModelMode(event.target.value as AgentModelPolicy["mode"])}>
             <NativeSelectOption value="provider_default">{text("跟随 Agent Core 默认模型", "Follow Agent Core default")}</NativeSelectOption>
             <NativeSelectOption value="fixed" disabled={!selectableModels}>{text("固定模型", "Fixed model")}</NativeSelectOption>
-            <NativeSelectOption value="schedule" disabled={!selectableModels}>{text("按 UTC 时间段切换", "Switch by UTC window")}</NativeSelectOption>
+            <NativeSelectOption value="schedule" disabled={!selectableModels}>{text("按 UTC 星期和时间切换", "Switch by UTC day and time")}</NativeSelectOption>
           </NativeSelect>
           {modelCatalog === null && modelCatalogError === "" ? <FieldDescription>{text("正在读取 Agent Core 模型…", "Loading models from Agent Core…")}</FieldDescription>
             : modelCatalogError !== "" ? <FieldDescription className="text-destructive">{text(`Agent Core 模型读取失败：${modelCatalogError}`, `Failed to read Agent Core models: ${modelCatalogError}`)}</FieldDescription>
@@ -418,14 +479,15 @@ export const AgentSettingsPage = () => {
           {modelPolicy.mode === "fixed" ? <Field><FieldLabel htmlFor="settings-fixed-model">{text("模型", "Model")}</FieldLabel><NativeSelect id="settings-fixed-model" className="w-full" value={modelPolicy.model} onChange={(event) => setModelPolicy({ mode: "fixed", model: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field> : null}
           {modelPolicy.mode === "schedule" ? <div className="flex flex-col gap-4">
             <Field><FieldLabel htmlFor="settings-default-model">{text("其他时间使用", "Model outside windows")}</FieldLabel><NativeSelect id="settings-default-model" className="w-full" value={modelPolicy.defaultModel} onChange={(event) => setModelPolicy({ ...modelPolicy, defaultModel: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
-            <div className="flex flex-col gap-3"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-medium">{text("UTC 时间段", "UTC windows")}</p><p className="text-xs text-muted-foreground">{text("开始时间包含，结束时间不包含。", "Start is inclusive; end is exclusive.")}</p></div><Button type="button" size="sm" variant="outline" onClick={() => setModelPolicy({ ...modelPolicy, windows: [...modelPolicy.windows, { start: "12:00", end: "18:00", model: availableModels[0] ?? modelPolicy.defaultModel }] })}><Plus />{text("增加时间段", "Add window")}</Button></div>
+            <div className="flex flex-col gap-3"><div className="flex items-center justify-between gap-3"><div><p className="text-sm font-medium">{text("UTC 时间规则", "UTC schedule rules")}</p><p className="text-xs text-muted-foreground">{text("分别选择星期和时间；开始时间包含，结束时间不包含。", "Choose weekdays and time separately; start is inclusive and end is exclusive.")}</p></div><Button type="button" size="sm" variant="outline" onClick={() => setModelPolicy({ ...modelPolicy, windows: [...modelPolicy.windows, { days: [...allModelWeekdays], start: "12:00", end: "18:00", model: availableModels[0] ?? modelPolicy.defaultModel }] })}><Plus />{text("增加规则", "Add rule")}</Button></div>
               {modelPolicy.windows.map((window, index) => <div key={index} className="grid gap-3 rounded-lg border bg-background p-3 sm:grid-cols-[1fr_1fr_2fr_auto] sm:items-end">
-                <Field><FieldLabel htmlFor={`settings-model-start-${index}`}>{text("开始（UTC）", "Start (UTC)")}</FieldLabel><Input id={`settings-model-start-${index}`} type="time" value={window.start} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, start: event.target.value } : item) })} /></Field>
-                <Field><FieldLabel htmlFor={`settings-model-end-${index}`}>{text("结束（UTC）", "End (UTC)")}</FieldLabel><Input id={`settings-model-end-${index}`} type="time" value={window.end} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, end: event.target.value } : item) })} /></Field>
+                <Field><FieldLabel htmlFor={`settings-model-start-${index}`}>{text("开始（UTC）", "Start (UTC)")}</FieldLabel><Input id={`settings-model-start-${index}`} type="text" inputMode="numeric" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" maxLength={5} placeholder="08:00" value={window.start} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, start: event.target.value } : item) })} /><FieldDescription>{text("24 小时制 HH:mm", "24-hour HH:mm")}</FieldDescription></Field>
+                <Field><FieldLabel htmlFor={`settings-model-end-${index}`}>{text("结束（UTC）", "End (UTC)")}</FieldLabel><Input id={`settings-model-end-${index}`} type="text" inputMode="numeric" pattern="([01][0-9]|2[0-3]):[0-5][0-9]" maxLength={5} placeholder="20:00" value={window.end} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, end: event.target.value } : item) })} /><FieldDescription>{text("24 小时制 HH:mm", "24-hour HH:mm")}</FieldDescription></Field>
                 <Field><FieldLabel htmlFor={`settings-window-model-${index}`}>{text("模型", "Model")}</FieldLabel><NativeSelect id={`settings-window-model-${index}`} className="w-full" value={window.model} onChange={(event) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, model: event.target.value } : item) })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
-                <Button type="button" variant="ghost" size="icon" aria-label={text(`删除时间段 ${index + 1}`, `Delete window ${index + 1}`)} disabled={modelPolicy.windows.length === 1} onClick={() => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.filter((_item, itemIndex) => itemIndex !== index) })}><Trash2 /></Button>
+                <Button type="button" variant="ghost" size="icon" aria-label={text(`删除规则 ${index + 1}`, `Delete rule ${index + 1}`)} disabled={modelPolicy.windows.length === 1} onClick={() => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.filter((_item, itemIndex) => itemIndex !== index) })}><Trash2 /></Button>
+                <div className="sm:col-span-4"><ModelWeekdayPicker value={window.days} onChange={(days) => setModelPolicy({ ...modelPolicy, windows: modelPolicy.windows.map((item, itemIndex) => itemIndex === index ? { ...item, days } : item) })} /></div>
               </div>)}
-              {!scheduleValid ? <p className="text-sm text-destructive">{text("结束时间必须晚于开始时间。跨 UTC 日期请拆成两个时间段。", "End time must be later than start time. Split windows that cross the UTC date boundary.")}</p> : null}
+              {!scheduleValid ? <p className="text-sm text-destructive">{text("每条规则至少选择一天，并使用 00:00–23:59 的 24 小时制时间；结束时间必须晚于开始时间。", "Select at least one day, use 24-hour times from 00:00 to 23:59, and make the end later than the start.")}</p> : null}
             </div>
           </div> : null}
           {!policyModelsAvailable ? <p className="text-sm text-destructive">{text("当前策略引用的模型已不在 Agent Core 模型列表中。请选择 Core 默认模型或重新选择可用模型。", "The current policy references models no longer exposed by Agent Core. Follow the Core default or choose available models again.")}</p> : null}

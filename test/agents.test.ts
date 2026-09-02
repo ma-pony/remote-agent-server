@@ -127,6 +127,7 @@ describe("Agent API", () => {
           mode: "schedule",
           defaultModel: "deepseek-v4-flash",
           windows: [{
+            days: ["mon", "tue", "wed", "thu", "fri"],
             start: "00:00",
             end: "12:00",
             model: "glm-4.5"
@@ -142,6 +143,34 @@ describe("Agent API", () => {
         defaultModel: "deepseek-v4-flash"
       }
     });
+
+    const invalidDays = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: {
+        modelPolicy: {
+          mode: "schedule",
+          defaultModel: "deepseek-v4-flash",
+          windows: [{ days: [], start: "00:00", end: "12:00", model: "glm-4.5" }]
+        }
+      }
+    });
+    expect(invalidDays.statusCode).toBe(400);
+
+    const missingDays = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: {
+        modelPolicy: {
+          mode: "schedule",
+          defaultModel: "deepseek-v4-flash",
+          windows: [{ start: "00:00", end: "12:00", model: "glm-4.5" }]
+        }
+      }
+    });
+    expect(missingDays.statusCode).toBe(400);
 
     const unknown = await app.inject({
       method: "PATCH",

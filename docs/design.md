@@ -129,13 +129,23 @@ Agent 的 `modelPolicy` 有三种格式：
   "mode": "schedule",
   "defaultModel": "model-used-outside-windows",
   "windows": [
-    { "start": "00:00", "end": "08:00", "model": "model-a" },
-    { "start": "08:00", "end": "18:00", "model": "model-b" }
+    {
+      "days": ["mon", "tue", "wed", "thu", "fri"],
+      "start": "08:00",
+      "end": "20:00",
+      "model": "model-a"
+    },
+    {
+      "days": ["sat", "sun"],
+      "start": "08:00",
+      "end": "20:00",
+      "model": "model-b"
+    }
   ]
 }
 ```
 
-API 接受的时间必须是 `00:00` 至 `23:59` 之间的 UTC `HH:mm`，且结束时间必须晚于开始时间。每个窗口开始时间包含、结束时间不包含，窗口外使用 `defaultModel`；多个窗口重叠时，配置中排在前面的窗口优先。策略最多包含 16 个窗口。
+`days` 是必填字段，使用 `mon`、`tue`、`wed`、`thu`、`fri`、`sat`、`sun`；每条规则至少选择一天且不能重复。API 接受的时间必须是 `00:00` 至 `23:59` 之间的 UTC 24 小时制 `HH:mm`，且结束时间必须晚于开始时间。每个窗口开始时间包含、结束时间不包含，未同时命中星期和时间时使用 `defaultModel`；多个窗口重叠时，配置中排在前面的窗口优先。策略最多包含 16 个窗口。
 
 运行中的 Run 使用启动时已经解析的模型，不响应中途配置修改。排队中的 Run 则使用真正开始时的最新 Agent 策略和 UTC 时间。这样时间策略不会因排队延迟而提前切换，也不会破坏同一 Session 的多轮上下文。
 

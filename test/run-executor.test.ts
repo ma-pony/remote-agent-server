@@ -300,6 +300,7 @@ describe("RunExecutor", () => {
         mode: "schedule",
         defaultModel: "deepseek-v4-flash",
         windows: [{
+          days: ["tue"],
           start: "08:00",
           end: "20:00",
           model: "glm-4.5"

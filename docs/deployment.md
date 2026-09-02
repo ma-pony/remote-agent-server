@@ -388,7 +388,7 @@ curl --fail-with-body \
 
 可用响应包含 `supported: true`、`currentModel` 和非空 `availableModels`。`supported: false` 表示该 Core 只能使用默认模型行为，不能通过 Remote Agent Server 配置固定或定时策略；不要手填模型 ID 绕过目录。
 
-在页面保存固定或 UTC 时间段策略后，创建一个真实 Run，并检查实际解析结果：
+在页面保存固定策略，或保存带 UTC 星期和 24 小时时间段的定时策略后，创建一个真实 Run，并检查实际解析结果：
 
 ```bash
 export RUN_ID='<刚完成的 Run ID>'
@@ -398,7 +398,7 @@ curl --fail-with-body \
   "$REMOTE_AGENT_URL/api/runs/$RUN_ID"
 ```
 
-响应的 `resolvedModel` 应与 Run 真正开始时命中的策略一致。验收定时策略时，以 UTC 时间和 Run 的实际开始时间为准，不使用提交时间或排队时间。第二个 Run 可以继续使用同一个 Session；模型变化不应创建新的 Session、Workspace 或 Conversation，也不应丢失上一轮 Provider 对话上下文。
+响应的 `resolvedModel` 应与 Run 真正开始时命中的策略一致。验收定时策略时，同时核对 UTC 星期、24 小时时间和 Run 的实际开始时间，不使用本地星期、提交时间或排队时间。第二个 Run 可以继续使用同一个 Session；模型变化不应创建新的 Session、Workspace 或 Conversation，也不应丢失上一轮 Provider 对话上下文。
 
 ## 7. 外部系统接入
 

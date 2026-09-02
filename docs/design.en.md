@@ -129,13 +129,23 @@ An agent accepts three `modelPolicy` shapes:
   "mode": "schedule",
   "defaultModel": "model-used-outside-windows",
   "windows": [
-    { "start": "00:00", "end": "08:00", "model": "model-a" },
-    { "start": "08:00", "end": "18:00", "model": "model-b" }
+    {
+      "days": ["mon", "tue", "wed", "thu", "fri"],
+      "start": "08:00",
+      "end": "20:00",
+      "model": "model-a"
+    },
+    {
+      "days": ["sat", "sun"],
+      "start": "08:00",
+      "end": "20:00",
+      "model": "model-b"
+    }
   ]
 }
 ```
 
-The API accepts UTC `HH:mm` values from `00:00` through `23:59`, and a window's end must be later than its start. Each window includes its start and excludes its end, while `defaultModel` applies outside all windows. If windows overlap, the first matching window in configuration order wins. A policy can contain at most 16 windows.
+`days` is required and uses `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, and `sun`. Each rule must select at least one unique day. The API accepts explicit 24-hour UTC `HH:mm` values from `00:00` through `23:59`, and a window's end must be later than its start. A window includes its start and excludes its end. `defaultModel` applies unless both weekday and time match. If windows overlap, the first matching window in configuration order wins. A policy can contain at most 16 windows.
 
 An active run keeps the model resolved at startup and ignores policy edits made mid-turn. A queued run uses the latest agent policy and UTC time when it actually starts. This prevents queue delay from selecting a scheduled model too early and preserves multi-turn context inside one Session.
 

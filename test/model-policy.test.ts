@@ -24,6 +24,7 @@ describe("Agent model policy", () => {
       mode: "schedule",
       defaultModel: "deepseek-v4-flash",
       windows: [{
+        days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
         start: "08:00",
         end: "20:00",
         model: "glm-4.5"
@@ -36,13 +37,28 @@ describe("Agent model policy", () => {
     expect(resolveModelPolicy(policy, new Date("2026-09-01T20:00:00Z"))).toBe("deepseek-v4-flash");
   });
 
+  it("routes by UTC weekday", () => {
+    const weekdaysOnly: AgentModelPolicy = {
+      mode: "schedule",
+      defaultModel: "deepseek-v4-flash",
+      windows: [{
+        days: ["mon", "tue", "wed", "thu", "fri"],
+        start: "08:00",
+        end: "20:00",
+        model: "glm-4.5"
+      }]
+    };
+    expect(resolveModelPolicy(weekdaysOnly, new Date("2026-09-07T12:00:00Z"))).toBe("glm-4.5");
+    expect(resolveModelPolicy(weekdaysOnly, new Date("2026-09-06T12:00:00Z"))).toBe("deepseek-v4-flash");
+  });
+
   it("exposes every configured model once", () => {
     const policy: AgentModelPolicy = {
       mode: "schedule",
       defaultModel: "deepseek-v4-flash",
       windows: [
-        { start: "08:00", end: "20:00", model: "glm-4.5" },
-        { start: "20:00", end: "23:00", model: "deepseek-v4-flash" }
+        { days: ["mon"], start: "08:00", end: "20:00", model: "glm-4.5" },
+        { days: ["mon"], start: "20:00", end: "23:00", model: "deepseek-v4-flash" }
       ]
     };
 

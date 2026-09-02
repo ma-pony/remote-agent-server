@@ -219,6 +219,11 @@ describe("最小管理界面", () => {
     await waitFor(() => expect(mode).not.toBeDisabled());
     fireEvent.change(mode, { target: { value: "schedule" } });
     expect(screen.getByLabelText("其他时间使用")).toHaveValue("deepseek-v4-flash");
+    expect(screen.getByLabelText("开始（UTC）")).toHaveAttribute("type", "text");
+    expect(screen.getByLabelText("开始（UTC）")).toHaveAttribute("placeholder", "08:00");
+    expect(screen.getByText("7 天")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "工作日" }));
+    expect(screen.getByText("5 天")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("模型"), { target: { value: "glm-4.5" } });
     fireEvent.change(screen.getByLabelText("开始（UTC）"), { target: { value: "08:00" } });
     fireEvent.change(screen.getByLabelText("结束（UTC）"), { target: { value: "20:00" } });
@@ -227,7 +232,12 @@ describe("最小管理界面", () => {
     await waitFor(() => expect(JSON.parse(patchBody).modelPolicy).toEqual({
       mode: "schedule",
       defaultModel: "deepseek-v4-flash",
-      windows: [{ start: "08:00", end: "20:00", model: "glm-4.5" }]
+      windows: [{
+        days: ["mon", "tue", "wed", "thu", "fri"],
+        start: "08:00",
+        end: "20:00",
+        model: "glm-4.5"
+      }]
     }));
   });
 
@@ -255,7 +265,7 @@ describe("最小管理界面", () => {
 
     expect(await screen.findByText("当前 Agent Core 没有暴露可选模型，因此不支持固定模型或定时切换。")).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "固定模型" })).toBeDisabled();
-    expect(screen.getByRole("option", { name: "按 UTC 时间段切换" })).toBeDisabled();
+    expect(screen.getByRole("option", { name: "按 UTC 星期和时间切换" })).toBeDisabled();
   });
 
   it("Fastify 对前端深层路由回退 index.html，但不把 API 404 伪装成页面", async () => {

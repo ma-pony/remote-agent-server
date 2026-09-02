@@ -1,7 +1,15 @@
 import { z } from "zod";
 
 const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+export const AGENT_MODEL_WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+export type AgentModelWeekday = typeof AGENT_MODEL_WEEKDAYS[number];
+const weekdaySchema = z.enum(AGENT_MODEL_WEEKDAYS);
+const weekdaysSchema = z.array(weekdaySchema).min(1).max(7).refine(
+  (days) => new Set(days).size === days.length,
+  { message: "Model schedule weekdays must be unique" }
+);
 const modelWindowSchema = z.object({
+  days: weekdaysSchema,
   start: timeSchema,
   end: timeSchema,
   model: z.string().trim().min(1).max(255)
@@ -33,6 +41,7 @@ const parseTime = (value: string): number => {
   const [hours, minutes] = value.split(":").map(Number);
   return hours * 60 + minutes;
 };
+const utcWeekday = (date: Date): AgentModelWeekday => AGENT_MODEL_WEEKDAYS[(date.getUTCDay() + 6) % 7];
 
 /** Resolves the model immediately before a Run starts. All policy times are UTC. */
 export const resolveModelPolicy = (policy: AgentModelPolicy, now: Date): string | undefined => {
@@ -40,7 +49,9 @@ export const resolveModelPolicy = (policy: AgentModelPolicy, now: Date): string 
   if (policy.mode === "fixed") return policy.model;
 
   const currentMinute = minuteOfDay(now);
-  const window = policy.windows.find((candidate) => currentMinute >= parseTime(candidate.start)
+  const currentWeekday = utcWeekday(now);
+  const window = policy.windows.find((candidate) => candidate.days.includes(currentWeekday)
+    && currentMinute >= parseTime(candidate.start)
     && currentMinute < parseTime(candidate.end));
   return window?.model ?? policy.defaultModel;
 };

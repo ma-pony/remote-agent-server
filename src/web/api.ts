@@ -20,7 +20,12 @@ export type AgentModelPolicy =
   | {
     mode: "schedule";
     defaultModel: string;
-    windows: Array<{ start: string; end: string; model: string }>;
+    windows: Array<{
+      days: Array<"mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun">;
+      start: string;
+      end: string;
+      model: string;
+    }>;
   };
 
 export type AgentModelCatalog = {
