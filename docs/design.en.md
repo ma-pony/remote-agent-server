@@ -108,7 +108,38 @@ Runs inside one session are serial. Different sessions may run concurrently with
 
 Selectable models come exclusively from the catalog advertised by Agent Core over ACP. When a Core does not advertise models, the agent can only use the Core's default behavior. A time policy does not change the Session lifecycle or create a new business Session for a model switch; the resolved model is stored on the Run.
 
-### 6.2 External tasks
+### 6.2 Model discovery, policy, and audit
+
+Model routing builds on the Agent Core's ACP configuration support instead of maintaining a separate global model registry:
+
+1. `GET /api/agents/:id/models` starts a short-lived probe with the agent's current provider, instructions, and ready project environment. It reads `currentModel` and `availableModels` from ACP status, then closes the probe process.
+2. The console only offers entries from `availableModels`. Before `PATCH /api/agents/:id` saves a policy, the server refreshes the catalog and rejects fixed or scheduled policies when the Core does not support model discovery or a selected model has disappeared.
+3. A queued run does not reserve a model. The executor resolves the policy against the current UTC time only after it obtains a concurrency slot and marks the run as `running`.
+4. The runtime creates or resumes the same ACP session and applies the resolved `model` option before sending the turn input. A switch does not create a new business Session, workspace, or Conversation.
+5. An explicitly resolved model is stored as the run's `resolvedModel` for the Session page, management API, and Integration Task audit trail. The field is `null` when selection is fully delegated to a Core that does not advertise its default.
+
+An agent accepts three `modelPolicy` shapes:
+
+```json
+{ "mode": "provider_default" }
+
+{ "mode": "fixed", "model": "core-advertised-model-id" }
+
+{
+  "mode": "schedule",
+  "defaultModel": "model-used-outside-windows",
+  "windows": [
+    { "start": "00:00", "end": "08:00", "model": "model-a" },
+    { "start": "08:00", "end": "18:00", "model": "model-b" }
+  ]
+}
+```
+
+The API accepts UTC `HH:mm` values from `00:00` through `23:59`, and a window's end must be later than its start. Each window includes its start and excludes its end, while `defaultModel` applies outside all windows. If windows overlap, the first matching window in configuration order wins. A policy can contain at most 16 windows.
+
+An active run keeps the model resolved at startup and ignores policy edits made mid-turn. A queued run uses the latest agent policy and UTC time when it actually starts. This prevents queue delay from selecting a scheduled model too early and preserves multi-turn context inside one Session.
+
+### 6.3 External tasks
 
 1. The caller submits a `requestId`, optional `conversationKey`, message, and declared parameters with an endpoint token.
 2. The server performs endpoint-scoped idempotency checks.

@@ -4,7 +4,7 @@
 
 Remote Agent Server is a self-hosted ACP agent execution gateway for business applications. Callers submit asynchronous tasks over HTTP. The server runs command-line agents such as Claude Code and Codex in isolated workspaces, then returns progress and results through status queries, events, SSE, or signed Webhooks.
 
-It turns existing agent CLIs into a durable backend for ticketing systems, CI/CD, internal platforms, and automation services. Operators use the web console to configure agents, project environments, Skills, provider extensions, MCP, concurrency, and integration endpoints. External callers need only an endpoint token and the stable Task API.
+It turns existing agent CLIs into a durable backend for ticketing systems, CI/CD, internal platforms, and automation services. Operators use the web console to configure agents, project environments, Skills, provider extensions, MCP, model policies, concurrency, and integration endpoints. External callers need only an endpoint token and the stable Task API.
 
 The execution layer uses [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol). The current provider adapters support Claude Code, Codex, and Hermes.
 
@@ -46,7 +46,7 @@ Integration endpoint (auth / parameter mapping / idempotency)
    v
 Task -> Conversation -> Session -> isolated Workspace -> acpx/ACP -> Provider
    |                         |
-   |                         +-> Skills / provider extensions / MCP
+   |                         +-> Skills / provider extensions / MCP / model policy
    |
    +-> status / event history / SSE / signed Webhook
 ```
@@ -62,7 +62,7 @@ Project environment -> Agent -> Session -> Run -> acpx/ACP -> Provider
 | Object | Purpose |
 | --- | --- |
 | Project environment | A versioned, prepared set of one or more Git repositories. |
-| Agent | A provider, project environment, instructions, Skills, provider extensions, and MCP configuration. |
+| Agent | A provider, project environment, instructions, Skills, provider extensions, MCP, model policy, and concurrency policy. |
 | Session | An isolated workspace and a continuing agent conversation. |
 | Run | One input and its recorded execution inside a session. |
 | Integration endpoint | An authenticated external entry point bound to one agent. |
@@ -196,7 +196,21 @@ The agent page also provides:
 - **Run concurrency policy:** inherit the system run limit by default, or set an Agent-specific cap. The smaller limit is effective.
 - **Model policy:** model choices come from the current Agent Core; arbitrary model IDs cannot be entered. Follow the Core default, pin one model, or switch with daily UTC windows. The latter two modes are unavailable when the Core does not advertise models.
 
-The model policy is resolved when a run leaves the queue and actually starts, so queue delay cannot select a model too early. A switch reuses the same Session and provider conversation and updates only the ACP `model` option. It never interrupts an active run; the next run receives the new model. Each run records the resolved model for auditability.
+The model policy is resolved when a run leaves the queue and actually starts, so queue delay cannot select a model too early. A switch reuses the same Session and provider conversation and updates only the ACP `model` option. It never interrupts an active run; the next run receives the new model. Fixed and scheduled policies record the resolved model on every run for auditability.
+
+#### Model policy quick reference
+
+Open **Agents → target agent → Settings → Model policy**:
+
+| Mode | Behavior | Typical use |
+| --- | --- | --- |
+| Follow Agent Core default | Uses the default model currently advertised by the Core. | Let Codex, Claude Code, or another Core own model selection. |
+| Fixed model | Selects one model for every new run. | Keep one agent on a predictable model. |
+| Switch by UTC window | Uses the matching window's model and a fallback model outside all windows. | Switch automatically for model availability, cost, or throughput policies. |
+
+Windows use `HH:mm` UTC, repeat daily, include their start, and exclude their end. For example, `00:00–08:00` matches 00:00 through 07:59 UTC. Each window must stay within one UTC date, and the fallback model applies whenever no window matches. The server refreshes the Core catalog when the policy is saved and rejects models that are no longer advertised.
+
+A policy change affects only runs that start afterward. An active run does not switch, while a queued run resolves the policy against the UTC time at which it obtains an execution slot. The Session, workspace, and provider conversation remain in place. When the server resolves an explicit model, the Session page shows it and management API run responses expose it as `resolvedModel`. This field is `null` when the policy fully delegates to a Core that does not advertise its default. See [Product and architecture: Model discovery, policy, and audit](docs/design.en.md#62-model-discovery-policy-and-audit) for the API shapes and resolution flow.
 
 Changes to Skills, provider extensions, and MCP apply on the next run. When an existing session detects a configuration change, it refreshes the provider connection. If the provider supports resumption, the original Provider Session and conversation context continue.
 

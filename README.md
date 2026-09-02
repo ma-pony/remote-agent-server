@@ -4,7 +4,7 @@
 
 Remote Agent Server 是一个面向业务系统的自托管 ACP Agent 执行网关。调用方通过 HTTP 提交异步任务，服务在隔离 Workspace 中运行 Claude Code、Codex 等命令行 Agent，并通过状态查询、Event、SSE 或签名 Webhook 返回执行过程和结果。
 
-它把现有 Agent CLI 变成可嵌入工单系统、CI/CD、内部平台和自动化服务的持久化后端。Web 管理台负责配置 Agent、项目环境、Skills、执行器扩展、MCP、并发和接入端点；外部调用方只需要 Endpoint Token 和稳定的 Task API。
+它把现有 Agent CLI 变成可嵌入工单系统、CI/CD、内部平台和自动化服务的持久化后端。Web 管理台负责配置 Agent、项目环境、Skills、执行器扩展、MCP、模型策略、并发和接入端点；外部调用方只需要 Endpoint Token 和稳定的 Task API。
 
 执行层基于 [acpx](https://github.com/openclaw/acpx) 和 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol)。目前支持 Claude Code、Codex 和 Hermes Provider。
 
@@ -46,7 +46,7 @@ Agent 的推理、工具使用和原生会话仍由对应 Provider 负责。Remo
    v
 Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
    |                         |
-   |                         +-> Skills / 执行器扩展 / MCP
+   |                         +-> Skills / 执行器扩展 / MCP / 模型策略
    |
    +-> 状态查询 / Event 查询 / SSE / 签名 Webhook
 ```
@@ -62,7 +62,7 @@ Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
 | 对象 | 作用 |
 | --- | --- |
 | 项目环境 | 保存一个或多个 Git 项目及准备完成的依赖，按版本发布。 |
-| Agent | 绑定 Provider、项目环境、Agent 指令、Skills、执行器扩展和 MCP。 |
+| Agent | 绑定 Provider、项目环境、Agent 指令、Skills、执行器扩展、MCP、模型策略和并发策略。 |
 | Session | 一个隔离的 Workspace，也是一段可继续的 Agent 对话。 |
 | Run | Session 中的一次输入和完整执行记录。 |
 | 接入端点 | 其他系统调用服务的认证入口，绑定一个 Agent。 |
@@ -196,7 +196,21 @@ Agent 页面还可以配置：
 - **运行并发策略**：默认继承系统 Run 并发，也可以设置当前 Agent 的独立上限；实际上限取两者较小值。
 - **模型策略**：模型列表来自当前 Agent Core，不允许手填未配置的模型。可以跟随 Core 默认模型、固定一个模型，或用 UTC 每日时间段切换；Core 未暴露模型列表时后两项不可用。
 
-模型策略在 Run 离开队列、真正开始执行时解析，因此排队时间不会导致提前选错模型。切换复用同一个 Session 和 Provider 对话上下文，只更新 ACP `model` 配置；不会中断正在执行的 Run，下一次 Run 才使用新模型。每个 Run 会记录实际解析出的模型，便于审计。
+模型策略在 Run 离开队列、真正开始执行时解析，因此排队时间不会导致提前选错模型。切换复用同一个 Session 和 Provider 对话上下文，只更新 ACP `model` 配置；不会中断正在执行的 Run，下一次 Run 才使用新模型。固定或定时策略会在每个 Run 上记录实际解析出的模型，便于审计。
+
+#### 模型策略速查
+
+进入 **Agent → 目标 Agent → 设置 → 模型策略** 配置：
+
+| 模式 | 行为 | 适合场景 |
+| --- | --- | --- |
+| 跟随 Agent Core 默认模型 | 使用 Core 当前公开的默认模型。 | 由 Codex、Claude Code 等 Core 统一管理模型。 |
+| 固定模型 | 每个新 Run 都选择同一个模型。 | 一个 Agent 需要稳定使用指定模型。 |
+| 按 UTC 时间段切换 | 命中时间段时使用其模型，其他时间使用兜底模型。 | 按模型可用时段、成本或吞吐策略自动切换。 |
+
+时间段使用 `HH:mm` UTC，每天重复，开始时间包含、结束时间不包含。例如 `00:00–08:00` 命中 UTC 00:00 至 07:59。窗口必须在同一个 UTC 日期内，未命中的时间使用兜底模型。保存时服务会重新读取 Core 模型目录，并拒绝已经不在目录中的模型。
+
+策略修改只影响之后真正开始的 Run：正在执行的 Run 不切换，仍在队列中的 Run 会在获得执行槽位时按当时 UTC 时间解析。Session、Workspace 和 Provider 对话上下文都会继续复用。服务解析出明确模型时，Session 页面会在 Run 上展示它，管理 API 也会在 `resolvedModel` 字段中返回；完全跟随且 Core 未公开默认模型时，该字段为 `null`。接口配置格式与解析顺序见[产品与架构：模型发现、策略与审计](docs/design.md#62-模型发现策略与审计)。
 
 Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Session 检测到配置变化后会刷新执行器连接；Provider 支持时，会继续原有 Provider Session 和对话上下文。
 

@@ -108,7 +108,38 @@ Web 控制台复用同一套 Session、Run 和 Event 模型。控制台创建的
 
 可选模型完全以 Agent Core 通过 ACP 返回的目录为准。Core 没有暴露模型列表时，Agent 只能使用 Core 默认行为。时间策略不改变 Session 生命周期，也不会为了切换模型创建新的业务 Session；实际模型写入 Run 记录。
 
-### 6.2 外部 Task
+### 6.2 模型发现、策略与审计
+
+模型路由建立在 Agent Core 的 ACP 配置能力上，不维护一份脱离 Core 的全局模型表：
+
+1. `GET /api/agents/:id/models` 使用 Agent 当前 Provider、指令和可用项目环境启动一次短生命周期探测，通过 ACP 状态读取 `currentModel` 和 `availableModels`，读取完成后关闭探测进程。
+2. 管理台只允许从 `availableModels` 中选择。`PATCH /api/agents/:id` 保存策略前会重新发现目录；Core 不支持模型目录或模型已经下线时，服务拒绝固定/定时策略。
+3. Run 在队列中不预选模型。执行器获得并发槽位、把 Run 标为 `running` 后，才按当前 UTC 时刻解析策略。
+4. Runtime 创建或恢复同一个 ACP Session，并在发送本轮输入前应用解析出的 `model` 配置。模型切换不会创建新的业务 Session、Workspace 或 Conversation。
+5. 明确解析出的模型写入 Run 的 `resolvedModel`，供 Session 页面、管理 API 和 Integration Task 查询审计。完全委托给 Core 且 Core 未公开默认模型时，该字段为 `null`。
+
+Agent 的 `modelPolicy` 有三种格式：
+
+```json
+{ "mode": "provider_default" }
+
+{ "mode": "fixed", "model": "core-advertised-model-id" }
+
+{
+  "mode": "schedule",
+  "defaultModel": "model-used-outside-windows",
+  "windows": [
+    { "start": "00:00", "end": "08:00", "model": "model-a" },
+    { "start": "08:00", "end": "18:00", "model": "model-b" }
+  ]
+}
+```
+
+API 接受的时间必须是 `00:00` 至 `23:59` 之间的 UTC `HH:mm`，且结束时间必须晚于开始时间。每个窗口开始时间包含、结束时间不包含，窗口外使用 `defaultModel`；多个窗口重叠时，配置中排在前面的窗口优先。策略最多包含 16 个窗口。
+
+运行中的 Run 使用启动时已经解析的模型，不响应中途配置修改。排队中的 Run 则使用真正开始时的最新 Agent 策略和 UTC 时间。这样时间策略不会因排队延迟而提前切换，也不会破坏同一 Session 的多轮上下文。
+
+### 6.3 外部 Task
 
 1. 调用方使用 Endpoint Token 提交 `requestId`、可选 `conversationKey`、消息和声明过的参数。
 2. 服务在 Endpoint 范围内执行幂等检查。

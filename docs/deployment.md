@@ -372,6 +372,34 @@ sudo -u remote-agent -H bash -lc '
 
 Smoke 只覆盖三个 Provider 的顺序双轮真实连通性。仍须在目标服务器验收：两个不同 Session 并发、断开并重新连接 SSE 后 `seq` 不缺失/不重复、Session 修改不污染项目环境或另一个 Session、浏览器任务只在该 Session 的 `browser/` 产生 Profile、服务重启把在途 Run 标为 `failed/server_restarted` 且不重放输入。
 
+### 6.1 验证模型目录与模型策略
+
+需要固定模型或按 UTC 自动切换时，先确认目标 Agent Core 确实通过 ACP 暴露了模型目录。管理台打开 **Agent → 目标 Agent → 设置 → 模型策略** 时会执行同一项检查，也可以直接调用管理 API：
+
+```bash
+export REMOTE_AGENT_URL=http://127.0.0.1:3000
+export API_TOKEN='<服务器 .env 中的 API_TOKEN>'
+export AGENT_ID='<目标 Agent ID>'
+
+curl --fail-with-body \
+  -H "Authorization: Bearer $API_TOKEN" \
+  "$REMOTE_AGENT_URL/api/agents/$AGENT_ID/models"
+```
+
+可用响应包含 `supported: true`、`currentModel` 和非空 `availableModels`。`supported: false` 表示该 Core 只能使用默认模型行为，不能通过 Remote Agent Server 配置固定或定时策略；不要手填模型 ID 绕过目录。
+
+在页面保存固定或 UTC 时间段策略后，创建一个真实 Run，并检查实际解析结果：
+
+```bash
+export RUN_ID='<刚完成的 Run ID>'
+
+curl --fail-with-body \
+  -H "Authorization: Bearer $API_TOKEN" \
+  "$REMOTE_AGENT_URL/api/runs/$RUN_ID"
+```
+
+响应的 `resolvedModel` 应与 Run 真正开始时命中的策略一致。验收定时策略时，以 UTC 时间和 Run 的实际开始时间为准，不使用提交时间或排队时间。第二个 Run 可以继续使用同一个 Session；模型变化不应创建新的 Session、Workspace 或 Conversation，也不应丢失上一轮 Provider 对话上下文。
+
 ## 7. 外部系统接入
 
 ### 7.1 创建接入端点并保存 Token
