@@ -248,7 +248,7 @@ it("Skills 列表可选择只删除当前副本或删除所有上传副本", asy
   fireEvent.click(screen.getByRole("button", { name: "删除 uploaded-review" }));
   fireEvent.click(screen.getByRole("button", { name: "从所有智能体删除" }));
   await waitFor(() => expect(deletedScopes).toEqual(["current", "all"]));
-  expect(await screen.findByText("暂无匹配的技能。")).toBeInTheDocument();
+  expect(await screen.findByText("还没有可用技能")).toBeInTheDocument();
 });
 
 it("新建支持的 Agent 时提交智能体指令，Hermes 明确禁用该配置", async () => {

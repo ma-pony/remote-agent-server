@@ -96,7 +96,7 @@ it("会话列表支持按智能体和状态筛选", async () => {
     `/api/sessions?page=1&pageSize=20&agentId=${agent.id}&status=running`,
     expect.objectContaining({ signal: expect.any(AbortSignal) })
   ));
-  expect(await screen.findByText("没有匹配的会话。")).toBeVisible();
+  expect(await screen.findByText("没有匹配结果")).toBeVisible();
 });
 
 it("列表支持翻页并把搜索交给服务端", async () => {

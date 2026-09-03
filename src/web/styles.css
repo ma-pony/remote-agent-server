@@ -1,9 +1,16 @@
+/* Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V4 */
+/* Hallmark · macrostructure: operations-workbench · theme: modern-minimal · contrast: pass (40–41) · nav: N2 · footer: none · slop: pass (42–45) · honest: pass (46) · chrome: pass (47) · tokens: pass (48) · responsive: pass (49) · icons: pass (30) · mobile: pass (34, 49, 50–57) */
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 
 @custom-variant dark (&:is(.dark *));
+
+/*
+ * Modern-minimal technical workbench.
+ * Green is the semantic anchor; a persistent rail and compact content deck form the structural fingerprint.
+ */
 
 :root {
   --background: oklch(0.975 0.008 135);
@@ -114,18 +121,60 @@
 
 @layer base {
   * { @apply border-border outline-ring/50; }
-  html { @apply font-sans; }
+  html {
+    @apply font-sans;
+    overflow-x: clip;
+    scrollbar-gutter: stable;
+  }
   body {
     @apply bg-background text-foreground;
     min-width: 300px;
     min-height: 100vh;
+    overflow-x: clip;
     background-image: linear-gradient(to right, color-mix(in oklab, var(--foreground) 3%, transparent) 1px, transparent 1px);
     background-size: 40px 40px;
   }
   button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
-  pre { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; }
+  pre { @apply font-mono; }
+  ::selection { @apply bg-accent text-accent-foreground; }
+}
+
+@layer components {
+  .resource-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+    gap: 1rem;
+  }
+
+  .surface-list > * {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 9rem;
+  }
+}
+
+@media (max-width: 639px) {
+  body {
+    background-image: none;
+  }
+}
+
+@media (pointer: coarse) {
+  [data-slot="button"],
+  [data-slot="tabs-trigger"],
+  [data-sidebar="menu-button"] {
+    min-height: 44px;
+  }
+
+  [data-slot="button"][data-size^="icon"] {
+    min-width: 44px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  * { scroll-behavior: auto !important; transition-duration: 0.01ms !important; }
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

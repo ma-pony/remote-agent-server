@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Cable, CheckCircle2, Copy, Plus, RefreshCw, Search, Settings2, ShieldCheck, Trash2, Upload, XCircle } from "lucide-react";
+import { ArrowLeft, Bot, Cable, CheckCircle2, Copy, Plus, RefreshCw, Search, Settings2, ShieldCheck, Trash2, Upload, XCircle } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams } from "react-router";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -19,7 +19,7 @@ import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { PageHeader } from "@/components/page-header";
+import { EmptyState, PageContainer, PageHeader } from "@/components/page-header";
 import { TokenUsageSummaryCard } from "@/components/token-usage";
 import {
   api, errorMessage, type Agent, type AgentDoctorResult, type AgentModelCatalog, type AgentModelPolicy,
@@ -173,17 +173,18 @@ export const AgentListPage = () => {
   const environmentNames = useMemo(() => new Map(environments.map((item) => [item.id, item.name])), [environments]);
   const visible = (agents ?? []).filter((agent) => agent.name.toLowerCase().includes(query.trim().toLowerCase()));
 
-  return <div className="mx-auto w-full max-w-7xl p-4 sm:p-6 lg:p-8">
+  return <PageContainer width="wide">
     <PageHeader eyebrow={text("执行配置", "EXECUTION PROFILES")} title={text("智能体", "Agents")} description={text("选择一个智能体查看运行状态、管理技能或修改配置。", "Select an agent to inspect its status, manage skills, or update configuration.")}
       action={<Button asChild><Link to="/agents/new"><Plus />{text("新建智能体", "New agent")}</Link></Button>} />
     <ErrorAlert message={error} />
-    <div className="mb-5 flex max-w-sm items-center gap-2 rounded-lg border bg-card px-3">
+    <div className="mb-5 flex max-w-md items-center gap-2 rounded-xl border bg-card px-3 shadow-sm">
       <Search className="size-4 text-muted-foreground" aria-hidden="true" />
-      <Input aria-label={text("搜索智能体", "Search agents")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("按名称搜索", "Search by name")} value={query} onChange={(event) => setQuery(event.target.value)} />
+      <Input type="search" name="agent-search" aria-label={text("搜索智能体", "Search agents")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("按名称搜索", "Search by name")} value={query} onChange={(event) => setQuery(event.target.value)} />
+      {agents === null ? null : <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground" aria-live="polite">{visible.length}</span>}
     </div>
-    {agents === null ? <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-44" />)}</div>
-      : visible.length === 0 ? <Card className="border-dashed"><CardContent className="py-16 text-center text-muted-foreground">{agents.length === 0 ? text("暂无智能体，先创建一个执行入口。", "No agents yet. Create an execution profile first.") : text("没有匹配的智能体。", "No matching agents.")}</CardContent></Card>
-      : <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{visible.map((agent) => <Card key={agent.id} className="transition-colors hover:border-primary/50">
+    {agents === null ? <div className="resource-grid">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-44" />)}</div>
+      : visible.length === 0 ? <EmptyState icon={Bot} title={agents.length === 0 ? text("还没有智能体", "No agents yet") : text("没有匹配结果", "No matching results")} description={agents.length === 0 ? text("创建智能体并绑定项目环境，开始运行独立任务。", "Create an agent, assign a project environment, and start isolated work.") : text("调整搜索词，或清除搜索查看全部智能体。", "Change the search term or clear it to see every agent.")} action={agents.length === 0 ? <Button asChild><Link to="/agents/new"><Plus />{text("新建智能体", "New agent")}</Link></Button> : <Button variant="outline" onClick={() => setQuery("")}>{text("清除搜索", "Clear search")}</Button>} />
+      : <div className="resource-grid">{visible.map((agent) => <Card key={agent.id} className="h-full transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40">
         <CardHeader>
           <div className="flex items-start justify-between gap-4">
             <div><CardTitle><Link className="hover:underline" to={`/agents/${agent.id}`}>{agent.name}</Link></CardTitle><CardDescription className="mt-2">{providerNames[agent.provider]}</CardDescription></div>
@@ -192,7 +193,7 @@ export const AgentListPage = () => {
         </CardHeader>
         <CardContent className="flex items-center justify-between gap-3 text-sm text-muted-foreground"><p className="min-w-0 truncate"><span className="font-medium text-foreground">{text("项目环境：", "Project environment: ")}</span>{agent.projectEnvironmentId === null ? text("未绑定", "Not assigned") : environmentNames.get(agent.projectEnvironmentId) ?? text("环境不可用", "Environment unavailable")}</p><AgentCloneDialog key={agent.id} agent={agent} /></CardContent>
       </Card>)}</div>}
-  </div>;
+  </PageContainer>;
 };
 
 export const AgentCreatePage = () => {
@@ -229,26 +230,26 @@ export const AgentCreatePage = () => {
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   };
 
-  return <div className="mx-auto w-full max-w-3xl p-4 sm:p-6 lg:p-8">
+  return <PageContainer width="form" className="max-w-3xl">
     <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />{text("返回智能体", "Back to agents")}</Link></Button>
     <PageHeader eyebrow={text("新建执行配置", "NEW EXECUTION PROFILE")} title={text("新建智能体", "New agent")} description={text("执行器创建后不可修改；名称、项目环境、智能体指令和技能可随时调整。", "The provider cannot be changed after creation. Name, environment, instructions, and skills remain editable.")} />
     <ErrorAlert message={error} />
     <Card><CardHeader><CardTitle>{text("基础配置", "Basic configuration")}</CardTitle><CardDescription>{text("绑定一个已准备完成的项目环境。", "Assign a prepared project environment.")}</CardDescription></CardHeader>
       <CardContent><form className="flex flex-col gap-6" onSubmit={submit}><FieldGroup>
-        <Field><FieldLabel htmlFor="agent-name">{text("智能体名称", "Agent name")}</FieldLabel><Input id="agent-name" value={name} onChange={(event) => setName(event.target.value)} autoFocus /></Field>
-        <Field><FieldLabel htmlFor="provider">{text("执行器", "Provider")}</FieldLabel><NativeSelect id="provider" className="w-full" value={provider} onChange={(event) => {
+        <Field><FieldLabel htmlFor="agent-name">{text("智能体名称", "Agent name")}</FieldLabel><Input id="agent-name" name="agent-name" value={name} onChange={(event) => setName(event.target.value)} /></Field>
+        <Field><FieldLabel htmlFor="provider">{text("执行器", "Provider")}</FieldLabel><NativeSelect id="provider" name="provider" className="w-full" value={provider} onChange={(event) => {
           const nextProvider = event.target.value as Provider;
           setProvider(nextProvider);
           if (nextProvider === "hermes") setInstructions("");
         }}>{Object.entries(providerNames).map(([value, label]) => <NativeSelectOption key={value} value={value}>{label}</NativeSelectOption>)}</NativeSelect></Field>
-        <Field data-disabled={provider === "hermes" || undefined}><FieldLabel htmlFor="agent-instructions">{text("智能体指令", "Agent instructions")}</FieldLabel><Textarea id="agent-instructions" rows={6} value={instructions} disabled={provider === "hermes"} placeholder={text("说明这个智能体长期遵循的角色、边界和工作方式", "Describe the agent's persistent role, boundaries, and working style")} onChange={(event) => setInstructions(event.target.value)} />
+        <Field data-disabled={provider === "hermes" || undefined}><FieldLabel htmlFor="agent-instructions">{text("智能体指令", "Agent instructions")}</FieldLabel><Textarea id="agent-instructions" name="agent-instructions" rows={6} value={instructions} disabled={provider === "hermes"} placeholder={text("说明这个智能体长期遵循的角色、边界和工作方式", "Describe the agent's persistent role, boundaries, and working style")} onChange={(event) => setInstructions(event.target.value)} />
           <FieldDescription>{provider === "hermes" ? text("Hermes 当前不支持智能体指令", "Hermes does not currently support agent instructions") : text("创建会话时保存快照；之后修改只影响新会话。", "Instructions are snapshotted when a session is created; later edits affect new sessions only.")}</FieldDescription>
         </Field>
-        <Field><FieldLabel htmlFor="agent-environment">{text("项目环境", "Project environment")}</FieldLabel><NativeSelect id="agent-environment" className="w-full" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}><NativeSelectOption value="" disabled>{text("请选择可用环境", "Select a ready environment")}</NativeSelectOption>{environments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect>{environments.length === 0 ? <FieldDescription>{text("暂无已准备完成的项目环境。", "No prepared project environments.")}</FieldDescription> : null}</Field>
-        <div className="flex justify-end gap-2"><Button variant="outline" asChild><Link to="/agents">{text("取消", "Cancel")}</Link></Button><Button type="submit" disabled={busy || projectEnvironmentId === ""}>{busy ? text("创建中…", "Creating…") : text("创建智能体", "Create agent")}</Button></div>
+        <Field><FieldLabel htmlFor="agent-environment">{text("项目环境", "Project environment")}</FieldLabel><NativeSelect id="agent-environment" name="agent-environment" className="w-full" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}><NativeSelectOption value="" disabled>{text("请选择可用环境", "Select a ready environment")}</NativeSelectOption>{environments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect>{environments.length === 0 ? <FieldDescription>{text("暂无已准备完成的项目环境。", "No prepared project environments.")}</FieldDescription> : null}</Field>
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" asChild><Link to="/agents">{text("取消", "Cancel")}</Link></Button><Button type="submit" disabled={busy || projectEnvironmentId === ""}>{busy ? text("创建中…", "Creating…") : text("创建智能体", "Create agent")}</Button></div>
       </FieldGroup></form></CardContent>
     </Card>
-  </div>;
+  </PageContainer>;
 };
 
 type AgentDetailContext = { agent: Agent; setAgent(agent: Agent): void };
@@ -282,7 +283,7 @@ const AgentCloneDialog = ({ agent }: { agent: Agent }) => {
     <DialogTrigger asChild><Button size="sm" variant="outline"><Copy />{text("复制创建", "Duplicate")}</Button></DialogTrigger>
     <DialogContent><form onSubmit={submit}>
       <DialogHeader><DialogTitle>{text("复制创建智能体", "Duplicate agent")}</DialogTitle><DialogDescription>{text("复制执行器配置、项目环境、智能体指令、技能和 MCP；不会复制会话、用量、接入端点或执行历史。", "Copies the provider configuration, environment, instructions, Skills, and MCP. Sessions, usage, endpoints, and execution history are excluded.")}</DialogDescription></DialogHeader>
-      <div className="py-5"><Field><FieldLabel htmlFor="clone-agent-name">{text("新智能体名称", "New agent name")}</FieldLabel><Input id="clone-agent-name" value={name} autoFocus onChange={(event) => setName(event.target.value)} /></Field></div>
+      <div className="py-5"><Field><FieldLabel htmlFor="clone-agent-name">{text("新智能体名称", "New agent name")}</FieldLabel><Input id="clone-agent-name" name="clone-agent-name" value={name} onChange={(event) => setName(event.target.value)} /></Field></div>
       {error === "" ? null : <Alert variant="destructive" className="mb-4"><XCircle /><AlertTitle>{text("复制失败", "Duplication failed")}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
       <DialogFooter><Button type="button" variant="outline" onClick={() => setOpen(false)}>{text("取消", "Cancel")}</Button><Button type="submit" disabled={busy || name.trim() === ""}>{busy ? text("复制中…", "Duplicating…") : text("创建副本", "Create copy")}</Button></DialogFooter>
     </form></DialogContent>
@@ -303,17 +304,17 @@ export const AgentDetailLayout = () => {
     return () => controller.abort();
   }, [id]);
   const section = pathname.endsWith("/skills") ? "skills" : pathname.endsWith("/extensions") ? "extensions" : pathname.endsWith("/parameters") ? "parameters" : pathname.endsWith("/mcp") ? "mcp" : pathname.endsWith("/settings") ? "settings" : "overview";
-  if (error !== "") return <div className="mx-auto max-w-5xl p-8"><ErrorAlert message={error} /><Button asChild variant="outline" className="mt-4"><Link to="/agents">{text("返回智能体", "Back to agents")}</Link></Button></div>;
-  if (agent === null) return <div className="mx-auto max-w-5xl p-8"><Skeleton className="h-10 w-72" /><Skeleton className="mt-8 h-64" /></div>;
+  if (error !== "") return <PageContainer><ErrorAlert message={error} /><Button asChild variant="outline" className="mt-4"><Link to="/agents">{text("返回智能体", "Back to agents")}</Link></Button></PageContainer>;
+  if (agent === null) return <PageContainer><Skeleton className="h-10 w-72" /><Skeleton className="mt-8 h-64" /></PageContainer>;
 
-  return <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
+  return <PageContainer>
     <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />{text("返回智能体", "Back to agents")}</Link></Button>
     <PageHeader eyebrow={providerNames[agent.provider]} title={agent.name} description={text("项目环境、运行检查和技能均在这个智能体范围内管理。", "Project environment, runtime checks, and skills are managed within this agent.")} action={<div className="flex items-center gap-2"><AgentCloneDialog key={agent.id} agent={agent} /><Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div>} />
     <Tabs value={section} onValueChange={(value) => navigate(value === "overview" ? `/agents/${id}` : `/agents/${id}/${value}`)}>
       <TabsList variant="line" aria-label={text("智能体管理", "Agent management")}><TabsTrigger value="overview">{text("概览", "Overview")}</TabsTrigger><TabsTrigger value="skills">{text("技能", "Skills")}</TabsTrigger><TabsTrigger value="extensions">{text("扩展", "Extensions")}</TabsTrigger><TabsTrigger value="parameters">{text("会话参数", "Session parameters")}</TabsTrigger><TabsTrigger value="mcp">MCP</TabsTrigger><TabsTrigger value="settings">{text("设置", "Settings")}</TabsTrigger></TabsList>
     </Tabs>
     <div className="mt-6"><Outlet context={{ agent, setAgent } satisfies AgentDetailContext} /></div>
-  </div>;
+  </PageContainer>;
 };
 
 export const AgentOverviewPage = () => {
@@ -424,7 +425,7 @@ export const AgentSkillsPage = () => {
       <Button variant="outline" asChild><label><Upload />{busy === "upload" ? text("上传中…", "Uploading…") : text("上传 ZIP 到共享库", "Upload ZIP to shared library")}<input className="sr-only" type="file" accept=".zip,application/zip" disabled={busy !== ""} onChange={(event) => void upload(event.target.files?.[0], event.currentTarget)} /></label></Button>
     </div>
     <p className="text-sm text-muted-foreground">{text(`已启用 ${(skills ?? []).filter((item) => item.enabled).length} / ${(skills ?? []).length}。配置会在下一次运行生效。`, `${(skills ?? []).filter((item) => item.enabled).length} / ${(skills ?? []).length} enabled. Changes apply to the next run.`)}</p>
-    {skills === null ? <Skeleton className="h-64" /> : visible.length === 0 ? <Card className="border-dashed"><CardContent className="py-12 text-center text-muted-foreground">{text("暂无匹配的技能。", "No matching skills.")}</CardContent></Card> : <div className="divide-y rounded-xl border bg-card">{visible.map((skill) => { const source = ({ codex: "Codex", agents: text("共享目录", "Shared directory"), claude: "Claude", plugin: text("插件", "Plugin"), upload: text("已上传", "Uploaded"), missing: text("来源已移除", "Source removed") } satisfies Record<AgentSkill["source"], string>)[skill.source]; return <div key={skill.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex items-center gap-2"><p className="font-medium">{skill.name}</p><Badge variant="outline">{source}</Badge>{!skill.available ? <Badge variant="destructive">{text("不可用", "Unavailable")}</Badge> : null}</div><p className="mt-1 line-clamp-1 text-sm text-muted-foreground" title={skill.description || text("暂无说明", "No description")}>{skill.description || text("暂无说明", "No description")}</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button size="sm" variant={skill.enabled ? "outline" : "default"} disabled={busy !== "" || !skill.available} onClick={() => void toggle(skill)}>{skill.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button>{skill.enabled || skill.source === "upload" ? <AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="ghost" disabled={busy !== ""} aria-label={text(`删除 ${skill.name}`, `Delete ${skill.name}`)}><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${skill.name}”？`, `Delete “${skill.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("仅删除当前副本只影响当前智能体；从所有智能体删除会同时删除共享上传源和全部副本。", "Deleting only the current copy affects this agent. Deleting from all agents also removes the shared upload and every copy.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel>{skill.enabled ? <AlertDialogAction variant="outline" onClick={() => void remove(skill, "current")}>{text("仅删除当前", "Current agent only")}</AlertDialogAction> : null}{skill.source === "upload" ? <AlertDialogAction variant="destructive" onClick={() => void remove(skill, "all")}>{text("从所有智能体删除", "Delete from all agents")}</AlertDialogAction> : null}</AlertDialogFooter></AlertDialogContent></AlertDialog> : null}</div></div>; })}</div>}
+    {skills === null ? <Skeleton className="h-64" /> : visible.length === 0 ? <EmptyState icon={Search} title={query.trim() === "" ? text("还没有可用技能", "No skills available") : text("没有匹配的技能", "No matching skills")} description={query.trim() === "" ? text("从执行器目录发现技能，或上传一个技能 ZIP 到共享库。", "Discover skills from the provider directories or upload a Skill ZIP to the shared library.") : text("尝试更短的关键词，或清除搜索条件。", "Try a shorter keyword or clear the search.")} action={query.trim() === "" ? undefined : <Button type="button" variant="outline" onClick={() => setQuery("")}>{text("清除搜索", "Clear search")}</Button>} /> : <div className="surface-list divide-y rounded-xl border bg-card">{visible.map((skill) => { const source = ({ codex: "Codex", agents: text("共享目录", "Shared directory"), claude: "Claude", plugin: text("插件", "Plugin"), upload: text("已上传", "Uploaded"), missing: text("来源已移除", "Source removed") } satisfies Record<AgentSkill["source"], string>)[skill.source]; return <div key={skill.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{skill.name}</p><Badge variant="outline">{source}</Badge>{!skill.available ? <Badge variant="destructive">{text("不可用", "Unavailable")}</Badge> : null}</div><p className="mt-1 line-clamp-1 text-sm text-muted-foreground" title={skill.description || text("暂无说明", "No description")}>{skill.description || text("暂无说明", "No description")}</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button size="sm" variant={skill.enabled ? "outline" : "default"} disabled={busy !== "" || !skill.available} onClick={() => void toggle(skill)}>{skill.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button>{skill.enabled || skill.source === "upload" ? <AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="ghost" disabled={busy !== ""} aria-label={text(`删除 ${skill.name}`, `Delete ${skill.name}`)}><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${skill.name}”？`, `Delete “${skill.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("仅删除当前副本只影响当前智能体；从所有智能体删除会同时删除共享上传源和全部副本。", "Deleting only the current copy affects this agent. Deleting from all agents also removes the shared upload and every copy.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel>{skill.enabled ? <AlertDialogAction variant="outline" onClick={() => void remove(skill, "current")}>{text("仅删除当前", "Current agent only")}</AlertDialogAction> : null}{skill.source === "upload" ? <AlertDialogAction variant="destructive" onClick={() => void remove(skill, "all")}>{text("从所有智能体删除", "Delete from all agents")}</AlertDialogAction> : null}</AlertDialogFooter></AlertDialogContent></AlertDialog> : null}</div></div>; })}</div>}
   </div>;
 };
 

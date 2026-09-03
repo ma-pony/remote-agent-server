@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronDown, Send, Settings2, Square, XCircle } from "lucide-react";
+import { ArrowLeft, ChevronDown, MessageSquare, Send, Settings2, Square, XCircle } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 
 import { api, errorMessage, isRunStreamPermanentError, streamRunEvents, type Agent, type Run, type RunEvent, type RunStatus, type SessionDetail } from "../api.js";
@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { Field, FieldLabel } from "@/components/ui/field";
-import { PageHeader } from "@/components/page-header";
+import { EmptyState, PageContainer, PageHeader } from "@/components/page-header";
 import { TokenUsageSummaryCard } from "@/components/token-usage";
 import { SessionDeleteDialog } from "./session-pages.js";
 import { useI18n } from "@/i18n";
@@ -301,7 +301,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     || activeRunId !== null || submitting || !mcpParametersValid;
 
   return (
-    <div className="mx-auto w-full max-w-5xl p-4 sm:p-6 lg:p-8">
+    <PageContainer>
       <Button asChild variant="ghost" className="mb-4"><Link to="/sessions"><ArrowLeft />{text("返回会话", "Back to sessions")}</Link></Button>
       <PageHeader eyebrow={text(`会话 / ${initialLoading ? "加载中" : session !== null && session.storageCleanedAt != null ? "已归档" : activeRunId !== null ? "运行中" : "空闲"}`, `SESSION / ${initialLoading ? "LOADING" : session !== null && session.storageCleanedAt != null ? "ARCHIVED" : activeRunId !== null ? "RUNNING" : "IDLE"}`)} title={session?.title ?? text("加载会话…", "Loading session…")} description={agentName === "" ? text("正在读取智能体…", "Loading agent…") : text(`智能体 · ${agentName}`, `Agent · ${agentName}`)} action={<div className="flex items-center gap-2">{session === null ? null : <Button asChild size="sm" variant="outline"><Link to={`/sessions/${session.id}/settings`}><Settings2 />{text("设置", "Settings")}</Link></Button>}<Badge variant={session !== null && session.storageCleanedAt != null ? "outline" : activeRunId === null ? "secondary" : "default"}>{session !== null && session.storageCleanedAt != null ? text("存储已清理", "Storage cleaned") : activeRunId === null ? text("空闲", "Idle") : text("活动中", "Active")}</Badge>{session === null ? null : <SessionDeleteDialog session={activeRunId === null ? session : { ...session, status: "running" }} onDeleted={() => navigate("/sessions")} onError={setError} />}</div>} />
       {session?.usageSummary === undefined ? null : <div className="mt-6"><TokenUsageSummaryCard headingLevel={2} title={text("累计 Token 用量", "Cumulative token usage")} summary={session.usageSummary} /></div>}
@@ -312,17 +312,17 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       </div>
       <section className="mt-6 flex flex-col gap-5" aria-label={text("运行历史", "Run history")} aria-live="polite">
         {session?.hasOlderRuns ? <Button className="self-center" variant="outline" type="button" disabled={loadingOlder} onClick={() => void loadOlderRuns()}>{loadingOlder ? text("加载中…", "Loading…") : text("加载更早记录", "Load earlier runs")}</Button> : null}
-        {views.length === 0 && session !== null ? <Card className="border-dashed"><CardContent className="py-14 text-center text-muted-foreground">{session.storageCleanedAt == null ? text("还没有消息，输入任务开始第一轮。", "No messages yet. Enter a task to start the first turn.") : text("该会话没有可展示的运行记录。", "This session has no run history to display.")}</CardContent></Card> : views.map((view) => <RunBlock key={view.run.id} view={view} />)}
+        {views.length === 0 && session !== null ? <EmptyState icon={MessageSquare} title={session.storageCleanedAt == null ? text("还没有运行记录", "No runs yet") : text("没有可展示的记录", "No run history available")} description={session.storageCleanedAt == null ? text("在下方输入任务，开始这个会话的第一轮运行。", "Enter a task below to start the first run in this session.") : text("该会话的磁盘内容已清理，历史统计仍会保留。", "The on-disk content was cleaned while historical statistics remain available.")} /> : <div className="surface-list contents">{views.map((view) => <RunBlock key={view.run.id} view={view} />)}</div>}
       </section>
       {session !== null && !mcpParametersValid ? <Alert className="mt-6"><XCircle /><AlertTitle>{text("缺少 MCP 参数", "Missing MCP parameters")}</AlertTitle><AlertDescription>{text("请先在", "Complete these in")} <Link className="underline" to={`/sessions/${session.id}/settings`}>{text("会话设置", "session settings")}</Link>{text(` 中填写：${missingMcpParameters.join("、")}`, `: ${missingMcpParameters.join(", ")}`)}</AlertDescription></Alert> : null}
-      <Card className="sticky bottom-4 mt-6 shadow-lg"><CardContent className="p-4"><form className="flex flex-col gap-3" onSubmit={send}>
+      <Card className="sticky bottom-3 z-10 mt-6 border-primary/20 bg-card/95 shadow-xl backdrop-blur"><CardContent className="p-4"><form className="flex flex-col gap-3" onSubmit={send}>
         <Field data-disabled={composerDisabled || undefined}><FieldLabel htmlFor="run-input">{text("发送给智能体", "Send to agent")}</FieldLabel><Textarea id="run-input" rows={3} value={input} onChange={(event) => setInput(event.target.value)} disabled={composerDisabled} placeholder={session !== null && session.storageCleanedAt != null ? text("会话存储已清理，无法继续发送", "Session storage was cleaned; no further runs are available") : activeRunId === null ? text("描述下一步任务…", "Describe the next task…") : text("当前运行结束后可继续输入", "Continue after the current run finishes")} /></Field>
         <div className="flex justify-end gap-2">
           {activeRunId !== null ? <Button type="button" variant="destructive" onClick={() => void cancel()}><Square />{text("取消运行", "Cancel run")}</Button> : null}
           <Button type="submit" disabled={composerDisabled || input.trim() === ""}><Send />{submitting ? text("发送中…", "Sending…") : text("发送", "Send")}</Button>
         </div>
       </form></CardContent></Card>
-    </div>
+    </PageContainer>
   );
 };
 

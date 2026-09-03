@@ -87,8 +87,8 @@ export const AgentExtensionPage = () => {
     </CardHeader>
     <CardContent>
       {items === null ? <Skeleton className="h-28" /> : groups[kind].length === 0
-        ? <div className="rounded-lg border border-dashed py-9 text-center text-sm text-muted-foreground">{text("系统中尚未发现。", "None discovered on this system.")}</div>
-        : <div className="divide-y rounded-lg border">{groups[kind].map((item) => <ExtensionRow
+        ? <div className="rounded-lg border border-dashed bg-muted/10 px-5 py-9 text-center"><p className="text-sm font-medium">{text("系统中尚未发现扩展", "No extensions discovered")}</p><p className="mt-1 text-xs text-muted-foreground">{text("在执行器系统配置中安装后即可在这里选择。", "Install one in the provider system configuration to select it here.")}</p></div>
+        : <div className="surface-list divide-y rounded-lg border">{groups[kind].map((item) => <ExtensionRow
           key={item.id}
           item={item}
           busy={busy !== ""}
@@ -100,7 +100,7 @@ export const AgentExtensionPage = () => {
   return <div className="flex flex-col gap-5">
     {error === "" ? null : <Alert variant="destructive"><XCircle /><AlertTitle>{text("操作失败", "Operation failed")}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
     {notice === "" ? null : <Alert><CheckCircle2 /><AlertTitle>{text("已更新", "Updated")}</AlertTitle><AlertDescription>{notice}</AlertDescription></Alert>}
-    <Card className="overflow-hidden border-primary/20 bg-[linear-gradient(135deg,var(--card),color-mix(in_oklab,var(--muted)_55%,transparent))]">
+    <Card className="overflow-hidden border-primary/20 bg-muted/15">
       <CardHeader>
         <div className="flex items-center gap-2"><ShieldCheck className="size-5" /><CardTitle role="heading" aria-level={2}>{text("执行器扩展", "Provider extensions")}</CardTitle></div>
         <CardDescription>{provider === undefined

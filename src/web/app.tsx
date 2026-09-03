@@ -70,7 +70,7 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
         <p className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">REMOTE AGENT SERVER</p>
         <h1 className="mt-4 text-2xl font-semibold">页面加载失败</h1>
         <p className="mt-3 text-sm leading-6 text-muted-foreground">前端资源可能刚刚更新，请重新加载页面。<br />The web application failed to load. Please reload the page.</p>
-        <button className="mt-6 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground" type="button" onClick={() => window.location.reload()}>重新加载</button>
+        <Button className="mt-6" type="button" onClick={() => window.location.reload()}>重新加载</Button>
       </section>
     </main>;
   }
@@ -171,18 +171,24 @@ const TokenGate = ({ onSave }: { onSave(token: string): void }) => {
   };
 
   return (
-    <main className="grid min-h-svh place-items-center bg-sidebar p-5">
-      <Card className="w-full max-w-md border-0 border-t-4 border-t-sidebar-primary shadow-2xl">
-        <CardHeader className="flex flex-col gap-3 p-7 pb-3 sm:p-9 sm:pb-3">
-          <div className="flex items-center justify-between gap-4"><p className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">REMOTE AGENT SERVER</p><Button type="button" size="sm" variant="ghost" aria-label={text("切换为 English", "Switch to 简体中文")} onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}>{locale === "zh-CN" ? "English" : "简体中文"}</Button></div>
-          <CardTitle id="token-title" role="heading" aria-level={1} className="text-3xl">{text("连接智能体服务", "Connect to Remote Agent")}</CardTitle>
-          <CardDescription className="leading-6">{text("输入服务器 API 令牌。凭证仅保留在当前浏览器会话中。", "Enter the server API token. It is kept only for this browser session.")}</CardDescription>
-        </CardHeader>
-        <CardContent className="p-7 pt-4 sm:p-9 sm:pt-4"><form className="flex flex-col gap-4" onSubmit={submit} aria-labelledby="token-title"><FieldGroup>
-          <Field><FieldLabel htmlFor="api-token">{text("API 令牌", "API token")}</FieldLabel><Input id="api-token" type="password" autoComplete="off" value={value} aria-invalid={error === null ? undefined : true} onChange={(event) => setValue(event.target.value)} autoFocus /></Field>
-          {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
-          <Button className="w-full" type="submit" disabled={busy}>{busy ? text("正在验证…", "Verifying…") : text("进入管理台", "Open console")}</Button>
-        </FieldGroup></form></CardContent>
+    <main className="grid min-h-svh place-items-center bg-sidebar p-4 sm:p-6">
+      <Card className="grid w-full max-w-4xl gap-0 overflow-hidden border-sidebar-border bg-card py-0 shadow-2xl md:grid-cols-[minmax(0,0.9fr)_minmax(24rem,1.1fr)]">
+        <div className="hidden min-h-[30rem] flex-col justify-between bg-sidebar-accent p-10 text-sidebar-foreground md:flex">
+          <div><span className="grid size-11 place-items-center rounded-xl bg-sidebar-primary font-mono text-sm font-black text-sidebar-primary-foreground">RA</span><p className="mt-6 font-mono text-xs font-bold tracking-[0.16em]">REMOTE AGENT SERVER</p></div>
+          <div><p className="text-2xl font-semibold tracking-tight">{text("一个入口，管理所有远程智能体。", "One console for every remote agent.")}</p><p className="mt-3 text-sm leading-6 text-sidebar-foreground/70">{text("连接后管理智能体、项目环境、会话和外部接入。", "Connect to manage agents, project environments, sessions, and integrations.")}</p></div>
+        </div>
+        <div className="flex min-h-[30rem] flex-col justify-center p-6 sm:p-10">
+          <CardHeader className="p-0">
+            <div className="flex items-center justify-between gap-4"><p className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground md:hidden">REMOTE AGENT SERVER</p><Button type="button" size="sm" variant="ghost" className="ml-auto" aria-label={text("切换为 English", "Switch to 简体中文")} onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}>{locale === "zh-CN" ? "English" : "简体中文"}</Button></div>
+            <CardTitle id="token-title" role="heading" aria-level={1} className="mt-5 text-2xl sm:text-3xl">{text("连接智能体服务", "Connect to Remote Agent")}</CardTitle>
+            <CardDescription className="mt-2 leading-6">{text("输入服务器 API 令牌。凭证仅保留在当前浏览器会话中。", "Enter the server API token. It is kept only for this browser session.")}</CardDescription>
+          </CardHeader>
+          <CardContent className="p-0 pt-7"><form className="flex flex-col gap-4" onSubmit={submit} aria-labelledby="token-title"><FieldGroup>
+            <Field><FieldLabel htmlFor="api-token">{text("API 令牌", "API token")}</FieldLabel><Input id="api-token" name="api-token" type="password" autoComplete="off" value={value} aria-invalid={error === null ? undefined : true} aria-describedby={error === null ? undefined : "api-token-error"} onChange={(event) => setValue(event.target.value)} /></Field>
+            {error && <p id="api-token-error" className="text-sm text-destructive" role="alert">{error}</p>}
+            <Button className="w-full" type="submit" disabled={busy || value.trim() === ""}>{busy ? text("正在验证…", "Verifying…") : text("进入管理台", "Open console")}</Button>
+          </FieldGroup></form></CardContent>
+        </div>
       </Card>
     </main>
   );

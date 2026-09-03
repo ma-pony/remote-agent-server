@@ -109,7 +109,7 @@ it("MCP 列表可选择只删除当前配置或整个共享组", async () => {
   expect(screen.getByRole("alertdialog")).toHaveTextContent("只影响当前智能体");
   fireEvent.click(screen.getByRole("button", { name: "从所有智能体删除" }));
   await waitFor(() => expect(deletedScopes).toEqual(["all"]));
-  expect(await screen.findByText("尚未配置 MCP。")).toBeInTheDocument();
+  expect(await screen.findByText("还没有 MCP 服务器")).toBeInTheDocument();
 });
 
 it("使用指定 Session 检查引用动态参数的 MCP", async () => {
