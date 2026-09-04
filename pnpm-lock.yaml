@@ -8,9 +8,9 @@ patchedDependencies:
   '@agentclientprotocol/codex-acp@1.1.14':
     hash: c4c78f722ca740d531c386170df36c85e58dcc41481199d3540d6abb08c9e20d
     path: patches/@agentclientprotocol__codex-acp@1.1.14.patch
-  acpx@0.12.1:
-    hash: 2cbd9e4ebbe7d0a4d00f92375faf8d1ee13c3949ebb14250f77771fd2c73fecf
-    path: patches/acpx@0.12.1.patch
+  acpx@0.13.2:
+    hash: ebd74b4e6ba7ec5031a18ef46b86faac57e0de15505c3831c644bd1c338a7cae
+    path: patches/acpx@0.13.2.patch
 
 importers:
 
@@ -38,8 +38,8 @@ importers:
         specifier: ^4.3.3
         version: 4.3.3(vite@8.2.1(@types/node@22.20.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12)(yaml@2.9.0))
       acpx:
-        specifier: 0.12.1
-        version: 0.12.1(patch_hash=2cbd9e4ebbe7d0a4d00f92375faf8d1ee13c3949ebb14250f77771fd2c73fecf)
+        specifier: 0.13.2
+        version: 0.13.2(patch_hash=ebd74b4e6ba7ec5031a18ef46b86faac57e0de15505c3831c644bd1c338a7cae)
       better-sqlite3:
         specifier: ^12.11.1
         version: 12.11.1
@@ -143,6 +143,11 @@ packages:
 
   '@agentclientprotocol/sdk@1.3.0':
     resolution: {integrity: sha512-i3h/efaeuMUFAO1HSfo97QZQnnvMd7wWBYtBsdL6UMZg3a78sk3Ffya5Xu7C7tYsXomXoDXJBAzQF2PcFKAhIQ==}
+    peerDependencies:
+      zod: ^3.25.0 || ^4.0.0
+
+  '@agentclientprotocol/sdk@1.4.0':
+    resolution: {integrity: sha512-/eufudw+aFY1LKLolT6yFE6UMmYRl7fMJ/DEONSIyR6wI3slHWITBsANRGqXEY8FRzqUxwh7QEaGiZHcJPVThg==}
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
 
@@ -1650,8 +1655,8 @@ packages:
     resolution: {integrity: sha512-5cvg6CtKwfgdmVqY1WIiXKc3Q1bkRqGLi+2W/6ao+6Y7gu/RCwRuAhGEzh5B4KlszSuTLgZYuqFqo5bImjNKng==}
     engines: {node: '>= 0.6'}
 
-  acpx@0.12.1:
-    resolution: {integrity: sha512-MoV932yPJUcjkX2L9u5TeFncvrxVD+jNTd3ES/tslaiT78S/7CwtgintmX9bonPbSgOB9vinvN+1OCHTQq4HJg==}
+  acpx@0.13.2:
+    resolution: {integrity: sha512-4hOLEo2kE/nCrPr50StbzU3G1WvzHkmKE/r3vxFAIr6GRI3VSmSRH62XCtnDpVcQNpBM8fVPAeTj39ewVhJwdQ==}
     engines: {node: '>=22.13.0'}
     hasBin: true
 
@@ -3741,6 +3746,10 @@ snapshots:
     dependencies:
       zod: 4.4.3
 
+  '@agentclientprotocol/sdk@1.4.0(zod@4.4.3)':
+    dependencies:
+      zod: 4.4.3
+
   '@asamuzakjp/css-color@4.1.2':
     dependencies:
       '@csstools/css-calc': 3.3.0(@csstools/css-parser-algorithms@4.0.0(@csstools/css-tokenizer@4.0.0))(@csstools/css-tokenizer@4.0.0)
@@ -5240,9 +5249,9 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.0.0
 
-  acpx@0.12.1(patch_hash=2cbd9e4ebbe7d0a4d00f92375faf8d1ee13c3949ebb14250f77771fd2c73fecf):
+  acpx@0.13.2(patch_hash=ebd74b4e6ba7ec5031a18ef46b86faac57e0de15505c3831c644bd1c338a7cae):
     dependencies:
-      '@agentclientprotocol/sdk': 1.3.0(zod@4.4.3)
+      '@agentclientprotocol/sdk': 1.4.0(zod@4.4.3)
       commander: 15.0.0
       skillflag: 0.2.1
       tsx: 4.23.12

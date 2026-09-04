@@ -59,10 +59,10 @@ const createClient = (
 const loadAcpClient = async (): Promise<AcpClientConstructor> => {
   const bundle = join(
     process.cwd(),
-    "node_modules/acpx/dist/live-checkpoint-DQp4JSHD.js"
+    "node_modules/acpx/dist/live-checkpoint-Gw2oGjhe.js"
   );
-  const module = await import(pathToFileURL(bundle).href) as { k: AcpClientConstructor };
-  return module.k;
+  const module = await import(pathToFileURL(bundle).href) as { D: AcpClientConstructor };
+  return module.D;
 };
 
 it.runIf(process.env.REMOTE_AGENT_ACPX_PROCESS_TEST === "1")(

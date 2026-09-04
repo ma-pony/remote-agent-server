@@ -122,6 +122,7 @@ const runtimeStub = (overrides: {
   };
   const turn = {
     requestId: REQUEST_ID,
+    promptStarted: Promise.resolve(),
     events: {
       async *[Symbol.asyncIterator]() {
         yield* overrides.events ?? [];

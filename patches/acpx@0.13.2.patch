@@ -1,8 +1,8 @@
-diff --git a/dist/live-checkpoint-DQp4JSHD.js b/dist/live-checkpoint-DQp4JSHD.js
-index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6fcf71529 100644
---- a/dist/live-checkpoint-DQp4JSHD.js
-+++ b/dist/live-checkpoint-DQp4JSHD.js
-@@ -2964,7 +2964,8 @@ function buildAgentSpawnOptions(cwd, authCredentials, sessionEnv) {
+diff --git a/dist/live-checkpoint-Gw2oGjhe.js b/dist/live-checkpoint-Gw2oGjhe.js
+index 1a7748c..2580736 100644
+--- a/dist/live-checkpoint-Gw2oGjhe.js
++++ b/dist/live-checkpoint-Gw2oGjhe.js
+@@ -3187,7 +3187,8 @@ function buildAgentSpawnOptions(cwd, authCredentials, sessionEnv) {
  			"pipe",
  			"pipe"
  		],
@@ -12,15 +12,16 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
  	};
  }
  //#endregion
-@@ -3702,6 +3703,7 @@ const REPLAY_DRAIN_TIMEOUT_MS = 5e3;
+@@ -3856,6 +3857,8 @@ const REPLAY_DRAIN_TIMEOUT_MS = 5e3;
  const DRAIN_POLL_INTERVAL_MS = 20;
  const AGENT_CLOSE_TERM_GRACE_MS = 1500;
  const AGENT_CLOSE_KILL_GRACE_MS = 1e3;
++const AGENT_PROCESS_HELPER_TIMEOUT_MS = 8e3;
 +const AGENT_DESCENDANT_CAPTURE_INTERVAL_MS = 100;
  const STARTUP_STDERR_MAX_CHARS = 8192;
  const DEVIN_COMPATIBILITY_CLIENT_CAPABILITIES_META = Object.freeze({ "cognition.ai/requestDiagnostics": true });
  const DEVIN_COMPATIBILITY_CLIENT_NAME = "windsurf";
-@@ -3851,6 +3853,7 @@ var AcpClient = class {
+@@ -4095,6 +4098,7 @@ var AcpClient = class {
  	agentStartedAt;
  	lastAgentExit;
  	lastKnownPid;
@@ -28,7 +29,7 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
  	promptPermissionFailures = /* @__PURE__ */ new Map();
  	pendingConnectionRequests = /* @__PURE__ */ new Set();
  	modelConfigIds = /* @__PURE__ */ new Map();
-@@ -3956,6 +3959,7 @@ var AcpClient = class {
+@@ -4215,6 +4219,7 @@ var AcpClient = class {
  		this.agentStartedAt = isoNow$1();
  		this.lastAgentExit = void 0;
  		this.lastKnownPid = child.pid ?? void 0;
@@ -36,7 +37,7 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
  		this.attachAgentLifecycleObservers(child);
  		const startupStderr = [];
  		child.stderr.on("data", (chunk) => {
-@@ -3968,16 +3972,16 @@ var AcpClient = class {
+@@ -4227,16 +4232,16 @@ var AcpClient = class {
  		const stream = this.createTappedStream(createNdJsonMessageStream(this.options.agentCommand, input, output));
  		const connection = this.createConnection(stream, launch);
  		connection.signal.addEventListener("abort", () => {
@@ -55,8 +56,8 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
 +		}));
  	}
  	async resolveAgentLaunchPlan() {
- 		const configuredCommand = splitCommandLine(this.options.agentCommand);
-@@ -4094,7 +4098,7 @@ var AcpClient = class {
+ 		const configuredCommand = resolveAgentCommandParts(this.options.agentCommand, this.options.agentArgv);
+@@ -4349,7 +4354,7 @@ var AcpClient = class {
  		params.startupFailure.dispose();
  		const normalizedError = await this.normalizeInitializeError(error, params.child, params.startupStderr);
  		try {
@@ -65,7 +66,7 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
  		} catch {}
  		if (params.launch.geminiAcp && error instanceof TimeoutError) throw new GeminiAcpStartupTimeoutError(await buildGeminiAcpStartupTimeoutMessage(params.launch.spawnCommand), {
  			cause: error,
-@@ -4146,11 +4150,11 @@ var AcpClient = class {
+@@ -4419,11 +4424,11 @@ var AcpClient = class {
  		const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
  		let result;
  		try {
@@ -79,7 +80,7 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
  			result = claudeAcp ? await withTimeout(createPromise, resolveClaudeAcpSessionCreateTimeoutMs()) : await createPromise;
  		} catch (error) {
  			if (claudeAcp && error instanceof TimeoutError) throw new ClaudeAcpSessionCreateTimeoutError(buildClaudeAcpSessionCreateTimeoutMessage(), {
-@@ -4185,11 +4189,11 @@ var AcpClient = class {
+@@ -4458,11 +4463,11 @@ var AcpClient = class {
  		const previousSuppression = this.applySessionUpdateSuppression(Boolean(options.suppressReplayUpdates));
  		let response;
  		try {
@@ -93,7 +94,7 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
  			await this.waitForSessionUpdateDrain(options.replayIdleMs ?? REPLAY_IDLE_MS, options.replayDrainTimeoutMs ?? REPLAY_DRAIN_TIMEOUT_MS);
  		} finally {
  			this.restoreSessionUpdateSuppression(previousSuppression);
-@@ -4202,11 +4206,11 @@ var AcpClient = class {
+@@ -4475,11 +4480,11 @@ var AcpClient = class {
  	async resumeSession(sessionId, cwd = this.options.cwd) {
  		const connection = this.getConnection();
  		const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
@@ -107,8 +108,8 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
  		this.loadedSessionId = sessionId;
  		const result = toReconnectedSessionResult(response);
  		this.updateRememberedSessionModels(sessionId, result);
-@@ -4433,28 +4437,108 @@ var AcpClient = class {
- 		this.agent = void 0;
+@@ -4747,28 +4752,108 @@ var AcpClient = class {
+ 		this.connection?.close?.();
  	}
  	async terminateAgentProcess(child) {
 +		const state = this.ensureAgentProcessState(child);
@@ -196,7 +197,7 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
 +	async captureAgentDescendantPids(child, descendantPids) {
 +		const pid = child.pid;
 +		if (!pid) return;
-+		for (const descendantPid of await listDescendantPids(pid)) descendantPids.add(descendantPid);
++		for (const descendantPid of await listDescendantPids(pid, AGENT_PROCESS_HELPER_TIMEOUT_MS)) descendantPids.add(descendantPid);
 +	}
 +	async waitForAgentProcessTreeExit(child, descendantPids, timeoutMs) {
 +		const deadline = Date.now() + timeoutMs;
@@ -223,7 +224,7 @@ index 328aa180be8c17274a8d32029ab0d26ebdd09a1a..740d509a53aad60e1c1836517257d5a6
  	}
  	detachAgentHandles(agent, unref) {
  		const stdin = agent.stdin;
-@@ -4669,13 +4753,19 @@ var AcpClient = class {
+@@ -5027,13 +5112,19 @@ var AcpClient = class {
  	}
  	attachAgentLifecycleObservers(child) {
  		child.once("exit", (exitCode, signal) => {

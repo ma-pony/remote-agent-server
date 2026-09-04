@@ -4,4 +4,4 @@ onlyBuiltDependencies:
 
 patchedDependencies:
   "@agentclientprotocol/codex-acp@1.1.14": patches/@agentclientprotocol__codex-acp@1.1.14.patch
-  acpx@0.12.1: patches/acpx@0.12.1.patch
+  acpx@0.13.2: patches/acpx@0.13.2.patch
