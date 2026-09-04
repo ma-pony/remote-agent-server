@@ -592,6 +592,7 @@ The [deployment guide](docs/deployment.md) covers macOS APFS/LaunchAgent, Linux 
 ## Documentation
 
 - [Product and architecture](docs/design.en.md): positioning, system boundaries, core objects, execution paths, and reliability design.
+- [Agent Core and model runtime routing proposal](docs/agent-core-routing.en.md): the proposed multi-Core, model, concurrency, Session-resume, and handoff architecture; not implemented yet.
 - [Deployment and acceptance](docs/deployment.md): production deployment, provider authentication, filesystems, reverse proxies, and real smoke tests.
 
 ## License

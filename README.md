@@ -600,6 +600,7 @@ pnpm smoke:integrations
 ## 文档
 
 - [产品与架构](docs/design.md)：定位、系统边界、核心对象、执行链路和可靠性设计。
+- [Agent Core 与模型运行路由设计提案](docs/agent-core-routing.md)：记录多 Core、模型、并发、Session 续接和 Handoff 的目标方案；尚未实现。
 - [部署与验收](docs/deployment.md)：生产部署、Provider 登录、文件系统、反向代理和真实 Smoke Test。
 
 ## 许可证

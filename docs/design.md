@@ -110,6 +110,8 @@ Web 控制台复用同一套 Session、Run 和 Event 模型。控制台创建的
 
 ### 6.2 模型发现、策略与审计
 
+当前实现固定一个 Agent Core，仅在该 Core 内选择模型。允许同一 Agent 按时间切换 Core、模型和并发的后续架构已记录在 [Agent Core 与模型运行路由设计提案](agent-core-routing.md)；该提案尚未实现，不代表当前 API 行为。
+
 模型路由建立在 Agent Core 的 ACP 配置能力上，不维护一份脱离 Core 的全局模型表：
 
 1. `GET /api/agents/:id/models` 使用 Agent 当前 Provider、指令和可用项目环境启动一次短生命周期探测，通过 ACP 状态读取 `currentModel` 和 `availableModels`，读取完成后关闭探测进程。

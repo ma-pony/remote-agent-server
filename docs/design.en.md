@@ -110,6 +110,8 @@ Selectable models come exclusively from the catalog advertised by Agent Core ove
 
 ### 6.2 Model discovery, policy, and audit
 
+The current implementation fixes one Agent Core and selects models only within that Core. The future architecture for switching Core, model, and concurrency by time is recorded in the [Agent Core and model runtime routing proposal](agent-core-routing.en.md). The proposal is not implemented and does not describe current API behavior.
+
 Model routing builds on the Agent Core's ACP configuration support instead of maintaining a separate global model registry:
 
 1. `GET /api/agents/:id/models` starts a short-lived probe with the agent's current provider, instructions, and ready project environment. It reads `currentModel` and `availableModels` from ACP status, then closes the probe process.
