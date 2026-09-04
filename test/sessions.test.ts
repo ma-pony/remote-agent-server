@@ -530,6 +530,8 @@ describe("Session API", () => {
       id: session.id,
       project_environment_revision_id: (created.json() as { projectEnvironmentRevisionId: number }).projectEnvironmentRevisionId
     });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM session_core_bindings WHERE session_id = ?").get(session.id))
+      .toEqual({ count: 0 });
 
     const detail = await app.inject({ method: "GET", url: `/api/sessions/${session.id}`, headers: authHeaders() });
     expect(detail.statusCode).toBe(200);
@@ -776,20 +778,20 @@ describe("Session API", () => {
     let dataDir!: string;
     let providerSessionIdDuringRuntime: string | null = null;
     const resetRelease = deferred<void>();
-    const reset = vi.fn(async (input: RuntimeSessionInput): Promise<void> => {
-      providerSessionIdDuringRuntime = (db.prepare("SELECT provider_session_id FROM sessions WHERE id = ?").get(input.sessionId) as {
+    const forgetSession = vi.fn(async (sessionId: number): Promise<void> => {
+      providerSessionIdDuringRuntime = (db.prepare("SELECT provider_session_id FROM sessions WHERE id = ?").get(sessionId) as {
         provider_session_id: string | null;
       }).provider_session_id;
       await resetRelease.promise;
     });
-    ({ app, db, dataDir } = await createTestApp({ runtime: createFakeRuntime(reset) }));
+    ({ app, db, dataDir } = await createTestApp({ runtime: createFakeRuntime(undefined, forgetSession) }));
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
     writeFileSync(join(dataDir, "agents", String(agent.id), "MEMORY.md"), "remember reset");
     db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
 
     const resetting = app.inject({ method: "POST", url: `/api/sessions/${session.id}/reset`, headers: authHeaders() });
-    await vi.waitFor(() => expect(reset).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(forgetSession).toHaveBeenCalledTimes(1));
 
     const statusDuringReset = db.prepare("SELECT status FROM sessions WHERE id = ?").get(session.id);
     const busy = await app.inject({
@@ -814,17 +816,7 @@ describe("Session API", () => {
       providerSessionId: null,
       workspacePath: session.workspacePath
     });
-    expect(reset).toHaveBeenCalledWith({
-      sessionId: session.id,
-      agentId: agent.id,
-      provider: "codex",
-      providerSessionId: "provider-session-1",
-      workspacePath: session.workspacePath,
-      browserProfilePath: join(dirname(session.workspacePath), "browser"),
-      instructions: "",
-      memory: "remember reset",
-      mcpServers: []
-    });
+    expect(forgetSession).toHaveBeenCalledWith(session.id);
     expect(providerSessionIdDuringRuntime).toBe("provider-session-1");
     expect(db.prepare("SELECT status, provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
       status: "idle",
@@ -842,17 +834,17 @@ describe("Session API", () => {
 
   it("Runtime reset 失败时释放 claim、保留 Provider Session ID 并允许创建 Run", async () => {
     const resetRelease = deferred<void>();
-    const reset = vi.fn(async () => {
+    const forgetSession = vi.fn(async () => {
       await resetRelease.promise;
       throw new Error("provider failed");
     });
-    const { app, db } = await createTestApp({ runtime: createFakeRuntime(reset) });
+    const { app, db } = await createTestApp({ runtime: createFakeRuntime(undefined, forgetSession) });
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
     db.prepare("UPDATE sessions SET provider_session_id = ? WHERE id = ?").run("provider-session-1", session.id);
 
     const resetting = app.inject({ method: "POST", url: `/api/sessions/${session.id}/reset`, headers: authHeaders() });
-    await vi.waitFor(() => expect(reset).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(forgetSession).toHaveBeenCalledTimes(1));
     const busy = await app.inject({
       method: "POST",
       url: `/api/sessions/${session.id}/runs`,

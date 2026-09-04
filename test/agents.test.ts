@@ -205,6 +205,133 @@ describe("Agent API", () => {
     expect(unknown.json()).toMatchObject({ error: { code: "agent_model_unavailable" } });
   });
 
+  it("配置多个 Agent Core，并保护默认或已被路由引用的 Core", async () => {
+    const { app, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "Multi core", provider: "codex", projectEnvironmentId }
+    });
+    const agent = created.json() as {
+      id: number;
+      defaultCoreProfileId: number;
+      coreProfiles: Array<{ id: number; provider: string }>;
+    };
+    expect(agent.coreProfiles).toEqual([
+      expect.objectContaining({ id: agent.defaultCoreProfileId, provider: "codex", enabled: true })
+    ]);
+
+    const secondary = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agent.id}/core-profiles`,
+      headers: authHeaders(),
+      payload: { name: "Claude night", provider: "claude_code", maxConcurrentRuns: 2 }
+    });
+    expect(secondary.statusCode).toBe(201);
+    const secondaryProfile = secondary.json() as { id: number };
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agent.id}/core-profiles`,
+      headers: authHeaders(),
+      payload: { name: "Claude night", provider: "codex" }
+    });
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json()).toMatchObject({ error: { code: "agent_core_profile_name_conflict" } });
+
+    const other = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agent.id}/core-profiles`,
+      headers: authHeaders(),
+      payload: { name: "Other", provider: "codex" }
+    });
+    const renamedDuplicate = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}/core-profiles/${other.json<{ id: number }>().id}`,
+      headers: authHeaders(),
+      payload: { name: "Claude night" }
+    });
+    expect(renamedDuplicate.statusCode).toBe(409);
+    expect(renamedDuplicate.json()).toMatchObject({ error: { code: "agent_core_profile_name_conflict" } });
+
+    const catalog = await app.inject({
+      method: "GET",
+      url: `/api/agents/${agent.id}/core-profiles/${secondaryProfile.id}/models`,
+      headers: authHeaders()
+    });
+    expect(catalog.statusCode).toBe(200);
+
+    const routed = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: {
+        coreRoutingMode: "scheduled_handoff",
+        modelPolicy: { mode: "fixed", coreProfileId: secondaryProfile.id, model: "glm-4.5" }
+      }
+    });
+    expect(routed.statusCode).toBe(200);
+    expect(routed.json()).toMatchObject({
+      provider: "codex",
+      coreRoutingMode: "scheduled_handoff",
+      modelPolicy: { mode: "fixed", coreProfileId: secondaryProfile.id, model: "glm-4.5" }
+    });
+
+    const disableReferenced = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}/core-profiles/${secondaryProfile.id}`,
+      headers: authHeaders(),
+      payload: { enabled: false }
+    });
+    const deleteReferenced = await app.inject({
+      method: "DELETE",
+      url: `/api/agents/${agent.id}/core-profiles/${secondaryProfile.id}`,
+      headers: authHeaders()
+    });
+    const disableDefault = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}/core-profiles/${agent.defaultCoreProfileId}`,
+      headers: authHeaders(),
+      payload: { enabled: false }
+    });
+
+    expect(disableReferenced.statusCode).toBe(409);
+    expect(disableReferenced.json()).toMatchObject({ error: { code: "agent_core_profile_in_use" } });
+    expect(deleteReferenced.statusCode).toBe(409);
+    expect(deleteReferenced.json()).toMatchObject({ error: { code: "agent_core_profile_in_use" } });
+    expect(disableDefault.statusCode).toBe(409);
+    expect(disableDefault.json()).toMatchObject({ error: { code: "agent_default_core_profile_required" } });
+  });
+
+  it("requires every enabled Core to support the Agent instructions", async () => {
+    const { app, projectEnvironmentId } = await createTestApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/agents",
+      headers: authHeaders(),
+      payload: { name: "Mixed core", provider: "codex", projectEnvironmentId }
+    });
+    const agent = created.json() as { id: number };
+    const profile = await app.inject({
+      method: "POST",
+      url: `/api/agents/${agent.id}/core-profiles`,
+      headers: authHeaders(),
+      payload: { name: "Hermes", provider: "hermes" }
+    });
+    expect(profile.statusCode).toBe(201);
+
+    const update = await app.inject({
+      method: "PATCH",
+      url: `/api/agents/${agent.id}`,
+      headers: authHeaders(),
+      payload: { instructions: "Always run the project tests." }
+    });
+
+    expect(update.statusCode).toBe(400);
+    expect(update.json()).toMatchObject({ error: { code: "agent_instructions_unsupported" } });
+  });
+
   it("disables model selection when Agent Core does not advertise configured models", async () => {
     const runtime = createFakeRuntime({ supported: false, currentModel: "core-private-default", availableModels: [] });
     const { app, projectEnvironmentId } = await createTestApp(runtime);

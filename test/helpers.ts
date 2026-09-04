@@ -47,6 +47,12 @@ export const createTestDatabase = (databasePath = ":memory:"): {
   const agentId = Number(db.prepare(
     "INSERT INTO agents (name, provider, project_environment_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
   ).run("Test agent", "codex", projectEnvironmentId, now(), now()).lastInsertRowid);
+  const coreProfileId = Number(db.prepare(`
+    INSERT INTO agent_core_profiles
+      (agent_id, name, provider, enabled, created_at, updated_at)
+    VALUES (?, 'Default', 'codex', 1, ?, ?)
+  `).run(agentId, now(), now()).lastInsertRowid);
+  db.prepare("UPDATE agents SET default_core_profile_id = ? WHERE id = ?").run(coreProfileId, agentId);
 
   return {
     db,

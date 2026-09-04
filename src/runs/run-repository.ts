@@ -1,8 +1,9 @@
 import type Database from "better-sqlite3";
 
 import { parseStoredModelPolicy, type AgentModelPolicy } from "../agents/model-policy.js";
+import type { ResolvedRunRoute } from "../agents/runtime-route.js";
 import { insertedId } from "../db.js";
-import type { Run, RunStatus, TokenUsage, TokenUsageSummary } from "../domain.js";
+import type { Agent, AgentCoreProfile, CoreRoutingMode, Provider, Run, RunStatus, TokenUsage, TokenUsageSummary } from "../domain.js";
 import { assertSynchronousTransactionHook } from "../transaction-hook.js";
 
 type RunRow = {
@@ -13,6 +14,11 @@ type RunRow = {
   result: string | null;
   error: string | null;
   resolved_model: string | null;
+  resolved_core_profile_id: number | null;
+  resolved_provider: Provider | null;
+  resolved_rule_index: number | null;
+  routing_policy_revision: string | null;
+  effective_concurrency: number | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -48,6 +54,11 @@ const toRun = (row: RunRow): Run => ({
   result: row.result,
   error: row.error,
   resolvedModel: row.resolved_model,
+  resolvedCoreProfileId: row.resolved_core_profile_id,
+  resolvedProvider: row.resolved_provider,
+  resolvedRuleIndex: row.resolved_rule_index,
+  routingPolicyRevision: row.routing_policy_revision,
+  effectiveConcurrency: row.effective_concurrency,
   createdAt: row.created_at,
   startedAt: row.started_at,
   finishedAt: row.finished_at,
@@ -168,6 +179,11 @@ export class RunRepository {
           result: null,
           error: null,
           resolvedModel: null,
+          resolvedCoreProfileId: null,
+          resolvedProvider: null,
+          resolvedRuleIndex: null,
+          routingPolicyRevision: null,
+          effectiveConcurrency: null,
           createdAt,
           startedAt: null,
           finishedAt: null,
@@ -247,25 +263,80 @@ export class RunRepository {
     agentId: number;
     maxConcurrentRuns: number | null;
     modelPolicy: AgentModelPolicy;
+    agent: Agent;
+    sessionId: number;
+    pinnedCoreProfileId: number | null;
   } | undefined {
     const row = this.db.prepare(`
-      SELECT sessions.agent_id, agents.max_concurrent_runs, agents.model_policy_json
+      SELECT sessions.id AS session_id, sessions.agent_id, sessions.pinned_core_profile_id,
+        agents.name, agents.provider, agents.enabled, agents.instructions,
+        agents.max_concurrent_runs, agents.model_policy_json, agents.provider_default_model,
+        agents.core_routing_mode, agents.default_core_profile_id, agents.project_environment_id,
+        agents.created_at, agents.updated_at
       FROM runs
       JOIN sessions ON sessions.id = runs.session_id
       JOIN agents ON agents.id = sessions.agent_id
       WHERE runs.id = ?
     `).get(id) as {
       agent_id: number;
+      session_id: number;
+      pinned_core_profile_id: number | null;
+      name: string;
+      provider: Provider;
+      enabled: number;
+      instructions: string;
       max_concurrent_runs: number | null;
       model_policy_json: string;
+      provider_default_model: string | null;
+      core_routing_mode: CoreRoutingMode;
+      default_core_profile_id: number;
+      project_environment_id: number | null;
+      created_at: string;
+      updated_at: string;
     } | undefined;
-    return row === undefined
-      ? undefined
-      : {
-        agentId: row.agent_id,
-        maxConcurrentRuns: row.max_concurrent_runs,
-        modelPolicy: parseStoredModelPolicy(row.model_policy_json)
-      };
+    if (row === undefined) return undefined;
+    const profiles = (this.db.prepare(`
+      SELECT id, agent_id, name, provider, enabled, max_concurrent_runs, created_at, updated_at
+      FROM agent_core_profiles WHERE agent_id = ? ORDER BY id ASC
+    `).all(row.agent_id) as Array<{
+      id: number; agent_id: number; name: string; provider: Provider; enabled: number;
+      max_concurrent_runs: number | null; created_at: string; updated_at: string;
+    }>).map<AgentCoreProfile>((profile) => ({
+      id: profile.id,
+      agentId: profile.agent_id,
+      name: profile.name,
+      provider: profile.provider,
+      enabled: profile.enabled === 1,
+      maxConcurrentRuns: profile.max_concurrent_runs,
+      createdAt: profile.created_at,
+      updatedAt: profile.updated_at
+    }));
+    const modelPolicy = parseStoredModelPolicy(row.model_policy_json);
+    const agent: Agent = {
+      id: row.agent_id,
+      name: row.name,
+      provider: row.provider,
+      enabled: row.enabled === 1,
+      instructions: row.instructions,
+      maxConcurrentRuns: row.max_concurrent_runs,
+      effectiveMaxConcurrentRuns: row.max_concurrent_runs ?? Number.MAX_SAFE_INTEGER,
+      modelPolicy,
+      providerDefaultModel: row.provider_default_model,
+      coreRoutingMode: row.core_routing_mode,
+      defaultCoreProfileId: row.default_core_profile_id,
+      coreProfiles: profiles,
+      projectEnvironmentId: row.project_environment_id,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+    return {
+      agentId: row.agent_id,
+      maxConcurrentRuns: row.max_concurrent_runs,
+      modelPolicy,
+      agent,
+      sessionId: row.session_id,
+      pinnedCoreProfileId: row.pinned_core_profile_id
+    };
   }
 
   /** Returns the exact cumulative usage stored for one Session. */
@@ -311,14 +382,41 @@ export class RunRepository {
   /**
    * Transitions a queued Run to running before an external execution starts.
    */
-  markRunning(id: number): Run {
+  markRunning(id: number, route?: ResolvedRunRoute): Run {
     const started = this.inImmediateTransaction(() => {
       const run = this.requireRun(id);
       if (run.status !== "queued") throw new RunRepositoryError("invalid_run_state");
 
       const startedAt = new Date().toISOString();
-      this.db.prepare("UPDATE runs SET status = ?, started_at = ? WHERE id = ?").run("running", startedAt, id);
-      const started = { ...run, status: "running" as const, startedAt };
+      this.db.prepare(`
+        UPDATE runs SET status = ?, started_at = ?, resolved_model = ?, resolved_core_profile_id = ?,
+          resolved_provider = ?, resolved_rule_index = ?, routing_policy_revision = ?, effective_concurrency = ?
+        WHERE id = ?
+      `).run(
+        "running",
+        startedAt,
+        route?.model ?? run.resolvedModel,
+        route?.coreProfileId ?? run.resolvedCoreProfileId,
+        route?.provider ?? run.resolvedProvider,
+        route?.ruleIndex ?? run.resolvedRuleIndex,
+        route?.policyRevision ?? run.routingPolicyRevision,
+        route?.effectiveConcurrency ?? run.effectiveConcurrency,
+        id
+      );
+      if (route?.pinSessionCore === true) {
+        const pinned = this.db.prepare(`
+          UPDATE sessions SET pinned_core_profile_id = ?
+          WHERE id = ? AND pinned_core_profile_id IS NULL
+        `).run(route.coreProfileId, run.sessionId);
+        if (pinned.changes !== 1) {
+          const session = this.db.prepare("SELECT pinned_core_profile_id FROM sessions WHERE id = ?")
+            .get(run.sessionId) as { pinned_core_profile_id: number | null } | undefined;
+          if (session?.pinned_core_profile_id !== route.coreProfileId) {
+            throw new RunRepositoryError("invalid_run_state");
+          }
+        }
+      }
+      const started = this.requireRun(id);
       assertSynchronousTransactionHook(this.projection.onStarted(started));
       return started;
     });

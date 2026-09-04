@@ -21,11 +21,14 @@ const updateAgentSchema = z.object({
   projectEnvironmentId: z.number().int().positive().optional(),
   instructions: z.string().max(20_000).optional(),
   maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional(),
-  modelPolicy: agentModelPolicySchema.optional()
+  modelPolicy: agentModelPolicySchema.optional(),
+  coreRoutingMode: z.enum(["session_sticky", "scheduled_handoff"]).optional(),
+  defaultCoreProfileId: z.number().int().positive().optional()
 }).strict().refine(
   (input) => input.name !== undefined || input.enabled !== undefined
     || input.projectEnvironmentId !== undefined || input.instructions !== undefined
-    || input.maxConcurrentRuns !== undefined || input.modelPolicy !== undefined,
+    || input.maxConcurrentRuns !== undefined || input.modelPolicy !== undefined
+    || input.coreRoutingMode !== undefined || input.defaultCoreProfileId !== undefined,
   {
   message: "At least one field must be provided"
   }
@@ -33,9 +36,24 @@ const updateAgentSchema = z.object({
 const cloneAgentSchema = z.object({
   name: z.string().trim().min(1)
 }).strict();
+const createCoreProfileSchema = z.object({
+  name: z.string().trim().min(1).max(100),
+  provider: z.enum(["claude_code", "codex", "hermes"]),
+  maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional()
+}).strict();
+const updateCoreProfileSchema = z.object({
+  name: z.string().trim().min(1).max(100).optional(),
+  enabled: z.boolean().optional(),
+  maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional()
+}).strict().refine((input) => Object.keys(input).length > 0, { message: "At least one field must be provided" });
 
 const updateSkillSchema = z.object({ enabled: z.boolean() }).strict();
-const updateExtensionSchema = z.object({ enabled: z.boolean() }).strict();
+const extensionProviderSchema = z.enum(["codex", "claude_code"]);
+const extensionQuerySchema = z.object({ provider: extensionProviderSchema.optional() }).strict();
+const updateExtensionSchema = z.object({
+  enabled: z.boolean(),
+  provider: extensionProviderSchema.optional()
+}).strict();
 const deleteSkillQuerySchema = z.object({ scope: z.enum(["current", "all"]).default("current") }).strict();
 const uploadSkillSchema = z.object({
   fileName: z.string().trim().min(1).max(255).regex(/\.zip$/i),
@@ -77,6 +95,31 @@ const handleAgentError = (reply: FastifyReply, error: unknown) => {
             ? "Agent Core does not expose selectable models"
             : "Model is not configured by Agent Core"
         }
+      });
+    }
+    if (error.code === "agent_core_profile_unavailable" || error.code === "agent_core_profile_conflict") {
+      return reply.code(400).send({
+        error: {
+          code: error.code,
+          message: error.code === "agent_core_profile_unavailable"
+            ? "Agent Core profile is unavailable"
+            : "Session-sticky routing can only use the default Core profile"
+        }
+      });
+    }
+    if (error.code === "agent_default_core_profile_required" || error.code === "agent_core_profile_in_use") {
+      return reply.code(409).send({
+        error: {
+          code: error.code,
+          message: error.code === "agent_default_core_profile_required"
+            ? "The default Agent Core profile cannot be disabled or deleted"
+            : "Agent Core profile is used by a Session and cannot be deleted"
+        }
+      });
+    }
+    if (error.code === "agent_core_profile_name_conflict") {
+      return reply.code(409).send({
+        error: { code: error.code, message: "Agent Core profile name already exists" }
       });
     }
     return reply.code(400).send({
@@ -172,6 +215,73 @@ export const registerAgentRoutes = (
     }
   });
 
+  app.get<{ Params: { id: string } }>("/agents/:id/core-profiles", (request, reply) => {
+    const id = parseId(request.params.id);
+    if (id === undefined) return notFound(reply);
+    const agent = agentManager.get(id);
+    return agent === undefined ? notFound(reply) : agent.coreProfiles;
+  });
+
+  app.post<{ Params: { id: string } }>("/agents/:id/core-profiles", (request, reply) => {
+    const id = parseId(request.params.id);
+    if (id === undefined) return notFound(reply);
+    const parsed = createCoreProfileSchema.safeParse(request.body);
+    if (!parsed.success) return badRequest(reply, "Invalid Agent Core profile input");
+    try {
+      const profile = agentManager.createCoreProfile(id, parsed.data);
+      return profile === undefined ? notFound(reply) : reply.code(201).send(profile);
+    } catch (error) {
+      return handleAgentError(reply, error);
+    }
+  });
+
+  app.patch<{ Params: { id: string; profileId: string } }>(
+    "/agents/:id/core-profiles/:profileId",
+    (request, reply) => {
+      const id = parseId(request.params.id);
+      const profileId = parseId(request.params.profileId);
+      if (id === undefined || profileId === undefined) return notFound(reply);
+      const parsed = updateCoreProfileSchema.safeParse(request.body);
+      if (!parsed.success) return badRequest(reply, "Invalid Agent Core profile update");
+      try {
+        const profile = agentManager.updateCoreProfile(id, profileId, parsed.data);
+        return profile === undefined ? notFound(reply) : profile;
+      } catch (error) {
+        return handleAgentError(reply, error);
+      }
+    }
+  );
+
+  app.delete<{ Params: { id: string; profileId: string } }>(
+    "/agents/:id/core-profiles/:profileId",
+    (request, reply) => {
+      const id = parseId(request.params.id);
+      const profileId = parseId(request.params.profileId);
+      if (id === undefined || profileId === undefined) return notFound(reply);
+      try {
+        const result = agentManager.deleteCoreProfile(id, profileId);
+        return result === "not_found" ? notFound(reply) : reply.code(204).send();
+      } catch (error) {
+        return handleAgentError(reply, error);
+      }
+    }
+  );
+
+  app.get<{ Params: { id: string; profileId: string } }>(
+    "/agents/:id/core-profiles/:profileId/models",
+    async (request, reply) => {
+      const id = parseId(request.params.id);
+      const profileId = parseId(request.params.profileId);
+      if (id === undefined || profileId === undefined) return notFound(reply);
+      try {
+        const catalog = await agentManager.models(id, profileId);
+        return catalog === undefined ? notFound(reply) : catalog;
+      } catch (error) {
+        return handleAgentError(reply, error);
+      }
+    }
+  );
+
   app.get<{ Params: { id: string } }>("/agents/:id/usage", (request, reply) => {
     const id = parseId(request.params.id);
     if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
@@ -184,10 +294,19 @@ export const registerAgentRoutes = (
     return skillManager.list(id);
   });
 
-  app.get<{ Params: { id: string } }>("/agents/:id/extensions", (request, reply) => {
+  app.get<{ Params: { id: string }; Querystring: { provider?: string } }>("/agents/:id/extensions", (request, reply) => {
     const id = parseId(request.params.id);
     if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
-    return providerExtensionManager.list(id);
+    const parsed = extensionQuerySchema.safeParse(request.query);
+    if (!parsed.success) return badRequest(reply, "Invalid Provider extension query");
+    try {
+      return providerExtensionManager.list(id, parsed.data.provider);
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "agent_provider_unavailable") {
+        return badRequest(reply, "Provider is not assigned to this Agent");
+      }
+      throw error;
+    }
   });
 
   app.put<{ Params: { id: string; extensionId: string } }>(
@@ -197,7 +316,20 @@ export const registerAgentRoutes = (
       if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
       const parsed = updateExtensionSchema.safeParse(request.body);
       if (!parsed.success) return badRequest(reply, "Invalid Provider extension update");
-      const extension = providerExtensionManager.setEnabled(id, request.params.extensionId, parsed.data.enabled);
+      let extension;
+      try {
+        extension = providerExtensionManager.setEnabled(
+          id,
+          request.params.extensionId,
+          parsed.data.enabled,
+          parsed.data.provider
+        );
+      } catch (error) {
+        if (error instanceof Error && "code" in error && error.code === "agent_provider_unavailable") {
+          return badRequest(reply, "Provider is not assigned to this Agent");
+        }
+        throw error;
+      }
       return extension === undefined
         ? reply.code(404).send({ error: { code: "provider_extension_not_found", message: "Provider extension not found" } })
         : extension;

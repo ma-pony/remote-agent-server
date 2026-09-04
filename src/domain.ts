@@ -2,6 +2,7 @@ import type { AgentModelPolicy } from "./agents/model-policy.js";
 
 export type Provider = "claude_code" | "codex" | "hermes";
 export type AgentProvider = Provider;
+export type CoreRoutingMode = "session_sticky" | "scheduled_handoff";
 export type SessionStatus = "idle" | "running";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type IntegrationTaskStatus = RunStatus;
@@ -74,7 +75,35 @@ export type Agent = {
   effectiveMaxConcurrentRuns: number;
   modelPolicy: AgentModelPolicy;
   providerDefaultModel: string | null;
+  coreRoutingMode: CoreRoutingMode;
+  defaultCoreProfileId: number;
+  coreProfiles: AgentCoreProfile[];
   projectEnvironmentId: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AgentCoreProfile = {
+  id: number;
+  agentId: number;
+  name: string;
+  provider: Provider;
+  enabled: boolean;
+  maxConcurrentRuns: number | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SessionCoreBinding = {
+  id: number;
+  sessionId: number;
+  coreProfileId: number;
+  providerSessionId: string | null;
+  contextCursorRunId: number | null;
+  lastModel: string | null;
+  usage: TokenUsageTotals | null;
+  lastUsedAt: string | null;
+  storageCleanedAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -85,6 +114,7 @@ export type Session = {
   title: string;
   status: SessionStatus;
   providerSessionId: string | null;
+  pinnedCoreProfileId: number | null;
   storageCleanedAt: string | null;
   workspacePath: string;
   projectEnvironmentRevisionId: number | null;
@@ -123,6 +153,11 @@ export type Run = {
   result: string | null;
   error: string | null;
   resolvedModel: string | null;
+  resolvedCoreProfileId: number | null;
+  resolvedProvider: Provider | null;
+  resolvedRuleIndex: number | null;
+  routingPolicyRevision: string | null;
+  effectiveConcurrency: number | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

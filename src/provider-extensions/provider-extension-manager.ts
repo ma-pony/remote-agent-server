@@ -212,11 +212,11 @@ export class ProviderExtensionManager {
     this.cacheTtlMs = options.cacheTtlMs ?? 30_000;
   }
 
-  list(agentId: number): ProviderExtensionCatalogItem[] {
-    const provider = this.agentProvider(agentId);
+  list(agentId: number, selectedProvider?: Provider): ProviderExtensionCatalogItem[] {
+    const provider = this.requireAgentProvider(agentId, selectedProvider);
     if (provider === "hermes") return [];
     const discovered = this.discover(provider);
-    const assignments = this.assignmentRows(agentId);
+    const assignments = this.assignmentRows(agentId, provider);
     const byId = new Map(discovered.map((item) => [item.id, item]));
     const result: ProviderExtensionCatalogItem[] = discovered.map((item) => ({
       id: item.id,
@@ -247,8 +247,13 @@ export class ProviderExtensionManager {
     });
   }
 
-  setEnabled(agentId: number, id: string, enabled: boolean): ProviderExtensionCatalogItem | undefined {
-    const provider = this.agentProvider(agentId);
+  setEnabled(
+    agentId: number,
+    id: string,
+    enabled: boolean,
+    selectedProvider?: Provider
+  ): ProviderExtensionCatalogItem | undefined {
+    const provider = this.requireAgentProvider(agentId, selectedProvider);
     if (provider === "hermes") return undefined;
     const item = this.discover(provider).find((candidate) => candidate.id === id);
     if (enabled) {
@@ -258,7 +263,8 @@ export class ProviderExtensionManager {
         INSERT INTO agent_provider_extensions
           (agent_id, provider, kind, extension_id, name, description, source_fingerprint, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(agent_id, extension_id) DO UPDATE SET
+        ON CONFLICT(agent_id, provider, extension_id) DO UPDATE SET
+          kind = excluded.kind,
           name = excluded.name,
           description = excluded.description,
           source_fingerprint = excluded.source_fingerprint,
@@ -275,23 +281,23 @@ export class ProviderExtensionManager {
         now
       );
     } else {
-      const deleted = this.options.db.prepare(
-        "DELETE FROM agent_provider_extensions WHERE agent_id = ? AND extension_id = ?"
-      ).run(agentId, id);
+      const deleted = this.options.db.prepare(`
+        DELETE FROM agent_provider_extensions WHERE agent_id = ? AND provider = ? AND extension_id = ?
+      `).run(agentId, provider, id);
       if (deleted.changes === 0 && item === undefined) return undefined;
     }
-    return this.list(agentId).find((candidate) => candidate.id === id);
+    return this.list(agentId, provider).find((candidate) => candidate.id === id);
   }
 
-  enabled(agentId: number): DiscoveredProviderExtension[] {
-    const provider = this.agentProvider(agentId);
+  enabled(agentId: number, selectedProvider?: Provider): DiscoveredProviderExtension[] {
+    const provider = this.requireAgentProvider(agentId, selectedProvider);
     if (provider === "hermes") return [];
-    const selected = this.assignmentRows(agentId);
+    const selected = this.assignmentRows(agentId, provider);
     return this.discover(provider).filter((item) => selected.has(item.id));
   }
 
-  revision(agentId: number): string {
-    return fingerprint(this.enabled(agentId).map(({ id, sourceFingerprint }) => ({ id, sourceFingerprint })));
+  revision(agentId: number, provider?: Provider): string {
+    return fingerprint(this.enabled(agentId, provider).map(({ id, sourceFingerprint }) => ({ id, sourceFingerprint })));
   }
 
   private discover(provider: "codex" | "claude_code"): DiscoveredProviderExtension[] {
@@ -302,24 +308,32 @@ export class ProviderExtensionManager {
     return items;
   }
 
-  private agentProvider(agentId: number): Provider {
+  private requireAgentProvider(agentId: number, selectedProvider?: Provider): Provider {
     const row = this.options.db.prepare("SELECT provider FROM agents WHERE id = ?").get(agentId) as
       | { provider: Provider }
       | undefined;
     if (row === undefined) throw new ProviderExtensionManagerError("agent_not_found");
-    return row.provider;
+    const provider = selectedProvider ?? row.provider;
+    if (provider === row.provider) return provider;
+    const profile = this.options.db.prepare(`
+      SELECT 1 FROM agent_core_profiles WHERE agent_id = ? AND provider = ? AND enabled = 1 LIMIT 1
+    `).get(agentId, provider);
+    if (profile === undefined) throw new ProviderExtensionManagerError("agent_provider_unavailable");
+    return provider;
   }
 
-  private assignmentRows(agentId: number): Map<string, ExtensionRow> {
-    const rows = this.options.db.prepare(
-      "SELECT * FROM agent_provider_extensions WHERE agent_id = ? ORDER BY created_at ASC, extension_id ASC"
-    ).all(agentId) as ExtensionRow[];
+  private assignmentRows(agentId: number, provider: Exclude<Provider, "hermes">): Map<string, ExtensionRow> {
+    const rows = this.options.db.prepare(`
+      SELECT * FROM agent_provider_extensions
+      WHERE agent_id = ? AND provider = ?
+      ORDER BY created_at ASC, extension_id ASC
+    `).all(agentId, provider) as ExtensionRow[];
     return new Map(rows.map((row) => [row.extension_id, row]));
   }
 }
 
 export class ProviderExtensionManagerError extends Error {
-  constructor(readonly code: "agent_not_found") {
+  constructor(readonly code: "agent_not_found" | "agent_provider_unavailable") {
     super(code);
   }
 }

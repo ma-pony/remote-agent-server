@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { migrate, openDatabase } from "../src/db.js";
-import type { Run } from "../src/domain.js";
+import type { Agent, Run } from "../src/domain.js";
 import { startServer, type RunningServer } from "../src/main.js";
 import { SecretStore } from "../src/mcp/secret-store.js";
 import type { AgentRuntime, RuntimeTurnResult } from "../src/runtime/agent-runtime.js";
@@ -364,6 +364,33 @@ describe("RunScheduler", () => {
     };
   };
 
+  const routedAgent = (modelPolicy: Agent["modelPolicy"]): Agent => ({
+    id: 10,
+    name: "Routed agent",
+    provider: "codex",
+    enabled: true,
+    instructions: "",
+    maxConcurrentRuns: 3,
+    effectiveMaxConcurrentRuns: 3,
+    modelPolicy,
+    providerDefaultModel: null,
+    coreRoutingMode: "scheduled_handoff",
+    defaultCoreProfileId: 10,
+    coreProfiles: [
+      {
+        id: 10, agentId: 10, name: "First", provider: "codex", enabled: true,
+        maxConcurrentRuns: 1, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z"
+      },
+      {
+        id: 20, agentId: 10, name: "Second", provider: "codex", enabled: true,
+        maxConcurrentRuns: 3, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z"
+      }
+    ],
+    projectEnvironmentId: null,
+    createdAt: "2026-09-01T00:00:00Z",
+    updatedAt: "2026-09-01T00:00:00Z"
+  });
+
   it("Agent 满额时跳过其队首 Run 并让其他 Agent 使用剩余全局槽位", async () => {
     const settings = mutableConcurrencySettings(2);
     const queued = [{ id: 1 }, { id: 2 }, { id: 3 }] as Run[];
@@ -478,6 +505,38 @@ describe("RunScheduler", () => {
     await scheduler.stop();
   });
 
+  it("Core 并发只限制自身，不占用同一 Agent 的其他 Core 槽位", async () => {
+    const settings = mutableConcurrencySettings(3);
+    const queued = [1, 2, 3].map((id) => ({ id })) as Run[];
+    const releases = new Map<number, () => void>();
+    const execute = vi.fn((runId: number) => new Promise<Run>((resolve) => {
+      releases.set(runId, () => resolve({ id: runId } as Run));
+    }));
+    const scheduler = new RunScheduler({
+      runRepository: {
+        get: (id) => queued.find((run) => run.id === id),
+        listQueued: () => queued,
+        failQueued: () => ({}) as Run,
+        getSchedulingContext: (id) => ({
+          agentId: 10,
+          maxConcurrentRuns: 3,
+          agent: routedAgent({ mode: "provider_default", coreProfileId: id === 3 ? 20 : 10 })
+        })
+      },
+      executor: { execute, cancel: async () => ({}) as Run },
+      concurrencySettings: settings
+    });
+
+    scheduler.start();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2));
+    expect(execute.mock.calls.map(([runId]) => runId)).toEqual([1, 3]);
+    releases.get(1)?.();
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(3));
+    expect(execute.mock.calls[2]?.[0]).toBe(2);
+    releases.forEach((release) => release());
+    await scheduler.stop();
+  });
+
   it("UTC 时间段开始时主动重新调度排队 Run", async () => {
     vi.useFakeTimers();
     try {
@@ -514,6 +573,46 @@ describe("RunScheduler", () => {
       await vi.advanceTimersByTimeAsync(20);
       expect(execute).toHaveBeenCalledTimes(3);
 
+      releases.forEach((release) => release());
+      await scheduler.stop();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("Core 路由时间段开始时主动重新调度排队 Run", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-01T07:59:59.990Z"));
+      const queued = [1, 2, 3].map((id) => ({ id })) as Run[];
+      const releases = new Map<number, () => void>();
+      const execute = vi.fn((runId: number) => new Promise<Run>((resolve) => {
+        releases.set(runId, () => resolve({ id: runId } as Run));
+      }));
+      const agent = routedAgent({
+        mode: "schedule",
+        defaultCoreProfileId: 10,
+        defaultModel: "codex-default",
+        windows: [{
+          days: ["tue"], start: "08:00", end: "12:00", coreProfileId: 20, model: "codex-fast"
+        }]
+      });
+      const scheduler = new RunScheduler({
+        runRepository: {
+          get: (id) => queued.find((run) => run.id === id),
+          listQueued: () => queued,
+          failQueued: () => ({}) as Run,
+          getSchedulingContext: () => ({ agentId: 10, maxConcurrentRuns: 3, agent })
+        },
+        executor: { execute, cancel: async () => ({}) as Run },
+        maxConcurrentRuns: 3
+      });
+
+      scheduler.start();
+      expect(execute).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(execute).toHaveBeenCalledTimes(3);
       releases.forEach((release) => release());
       await scheduler.stop();
       expect(vi.getTimerCount()).toBe(0);
@@ -792,6 +891,132 @@ describe("RunScheduler", () => {
 });
 
 describe("Run API", () => {
+  it("通过真实 HTTP 完成 Agent Core 配置、Run 路由和跨 Core handoff", async () => {
+    const runtime = createFakeRuntime({
+      events: [{ type: "message", stream: "output", text: "completed" }],
+      result: { status: "completed" }
+    });
+    runtime.ensureSession = vi.fn(async (input) => ({
+      providerSessionId: `${input.provider}-core-${input.coreProfileId}`
+    }));
+    runtime.startTurn = vi.fn(runtime.startTurn);
+    runtime.listModels = vi.fn(async (input) => ({
+      supported: true,
+      currentModel: input.provider === "codex" ? "codex-default" : "claude-default",
+      availableModels: input.provider === "codex"
+        ? ["codex-default"]
+        : ["claude-default"]
+    }));
+    const { app, db, root } = await createApiTestApp({ runtime, maxConcurrentRuns: 2 });
+    seedSession(db, root, 1);
+    await app.listen({ host: "127.0.0.1", port: 0 });
+    const address = app.server.address();
+    if (address === null || typeof address === "string") throw new Error("HTTP test server did not expose a TCP port");
+    const baseUrl = `http://127.0.0.1:${address.port}/api`;
+    const request = async (path: string, init: RequestInit = {}): Promise<Response> => fetch(`${baseUrl}${path}`, {
+      ...init,
+      headers: {
+        ...authHeaders(),
+        ...(init.body === undefined ? {} : { "content-type": "application/json" }),
+        ...init.headers
+      }
+    });
+    const waitForTerminalRun = async (runId: number): Promise<Run> => {
+      let current: Run | undefined;
+      await vi.waitFor(async () => {
+        const response = await request(`/runs/${runId}`);
+        expect(response.status).toBe(200);
+        current = await response.json() as Run;
+        expect(current.status).toBe("succeeded");
+      });
+      return current!;
+    };
+
+    const agent = await (await request("/agents/1")).json() as Agent;
+    const createdProfileResponse = await request("/agents/1/core-profiles", {
+      method: "POST",
+      body: JSON.stringify({ name: "Claude", provider: "claude_code", maxConcurrentRuns: 1 })
+    });
+    expect(createdProfileResponse.status).toBe(201);
+    const secondaryProfile = await createdProfileResponse.json() as Agent["coreProfiles"][number];
+    const firstPolicyResponse = await request("/agents/1", {
+      method: "PATCH",
+      body: JSON.stringify({
+        coreRoutingMode: "scheduled_handoff",
+        modelPolicy: {
+          mode: "fixed",
+          coreProfileId: agent.defaultCoreProfileId,
+          model: "codex-default"
+        }
+      })
+    });
+    expect(firstPolicyResponse.status).toBe(200);
+
+    const firstRunResponse = await request("/sessions/1/runs", {
+      method: "POST",
+      body: JSON.stringify({ input: "first request" })
+    });
+    expect(firstRunResponse.status).toBe(201);
+    const firstRun = await waitForTerminalRun((await firstRunResponse.json() as Run).id);
+    expect(firstRun).toMatchObject({
+      resolvedCoreProfileId: agent.defaultCoreProfileId,
+      resolvedProvider: "codex",
+      resolvedModel: "codex-default"
+    });
+
+    const secondPolicyResponse = await request("/agents/1", {
+      method: "PATCH",
+      body: JSON.stringify({
+        modelPolicy: {
+          mode: "fixed",
+          coreProfileId: secondaryProfile.id,
+          model: "claude-default"
+        }
+      })
+    });
+    expect(secondPolicyResponse.status).toBe(200);
+    const secondRunResponse = await request("/sessions/1/runs", {
+      method: "POST",
+      body: JSON.stringify({ input: "second request" })
+    });
+    expect(secondRunResponse.status).toBe(201);
+    const secondRun = await waitForTerminalRun((await secondRunResponse.json() as Run).id);
+
+    expect(secondRun).toMatchObject({
+      resolvedCoreProfileId: secondaryProfile.id,
+      resolvedProvider: "claude_code",
+      resolvedModel: "claude-default"
+    });
+    expect(runtime.ensureSession).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      coreProfileId: agent.defaultCoreProfileId,
+      provider: "codex",
+      providerSessionId: null
+    }));
+    expect(runtime.ensureSession).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      coreProfileId: secondaryProfile.id,
+      provider: "claude_code",
+      providerSessionId: null
+    }));
+    expect(runtime.startTurn).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      text: expect.stringMatching(/\[REMOTE_AGENT_HANDOFF v1\][\s\S]*first request[\s\S]*\[CURRENT_USER_REQUEST\]\nsecond request/)
+    }));
+    expect(db.prepare(`
+      SELECT core_profile_id, provider_session_id, context_cursor_run_id
+      FROM session_core_bindings WHERE session_id = 1 ORDER BY core_profile_id
+    `).all()).toEqual([
+      {
+        core_profile_id: agent.defaultCoreProfileId,
+        provider_session_id: `codex-core-${agent.defaultCoreProfileId}`,
+        context_cursor_run_id: firstRun.id
+      },
+      {
+        core_profile_id: secondaryProfile.id,
+        provider_session_id: `claude_code-core-${secondaryProfile.id}`,
+        context_cursor_run_id: secondRun.id
+      }
+    ]);
+  });
+
   it("创建 Run 后可读取，并拒绝同一 Session 的第二个未结束 Run", async () => {
     const result = deferred<RuntimeTurnResult>();
     const runtime = createFakeRuntime();

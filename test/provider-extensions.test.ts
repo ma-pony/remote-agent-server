@@ -209,6 +209,38 @@ describe("Provider extensions", () => {
     ]));
   });
 
+  it("多 Core Agent 可以按 Provider 独立选择扩展", async () => {
+    const { app, codexAgentId, db, codexHome, claudeHome } = await fixture();
+    db.prepare(`
+      INSERT INTO agent_core_profiles
+        (agent_id, name, provider, enabled, created_at, updated_at)
+      VALUES (?, 'Claude', 'claude_code', 1, ?, ?)
+    `).run(codexAgentId, "2026-08-26T00:00:00.000Z", "2026-08-26T00:00:00.000Z");
+
+    const catalog = await app.inject({
+      method: "GET",
+      url: `/api/agents/${codexAgentId}/extensions?provider=claude_code`,
+      headers: authHeaders
+    });
+    expect(catalog.statusCode).toBe(200);
+    const plugin = (catalog.json() as Array<{ id: string; kind: string }>).find(({ kind }) => kind === "plugin")!;
+
+    const enabled = await app.inject({
+      method: "PUT",
+      url: `/api/agents/${codexAgentId}/extensions/${encodeURIComponent(plugin.id)}`,
+      headers: authHeaders,
+      payload: { enabled: true, provider: "claude_code" }
+    });
+    expect(enabled.statusCode).toBe(200);
+    expect(enabled.json()).toMatchObject({ id: plugin.id, provider: "claude_code", enabled: true });
+
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    expect(manager.enabled(codexAgentId, "claude_code")).toEqual([
+      expect.objectContaining({ id: plugin.id, provider: "claude_code" })
+    ]);
+    expect(manager.enabled(codexAgentId, "codex")).toHaveLength(0);
+  });
+
   it("只把 Agent 选中的 Provider 插件和 Hook 投影到运行目录", async () => {
     const { app, codexAgentId, root, codexHome, claudeHome, db } = await fixture();
     const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });

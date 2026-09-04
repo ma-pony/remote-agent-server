@@ -4,6 +4,8 @@ import type { RuntimeMcpServer } from "../mcp/mcp-types.js";
 export type RuntimeSessionInput = {
   sessionId: number;
   agentId: number;
+  coreProfileId?: number;
+  legacySessionNamespace?: boolean;
   provider: Provider;
   workspacePath: string;
   browserProfilePath: string;
@@ -32,6 +34,7 @@ export type RuntimeTurnResult = (
 export type RuntimeDoctor = { ok: boolean; message: string; details: string[] };
 export type RuntimeModelCatalogInput = {
   agentId: number;
+  coreProfileId?: number;
   provider: Provider;
   workspacePath: string;
   instructions: string;

@@ -17,6 +17,11 @@ import { useI18n } from "@/i18n";
 type RunView = { run: Run; events: RunEvent[]; historyError: string | null };
 const activeStatuses = new Set<RunStatus>(["queued", "running"]);
 const terminalStatuses = new Set<RunStatus>(["succeeded", "failed", "cancelled"]);
+const providerNames: Record<Agent["provider"], string> = {
+  claude_code: "Claude Code",
+  codex: "Codex",
+  hermes: "Hermes"
+};
 const streamRetryDelays = [500, 1_000, 2_000, 4_000, 5_000] as const;
 const canonicalPollIntervalMs = 5_000;
 
@@ -68,6 +73,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   const { text } = useI18n();
   const navigate = useNavigate();
   const [session, setSession] = useState<SessionDetail | null>(null);
+  const [agent, setAgent] = useState<Agent | null>(null);
   const [agentName, setAgentName] = useState("");
   const [views, setViews] = useState<RunView[]>([]);
   const [input, setInput] = useState("");
@@ -87,6 +93,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     setInitialLoading(true);
     setLoadError("");
     setSession(null);
+    setAgent(null);
     setAgentName("");
     setViews([]);
     void Promise.all([
@@ -97,8 +104,10 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
         api<RunEvent[]>(`/runs/${run.id}/events?afterSeq=0`, { signal: controller.signal })
       ));
       if (controller.signal.aborted || generation !== loadGeneration.current) return;
+      const currentAgent = agents.find((agent) => agent.id === detail.agentId) ?? null;
       setSession(detail);
-      setAgentName(agents.find((agent) => agent.id === detail.agentId)?.name ?? String(detail.agentId));
+      setAgent(currentAgent);
+      setAgentName(currentAgent?.name ?? String(detail.agentId));
       setViews(detail.runs.map((run, index) => {
         const history = histories[index];
         if (history?.status === "fulfilled") {
@@ -312,7 +321,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       </div>
       <section className="mt-6 flex flex-col gap-5" aria-label={text("运行历史", "Run history")} aria-live="polite">
         {session?.hasOlderRuns ? <Button className="self-center" variant="outline" type="button" disabled={loadingOlder} onClick={() => void loadOlderRuns()}>{loadingOlder ? text("加载中…", "Loading…") : text("加载更早记录", "Load earlier runs")}</Button> : null}
-        {views.length === 0 && session !== null ? <EmptyState icon={MessageSquare} title={session.storageCleanedAt == null ? text("还没有运行记录", "No runs yet") : text("没有可展示的记录", "No run history available")} description={session.storageCleanedAt == null ? text("在下方输入任务，开始这个会话的第一轮运行。", "Enter a task below to start the first run in this session.") : text("该会话的磁盘内容已清理，历史统计仍会保留。", "The on-disk content was cleaned while historical statistics remain available.")} /> : <div className="surface-list contents">{views.map((view) => <RunBlock key={view.run.id} view={view} />)}</div>}
+        {views.length === 0 && session !== null ? <EmptyState icon={MessageSquare} title={session.storageCleanedAt == null ? text("还没有运行记录", "No runs yet") : text("没有可展示的记录", "No run history available")} description={session.storageCleanedAt == null ? text("在下方输入任务，开始这个会话的第一轮运行。", "Enter a task below to start the first run in this session.") : text("该会话的磁盘内容已清理，历史统计仍会保留。", "The on-disk content was cleaned while historical statistics remain available.")} /> : <div className="surface-list contents">{views.map((view) => <RunBlock key={view.run.id} view={view} agent={agent} />)}</div>}
       </section>
       {session !== null && !mcpParametersValid ? <Alert className="mt-6"><XCircle /><AlertTitle>{text("缺少 MCP 参数", "Missing MCP parameters")}</AlertTitle><AlertDescription>{text("请先在", "Complete these in")} <Link className="underline" to={`/sessions/${session.id}/settings`}>{text("会话设置", "session settings")}</Link>{text(` 中填写：${missingMcpParameters.join("、")}`, `: ${missingMcpParameters.join(", ")}`)}</AlertDescription></Alert> : null}
       <Card className="sticky bottom-3 z-10 mt-6 border-primary/20 bg-card/95 shadow-xl backdrop-blur"><CardContent className="p-4"><form className="flex flex-col gap-3" onSubmit={send}>
@@ -326,9 +335,10 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   );
 };
 
-const RunBlock = ({ view }: { view: RunView }) => {
+const RunBlock = ({ view, agent }: { view: RunView; agent: Agent | null }) => {
   const { text } = useI18n();
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const coreProfile = (agent?.coreProfiles ?? []).find((profile) => profile.id === view.run.resolvedCoreProfileId);
   const { output, details } = useMemo(() => {
     const outputParts: string[] = [];
     const nextDetails: RunEvent[] = [];
@@ -349,7 +359,7 @@ const RunBlock = ({ view }: { view: RunView }) => {
   return <article className="flex flex-col gap-3">
     <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-foreground px-4 py-3 text-background"><span className="mb-1 block text-xs font-semibold uppercase tracking-wide opacity-70">{text("你", "You")}</span><p className="whitespace-pre-wrap">{view.run.input}</p></div>
     <Card className="border-l-4 border-l-primary"><CardContent className="p-5">
-      <div className="mb-4 flex items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><span className="text-sm font-semibold">{text("智能体", "Agent")}</span>{view.run.resolvedModel === null || view.run.resolvedModel === undefined ? null : <Badge className="max-w-64 truncate font-mono font-normal" variant="outline" title={view.run.resolvedModel}>{view.run.resolvedModel}</Badge>}</div><Badge variant={view.run.status === "failed" ? "destructive" : view.run.status === "succeeded" ? "default" : "secondary"}>{({ queued: text("排队中", "Queued"), running: text("运行中", "Running"), succeeded: text("已完成", "Completed"), failed: text("失败", "Failed"), cancelled: text("已取消", "Cancelled") } satisfies Record<RunStatus, string>)[view.run.status]}</Badge></div>
+      <div className="mb-4 flex items-center justify-between gap-3"><div className="flex min-w-0 flex-wrap items-center gap-2"><span className="text-sm font-semibold">{text("智能体", "Agent")}</span>{view.run.resolvedCoreProfileId === null ? null : <Badge variant="secondary" title={`Core #${view.run.resolvedCoreProfileId}`}>{coreProfile?.name ?? `Core #${view.run.resolvedCoreProfileId}`}</Badge>}{view.run.resolvedProvider === null ? null : <Badge variant="outline">{providerNames[view.run.resolvedProvider]}</Badge>}{view.run.resolvedModel === null || view.run.resolvedModel === undefined ? null : <Badge className="max-w-64 truncate font-mono font-normal" variant="outline" title={view.run.resolvedModel}>{view.run.resolvedModel}</Badge>}</div><Badge variant={view.run.status === "failed" ? "destructive" : view.run.status === "succeeded" ? "default" : "secondary"}>{({ queued: text("排队中", "Queued"), running: text("运行中", "Running"), succeeded: text("已完成", "Completed"), failed: text("失败", "Failed"), cancelled: text("已取消", "Cancelled") } satisfies Record<RunStatus, string>)[view.run.status]}</Badge></div>
       {output !== "" ? <p className="whitespace-pre-wrap leading-7">{output}</p> : activeStatuses.has(view.run.status) ? <p className="text-muted-foreground">{text("等待智能体输出…", "Waiting for agent output…")}</p> : null}
       {view.historyError !== null ? <div className="mt-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">{view.historyError}</div> : null}
       {view.run.error !== null && !details.some((item) => item.type === "error") ? <div className="mt-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive" role="alert">{view.run.error}</div> : null}

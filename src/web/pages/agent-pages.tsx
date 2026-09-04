@@ -22,7 +22,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, PageContainer, PageHeader } from "@/components/page-header";
 import { TokenUsageSummaryCard } from "@/components/token-usage";
 import {
-  api, errorMessage, type Agent, type AgentDoctorResult, type AgentModelCatalog, type AgentModelPolicy,
+  api, errorMessage, type Agent, type AgentCoreProfile, type AgentDoctorResult, type AgentModelCatalog, type AgentModelPolicy,
   type AgentSkill, type IntegrationEndpointSummary,
   type ProjectEnvironment, type Provider, type TokenUsageSummary
 } from "@/api";
@@ -37,7 +37,7 @@ const maxSkillArchiveBytes = 10 * 1024 * 1024;
 type SchedulePolicy = Extract<AgentModelPolicy, { mode: "schedule" }>;
 type ScheduleWindow = SchedulePolicy["windows"][number];
 type ModelWeekday = SchedulePolicy["windows"][number]["days"][number];
-type ScheduleGroup = Pick<ScheduleWindow, "days" | "model" | "maxConcurrentRuns"> & {
+type ScheduleGroup = Pick<ScheduleWindow, "days" | "model" | "coreProfileId" | "maxConcurrentRuns"> & {
   periods: Array<Pick<ScheduleWindow, "start" | "end">>;
 };
 const modelWeekdays: Array<{ value: ModelWeekday; zh: string; en: string; shortZh: string; shortEn: string }> = [
@@ -62,6 +62,7 @@ const scheduleWindowsToGroups = (windows: ScheduleWindow[]): ScheduleGroup[] => 
   if (previous !== undefined
     && sameModelWeekdays(previous.days, window.days)
     && previous.model === window.model
+    && previous.coreProfileId === window.coreProfileId
     && (previous.maxConcurrentRuns ?? null) === (window.maxConcurrentRuns ?? null)) {
     return [...groups.slice(0, -1), {
       ...previous,
@@ -71,6 +72,7 @@ const scheduleWindowsToGroups = (windows: ScheduleWindow[]): ScheduleGroup[] => 
   return [...groups, {
     days: [...window.days],
     model: window.model,
+    ...(window.coreProfileId === undefined ? {} : { coreProfileId: window.coreProfileId }),
     maxConcurrentRuns: window.maxConcurrentRuns ?? null,
     periods: [{ start: window.start, end: window.end }]
   }];
@@ -79,6 +81,7 @@ const scheduleWindowsToGroups = (windows: ScheduleWindow[]): ScheduleGroup[] => 
 const scheduleGroupsToWindows = (groups: ScheduleGroup[]): ScheduleWindow[] => groups.flatMap((group) => group.periods.map((period) => ({
   days: [...group.days],
   model: group.model,
+  ...(group.coreProfileId === undefined ? {} : { coreProfileId: group.coreProfileId }),
   maxConcurrentRuns: group.maxConcurrentRuns ?? null,
   ...period
 })));
@@ -103,6 +106,51 @@ const fileBase64 = (file: File, readError: string): Promise<string> => new Promi
 const ErrorAlert = ({ message }: { message: string }) => { const { text } = useI18n(); return message === "" ? null : (
   <Alert variant="destructive"><XCircle /><AlertTitle>{text("操作失败", "Operation failed")}</AlertTitle><AlertDescription>{message}</AlertDescription></Alert>
 ); };
+
+const CoreProfileCreateDialog = ({ agentId, disabled, onCreated, onError }: {
+  agentId: number;
+  disabled: boolean;
+  onCreated: (profile: AgentCoreProfile) => void;
+  onError?: (message: string) => void;
+}) => {
+  const { text } = useI18n();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [provider, setProvider] = useState<Provider>("codex");
+  const [maxConcurrentRuns, setMaxConcurrentRuns] = useState("");
+  const [busy, setBusy] = useState(false);
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    const limit = maxConcurrentRuns === "" ? null : Number(maxConcurrentRuns);
+    if (name.trim() === "" || (limit !== null && (!Number.isInteger(limit) || limit < 1 || limit > 64))) return;
+    setBusy(true);
+    try {
+      const profile = await api<AgentCoreProfile>(`/agents/${agentId}/core-profiles`, {
+        method: "POST",
+        body: JSON.stringify({ name: name.trim(), provider, maxConcurrentRuns: limit })
+      });
+      onCreated(profile);
+      setName("");
+      setMaxConcurrentRuns("");
+      setOpen(false);
+    } catch (reason) {
+      onError?.(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return <Dialog open={open} onOpenChange={setOpen}>
+    <DialogTrigger asChild><Button type="button" size="sm" variant="outline" disabled={disabled}><Plus />{text("添加 Core", "Add core")}</Button></DialogTrigger>
+    <DialogContent><form onSubmit={create}><DialogHeader><DialogTitle>{text("添加 Agent Core", "Add agent core")}</DialogTitle><DialogDescription>{text("Core 是一个可独立恢复上下文的执行身份。Provider 创建后不再修改。", "A core is an execution identity with its own resumable context. Its provider is immutable after creation.")}</DialogDescription></DialogHeader>
+      <FieldGroup className="py-5">
+        <Field><FieldLabel htmlFor="new-core-name">{text("名称", "Name")}</FieldLabel><Input id="new-core-name" value={name} placeholder={text("例如：夜间 DeepSeek", "For example: Night DeepSeek")} onChange={(event) => setName(event.target.value)} /></Field>
+        <Field><FieldLabel htmlFor="new-core-provider">{text("执行器", "Provider")}</FieldLabel><NativeSelect id="new-core-provider" value={provider} onChange={(event) => setProvider(event.target.value as Provider)}>{Object.entries(providerNames).map(([value, label]) => <NativeSelectOption key={value} value={value}>{label}</NativeSelectOption>)}</NativeSelect></Field>
+        <Field><FieldLabel htmlFor="new-core-concurrency">{text("并发上限（可选）", "Concurrency limit (optional)")}</FieldLabel><Input id="new-core-concurrency" type="number" min={1} max={64} value={maxConcurrentRuns} placeholder={text("继承智能体设置", "Inherit agent setting")} onChange={(event) => setMaxConcurrentRuns(event.target.value)} /></Field>
+      </FieldGroup>
+      <DialogFooter><Button type="submit" disabled={busy || name.trim() === ""}>{busy ? text("添加中…", "Adding…") : text("添加", "Add")}</Button></DialogFooter>
+    </form></DialogContent>
+  </Dialog>;
+};
 
 const ModelWeekdayPicker = ({ value, onChange }: {
   value: ModelWeekday[];
@@ -439,26 +487,49 @@ export const AgentSettingsPage = () => {
   const [projectEnvironmentId, setProjectEnvironmentId] = useState(agent.projectEnvironmentId ?? "");
   const [concurrencyMode, setConcurrencyMode] = useState(agent.maxConcurrentRuns == null ? "inherit" : "custom");
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState(String(agent.maxConcurrentRuns ?? agent.effectiveMaxConcurrentRuns ?? ""));
-  const [modelCatalog, setModelCatalog] = useState<AgentModelCatalog | null>(null);
+  const [coreProfiles, setCoreProfiles] = useState<AgentCoreProfile[]>(agent.coreProfiles);
+  const [coreRoutingMode, setCoreRoutingMode] = useState(agent.coreRoutingMode);
+  const [defaultCoreProfileId, setDefaultCoreProfileId] = useState(agent.defaultCoreProfileId);
+  const [modelCatalogs, setModelCatalogs] = useState<Record<number, AgentModelCatalog>>({});
   const [modelCatalogError, setModelCatalogError] = useState("");
   const [modelPolicy, setModelPolicy] = useState<AgentModelPolicy>(agent.modelPolicy ?? { mode: "provider_default" });
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const instructionsUnsupported = coreProfiles.some((profile) => profile.enabled && profile.provider === "hermes");
   useEffect(() => {
     const controller = new AbortController();
     void api<ProjectEnvironment[]>("/project-environments", { signal: controller.signal }).then((items) => setEnvironments(items.filter((item) => item.currentRevisionId !== null))).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
-    void api<AgentModelCatalog>(`/agents/${agent.id}/models`, { signal: controller.signal })
-      .then(setModelCatalog)
-      .catch((reason: unknown) => { if (!controller.signal.aborted) setModelCatalogError(errorMessage(reason)); });
+    const profiles = agent.coreProfiles.filter((profile) => profile.enabled);
+    void Promise.allSettled(profiles.map(async (profile) => [
+      profile.id,
+      await api<AgentModelCatalog>(`/agents/${agent.id}/core-profiles/${profile.id}/models`, { signal: controller.signal })
+    ] as const)).then((results) => {
+      if (controller.signal.aborted) return;
+      const entries = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      const failures = results.filter((result) => result.status === "rejected");
+      setModelCatalogs(Object.fromEntries(entries));
+      setModelCatalogError(failures.length === 0
+        ? ""
+        : failures.length === results.length
+          ? errorMessage(failures[0]!.reason)
+          : text("部分 Agent Core 的模型读取失败", "Failed to load models from some Agent Cores"));
+    });
     return () => controller.abort();
-  }, [agent.id]);
-  const availableModels = modelCatalog?.availableModels ?? [];
-  const selectableModels = modelCatalog?.supported === true && availableModels.length > 0;
-  const selectedPolicyModels = modelPolicy.mode === "provider_default" ? [] : modelPolicy.mode === "fixed"
-    ? [modelPolicy.model]
-    : [modelPolicy.defaultModel, ...modelPolicy.windows.map((window) => window.model)];
-  const policyModelsAvailable = modelPolicy.mode === "provider_default"
-    || (selectableModels && selectedPolicyModels.every((model) => availableModels.includes(model)));
+  }, [agent.coreProfiles, agent.id, text]);
+  const defaultCatalog = modelCatalogs[defaultCoreProfileId] ?? null;
+  const availableModels = defaultCatalog?.availableModels ?? [];
+  const selectableModels = Object.values(modelCatalogs).some((catalog) => catalog.supported && catalog.availableModels.length > 0);
+  const policyModelsAvailable = (() => {
+    if (modelPolicy.mode === "provider_default") return true;
+    if (modelPolicy.mode === "fixed") {
+      const profileId = modelPolicy.coreProfileId ?? defaultCoreProfileId;
+      return modelCatalogs[profileId]?.availableModels.includes(modelPolicy.model) === true;
+    }
+    const defaultsAvailable = modelCatalogs[modelPolicy.defaultCoreProfileId ?? defaultCoreProfileId]
+      ?.availableModels.includes(modelPolicy.defaultModel) === true;
+    return defaultsAvailable && modelPolicy.windows.every((window) => modelCatalogs[window.coreProfileId ?? defaultCoreProfileId]
+      ?.availableModels.includes(window.model) === true);
+  })();
   const scheduleGroups = modelPolicy.mode === "schedule" ? scheduleWindowsToGroups(modelPolicy.windows) : [];
   const scheduleValid = modelPolicy.mode !== "schedule" || (modelPolicy.windows.length > 0
     && modelPolicy.windows.every((window) => time24Pattern.test(window.start) && time24Pattern.test(window.end)
@@ -476,16 +547,70 @@ export const AgentSettingsPage = () => {
       setModelPolicy({ mode });
       return;
     }
-    const defaultModel = modelCatalog?.currentModel !== null && modelCatalog?.currentModel !== undefined
-      && availableModels.includes(modelCatalog.currentModel)
-      ? modelCatalog.currentModel
+    const defaultModel = defaultCatalog?.currentModel !== null && defaultCatalog?.currentModel !== undefined
+      && availableModels.includes(defaultCatalog.currentModel)
+      ? defaultCatalog.currentModel
       : availableModels[0];
     if (defaultModel === undefined) return;
     setModelPolicy(mode === "fixed"
-      ? { mode, model: defaultModel }
+      ? { mode, model: defaultModel, ...(coreRoutingMode === "scheduled_handoff" ? { coreProfileId: defaultCoreProfileId } : {}) }
       : { mode, defaultModel, windows: [{
-        days: [...allModelWeekdays], start: "00:00", end: "12:00", model: defaultModel, maxConcurrentRuns: null
-      }] });
+        days: [...allModelWeekdays], start: "00:00", end: "12:00", model: defaultModel,
+        ...(coreRoutingMode === "scheduled_handoff" ? { coreProfileId: defaultCoreProfileId } : {}),
+        maxConcurrentRuns: null
+      }], ...(coreRoutingMode === "scheduled_handoff" ? { defaultCoreProfileId } : {}) });
+  };
+  const normalizePolicyCoreProfiles = (policy: AgentModelPolicy): AgentModelPolicy => {
+    if (coreRoutingMode === "session_sticky") {
+      if (policy.mode === "provider_default") return { mode: policy.mode };
+      if (policy.mode === "fixed") return { mode: policy.mode, model: policy.model };
+      return {
+        mode: policy.mode,
+        defaultModel: policy.defaultModel,
+        windows: policy.windows.map(({ coreProfileId: _coreProfileId, ...window }) => window)
+      };
+    }
+    if (policy.mode === "provider_default") {
+      return { ...policy, coreProfileId: policy.coreProfileId ?? defaultCoreProfileId };
+    }
+    if (policy.mode === "fixed") {
+      return { ...policy, coreProfileId: policy.coreProfileId ?? defaultCoreProfileId };
+    }
+    return {
+      ...policy,
+      defaultCoreProfileId: policy.defaultCoreProfileId ?? defaultCoreProfileId,
+      windows: policy.windows.map((window) => ({
+        ...window,
+        coreProfileId: window.coreProfileId ?? defaultCoreProfileId
+      }))
+    };
+  };
+  const saveCoreProfile = async (profile: AgentCoreProfile): Promise<void> => {
+    setBusy(`core-${profile.id}`); setError("");
+    try {
+      const updated = await api<AgentCoreProfile>(`/agents/${agent.id}/core-profiles/${profile.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: profile.name.trim(),
+          enabled: profile.enabled,
+          maxConcurrentRuns: profile.maxConcurrentRuns
+        })
+      });
+      setCoreProfiles((items) => items.map((item) => item.id === updated.id ? updated : item));
+      setAgent({
+        ...agent,
+        coreProfiles: agent.coreProfiles.map((item) => item.id === updated.id ? updated : item)
+      });
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
+  };
+  const deleteCoreProfile = async (profile: AgentCoreProfile): Promise<void> => {
+    setBusy(`core-${profile.id}`); setError("");
+    try {
+      await api(`/agents/${agent.id}/core-profiles/${profile.id}`, { method: "DELETE" });
+      setCoreProfiles((items) => items.filter((item) => item.id !== profile.id));
+      setAgent({ ...agent, coreProfiles: agent.coreProfiles.filter((item) => item.id !== profile.id) });
+      setModelCatalogs((current) => Object.fromEntries(Object.entries(current).filter(([id]) => Number(id) !== profile.id)));
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
   const save = async (event: FormEvent) => {
     event.preventDefault();
@@ -493,10 +618,12 @@ export const AgentSettingsPage = () => {
     if (name.trim() === "" || projectEnvironmentId === "" || !modelPolicyValid || (concurrencyMode === "custom" && (!Number.isInteger(customLimit) || customLimit < 1 || customLimit > 64))) return;
     setBusy("save"); setError("");
     try { setAgent(await api<Agent>(`/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({
-      name: name.trim(), projectEnvironmentId,
-      instructions: agent.provider === "hermes" ? "" : instructions,
+      name: name.trim(), projectEnvironmentId: Number(projectEnvironmentId),
+      instructions: instructionsUnsupported ? "" : instructions,
       maxConcurrentRuns: concurrencyMode === "inherit" ? null : customLimit,
-      modelPolicy
+      coreRoutingMode,
+      defaultCoreProfileId,
+      modelPolicy: normalizePolicyCoreProfiles(modelPolicy)
     }) })); }
     catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
@@ -506,9 +633,18 @@ export const AgentSettingsPage = () => {
     catch (reason) { setError(errorMessage(reason)); setBusy(""); }
   };
   return <div className="flex flex-col gap-5"><ErrorAlert message={error} />
-    <Card><CardHeader><CardTitle>{text("智能体设置", "Agent settings")}</CardTitle><CardDescription>{text("执行器是运行身份，创建后不允许修改。", "The provider is the execution identity and cannot be changed after creation.")}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-5" onSubmit={save}><FieldGroup>
+    <Card><CardHeader className="flex-row items-start justify-between gap-4"><div><CardTitle>{text("Agent Core", "Agent cores")}</CardTitle><CardDescription className="mt-1">{text("每个 Core 拥有独立的 Provider 会话；模型和并发策略引用稳定的 Core ID。", "Each core owns an independent provider session. Model and concurrency rules reference its stable core ID.")}</CardDescription></div><CoreProfileCreateDialog agentId={agent.id} disabled={busy !== ""} onError={setError} onCreated={(profile) => { setCoreProfiles((items) => [...items, profile]); setAgent({ ...agent, coreProfiles: [...agent.coreProfiles, profile] }); }} /></CardHeader><CardContent className="space-y-3">
+      {coreProfiles.map((profile) => <div key={profile.id} className="grid gap-3 rounded-xl border bg-muted/10 p-4 lg:grid-cols-[minmax(180px,1fr)_160px_180px_auto] lg:items-end">
+        <Field><FieldLabel htmlFor={`core-name-${profile.id}`}>{text("名称", "Name")}</FieldLabel><Input id={`core-name-${profile.id}`} value={profile.name} onChange={(event) => setCoreProfiles((items) => items.map((item) => item.id === profile.id ? { ...item, name: event.target.value } : item))} /></Field>
+        <Field><FieldLabel>{text("执行器", "Provider")}</FieldLabel><Input value={providerNames[profile.provider]} disabled /></Field>
+        <Field><FieldLabel htmlFor={`core-limit-${profile.id}`}>{text("并发上限", "Concurrency limit")}</FieldLabel><Input id={`core-limit-${profile.id}`} type="number" min={1} max={64} placeholder={text("继承", "Inherit")} value={profile.maxConcurrentRuns ?? ""} onChange={(event) => setCoreProfiles((items) => items.map((item) => item.id === profile.id ? { ...item, maxConcurrentRuns: event.target.value === "" ? null : Number(event.target.value) } : item))} /></Field>
+        <div className="flex flex-wrap justify-end gap-2"><Badge variant={profile.id === defaultCoreProfileId ? "default" : "outline"}>{profile.id === defaultCoreProfileId ? text("默认", "Default") : `#${profile.id}`}</Badge><Button type="button" size="sm" variant="outline" disabled={busy !== "" || profile.name.trim() === ""} onClick={() => void saveCoreProfile(profile)}>{busy === `core-${profile.id}` ? text("保存中…", "Saving…") : text("保存", "Save")}</Button><Button type="button" size="sm" variant="ghost" disabled={busy !== "" || profile.id === defaultCoreProfileId} onClick={() => void saveCoreProfile({ ...profile, enabled: !profile.enabled })}>{profile.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button>{profile.id !== defaultCoreProfileId ? <AlertDialog><AlertDialogTrigger asChild><Button type="button" size="icon-sm" variant="ghost" disabled={busy !== ""} aria-label={text(`删除 ${profile.name}`, `Delete ${profile.name}`)}><Trash2 /></Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${profile.name}”？`, `Delete “${profile.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("已被会话或路由规则使用的 Core 不能删除。", "A core referenced by a session or routing rule cannot be deleted.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void deleteCoreProfile(profile)}>{text("删除", "Delete")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog> : null}</div>
+      </div>)}
+    </CardContent></Card>
+    <Card><CardHeader><CardTitle>{text("智能体设置", "Agent settings")}</CardTitle><CardDescription>{text("配置默认 Core，以及是否允许在 Run 边界按规则切换执行器。", "Configure the default core and whether Runs may switch execution identities at rule boundaries.")}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-5" onSubmit={save}><FieldGroup>
       <Field><FieldLabel htmlFor="settings-agent-name">{text("名称", "Name")}</FieldLabel><Input id="settings-agent-name" value={name} onChange={(event) => setName(event.target.value)} /></Field>
-      <Field data-disabled><FieldLabel htmlFor="settings-provider">{text("执行器", "Provider")}</FieldLabel><Input id="settings-provider" value={providerNames[agent.provider]} disabled /></Field>
+      <Field><FieldLabel htmlFor="settings-routing-mode">{text("Core 路由", "Core routing")}</FieldLabel><NativeSelect id="settings-routing-mode" value={coreRoutingMode} onChange={(event) => setCoreRoutingMode(event.target.value as Agent["coreRoutingMode"])}><NativeSelectOption value="session_sticky">{text("会话固定（推荐）", "Session sticky (recommended)")}</NativeSelectOption><NativeSelectOption value="scheduled_handoff">{text("按规则切换并衔接上下文", "Rule-based switching with handoff")}</NativeSelectOption></NativeSelect><FieldDescription>{coreRoutingMode === "session_sticky" ? text("Session 第一次运行绑定默认 Core，后续 Turn 始终复用它。", "The first Run pins the Session to the default core and every later Turn reuses it.") : text("每个 Run 启动时选择 Core；跨 Core 时注入该 Core 尚未见过的执行摘要。", "Each Run selects a core at start. Cross-core transitions inject the completed history that core has not seen.")}</FieldDescription></Field>
+      <Field><FieldLabel htmlFor="settings-default-core">{text("默认 Core", "Default core")}</FieldLabel><NativeSelect id="settings-default-core" value={defaultCoreProfileId} onChange={(event) => setDefaultCoreProfileId(Number(event.target.value))}>{coreProfiles.filter((profile) => profile.enabled).map((profile) => <NativeSelectOption key={profile.id} value={profile.id}>{profile.name} · {providerNames[profile.provider]}</NativeSelectOption>)}</NativeSelect></Field>
       <Field><FieldLabel htmlFor="settings-environment">{text("项目环境", "Project environment")}</FieldLabel><NativeSelect id="settings-environment" className="w-full" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}>{environments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></Field>
       <Field><FieldLabel htmlFor="settings-concurrency-mode">{text("运行并发策略", "Run concurrency policy")}</FieldLabel><NativeSelect id="settings-concurrency-mode" className="w-full" value={concurrencyMode} onChange={(event) => setConcurrencyMode(event.target.value)}><NativeSelectOption value="inherit">{text("继承系统上限", "Inherit system limit")}</NativeSelectOption><NativeSelectOption value="custom">{text("自定义上限", "Custom limit")}</NativeSelectOption></NativeSelect><FieldDescription>{text(`当前有效上限：${agent.effectiveMaxConcurrentRuns}`, `Current effective limit: ${agent.effectiveMaxConcurrentRuns}`)}</FieldDescription></Field>
       {concurrencyMode === "custom" ? <Field><FieldLabel htmlFor="settings-max-concurrent-runs">{text("自定义 Run 并发上限", "Custom run concurrency limit")}</FieldLabel><Input id="settings-max-concurrent-runs" type="number" min={1} max={64} step={1} value={maxConcurrentRuns} onChange={(event) => setMaxConcurrentRuns(event.target.value)} /><FieldDescription>{text("最终有效值不会超过系统的全局 Run 并发上限。", "The effective value never exceeds the global run concurrency limit.")}</FieldDescription></Field> : null}
@@ -518,19 +654,19 @@ export const AgentSettingsPage = () => {
           <p className="mt-1 text-sm text-muted-foreground">{text("模型列表自动读取自 Agent Core。星期和时间统一使用 UTC，并在 Run 真正开始时选择；不会中断正在执行的 Run。", "Models are read from Agent Core. UTC weekdays and times are resolved when a Run actually starts and never interrupt an active Run.")}</p>
         </div>
         <div className="flex flex-col gap-4">
-          <Field><FieldLabel htmlFor="settings-model-mode">{text("选择方式", "Selection mode")}</FieldLabel><NativeSelect id="settings-model-mode" className="w-full" value={modelPolicy.mode} disabled={modelCatalog === null && modelCatalogError === ""} onChange={(event) => setModelMode(event.target.value as AgentModelPolicy["mode"])}>
+          <Field><FieldLabel htmlFor="settings-model-mode">{text("选择方式", "Selection mode")}</FieldLabel><NativeSelect id="settings-model-mode" className="w-full" value={modelPolicy.mode} disabled={Object.keys(modelCatalogs).length === 0 && modelCatalogError === ""} onChange={(event) => setModelMode(event.target.value as AgentModelPolicy["mode"])}>
             <NativeSelectOption value="provider_default">{text("跟随 Agent Core 默认模型", "Follow Agent Core default")}</NativeSelectOption>
             <NativeSelectOption value="fixed" disabled={!selectableModels}>{text("固定模型", "Fixed model")}</NativeSelectOption>
             <NativeSelectOption value="schedule" disabled={!selectableModels}>{text("按 UTC 星期和时间切换", "Switch by UTC day and time")}</NativeSelectOption>
           </NativeSelect>
-          {modelCatalog === null && modelCatalogError === "" ? <FieldDescription>{text("正在读取 Agent Core 模型…", "Loading models from Agent Core…")}</FieldDescription>
+          {defaultCatalog === null && modelCatalogError === "" ? <FieldDescription>{text("正在读取 Agent Core 模型…", "Loading models from Agent Core…")}</FieldDescription>
             : modelCatalogError !== "" ? <FieldDescription className="text-destructive">{text(`Agent Core 模型读取失败：${modelCatalogError}`, `Failed to read Agent Core models: ${modelCatalogError}`)}</FieldDescription>
             : !selectableModels ? <FieldDescription>{text("当前 Agent Core 没有暴露可选模型，因此不支持固定模型或定时切换。", "This Agent Core does not expose selectable models, so fixed and scheduled selection are unavailable.")}</FieldDescription>
-            : <FieldDescription>{text(`Core 默认：${modelCatalog.currentModel ?? "未知"}；可选 ${availableModels.length} 个模型。`, `Core default: ${modelCatalog.currentModel ?? "unknown"}; ${availableModels.length} models available.`)}</FieldDescription>}
+            : <FieldDescription>{text(`默认 Core 模型：${defaultCatalog.currentModel ?? "未知"}；可选 ${availableModels.length} 个。`, `Default core model: ${defaultCatalog.currentModel ?? "unknown"}; ${availableModels.length} available.`)}</FieldDescription>}
           </Field>
-          {modelPolicy.mode === "fixed" ? <Field><FieldLabel htmlFor="settings-fixed-model">{text("模型", "Model")}</FieldLabel><NativeSelect id="settings-fixed-model" className="w-full" value={modelPolicy.model} onChange={(event) => setModelPolicy({ mode: "fixed", model: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field> : null}
+          {modelPolicy.mode === "fixed" ? <div className="grid gap-4 sm:grid-cols-2">{coreRoutingMode === "scheduled_handoff" ? <Field><FieldLabel htmlFor="settings-fixed-core">Core</FieldLabel><NativeSelect id="settings-fixed-core" value={modelPolicy.coreProfileId ?? defaultCoreProfileId} onChange={(event) => { const coreProfileId = Number(event.target.value); const catalog = modelCatalogs[coreProfileId]; setModelPolicy({ mode: "fixed", coreProfileId, model: catalog?.currentModel ?? catalog?.availableModels[0] ?? modelPolicy.model }); }}>{coreProfiles.filter((profile) => profile.enabled).map((profile) => <NativeSelectOption key={profile.id} value={profile.id}>{profile.name}</NativeSelectOption>)}</NativeSelect></Field> : null}<Field><FieldLabel htmlFor="settings-fixed-model">{text("模型", "Model")}</FieldLabel><NativeSelect id="settings-fixed-model" className="w-full" value={modelPolicy.model} onChange={(event) => setModelPolicy({ ...modelPolicy, model: event.target.value })}>{(modelCatalogs[modelPolicy.coreProfileId ?? defaultCoreProfileId]?.availableModels ?? []).map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field></div> : null}
           {modelPolicy.mode === "schedule" ? <div className="flex flex-col gap-4">
-            <Field><FieldLabel htmlFor="settings-default-model">{text("其他时间使用", "Model outside windows")}</FieldLabel><NativeSelect id="settings-default-model" className="w-full" value={modelPolicy.defaultModel} onChange={(event) => setModelPolicy({ ...modelPolicy, defaultModel: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
+            <div className="grid gap-4 sm:grid-cols-2">{coreRoutingMode === "scheduled_handoff" ? <Field><FieldLabel htmlFor="settings-default-policy-core">{text("其他时间使用 Core", "Core outside windows")}</FieldLabel><NativeSelect id="settings-default-policy-core" value={modelPolicy.defaultCoreProfileId ?? defaultCoreProfileId} onChange={(event) => { const defaultCoreProfileId = Number(event.target.value); const catalog = modelCatalogs[defaultCoreProfileId]; setModelPolicy({ ...modelPolicy, defaultCoreProfileId, defaultModel: catalog?.currentModel ?? catalog?.availableModels[0] ?? modelPolicy.defaultModel }); }}>{coreProfiles.filter((profile) => profile.enabled).map((profile) => <NativeSelectOption key={profile.id} value={profile.id}>{profile.name}</NativeSelectOption>)}</NativeSelect></Field> : null}<Field><FieldLabel htmlFor="settings-default-model">{text("其他时间使用模型", "Model outside windows")}</FieldLabel><NativeSelect id="settings-default-model" className="w-full" value={modelPolicy.defaultModel} onChange={(event) => setModelPolicy({ ...modelPolicy, defaultModel: event.target.value })}>{(modelCatalogs[modelPolicy.defaultCoreProfileId ?? defaultCoreProfileId]?.availableModels ?? []).map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field></div>
             <div className="flex flex-col gap-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><p className="text-sm font-medium">{text("UTC 规则组", "UTC rule groups")}</p><Badge variant="outline">{text(`${scheduleGroups.length} 组`, `${scheduleGroups.length} groups`)}</Badge></div><p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">{text("每组统一设置生效日、模型和 Run 并发，并可添加多个时间段。结束早于开始时跨到下一 UTC 日；规则组重叠时上方优先。", "Each group shares active days, model, and run concurrency across multiple time windows. An end earlier than its start crosses into the next UTC day; earlier groups take priority when they overlap.")}</p></div><Button type="button" size="sm" variant="outline" disabled={modelPolicy.windows.length >= 16} onClick={() => updateScheduleGroups((groups) => {
               const previous = groups.at(-1);
               const nextModel = availableModels.find((model) => model !== previous?.model) ?? previous?.model ?? modelPolicy.defaultModel;
@@ -540,20 +676,22 @@ export const AgentSettingsPage = () => {
               return [...groups, {
                 days: [...nextDays],
                 model: nextModel,
+                ...(coreRoutingMode === "scheduled_handoff" ? { coreProfileId: previous?.coreProfileId ?? defaultCoreProfileId } : {}),
                 maxConcurrentRuns: previous?.maxConcurrentRuns ?? null,
                 periods: [{ start: "12:00", end: "18:00" }]
               }];
             })}><Plus />{text("添加规则组", "Add rule group")}</Button></div>
               {scheduleGroups.map((group, groupIndex) => <div key={groupIndex} className="overflow-hidden rounded-xl border bg-background shadow-xs">
                 <div className="flex items-center justify-between gap-3 border-b bg-muted/20 px-4 py-3">
-                  <div className="flex min-w-0 flex-wrap items-center gap-2"><Badge>{text(`规则 ${groupIndex + 1}`, `Rule ${groupIndex + 1}`)}</Badge><span className="truncate text-sm font-medium">{group.model}</span><span className="text-xs text-muted-foreground">{text(`${group.days.length} 天 · ${group.periods.length} 个时间段`, `${group.days.length} days · ${group.periods.length} windows`)}</span></div>
+                  <div className="flex min-w-0 flex-wrap items-center gap-2"><Badge>{text(`规则 ${groupIndex + 1}`, `Rule ${groupIndex + 1}`)}</Badge><span className="truncate text-sm font-medium">{coreProfiles.find((profile) => profile.id === (group.coreProfileId ?? defaultCoreProfileId))?.name} · {group.model}</span><span className="text-xs text-muted-foreground">{text(`${group.days.length} 天 · ${group.periods.length} 个时间段`, `${group.days.length} days · ${group.periods.length} windows`)}</span></div>
                   <Button type="button" variant="ghost" size="icon-sm" aria-label={text(`删除规则 ${groupIndex + 1}`, `Delete rule ${groupIndex + 1}`)} disabled={scheduleGroups.length === 1} onClick={() => updateScheduleGroups((groups) => groups.filter((_item, itemIndex) => itemIndex !== groupIndex))}><Trash2 /></Button>
                 </div>
                 <div className="grid gap-5 p-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,1fr)]">
                   <div className="flex min-w-0 flex-col gap-4">
                     <ModelWeekdayPicker value={group.days} onChange={(days) => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, days } : item))} />
-                    <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(150px,0.55fr)]">
-                      <Field><FieldLabel htmlFor={`settings-group-model-${groupIndex}`}>{text("模型", "Model")}</FieldLabel><NativeSelect id={`settings-group-model-${groupIndex}`} className="w-full" value={group.model} onChange={(event) => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, model: event.target.value } : item))}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
+                    <div className="grid gap-4 sm:grid-cols-[minmax(0,0.8fr)_minmax(0,1fr)_minmax(150px,0.55fr)]">
+                      {coreRoutingMode === "scheduled_handoff" ? <Field><FieldLabel htmlFor={`settings-group-core-${groupIndex}`}>Core</FieldLabel><NativeSelect id={`settings-group-core-${groupIndex}`} value={group.coreProfileId ?? defaultCoreProfileId} onChange={(event) => { const coreProfileId = Number(event.target.value); const catalog = modelCatalogs[coreProfileId]; updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, coreProfileId, model: catalog?.currentModel ?? catalog?.availableModels[0] ?? item.model } : item)); }}>{coreProfiles.filter((profile) => profile.enabled).map((profile) => <NativeSelectOption key={profile.id} value={profile.id}>{profile.name}</NativeSelectOption>)}</NativeSelect></Field> : null}
+                      <Field><FieldLabel htmlFor={`settings-group-model-${groupIndex}`}>{text("模型", "Model")}</FieldLabel><NativeSelect id={`settings-group-model-${groupIndex}`} className="w-full" value={group.model} onChange={(event) => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, model: event.target.value } : item))}>{(modelCatalogs[group.coreProfileId ?? defaultCoreProfileId]?.availableModels ?? []).map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
                       <Field><FieldLabel htmlFor={`settings-group-concurrency-${groupIndex}`}>{text("Run 并发上限", "Run concurrency limit")}</FieldLabel><Input id={`settings-group-concurrency-${groupIndex}`} type="number" min={1} max={64} step={1} placeholder={text("继承默认", "Use default")} value={group.maxConcurrentRuns ?? ""} onChange={(event) => {
                         const value = event.target.value;
                         updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? {
@@ -579,8 +717,8 @@ export const AgentSettingsPage = () => {
           {!policyModelsAvailable ? <p className="text-sm text-destructive">{text("当前策略引用的模型已不在 Agent Core 模型列表中。请选择 Core 默认模型或重新选择可用模型。", "The current policy references models no longer exposed by Agent Core. Follow the Core default or choose available models again.")}</p> : null}
         </div>
       </div>
-      <Field data-disabled={agent.provider === "hermes" || undefined}><FieldLabel htmlFor="settings-agent-instructions">{text("智能体指令", "Agent instructions")}</FieldLabel><Textarea id="settings-agent-instructions" rows={8} value={instructions} disabled={agent.provider === "hermes"} placeholder={text("说明这个智能体长期遵循的角色、边界和工作方式", "Describe the agent's persistent role, boundaries, and working style")} onChange={(event) => setInstructions(event.target.value)} />
-        <FieldDescription>{agent.provider === "hermes" ? text("Hermes 当前不支持智能体指令", "Hermes does not currently support agent instructions") : text("创建会话时保存快照；之后修改只影响新会话。", "Instructions are snapshotted at session creation; later edits affect new sessions only.")}</FieldDescription>
+      <Field data-disabled={instructionsUnsupported || undefined}><FieldLabel htmlFor="settings-agent-instructions">{text("智能体指令", "Agent instructions")}</FieldLabel><Textarea id="settings-agent-instructions" rows={8} value={instructions} disabled={instructionsUnsupported} placeholder={text("说明这个智能体长期遵循的角色、边界和工作方式", "Describe the agent's persistent role, boundaries, and working style")} onChange={(event) => setInstructions(event.target.value)} />
+        <FieldDescription>{instructionsUnsupported ? text("已启用的 Hermes Core 不支持智能体指令", "An enabled Hermes core does not support agent instructions") : text("创建会话时保存快照；之后修改只影响新会话。", "Instructions are snapshotted at session creation; later edits affect new sessions only.")}</FieldDescription>
       </Field>
       <Button type="submit" disabled={busy !== "" || !modelPolicyValid || (concurrencyMode === "custom" && (!Number.isInteger(Number(maxConcurrentRuns)) || Number(maxConcurrentRuns) < 1 || Number(maxConcurrentRuns) > 64))}>{busy === "save" ? text("保存中…", "Saving…") : text("保存设置", "Save settings")}</Button>
     </FieldGroup></form></CardContent></Card>

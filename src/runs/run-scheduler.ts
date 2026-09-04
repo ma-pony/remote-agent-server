@@ -1,5 +1,10 @@
 import { resolveModelWindow, type AgentModelPolicy } from "../agents/model-policy.js";
-import type { Run } from "../domain.js";
+import {
+  resolveRunConcurrency,
+  resolveRunRoute,
+  type ResolvedRunRoute
+} from "../agents/runtime-route.js";
+import type { Agent, Run } from "../domain.js";
 import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { ConcurrencySettings, ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 import type { RunExecutor } from "./run-executor.js";
@@ -11,6 +16,9 @@ export type RunSchedulerDependencies = {
       agentId: number;
       maxConcurrentRuns: number | null;
       modelPolicy?: AgentModelPolicy;
+      agent?: Agent;
+      sessionId?: number;
+      pinnedCoreProfileId?: number | null;
     } | undefined;
   };
   executor: Pick<RunExecutor, "execute" | "cancel">;
@@ -38,8 +46,9 @@ export class RunSchedulerError extends Error {
  */
 export class RunScheduler {
   private readonly pending: number[] = [];
-  private readonly active = new Map<number, number>();
+  private readonly active = new Map<number, { agentId: number; coreProfileId: number | null }>();
   private readonly activeByAgent = new Map<number, number>();
+  private readonly activeByCoreProfile = new Map<number, number>();
   private readonly runRepository: RunSchedulerDependencies["runRepository"];
   private readonly executor: Pick<RunExecutor, "execute" | "cancel">;
   private readonly concurrencySettings: Pick<ConcurrencySettingsStore, "get" | "subscribe">;
@@ -137,11 +146,17 @@ export class RunScheduler {
     while (this.active.size < globalLimit) {
       const next = this.nextRunnable(globalLimit, this.now());
       if (next === undefined) return;
-      const { pendingIndex, runId, agentId } = next;
+      const { pendingIndex, runId, agentId, route } = next;
       this.pending.splice(pendingIndex, 1);
-      this.active.set(runId, agentId);
+      this.active.set(runId, { agentId, coreProfileId: route?.coreProfileId ?? null });
       this.activeByAgent.set(agentId, (this.activeByAgent.get(agentId) ?? 0) + 1);
-      void this.executor.execute(runId)
+      if (route !== undefined) {
+        this.activeByCoreProfile.set(
+          route.coreProfileId,
+          (this.activeByCoreProfile.get(route.coreProfileId) ?? 0) + 1
+        );
+      }
+      void this.executor.execute(runId, route)
         .then((run) => this.handleExecutionSuccess(runId, run))
         .catch((error: unknown) => this.handleExecutionError(error, runId))
         .finally(() => {
@@ -149,6 +164,11 @@ export class RunScheduler {
           const activeForAgent = (this.activeByAgent.get(agentId) ?? 1) - 1;
           if (activeForAgent === 0) this.activeByAgent.delete(agentId);
           else this.activeByAgent.set(agentId, activeForAgent);
+          if (route !== undefined) {
+            const activeForProfile = (this.activeByCoreProfile.get(route.coreProfileId) ?? 1) - 1;
+            if (activeForProfile === 0) this.activeByCoreProfile.delete(route.coreProfileId);
+            else this.activeByCoreProfile.set(route.coreProfileId, activeForProfile);
+          }
           this.drain();
         });
     }
@@ -158,6 +178,7 @@ export class RunScheduler {
     pendingIndex: number;
     runId: number;
     agentId: number;
+    route?: ResolvedRunRoute;
   } | undefined {
     for (let pendingIndex = 0; pendingIndex < this.pending.length; pendingIndex += 1) {
       const runId = this.pending[pendingIndex]!;
@@ -165,6 +186,26 @@ export class RunScheduler {
         agentId: 0,
         maxConcurrentRuns: null
       };
+      if (context.agent !== undefined) {
+        const route = resolveRunRoute({
+          agent: context.agent,
+          pinnedCoreProfileId: context.pinnedCoreProfileId ?? null,
+          globalConcurrency: globalLimit,
+          now
+        });
+        const concurrency = resolveRunConcurrency({
+          agent: context.agent,
+          coreProfileId: route.coreProfileId,
+          globalConcurrency: globalLimit,
+          now
+        });
+        const activeForAgent = this.activeByAgent.get(context.agentId) ?? 0;
+        const activeForProfile = this.activeByCoreProfile.get(route.coreProfileId) ?? 0;
+        if (activeForAgent < concurrency.agent && activeForProfile < concurrency.coreProfile) {
+          return { pendingIndex, runId, agentId: context.agentId, route };
+        }
+        continue;
+      }
       const windowLimit = context.modelPolicy === undefined
         ? undefined
         : resolveModelWindow(context.modelPolicy, now)?.maxConcurrentRuns ?? undefined;
@@ -195,7 +236,9 @@ export class RunScheduler {
   }
 
   private runUsesTimedConcurrency(runId: number): boolean {
-    const policy = this.runRepository.getSchedulingContext?.(runId)?.modelPolicy;
+    const context = this.runRepository.getSchedulingContext?.(runId);
+    const policy = context?.modelPolicy ?? context?.agent?.modelPolicy;
+    if (context?.agent?.coreRoutingMode === "scheduled_handoff" && policy?.mode === "schedule") return true;
     return policy?.mode === "schedule"
       && policy.windows.some((window) => window.maxConcurrentRuns != null);
   }

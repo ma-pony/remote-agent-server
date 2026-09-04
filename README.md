@@ -4,7 +4,7 @@
 
 Remote Agent Server 是一个面向业务系统的自托管 ACP Agent 执行网关。调用方通过 HTTP 提交异步任务，服务在隔离 Workspace 中运行 Claude Code、Codex 等命令行 Agent，并通过状态查询、Event、SSE 或签名 Webhook 返回执行过程和结果。
 
-它把现有 Agent CLI 变成可嵌入工单系统、CI/CD、内部平台和自动化服务的持久化后端。Web 管理台负责配置 Agent、项目环境、Skills、执行器扩展、MCP、模型策略、并发和接入端点；外部调用方只需要 Endpoint Token 和稳定的 Task API。
+它把现有 Agent CLI 变成可嵌入工单系统、CI/CD、内部平台和自动化服务的持久化后端。Web 管理台负责配置 Agent、可路由的 Core Profile、项目环境、Skills、执行器扩展、MCP、模型策略、并发和接入端点；外部调用方只需要 Endpoint Token 和稳定的 Task API。
 
 执行层基于 [acpx](https://github.com/openclaw/acpx) 和 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol)。目前支持 Claude Code、Codex 和 Hermes Provider。
 
@@ -21,7 +21,7 @@ Agent 的推理、工具使用和原生会话仍由对应 Provider 负责。Remo
 
 - **异步 Task API**：外部系统通过 HTTP 提交任务，使用幂等键避免重复执行，并可查询、取消或继续多轮 Conversation。
 - **可靠事件出口**：支持增量 Event 查询、可续读 SSE 和签名 Webhook；断线不影响正在执行的 Task。
-- **统一管理 Agent**：集中配置 Provider、Agent 指令、项目环境、Skills 和 MCP。
+- **统一管理 Agent**：集中配置 Core Profile、Agent 指令、项目环境、Skills 和 MCP。
 - **可复用项目环境**：提前准备一个或多个 Git 仓库及依赖，Session 创建时无需重新安装。
 - **隔离 Workspace**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot，为每个 Session 快速创建写时复制环境。
 - **多轮 Agent 对话**：同一 Session 可以连续执行多个 Run，并在 Provider 支持时续接 ACP Session。
@@ -29,7 +29,7 @@ Agent 的推理、工具使用和原生会话仍由对应 Provider 负责。Remo
 - **Skills 管理**：发现本机 Skills、上传 Skill ZIP，并控制每个 Agent 启用的 Skills。
 - **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
 - **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
-- **模型策略**：自动读取 Agent Core 通过 ACP 暴露的模型，可跟随 Core 默认模型、固定模型，或按 UTC 星期和 24 小时时间段为新 Run 选择模型。
+- **Core 运行路由**：一个 Agent 可配置 Codex、Claude Code 或 Hermes 等多个 Core Profile；默认按 Session 固定 Core，也可按 UTC 规则统一选择 Core、模型和并发。
 - **运行、存储与并发控制**：在管理台调整 Run 超时、空闲 Session 大文件保留期和三类服务并发，并可为单个 Agent 设置 Run 上限。
 - **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
 
@@ -44,9 +44,9 @@ Agent 的推理、工具使用和原生会话仍由对应 Provider 负责。Remo
 接入端点（鉴权 / 参数映射 / 幂等）
    |
    v
-Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
+Task -> Conversation -> Session -> Run Route -> 隔离 Workspace -> acpx/ACP -> Provider
    |                         |
-   |                         +-> Skills / 执行器扩展 / MCP / 模型策略
+   |                         +-> Core / 模型 / 并发 / Skills / 执行器扩展 / MCP
    |
    +-> 状态查询 / Event 查询 / SSE / 签名 Webhook
 ```
@@ -62,8 +62,8 @@ Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
 | 对象 | 作用 |
 | --- | --- |
 | 项目环境 | 保存一个或多个 Git 项目及准备完成的依赖，按版本发布。 |
-| Agent | 绑定 Provider、项目环境、Agent 指令、Skills、执行器扩展、MCP、模型策略和并发策略。 |
-| Session | 一个隔离的 Workspace，也是一段可继续的 Agent 对话。 |
+| Agent | 绑定项目环境、Agent 指令、能力和一组可路由 Core Profile。 |
+| Session | 一个隔离 Workspace，并为每个使用过的 Core 保留独立 Provider 对话。 |
 | Run | Session 中的一次输入和完整执行记录。 |
 | 接入端点 | 其他系统调用服务的认证入口，绑定一个 Agent。 |
 | Conversation | 外部系统的多轮业务会话，内部复用同一个 Session。 |
@@ -191,16 +191,16 @@ hermes --version
 Agent 页面还可以配置：
 
 - **Skills**：发现本机 Skill、上传 ZIP，并明确启用需要的 Skill。
-- **执行器扩展**：查看当前 Provider 系统配置中发现的插件和 Hook，并为这个 Agent 启用需要的项。
+- **执行器扩展**：按 Agent Core 的 Provider 查看系统配置中发现的插件和 Hook，并为这个 Agent 启用需要的项。
 - **MCP**：添加 HTTP 或 stdio MCP，检查连接并查看工具；也可将 Codex 或 Claude Code 的系统全局 MCP 导入当前 Agent。
 - **运行并发策略**：默认继承系统 Run 并发，也可以设置当前 Agent 的独立上限；实际上限取两者较小值。
-- **模型策略**：模型列表来自当前 Agent Core，不允许手填未配置的模型。可以跟随 Core 默认模型、固定一个模型，或按 UTC 星期和 24 小时时间段切换；Core 未暴露模型列表时后两项不可用。
+- **Core 与模型路由**：为 Agent 添加一个或多个 Core Profile，可选模型只来自各 Core 通过 ACP 暴露的目录。默认 Session 固定 Core；显式启用规则切换后，可按 UTC 星期和 24 小时时间段统一选择 Core、模型和并发。
 
-模型策略在 Run 离开队列、真正开始执行时解析，因此排队时间不会导致提前选错模型。切换复用同一个 Session 和 Provider 对话上下文，只更新 ACP `model` 配置；不会中断正在执行的 Run，下一次 Run 才使用新模型。固定或定时策略会在每个 Run 上记录实际解析出的模型，便于审计。
+运行路由在 Run 真正获得执行槽位时解析，因此排队时间不会提前锁定错误规则。同一 Core 内切换模型直接续接原生 Provider 对话；跨 Core 切换则恢复目标 Core 的独立对话，并注入有界 Handoff。运行中的 Run 不切换。
 
 #### 模型策略速查
 
-进入 **Agent → 目标 Agent → 设置 → 模型策略** 配置：
+进入 **Agent → 目标 Agent → 设置** 配置 Core Profile、Core 路由和模型策略：
 
 | 模式 | 行为 | 适合场景 |
 | --- | --- | --- |
@@ -208,9 +208,9 @@ Agent 页面还可以配置：
 | 固定模型 | 每个新 Run 都选择同一个模型。 | 一个 Agent 需要稳定使用指定模型。 |
 | 按 UTC 规则切换 | 同时命中星期和时间段时使用其模型，其他时间使用兜底模型。 | 工作日/周末使用不同模型，或按模型可用时段、成本和吞吐策略自动切换。 |
 
-管理台按规则组配置：每组统一选择一个或多个 UTC 星期、一个模型和可选的 Run 并发上限，组内可添加多个 24 小时制 `HH:mm` 时间段，例如工作日 `08:00–10:00` 和 `14:00–18:00` 共用同一模型与并发。开始时间包含、结束时间不包含；结束早于开始时自动跨到下一 UTC 日，所选星期表示时间段的开始日。规则组重叠时配置靠前的优先。并发留空时继承 Agent 平时的并发策略，填写后覆盖 Agent 上限但仍不超过系统全局上限。页面提供“工作日 / 周末 / 每天”快捷选择，未命中的时间使用兜底模型和默认并发。保存时服务会重新读取 Core 模型目录，并拒绝已经不在目录中的模型。
+管理台按规则组配置：每组统一选择 UTC 星期、Core、模型和可选 Run 并发上限，组内可添加多个 24 小时制 `HH:mm` 时间段，例如工作日 `08:00–10:00` 和 `14:00–18:00` 共用同一路由。开始时间包含、结束时间不包含；结束早于开始时自动跨到下一 UTC 日，所选星期表示时间段的开始日。规则组重叠时配置靠前的优先。并发留空时继承 Agent 平时的并发策略，填写后覆盖 Agent 上限但仍不超过系统全局上限。页面提供“工作日 / 周末 / 每天”快捷选择，未命中的时间使用兜底 Core、模型和默认并发。保存时服务会重新读取各 Core 模型目录，并拒绝已经不在目录中的模型。
 
-策略修改只影响之后真正开始的 Run：正在执行的 Run 不切换，仍在队列中的 Run 会在获得执行槽位时按当时 UTC 时间解析。Session、Workspace 和 Provider 对话上下文都会继续复用。服务解析出明确模型时，Session 页面会在 Run 上展示它，管理 API 也会在 `resolvedModel` 字段中返回；完全跟随且 Core 未公开默认模型时，该字段为 `null`。接口配置格式与解析顺序见[产品与架构：模型发现、策略与审计](docs/design.md#62-模型发现策略与审计)。
+策略修改只影响之后真正开始的 Run：正在执行的 Run 不切换，仍在队列中的 Run 会在获得执行槽位时按当时 UTC 时间解析。Run 页面和 API 同时记录实际 Core、Provider、模型、规则和并发上限。接口配置格式与解析顺序见[产品与架构：Core、模型和并发路由](docs/design.md#62-core模型和并发路由)。
 
 Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Session 检测到配置变化后会刷新执行器连接；Provider 支持时，会继续原有 Provider Session 和对话上下文。
 
@@ -600,7 +600,7 @@ pnpm smoke:integrations
 ## 文档
 
 - [产品与架构](docs/design.md)：定位、系统边界、核心对象、执行链路和可靠性设计。
-- [Agent Core 与模型运行路由设计提案](docs/agent-core-routing.md)：记录多 Core、模型、并发、Session 续接和 Handoff 的目标方案；尚未实现。
+- [Agent Core 运行路由](docs/agent-core-routing.md)：多 Core、模型、并发、Session Binding 和 Handoff 的实现语义。
 - [部署与验收](docs/deployment.md)：生产部署、Provider 登录、文件系统、反向代理和真实 Smoke Test。
 
 ## 许可证

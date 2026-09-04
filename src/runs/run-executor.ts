@@ -1,6 +1,6 @@
 import { dirname, join } from "node:path";
 
-import { resolveModelPolicy } from "../agents/model-policy.js";
+import { resolveRunRoute, type ResolvedRunRoute } from "../agents/runtime-route.js";
 import type { EventType, Run, TokenUsage } from "../domain.js";
 import type { EventStore } from "../events/event-store.js";
 import type { RunMcpPreparer } from "../mcp/run-mcp-preparer.js";
@@ -9,8 +9,10 @@ import type { AgentRuntime, RuntimeEvent, RuntimeTurn, RuntimeTurnResult } from 
 import { settleBestEffort } from "../runtime/bounded-operation.js";
 import type { SkillProjector } from "../runtime/skill-projector.js";
 import { SessionManagerError, type SessionManager } from "../sessions/session-manager.js";
+import type { SessionCoreBindingStore } from "../sessions/session-core-binding-store.js";
 import type { ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 import { RunRepositoryError, type RunRepository } from "./run-repository.js";
+import type { ContextHandoffBuilder } from "./context-handoff-builder.js";
 
 export type RunExecutorDependencies = {
   runtime: AgentRuntime;
@@ -20,6 +22,8 @@ export type RunExecutorDependencies = {
   sessionManager: SessionManager;
   mcpPreparer: Pick<RunMcpPreparer, "prepare">;
   providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
+  sessionCoreBindingStore?: SessionCoreBindingStore;
+  contextHandoffBuilder?: ContextHandoffBuilder;
   runtimeSettings?: Pick<ConcurrencySettingsStore, "getRuntime">;
   runTimeoutMs?: number;
 };
@@ -71,6 +75,8 @@ export class RunExecutor {
   private readonly sessionManager: SessionManager;
   private readonly mcpPreparer: Pick<RunMcpPreparer, "prepare">;
   private readonly providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
+  private readonly sessionCoreBindingStore: SessionCoreBindingStore | undefined;
+  private readonly contextHandoffBuilder: ContextHandoffBuilder | undefined;
   private readonly runtimeSettings: Pick<ConcurrencySettingsStore, "getRuntime"> | undefined;
   private readonly runTimeoutMs: number;
   private readonly cancellationIntents = new Set<number>();
@@ -83,6 +89,8 @@ export class RunExecutor {
     sessionManager,
     mcpPreparer,
     providerExtensionManager,
+    sessionCoreBindingStore,
+    contextHandoffBuilder,
     runtimeSettings,
     runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS
   }: RunExecutorDependencies) {
@@ -93,6 +101,8 @@ export class RunExecutor {
     this.sessionManager = sessionManager;
     this.mcpPreparer = mcpPreparer;
     this.providerExtensionManager = providerExtensionManager;
+    this.sessionCoreBindingStore = sessionCoreBindingStore;
+    this.contextHandoffBuilder = contextHandoffBuilder;
     this.runtimeSettings = runtimeSettings;
     this.runTimeoutMs = runTimeoutMs;
   }
@@ -100,8 +110,15 @@ export class RunExecutor {
   /**
    * Marks the Run running before projecting files or touching the Runtime.
    */
-  async execute(runId: number): Promise<Run> {
-    const run = this.runRepository.markRunning(runId);
+  async execute(runId: number, route?: ResolvedRunRoute): Promise<Run> {
+    const schedulingContext = route === undefined ? this.runRepository.getSchedulingContext(runId) : undefined;
+    const resolvedRoute = route ?? (schedulingContext === undefined ? undefined : resolveRunRoute({
+      agent: schedulingContext.agent,
+      pinnedCoreProfileId: schedulingContext.pinnedCoreProfileId,
+      globalConcurrency: schedulingContext.agent.effectiveMaxConcurrentRuns,
+      now: new Date()
+    }));
+    const run = this.runRepository.markRunning(runId, resolvedRoute);
     let liveTurn: RuntimeTurn | undefined;
     let liveIterator: AsyncIterator<RuntimeEvent> | undefined;
     let publicNoticeCode: "mcp_preflight_failed" | "run_timed_out" | undefined;
@@ -111,6 +128,8 @@ export class RunExecutor {
     let messageFlushSignal: Promise<TurnRace> | undefined;
     let runTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
     const runAbortController = new AbortController();
+    let bindingId: number | undefined;
+    let bindingObservedRun = false;
 
     const clearMessageFlushTimer = (): void => {
       if (messageFlushTimer !== undefined) clearTimeout(messageFlushTimer);
@@ -165,6 +184,16 @@ export class RunExecutor {
         return outcome.value;
       };
       const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
+      const profile = agent.coreProfiles.find((candidate) => candidate.id === resolvedRoute?.coreProfileId)
+        ?? agent.coreProfiles.find((candidate) => candidate.id === agent.defaultCoreProfileId);
+      if (profile === undefined) throw new Error("core_profile_not_found");
+      const legacyCoreProfileId = agent.coreProfiles.reduce<number | undefined>(
+        (lowest, candidate) => lowest === undefined || candidate.id < lowest ? candidate.id : lowest,
+        undefined
+      );
+      const legacySessionNamespace = profile.id === legacyCoreProfileId;
+      const binding = this.sessionCoreBindingStore?.getOrCreate(session.id, profile);
+      bindingId = binding?.id;
       if (session.projectEnvironmentRevisionId !== null) {
         await withinRunTimeout(this.sessionManager.ensureWorkspacePrepared(session.id, runAbortController.signal));
       }
@@ -186,17 +215,21 @@ export class RunExecutor {
         publicNoticeCode = "mcp_preflight_failed";
         throw error;
       }
-      const { memory, revision: skillsRevision } = this.skillProjector.prepare(agent, session);
-      const extensionsRevision = this.providerExtensionManager.revision(agent.id);
-      const resolvedModel = resolveModelPolicy(agent.modelPolicy, new Date()) ?? agent.providerDefaultModel ?? undefined;
-      this.runRepository.setResolvedModel(run.id, resolvedModel ?? null);
+      const routedAgent = { ...agent, provider: profile.provider };
+      const { memory, revision: skillsRevision } = this.skillProjector.prepare(routedAgent, session);
+      const extensionsRevision = this.providerExtensionManager.revision(agent.id, profile.provider);
+      const resolvedModel = resolvedRoute === undefined
+        ? agent.providerDefaultModel ?? undefined
+        : resolvedRoute.model ?? undefined;
       const runtimeSessionPromise = this.runtime.ensureSession({
         sessionId: session.id,
         agentId: agent.id,
-        provider: agent.provider,
+        coreProfileId: profile.id,
+        legacySessionNamespace,
+        provider: profile.provider,
         workspacePath: session.workspacePath,
         browserProfilePath,
-        providerSessionId: session.providerSessionId,
+        providerSessionId: binding?.providerSessionId ?? null,
         instructions: session.instructionsSnapshot,
         memory,
         skillsRevision,
@@ -216,12 +249,25 @@ export class RunExecutor {
         }
         throw error;
       }
-      this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
+      if (binding === undefined || legacySessionNamespace) {
+        this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
+      }
+      this.sessionCoreBindingStore?.saveProviderSession(binding!.id, runtimeSession.providerSessionId, resolvedModel ?? null);
 
       if (this.cancellationIntents.has(run.id)) {
         return this.finishRun(run.id, { status: "cancelled" }, usage);
       }
-      const turn = this.runtime.startTurn({ sessionId: session.id, requestId: run.id, text: run.input });
+      const turnInput = binding === undefined || this.contextHandoffBuilder === undefined
+        ? run.input
+        : this.contextHandoffBuilder.compose({
+          sessionId: session.id,
+          targetCoreProfileId: profile.id,
+          afterRunId: binding.contextCursorRunId,
+          beforeRunId: run.id,
+          currentInput: run.input
+        });
+      const turn = this.runtime.startTurn({ sessionId: session.id, requestId: run.id, text: turnInput });
+      bindingObservedRun = true;
       liveTurn = turn;
       let output = "";
       const iterator = turn.events[Symbol.asyncIterator]();
@@ -302,9 +348,10 @@ export class RunExecutor {
       }
 
       if (result.sessionUsage !== undefined) {
-        this.sessionManager.saveTokenUsage(session.id, result.sessionUsage);
+        if (binding === undefined) this.sessionManager.saveTokenUsage(session.id, result.sessionUsage);
+        else this.sessionCoreBindingStore!.saveUsage(binding.id, result.sessionUsage);
       }
-      return this.finishFromCanonicalResult(run.id, output, result, usage);
+      return this.finishFromCanonicalResult(run.id, output, result, usage, bindingObservedRun ? bindingId : undefined);
     } catch (error) {
       clearMessageFlushTimer();
       await this.cleanupFailedTurn(liveTurn, liveIterator);
@@ -316,7 +363,12 @@ export class RunExecutor {
         this.appendBestEffort(run.id, "status", { status: "failed", publicNoticeCode: stableNoticeCode });
       }
       this.appendBestEffort(run.id, "error", { message });
-      return this.finishRun(run.id, { status: "failed", error: message }, usage);
+      return this.finishRun(
+        run.id,
+        { status: "failed", error: message },
+        usage,
+        bindingObservedRun ? bindingId : undefined
+      );
     } finally {
       clearMessageFlushTimer();
       if (runTimeoutTimer !== undefined) clearTimeout(runTimeoutTimer);
@@ -348,32 +400,36 @@ export class RunExecutor {
     runId: number,
     output: string,
     result: RuntimeTurnResult,
-    usage: Partial<TokenUsage>
+    usage: Partial<TokenUsage>,
+    bindingId?: number
   ): Run {
     if (result.status === "completed") {
-      return this.finishRun(runId, { status: "succeeded", result: output }, usage);
+      return this.finishRun(runId, { status: "succeeded", result: output }, usage, bindingId);
     }
     if (result.status === "cancelled") {
-      return this.finishRun(runId, { status: "cancelled" }, usage);
+      return this.finishRun(runId, { status: "cancelled" }, usage, bindingId);
     }
 
     this.appendBestEffort(runId, "error", {
       ...(result.code === undefined ? {} : { code: result.code }),
       message: result.message
     });
-    return this.finishRun(runId, { status: "failed", error: result.message }, usage);
+    return this.finishRun(runId, { status: "failed", error: result.message }, usage, bindingId);
   }
 
   private finishRun(
     runId: number,
     result: { status: "succeeded"; result: string } | { status: "failed"; error: string } | { status: "cancelled" },
-    usage: Partial<TokenUsage> = {}
+    usage: Partial<TokenUsage> = {},
+    bindingId?: number
   ): Run {
     this.appendBestEffort(runId, "status", { status: result.status });
-    return this.runRepository.finish(runId, {
+    const finished = this.runRepository.finish(runId, {
       ...result,
       ...(Object.keys(usage).length === 0 ? {} : { usage })
     });
+    if (bindingId !== undefined) this.sessionCoreBindingStore?.advanceCursor(bindingId, runId);
+    return finished;
   }
 
   private appendBestEffort(runId: number, type: EventType, content: unknown): void {

@@ -12,6 +12,12 @@ const agent = {
   id: 3,
   name: "爬虫开发",
   provider: "codex",
+  coreRoutingMode: "scheduled_handoff",
+  defaultCoreProfileId: 1,
+  coreProfiles: [
+    { id: 1, agentId: 3, name: "Codex", provider: "codex", enabled: true, maxConcurrentRuns: null, createdAt: now, updatedAt: now },
+    { id: 2, agentId: 3, name: "Claude", provider: "claude_code", enabled: true, maxConcurrentRuns: null, createdAt: now, updatedAt: now }
+  ],
   enabled: true,
   instructions: "",
   projectEnvironmentId: 1,
@@ -60,12 +66,12 @@ it("按 Provider 展示插件和 Hook，并允许 Agent 显式启用", async () 
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/extensions` && init?.method !== "PUT") {
+    if (url === `/api/agents/${agent.id}/extensions?provider=codex` && init?.method !== "PUT") {
       return response([{ ...plugin, enabled }, hook]);
     }
     if (url === `/api/agents/${agent.id}/extensions/${encodeURIComponent(plugin.id)}` && init?.method === "PUT") {
       enabled = true;
-      expect(JSON.parse(String(init.body))).toEqual({ enabled: true });
+      expect(JSON.parse(String(init.body))).toEqual({ enabled: true, provider: "codex" });
       return response({ ...plugin, enabled });
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
@@ -76,6 +82,7 @@ it("按 Provider 展示插件和 Hook，并允许 Agent 显式启用", async () 
 
   expect(await screen.findByRole("heading", { name: "执行器扩展" })).toBeVisible();
   expect(screen.getByText("Codex 插件与钩子")).toBeVisible();
+  expect(screen.getByLabelText("Agent Core 类型")).toHaveValue("codex");
   expect(screen.getByText("browser")).toBeVisible();
   expect(screen.getByText("PreToolUse #1")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "启用 browser" }));

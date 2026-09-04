@@ -57,6 +57,12 @@ describe("SessionCleanupScheduler", () => {
       UPDATE sessions SET provider_session_id = 'provider-101', input_tokens = 100, output_tokens = 23, total_tokens = 123
       WHERE id = 101
     `).run();
+    const coreProfileId = Number(db.prepare("SELECT default_core_profile_id FROM agents WHERE id = ?").pluck().get(1));
+    db.prepare(`
+      INSERT INTO session_core_bindings
+        (session_id, core_profile_id, provider_session_id, created_at, updated_at)
+      VALUES (101, ?, 'provider-101', '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z')
+    `).run(coreProfileId);
     const runId = Number(db.prepare(`
       INSERT INTO runs (session_id, status, input, result, created_at, input_tokens, output_tokens, total_tokens)
       VALUES (101, 'succeeded', 'hello', 'world', '2026-08-01T00:00:00.000Z', 100, 23, 123)
@@ -67,10 +73,11 @@ describe("SessionCleanupScheduler", () => {
     `).run(runId);
     const providerSessionPath = join(root, "agents", String(1), "provider-home", "codex", "sessions", "101");
     mkdirSync(providerSessionPath, { recursive: true });
-    const acpxSessionPath = join(root, "acpx", "sessions", "remote-agent%3A101.json");
+    const acpxKey = "remote-agent%3A101";
+    const acpxSessionPath = join(root, "acpx", "sessions", `${acpxKey}.json`);
     const acpxEventDirectory = join(root, "acpx", "events");
-    const acpxEventPath = join(acpxEventDirectory, "remote-agent%3A101.stream.jsonl");
-    const acpxEventRolloverPath = join(acpxEventDirectory, "remote-agent%3A101.stream.1.jsonl");
+    const acpxEventPath = join(acpxEventDirectory, `${acpxKey}.stream.jsonl`);
+    const acpxEventRolloverPath = join(acpxEventDirectory, `${acpxKey}.stream.1.jsonl`);
     mkdirSync(join(root, "acpx", "sessions"), { recursive: true });
     mkdirSync(acpxEventDirectory, { recursive: true });
     writeFileSync(acpxEventPath, "event\n", "utf8");

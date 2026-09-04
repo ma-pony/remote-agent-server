@@ -10,7 +10,7 @@ The project serves teams that need to embed coding agents in ticketing systems, 
 
 Providers remain responsible for reasoning, tools, and native sessions. Remote Agent Server owns:
 
-- agent and provider configuration;
+- Agent Core profiles and runtime routing;
 - prepared, versioned project environments;
 - isolated session workspaces;
 - ACP session creation, recovery, cancellation, and reset;
@@ -38,9 +38,9 @@ External system
 Integration endpoint (token / parameter mapping / idempotency)
    |
    v
-Task -> Conversation -> Session -> Run -> acpx/ACP -> Provider
-   |                         |                 |
-   |                         |                 +-> Claude Code / Codex / Hermes
+Task -> Conversation -> Session -> Run -> Runtime Route -> acpx/ACP -> Provider
+   |                         |                        |
+   |                         |                        +-> Claude Code / Codex / Hermes
    |                         |
    |                         +-> Workspace / Skills / provider extensions / MCP
    |
@@ -57,9 +57,10 @@ The web console uses the same Session, Run, and Event model. Runs created in the
 | --- | --- |
 | Project environment | Stores one or more Git repositories, preparation commands, and the current ready revision. |
 | Project revision | A successful build published as the snapshot source for new session workspaces. |
-| Agent | Binds a provider, project environment, instructions, Skills, provider extensions, MCP, model policy, and concurrency policy. |
-| Session | Owns one isolated workspace and one resumable provider conversation. |
-| Run | Records one input, execution state, result, and token usage inside a session. |
+| Agent | Binds a project environment, instructions, capabilities, and a set of routable Core Profiles. |
+| Core Profile | A stable provider execution identity with an independent conversation binding and optional concurrency cap. |
+| Session | Owns one isolated workspace and an independent resumable provider conversation for each Core it uses. |
+| Run | Records one input together with its resolved Core, provider, model, concurrency cap, state, result, and token usage. |
 | Event | Appends messages, tools, statuses, and errors for a run, ordered by `seq`. |
 | Integration endpoint | Authenticates an external caller, maps parameters, and binds requests to one agent. |
 | Conversation | Uses a caller-supplied business key to reuse one session and serialize multiple tasks. |
@@ -98,43 +99,46 @@ Business modules use acpx through the Runtime interface, keeping provider and AC
 1. An operator selects an agent and creates a session.
 2. The server pins the current project revision and creates a copy-on-write workspace.
 3. A user message creates a queued run.
-4. The run scheduler checks global, agent, and session concurrency constraints.
-5. The server prepares the agent Provider Home, projects Skills, provider extensions, and MCP, and resolves the model policy against the current UTC time.
-6. The runtime creates or resumes an ACP session. When needed, it updates the Core-advertised ACP `model` option before sending the input.
-7. Normalized provider events are persisted and streamed to the console.
-8. The server stores the result and token usage, then updates run and session state.
+4. The run scheduler checks global, Agent, Core Profile, and Session concurrency constraints.
+5. When a slot becomes available, one UTC snapshot resolves the Core, provider, model, and concurrency cap and persists that route on the Run.
+6. The server prepares the target Core's Provider Home, Skills, provider extensions, and MCP, then creates or resumes that Core's ACP session.
+7. A Core switch prepends a bounded summary of completed Runs that the target Core has not seen.
+8. Normalized provider events are persisted and streamed to the console.
+9. The server stores the result, per-Core usage, and handoff cursor, then updates run and session state.
 
 Runs inside one session are serial. Different sessions may run concurrently within the global and agent limits.
 
-Selectable models come exclusively from the catalog advertised by Agent Core over ACP. When a Core does not advertise models, the agent can only use the Core's default behavior. A time policy does not change the Session lifecycle or create a new business Session for a model switch; the resolved model is stored on the Run.
+The default `session_sticky` mode pins a Session to the Core used by its first Run, preserving native context. Only explicit `scheduled_handoff` routing switches Core by schedule. Neither mode replaces the business Session, workspace, or Conversation.
 
-### 6.2 Model discovery, policy, and audit
+### 6.2 Core, model, and concurrency routing
 
-The current implementation fixes one Agent Core and selects models only within that Core. The future architecture for switching Core, model, and concurrency by time is recorded in the [Agent Core and model runtime routing proposal](agent-core-routing.en.md). The proposal is not implemented and does not describe current API behavior.
+One Agent can own multiple Core Profiles. Each Profile fixes its provider, may set a concurrency cap, and discovers its own selectable models over ACP. See [Agent Core runtime routing](agent-core-routing.en.md) for the complete contract.
 
 Model routing builds on the Agent Core's ACP configuration support instead of maintaining a separate global model registry:
 
-1. `GET /api/agents/:id/models` starts a short-lived probe with the agent's current provider, instructions, and ready project environment. It reads `currentModel` and `availableModels` from ACP status, then closes the probe process.
+1. `GET /api/agents/:id/core-profiles/:profileId/models` starts a short-lived probe and reads that Core's `currentModel` and `availableModels` from ACP status, then closes the probe process.
 2. The console only offers entries from `availableModels`. Before `PATCH /api/agents/:id` saves a policy, the server refreshes the catalog and rejects fixed or scheduled policies when the Core does not support model discovery or a selected model has disappeared.
 3. A queued run does not reserve a model. The executor resolves the policy against the current UTC time only after it obtains a concurrency slot and marks the run as `running`.
-4. The runtime creates or resumes the same ACP session and applies the resolved `model` option before sending the turn input. A switch does not create a new business Session, workspace, or Conversation.
-5. An explicitly resolved model is stored as the run's `resolvedModel` for the Session page, management API, and Integration Task audit trail. The field is `null` when selection is fully delegated to a Core that does not advertise its default.
+4. The runtime creates or resumes the ACP session held by the Session-to-Core binding. Switching Core replaces only the live Runtime Handle, not the business Session, workspace, or Conversation.
+5. Each Run stores `resolvedCoreProfileId`, `resolvedProvider`, `resolvedModel`, `resolvedRuleIndex`, `routingPolicyRevision`, and `effectiveConcurrency` for UI and API audit.
 
 An agent accepts three `modelPolicy` shapes:
 
 ```json
-{ "mode": "provider_default" }
+{ "mode": "provider_default", "coreProfileId": 1 }
 
-{ "mode": "fixed", "model": "core-advertised-model-id" }
+{ "mode": "fixed", "coreProfileId": 1, "model": "core-advertised-model-id" }
 
 {
   "mode": "schedule",
+  "defaultCoreProfileId": 1,
   "defaultModel": "model-used-outside-windows",
   "windows": [
     {
       "days": ["mon", "tue", "wed", "thu", "fri"],
       "start": "08:00",
       "end": "20:00",
+      "coreProfileId": 2,
       "model": "model-a",
       "maxConcurrentRuns": 4
     },
@@ -148,7 +152,7 @@ An agent accepts three `modelPolicy` shapes:
 }
 ```
 
-`days` is required and uses `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, and `sun`. Each window must select at least one unique day. The API accepts 24-hour UTC `HH:mm` values from `00:00` through `23:59`, and the start and end must differ. A window includes its start and excludes its end. An end earlier than its start crosses into the next UTC day, with `days` identifying the start weekday. The same model may appear in multiple windows. `maxConcurrentRuns` may be omitted or `null` to inherit the Agent's normal limit, or set from 1–64 to override that limit for the window; the system-wide limit always remains authoritative. `defaultModel` and the normal Agent concurrency apply unless both weekday and time match, and the first matching window in configuration order wins when windows overlap. A policy can contain at most 16 windows.
+`days` is required and uses `mon`, `tue`, `wed`, `thu`, `fri`, `sat`, and `sun`. Each window must select at least one unique day. The API accepts 24-hour UTC `HH:mm` values from `00:00` through `23:59`, and the start and end must differ. A window includes its start and excludes its end. An end earlier than its start crosses into the next UTC day, with `days` identifying the start weekday. The same Core and model may appear in multiple windows. `maxConcurrentRuns` may be omitted or `null` to inherit the Agent's normal limit, or set from 1–64 to override that limit for the window; the system-wide limit always remains authoritative. `defaultCoreProfileId`, `defaultModel`, and the normal Agent concurrency apply unless both weekday and time match, and the first matching window in configuration order wins when windows overlap. A policy can contain at most 16 windows.
 
 The console groups adjacent windows with identical `days`, `model`, and `maxConcurrentRuns` into one editor. Weekdays, model, and concurrency are set once, while the group can contain multiple start/end pairs. Saving expands the group back into the `windows` contract above, so the presentation model does not change runtime resolution or the external API.
 
@@ -201,7 +205,7 @@ Configuration changes take effect on the next run. Existing sessions refresh the
 
 - Global run, per-agent run, Webhook-delivery, and project-build concurrency are configurable at runtime.
 - Sessions and conversations serialize their work.
-- Each Webhook subscription delivers events in order.
+- Webhook deliveries may run concurrently within the global limit; receivers deduplicate by stable `eventId`.
 - Duplicate sync requests for one project environment are coalesced.
 - Events are persisted before clients query them; `seq` supports gap recovery.
 - Disconnecting SSE does not cancel a run.

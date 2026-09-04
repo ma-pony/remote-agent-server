@@ -158,7 +158,7 @@ export class ProviderExtensionProjector {
   async prepare({ agentId, provider, home }: ProjectionInput): Promise<void> {
     if (provider === "hermes") return;
     await mkdir(home, { recursive: true });
-    const extensions = this.manager.enabled(agentId);
+    const extensions = this.manager.enabled(agentId, provider);
     if (provider === "codex") await projectCodex(home, extensions);
     else await projectClaude(home, extensions);
   }

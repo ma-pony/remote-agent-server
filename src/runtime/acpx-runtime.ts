@@ -56,6 +56,8 @@ const providers = new Set<Provider>(["claude_code", "codex", "hermes"]);
 type RuntimeTarget = {
   provider: Provider;
   agentId: number;
+  coreProfileId: number;
+  legacySessionNamespace: boolean;
   sessionId: number;
   browserProfilePath: string;
   instructions: string;
@@ -176,8 +178,15 @@ const assertTarget = (provider: Provider, agentId: number, sessionId: number): v
 
 const targetName = (target: RuntimeTarget): string => {
   assertTarget(target.provider, target.agentId, target.sessionId);
-  return `remote:${target.provider}:${target.agentId}:${target.sessionId}`;
+  return target.legacySessionNamespace || target.coreProfileId === 0
+    ? `remote:${target.provider}:${target.agentId}:${target.sessionId}`
+    : `remote:${target.provider}:${target.agentId}:${target.coreProfileId}:${target.sessionId}`;
 };
+
+const persistentSessionKey = (input: RuntimeSessionInput): string => input.coreProfileId === undefined
+  || input.legacySessionNamespace !== false
+  ? `remote-agent:${input.sessionId}`
+  : `remote-agent:${input.sessionId}:core:${input.coreProfileId}`;
 
 class RemoteAgentRegistry implements AcpAgentRegistry {
   private readonly targets = new Map<string, RuntimeTarget>();
@@ -211,7 +220,9 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       environment.push(`HERMES_HOME=${shellQuote(home)}`);
     } else if (target.provider === "codex") {
       const agentHome = join(providerHome, "codex");
-      const home = join(agentHome, "sessions", String(target.sessionId));
+      const home = target.legacySessionNamespace
+        ? join(agentHome, "sessions", String(target.sessionId))
+        : join(agentHome, "profiles", String(target.coreProfileId), "sessions", String(target.sessionId));
       const hostHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
       await this.prepareProviderHome(hostHome, home);
       await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home });
@@ -281,6 +292,7 @@ type ManagedSession = {
   providerSessionId: string | null;
   provider: Provider;
   agentId: number;
+  coreProfileId: number;
   workspacePath: string;
   browserProfilePath: string;
   instructions: string;
@@ -502,6 +514,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const agent = registry.register({
       provider: input.provider,
       agentId: input.agentId,
+      coreProfileId: input.coreProfileId ?? 0,
+      legacySessionNamespace: input.legacySessionNamespace ?? true,
       sessionId: input.sessionId,
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions
@@ -515,7 +529,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
         : {})
     };
     const handle = await runtime.ensureSession({
-      sessionKey: `remote-agent:${input.sessionId}`,
+      sessionKey: persistentSessionKey(input),
       agent,
       mode: "persistent",
       cwd: input.workspacePath,
@@ -536,6 +550,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
           providerSessionId,
           provider: input.provider,
           agentId: input.agentId,
+          coreProfileId: input.coreProfileId ?? 0,
           workspacePath: input.workspacePath,
           browserProfilePath: input.browserProfilePath,
           instructions: input.instructions,
@@ -575,6 +590,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       providerSessionId,
       provider: input.provider,
       agentId: input.agentId,
+      coreProfileId: input.coreProfileId ?? 0,
       workspacePath: input.workspacePath,
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions,
@@ -734,6 +750,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const probeAgent = registry.register({
       provider: input.provider,
       agentId: input.agentId,
+      coreProfileId: input.coreProfileId ?? 0,
+      legacySessionNamespace: false,
       sessionId,
       browserProfilePath: join(this.config.dataDir, "agents", String(input.agentId), "model-catalog-browser"),
       instructions: input.instructions
@@ -743,7 +761,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
     let handle: AcpRuntimeHandle | undefined;
     try {
       handle = await runtime.ensureSession({
-        sessionKey: `remote-agent:model-catalog:${input.agentId}`,
+        sessionKey: input.coreProfileId === undefined
+          ? `remote-agent:model-catalog:${input.agentId}`
+          : `remote-agent:model-catalog:${input.agentId}:core:${input.coreProfileId}`,
         agent: probeAgent,
         mode: "oneshot",
         cwd: input.workspacePath
@@ -783,6 +803,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const probeAgent = registry.register({
       provider,
       agentId,
+      coreProfileId: 0,
+      legacySessionNamespace: false,
       sessionId,
       browserProfilePath: join(this.config.dataDir, "agents", String(agentId), "doctor-browser"),
       instructions: ""
@@ -898,6 +920,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private hasSameTarget(session: ManagedSession, input: RuntimeSessionInput): boolean {
     return session.provider === input.provider
       && session.agentId === input.agentId
+      && session.coreProfileId === (input.coreProfileId ?? 0)
       && session.workspacePath === input.workspacePath
       && session.browserProfilePath === input.browserProfilePath
       && (input.providerSessionId === null || session.providerSessionId === input.providerSessionId);

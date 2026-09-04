@@ -15,7 +15,9 @@ import type {
 } from "../src/runtime/agent-runtime.js";
 import { BEST_EFFORT_TIMEOUT_MS } from "../src/runtime/bounded-operation.js";
 import { RunExecutor } from "../src/runs/run-executor.js";
+import { ContextHandoffBuilder } from "../src/runs/context-handoff-builder.js";
 import { RunRepository } from "../src/runs/run-repository.js";
+import { SessionCoreBindingStore } from "../src/sessions/session-core-binding-store.js";
 import { SessionManager } from "../src/sessions/session-manager.js";
 import { BtrfsWorkspaceManager } from "../src/workspaces/btrfs-workspace.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
@@ -36,7 +38,8 @@ const setup = (
   runRepositoryOptions: Record<string, unknown> = {},
   providerExtensionRevision = vi.fn(() => "extensions-v1"),
   runTimeoutMs?: number,
-  runtimeSettings?: { getRuntime(): { runTimeoutMinutes: number; sessionStorageRetentionHours: number } }
+  runtimeSettings?: { getRuntime(): { runTimeoutMinutes: number; sessionStorageRetentionHours: number } },
+  enableCoreBindings = false
 ) => {
   const root = mkdtempSync(join(tmpdir(), "remote-agent-executor-"));
   tempDirectories.push(root);
@@ -73,6 +76,10 @@ const setup = (
     sessionManager,
     mcpPreparer: { prepare: mcpPrepare },
     providerExtensionManager: { revision: providerExtensionRevision },
+    ...(enableCoreBindings ? {
+      sessionCoreBindingStore: new SessionCoreBindingStore(db),
+      contextHandoffBuilder: new ContextHandoffBuilder(db)
+    } : {}),
     runtimeSettings,
     runTimeoutMs
   });
@@ -94,6 +101,136 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("切换 Core 时恢复独立绑定并注入目标 Core 未见过的历史", async () => {
+    const runtime = createFakeRuntime({ result: { status: "completed" } });
+    runtime.ensureSession = vi.fn(async (input) => ({ providerSessionId: `${input.provider}-session` }));
+    runtime.startTurn = vi.fn(runtime.startTurn);
+    const setupResult = setup(runtime, undefined, undefined, undefined, undefined, undefined, undefined, true);
+    const agent = setupResult.db.prepare(`
+      SELECT agent_id FROM sessions WHERE id = ?
+    `).get(TEST_SESSION_ID) as { agent_id: number };
+    const secondaryProfileId = Number(setupResult.db.prepare(`
+      INSERT INTO agent_core_profiles
+        (agent_id, name, provider, enabled, created_at, updated_at)
+      VALUES (?, 'Claude', 'claude_code', 1, ?, ?)
+    `).run(agent.agent_id, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z").lastInsertRowid);
+    setupResult.db.prepare("UPDATE agents SET core_routing_mode = 'scheduled_handoff' WHERE id = ?")
+      .run(agent.agent_id);
+    const defaultProfile = setupResult.db.prepare(`
+      SELECT default_core_profile_id AS id FROM agents WHERE id = ?
+    `).get(agent.agent_id) as { id: number };
+
+    await setupResult.executor.execute(setupResult.run.id, {
+      resolvedAt: "2026-09-01T00:00:00Z",
+      policyRevision: "policy-1",
+      ruleIndex: null,
+      coreProfileId: defaultProfile.id,
+      provider: "codex",
+      model: "codex-model",
+      effectiveConcurrency: 2,
+      pinSessionCore: false
+    });
+    expect(runtime.ensureSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      coreProfileId: defaultProfile.id,
+      legacySessionNamespace: true
+    }));
+    setupResult.db.prepare(`
+      UPDATE agents SET default_core_profile_id = ?, provider = 'claude_code' WHERE id = ?
+    `).run(secondaryProfileId, agent.agent_id);
+    const next = setupResult.runRepository.create({ sessionId: TEST_SESSION_ID, input: "继续处理" });
+    await setupResult.executor.execute(next.id, {
+      resolvedAt: "2026-09-01T01:00:00Z",
+      policyRevision: "policy-2",
+      ruleIndex: 0,
+      coreProfileId: secondaryProfileId,
+      provider: "claude_code",
+      model: "claude-model",
+      effectiveConcurrency: 1,
+      pinSessionCore: false
+    });
+
+    expect(runtime.ensureSession).toHaveBeenLastCalledWith(expect.objectContaining({
+      coreProfileId: secondaryProfileId,
+      provider: "claude_code",
+      providerSessionId: null,
+      legacySessionNamespace: false,
+      model: "claude-model"
+    }));
+    expect(runtime.startTurn).toHaveBeenLastCalledWith(expect.objectContaining({
+      sessionId: TEST_SESSION_ID,
+      requestId: next.id,
+      text: expect.stringContaining("[REMOTE_AGENT_HANDOFF v1]")
+    }));
+    const bindings = setupResult.db.prepare(`
+      SELECT core_profile_id, provider_session_id, context_cursor_run_id
+      FROM session_core_bindings WHERE session_id = ? ORDER BY core_profile_id
+    `).all(TEST_SESSION_ID);
+    expect(bindings).toEqual([
+      { core_profile_id: defaultProfile.id, provider_session_id: "codex-session", context_cursor_run_id: setupResult.run.id },
+      { core_profile_id: secondaryProfileId, provider_session_id: "claude_code-session", context_cursor_run_id: next.id }
+    ]);
+    expect(setupResult.db.prepare("SELECT provider_session_id FROM sessions WHERE id = ?").get(TEST_SESSION_ID))
+      .toEqual({ provider_session_id: "codex-session" });
+    setupResult.db.close();
+  });
+
+  it("非默认 Core 跟随自身默认模型时不会误用默认 Core 模型", async () => {
+    const runtime = createFakeRuntime({ result: { status: "completed" } });
+    runtime.ensureSession = vi.fn(runtime.ensureSession);
+    const setupResult = setup(runtime, undefined, undefined, undefined, undefined, undefined, undefined, true);
+    const agent = setupResult.db.prepare(`
+      SELECT agent_id FROM sessions WHERE id = ?
+    `).get(TEST_SESSION_ID) as { agent_id: number };
+    const secondaryProfileId = Number(setupResult.db.prepare(`
+      INSERT INTO agent_core_profiles
+        (agent_id, name, provider, enabled, created_at, updated_at)
+      VALUES (?, 'Claude', 'claude_code', 1, ?, ?)
+    `).run(agent.agent_id, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z").lastInsertRowid);
+    setupResult.db.prepare("UPDATE agents SET provider_default_model = 'codex-default' WHERE id = ?")
+      .run(agent.agent_id);
+
+    await setupResult.executor.execute(setupResult.run.id, {
+      resolvedAt: "2026-09-01T00:00:00Z",
+      policyRevision: "policy-1",
+      ruleIndex: null,
+      coreProfileId: secondaryProfileId,
+      provider: "claude_code",
+      model: null,
+      effectiveConcurrency: 1,
+      pinSessionCore: false
+    });
+
+    expect(runtime.ensureSession).toHaveBeenCalledWith(expect.not.objectContaining({ model: "codex-default" }));
+    expect(runtime.ensureSession).toHaveBeenCalledWith(expect.objectContaining({
+      coreProfileId: secondaryProfileId,
+      provider: "claude_code"
+    }));
+    setupResult.db.close();
+  });
+
+  it("Core 尚未收到 Turn 时失败不会推进 Handoff 游标", async () => {
+    const runtime = createFakeRuntime();
+    runtime.startTurn = vi.fn(runtime.startTurn);
+    const setupResult = setup(
+      runtime,
+      undefined,
+      vi.fn(async () => Promise.reject(new Error("mcp unavailable"))),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true
+    );
+
+    await setupResult.executor.execute(setupResult.run.id);
+
+    expect(runtime.startTurn).not.toHaveBeenCalled();
+    expect(setupResult.db.prepare(`
+      SELECT context_cursor_run_id FROM session_core_bindings WHERE session_id = ?
+    `).get(TEST_SESSION_ID)).toEqual({ context_cursor_run_id: null });
+    setupResult.db.close();
+  });
+
   it("使用在线配置的 Run 硬超时终止 Turn、释放 Runtime 并稳定失败", async () => {
     vi.useFakeTimers();
     try {

@@ -7,6 +7,8 @@ export type ProviderSessionStorage = {
   agentId: number;
   provider: Provider;
   sessionId: number;
+  coreProfileId?: number;
+  legacySessionNamespace?: boolean;
   providerSessionId: string | null;
 };
 
@@ -21,13 +23,19 @@ export class SystemProviderSessionCleaner implements ProviderSessionCleaner {
   constructor(private readonly dataDir: string) {}
 
   async purge(input: ProviderSessionStorage): Promise<void> {
-    const acpxKey = encodeURIComponent(`remote-agent:${input.sessionId}`);
+    const runtimeKey = input.coreProfileId === undefined || input.legacySessionNamespace !== false
+      ? `remote-agent:${input.sessionId}`
+      : `remote-agent:${input.sessionId}:core:${input.coreProfileId}`;
+    const acpxKey = encodeURIComponent(runtimeKey);
     const acpxSessionPath = join(this.dataDir, "acpx", "sessions", `${acpxKey}.json`);
     await this.removeAcpxEventLog(acpxSessionPath, acpxKey);
     await rm(acpxSessionPath, { force: true });
     const providerRoot = join(this.dataDir, "agents", String(input.agentId), "provider-home");
     if (input.provider === "codex") {
-      await rm(join(providerRoot, "codex", "sessions", String(input.sessionId)), { recursive: true, force: true });
+      const home = input.legacySessionNamespace === false && input.coreProfileId !== undefined
+        ? join(providerRoot, "codex", "profiles", String(input.coreProfileId), "sessions", String(input.sessionId))
+        : join(providerRoot, "codex", "sessions", String(input.sessionId));
+      await rm(home, { recursive: true, force: true });
       return;
     }
     if (input.providerSessionId === null) return;

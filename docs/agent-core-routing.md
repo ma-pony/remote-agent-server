@@ -1,300 +1,197 @@
-# Agent Core 与模型运行路由设计提案
+# Agent Core 运行路由
 
 [English](agent-core-routing.en.md)
 
-> 状态：设计提案，尚未实现。本文记录目标架构、关键约束和分阶段实施边界；当前生产行为仍以[产品与架构](design.md)中的单 Core 模型策略为准。
+Remote Agent Server 允许一个 Agent 配置多个 Agent Core，并在 Run 真正开始时统一选择 Core、模型和并发。业务 Session、Workspace 和外部 Conversation 保持不变；每个 Core 单独维护自己的 Provider 原生会话。
 
-## 1. 目标
+## 1. 设计目标
 
-允许一个 Agent 选择多个 Agent Core，并按 UTC 星期和时间段统一选择：
+这套设计解决三个问题：
 
-- 本次 Run 使用的 Agent Core；
-- 该 Core 实际暴露的模型；
-- 当前时间段的 Run 并发上限。
+- 一个业务 Agent 可以使用 Codex、Claude Code 或 Hermes 等不同执行器；
+- 白天、夜间或不同工作日可以选择不同 Core、模型和并发上限；
+- Core 切换后仍能继续同一个任务，但不会错误复用另一个 Core 的隐藏上下文。
 
-切换不创建新的业务 Session、Conversation 或 Workspace，也不打断已经运行的 Run。系统必须保留可审计的路由结果，并避免把一个 Core 的 Provider Session ID 传给另一个 Core。
+系统不尝试迁移 Provider 的内部状态。可共享的内容只有 Workspace、服务端持久化状态和显式 Handoff。
 
-## 2. 术语与边界
+## 2. 四个核心概念
 
-- **Agent**：业务身份，拥有项目环境、指令、Skills、MCP 和执行策略。
-- **Agent Core Profile**：一个可运行的 ACP 执行器实例，例如某个 Codex、Claude Code 或 Hermes 配置。
-- **Provider**：Core 使用的适配器家族，例如 `codex`、`claude_code`、`hermes`。
-- **Model**：由指定 Core 通过 ACP 暴露并选择的模型。
-- **业务 Session**：Remote Agent Server 的长期工作上下文和 Workspace。
-- **Provider Session**：某个 Core 自己的原生对话上下文。
+### Agent Core Profile
 
-一个业务 Session 可以拥有多个 Provider Session，但不同 Core 不能共享同一个 Provider Session。跨 Core 只能共享 Workspace、持久化业务事实和显式 Handoff，不能迁移 Provider 的隐藏上下文。
+Core Profile 是 Agent 可选择的执行身份，包含：
 
-## 3. 核心决策
+- 名称；
+- Provider：`codex`、`claude_code` 或 `hermes`；
+- 是否启用；
+- 可选的并发上限。
 
-### 3.1 Core、模型和并发使用同一份路由策略
+Provider 在 Profile 创建后不可修改。需要更换 Provider 时创建新 Profile，避免把旧 Provider 会话静默解释成另一种执行器状态。
 
-不分别维护 Core 策略和模型策略。模型目录属于具体 Core，拆开配置可能产生“选择了 Claude Core，却选择 Codex 模型”的无效组合。
+### Core 路由模式
 
-建议的策略协议：
+Agent 支持两种模式：
+
+| 模式 | 行为 | 适用场景 |
+| --- | --- | --- |
+| `session_sticky` | Session 第一个 Run 绑定默认 Core，后续 Turn 始终复用该 Core。 | 默认模式；最稳定、上下文连续性最好。 |
+| `scheduled_handoff` | 每个 Run 开始时按 UTC 规则选择 Core；切换时注入增量 Handoff。 | 需要按成本、能力或时间切换执行器。 |
+
+同一业务 Session 仍然串行执行，不会让两个 Core 同时操作同一个 Workspace。
+
+### Session Core Binding
+
+一个业务 Session 对每个使用过的 Core 保存一条独立绑定：
+
+- Provider Session ID；
+- 已同步的 Run 游标；
+- 最近模型和使用时间；
+- 该 Core 返回的累计 Token 用量。
+
+默认 Core 沿用 `remote-agent:<sessionId>` 持久化键，保证升级前已有会话可以继续恢复；非默认 Core 使用 `remote-agent:<sessionId>:core:<coreProfileId>`。不同 Core 不会共享 Provider Session ID。
+
+### Resolved Run Route
+
+调度器在 Run 获得执行槽位时解析一次路由，并把结果写入 Run：
+
+- Core Profile 与 Provider；
+- 模型；
+- 命中的规则序号；
+- 策略摘要；
+- 实际并发上限。
+
+Executor 使用这份不可变快照启动运行，不会在时间边界再次解析配置。
+
+## 3. 路由规则
+
+模型策略继续使用现有协议，并在需要跨 Core 时增加 Core ID：
 
 ```json
 {
   "mode": "schedule",
-  "defaultTarget": {
-    "coreProfileId": 1,
-    "model": { "mode": "core_default" }
-  },
-  "rules": [
+  "defaultCoreProfileId": 1,
+  "defaultModel": "glm-5.3-flash",
+  "windows": [
     {
-      "id": "weekday-daytime",
       "days": ["mon", "tue", "wed", "thu", "fri"],
-      "periods": [
-        { "start": "08:00", "end": "12:00" },
-        { "start": "13:00", "end": "20:00" }
-      ],
-      "target": {
-        "coreProfileId": 1,
-        "model": { "mode": "fixed", "id": "glm-5.3-flash" }
-      },
+      "start": "08:00",
+      "end": "20:00",
+      "coreProfileId": 1,
+      "model": "glm-5.3-flash",
       "maxConcurrentRuns": 4
     },
     {
-      "id": "weekday-night",
       "days": ["mon", "tue", "wed", "thu", "fri"],
-      "periods": [{ "start": "20:00", "end": "08:00" }],
-      "target": {
-        "coreProfileId": 2,
-        "model": { "mode": "fixed", "id": "deepseek-v4" }
-      },
+      "start": "20:00",
+      "end": "08:00",
+      "coreProfileId": 2,
+      "model": "deepseek-v4",
       "maxConcurrentRuns": 2
     }
   ]
 }
 ```
 
-规则继续使用 UTC：开始时间包含、结束时间不包含，结束早于开始表示跨到下一 UTC 日，重叠时配置在前的规则优先。`defaultTarget` 必填，保证任意时间都有明确目标。
+规则语义：
 
-### 3.2 路由在 Run 获得槽位时只解析一次
+- 时间统一使用 UTC 和 24 小时制；
+- 开始时间包含，结束时间不包含；
+- 结束时间早于开始时间表示跨 UTC 日；
+- 多条规则重叠时，配置靠前的规则优先；
+- 未命中规则时使用默认 Core 和默认模型；
+- 排队 Run 在真正获得槽位时读取最新策略，运行中的 Run 不受配置修改影响。
 
-调度器在 Run 真正获得执行槽位时生成不可变的 `ResolvedRunRoute`：
-
-```ts
-type ResolvedRunRoute = {
-  resolvedAt: string;
-  policyRevision: string;
-  ruleId: string | null;
-  coreProfileId: number;
-  coreGeneration: number;
-  provider: Provider;
-  model: string | null;
-  effectiveConcurrency: number;
-};
-```
-
-同一个结果同时用于并发准入、Run 持久化和 Runtime 启动，Executor 不重新读取时间或再次解析策略。这样不会在 UTC 分钟边界出现“按一条规则放行，却按另一条规则执行”。
-
-有效并发上限为：
+调度器分别检查 Agent 总量和当前 Core 的容量：
 
 ```text
-min(系统全局上限, Agent 上限, Core Profile 上限, 时间规则上限)
+Agent 容量 = min(系统全局上限, 命中时间段上限 ?? Agent 默认上限)
+Core 容量  = min(系统全局上限, Core Profile 上限)
 ```
 
-调度器除 `activeByAgent` 外还要维护 `activeByCoreProfile`。降低配置不会取消正在运行的 Run；排队 Run 在下一次准入时使用最新策略。
+时间段上限覆盖 Agent 默认上限，Core Profile 上限只限制自身，不会压低同一 Agent 下其他 Core 的容量。Run 中记录的有效并发是两者的最小值。
 
-### 3.3 每个业务 Session 为每个 Core 保存独立绑定
-
-移除“一个 Session 只有一个 `provider_session_id`”的假设，新增：
-
-```sql
-CREATE TABLE session_core_bindings (
-  session_id INTEGER NOT NULL,
-  core_profile_id INTEGER NOT NULL,
-  core_generation INTEGER NOT NULL,
-  provider_session_id TEXT,
-  context_cursor_run_id INTEGER,
-  last_model TEXT,
-  input_tokens INTEGER,
-  output_tokens INTEGER,
-  cached_read_tokens INTEGER,
-  cached_write_tokens INTEGER,
-  thought_tokens INTEGER,
-  total_tokens INTEGER,
-  last_used_at TEXT,
-  storage_cleaned_at TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (session_id, core_profile_id, core_generation)
-);
-```
-
-acpx 持久化 Key 使用：
+## 4. 一次 Run 的执行流程
 
 ```text
-remote-agent:<sessionId>:core:<coreProfileId>:generation:<generation>
-```
-
-Core 的 Provider、命令、Provider Home 或凭证身份发生变化时发布新 generation，不能让旧 Provider Session 静默进入不同执行身份。
-
-### 3.4 同一业务 Session 同时只保留一个活跃 Core Handle
-
-同一 Session 的 Run 继续严格串行。切换 Core 时：
-
-1. 关闭旧 Core 的活跃 Handle，但不丢弃持久化状态；
-2. 保存旧 Core 的 Provider Session ID 和累计用量；
-3. 创建或恢复目标 Core 的 Handle；
-4. 空闲超时继续释放当前 Handle。
-
-不同时驻留多个 Core 进程，避免 MCP、浏览器和 Provider 进程按 Core 数量成倍占用内存。
-
-## 4. 跨 Core 上下文同步
-
-Workspace 修改会自然共享，但 Provider 原生对话不会共享。每个 Binding 使用 `context_cursor_run_id` 记录该 Core 已经了解的业务历史位置。
-
-目标 Core 在执行前：
-
-1. 读取 cursor 之后已经结束、且由其他 Core 执行的 Run；
-2. 生成确定性、脱敏的增量 Handoff；
-3. 把 Handoff 与本轮用户输入一起发送；
-4. 本轮被目标 Core 成功处理后推进 cursor。
-
-Handoff 可以包含 Run ID、状态、Core、模型、用户输入、最终回复、Workspace 变更摘要、未完成事项以及公开的外部任务状态。不得包含 thought、密钥、未经脱敏的工具参数或完整事件流。
-
-Handoff 不是只在首次使用某个 Core 时发送。一个 Core 离开期间如果其他 Core 完成了工作，切回来时也必须补齐增量。同一 Core 连续执行时不重复注入。
-
-第一版使用确定性 Handoff，不额外调用模型总结。对每个 Run 和整体 Handoff 设置字节上限；超限时保留最近结果和结构化状态，并明确指出省略范围。
-
-## 5. Core Catalog 与能力
-
-系统级 Core Catalog 保存可信的可执行配置：
-
-```yaml
-agentCores:
-  - key: codex-primary
-    name: Codex
-    adapter: codex
-    enabled: true
-    maxConcurrentRuns: 6
-  - key: claude-primary
-    name: Claude Code
-    adapter: claude_code
-    enabled: true
-    maxConcurrentRuns: 3
-```
-
-普通 Agent 配置只选择已注册 Core。任意 shell 命令、Provider Home 来源和凭证引用属于可信系统配置，不通过普通 Agent API 开放。
-
-能力由两部分组成：
-
-- 平台静态能力：指令、Skills、插件、Hook 和 Provider Home 如何投影；
-- ACP 动态能力：模型目录、配置选项、Session resume/load 等。
-
-模型目录按 `(agentId, coreProfileId, coreGeneration)` 发现和缓存，因为不同 Agent 的账号、Provider Home 和权限可能不同。固定模型只能从目标 Core 实际返回的 `availableModels` 中选择；Core 不支持模型选择时只允许 `core_default`。
-
-保存策略前校验每个目标 Core 是否已启用、已分配给 Agent、模型仍可用，并支持 Agent 所需的指令、MCP、Skills 和扩展能力。模型探测在配置保存、手动检测和低频刷新时执行，不在每个 Run 前重复拉起短生命周期 Core/MCP 进程。
-
-## 6. 运行时能力投影
-
-路由解析必须发生在运行准备之前。目标流程为：
-
-```text
-解析并持久化 Runtime Route
-  -> 按目标 Core 准备 Provider Home
-  -> 投影目标 Core 的 Skills、插件和 Hook
-  -> 准备并注入 MCP
+Run 获得执行槽位
+  -> 解析并持久化 Runtime Route
+  -> 选择或创建 Session Core Binding
+  -> 准备 Workspace、Skills、扩展和 MCP
   -> 恢复目标 Core 的 Provider Session
-  -> 应用模型
-  -> 注入增量 Handoff
+  -> 必要时注入增量 Handoff
   -> startTurn
+  -> 保存结果、用量和 Handoff 游标
 ```
 
-Skills 可以继续属于 Agent，由 Projector 根据本次 Core 写入相应目录。插件和 Hook 是 Provider 原生能力，应按 `(agent_id, core_profile_id, extension_id)` 保存。MCP 默认属于 Agent，但只有支持 MCP 注入的 Core 才能进入该 Agent 的路由。
+运行时按目标 Provider 投影能力：
 
-不同 Core Profile 的 Provider Home 路径必须隔离。即使两个 Profile 都使用 Codex，也不能共享会话目录、运行缓存或认证身份不明确的状态。
+- Skills 和 MCP 属于 Agent，每次投影到当前 Core；
+- 插件和 Hook 按 Provider 选择，同一种 Provider 的多个 Core 共用选择；
+- Provider 会话和 acpx 会话键按 Core 隔离；同 Provider 的静态配置仍按 Agent 统一投影；
+- 同一业务 Session 同时只保留一个活跃 Runtime Handle。切换 Core 会关闭旧 Handle，但保留其持久化会话。
 
-## 7. 用量、审计、重置与清理
+## 5. Handoff
 
-Run 增加以下不可变审计字段：
+目标 Core 的游标落后于 Session 历史时，服务端把尚未见过的终态 Run 组成确定性 Handoff，并与当前用户请求一起发送。
 
-- `resolved_core_profile_id`；
-- `resolved_core_generation`；
-- `resolved_provider`；
-- `resolved_model`；
-- `resolved_rule_id`；
-- `routing_policy_revision`；
-- `fallback_reason`，第一版固定为空。
+第一版 Handoff 包含：
 
-Provider 返回的累计 Token 用量保存到对应 `session_core_bindings`，Session 总用量为所有 Binding 的累计值之和。不能用当前 Core 的累计值覆盖整个业务 Session。
+- Run ID、状态、Core、Provider 和模型；
+- 用户请求；
+- 最终结果或错误。
 
-重置入口区分：
+Handoff 不包含 thought 和完整事件流。常见 Authorization、API Key、Token、Password、Secret 会脱敏；单字段最多 4 KiB，总体最多 24 KiB，超限优先保留最近记录。
 
-- 重置当前 Core 上下文；
-- 重置指定 Core 上下文；
-- 重置全部 Core 上下文。
+只有 `startTurn` 成功创建后，目标 Core 的游标才会在 Run 结束时推进。Workspace、MCP 或 Runtime 准备阶段失败不会误标记为“Core 已看过”。
 
-Session 存储过期时遍历全部 Binding，清理各自的 acpx 记录和 Provider 原生历史，保留 Run、路由审计和 Token 统计。永久删除 Session 时再删除 Binding 与统计。
+Handoff 提供可恢复的业务语境，不承诺复制 Provider 的隐式记忆、压缩状态或内部缓存。因此 `session_sticky` 仍是默认和推荐模式。
 
-## 8. 失败语义
+## 6. 配置与安全约束
 
-第一版不做静默自动降级：
+- 固定模型必须来自目标 Core 通过 ACP 返回的模型目录；不允许手填未知模型。
+- 默认 Core、策略引用的 Core 和固定 Session 使用的 Core 不能直接停用。
+- 已被 Session Binding 引用的 Core 不能删除；先删除相应 Session 或调整使用关系。
+- 不在 Run 中途切换 Core，也不做静默自动降级。启动失败时当前 Run 明确失败。
+- Profile 只选择服务内已支持的 Provider，不允许通过普通 Agent API 注入任意 shell 命令。
 
-- `core_unavailable`：目标 Core 无法启动或连接；
-- `model_unavailable`：模型已下线或 Core 拒绝选择；
-- `core_capability_mismatch`：Core 不支持 Agent 的必需能力；
-- `session_resume_failed`：目标 Core 的 Provider Session 无法安全恢复。
+## 7. 重置、清理与用量
 
-不允许在一个 Run 已经开始或产生工具副作用后切换 Core。以后若增加 fallback，也只能在 `startTurn` 之前显式配置和执行，并持久化原目标、备用目标和降级原因。
+“重建执行器会话”会：
 
-被现有 Agent 路由引用的 Core 不允许直接禁用。管理员需要先为受影响 Agent 设置替代目标，再禁用 Core。
+- 关闭当前活跃 Runtime；
+- 清理该业务 Session 的全部 Core Provider 会话和 acpx 持久化状态；
+- 清空 Handoff 游标，使后续 Core 从保留的 Run 历史重新衔接；
+- 保留业务 Session、Workspace、Run、事件和 Token 统计。
 
-## 9. 管理 API 与界面
+会话存储过期清理也会遍历所有 Core Binding。永久删除 Session 时，Binding 随 Session 删除。
 
-建议增加：
+Provider 返回的累计用量按 Binding 保存，Session 展示所有 Binding 的汇总，避免 Core 切换时互相覆盖。
 
-- Core 管理页：启用状态、适配器、健康状态、模型目录、并发上限和 generation；
-- Agent Core 页签：选择允许使用的 Core，并管理各 Core 的原生插件和 Hook；
-- Agent 运行路由：默认目标，以及按星期和多个时间段统一设置的 Core、模型和并发；
-- 路由预览：当前 UTC 命中目标、下一次切换时间和配置冲突提示；
-- Session Run：展示实际 Core、模型、命中规则和策略版本；
-- Session 重置：选择当前、指定或全部 Core 上下文。
+## 8. 管理 API
 
-外部 Endpoint 和 Task API 不需要感知路由细节，仍绑定 Agent。调用方可从 Task/Run 查询结果中读取最终解析出的 Core 和模型用于审计。
+```text
+GET    /api/agents/:id/core-profiles
+POST   /api/agents/:id/core-profiles
+PATCH  /api/agents/:id/core-profiles/:profileId
+DELETE /api/agents/:id/core-profiles/:profileId
+GET    /api/agents/:id/core-profiles/:profileId/models
+```
 
-## 10. 分阶段实施
+Agent 更新接口接受：
 
-### 阶段一：Core 数据模型与路由快照
+- `coreRoutingMode`；
+- `defaultCoreProfileId`；
+- 带可选 Core ID 的 `modelPolicy`。
 
-- 增加 Core Profile、Agent Core 分配和统一运行策略；
-- 调度器一次解析 Core、模型和并发；
-- Run 持久化完整路由快照；
-- 仍只允许每个 Agent 实际使用一个 Core，先验证无行为回归。
+扩展目录使用 `GET /api/agents/:id/extensions?provider=codex|claude_code`，启停扩展时在请求体传递同一个 `provider`。
 
-### 阶段二：多 Core Session
+## 9. 验收标准
 
-- 增加 `session_core_bindings`；
-- acpx Key、Provider Home、Token 统计、重置和清理改为按 Core；
-- 验证 Core A -> Core B -> Core A 能恢复各自的 Provider Session；
-- 切换时只保留一个活跃 Handle。
+1. Sticky Session 首次运行后固定 Core，后续 Run 不受默认 Core 修改影响。
+2. Scheduled Session 可完成 Codex -> Claude -> Codex 切换，并分别恢复两个 Provider 会话。
+3. Core、模型和并发来自同一个 UTC 时间快照，并写入 Run 审计字段。
+4. 切回 Core 时只注入它尚未见过的终态 Run；准备阶段失败不推进游标。
+5. Core 切换后同一业务 Session 只有一个活跃 Runtime 进程树。
+6. Token 汇总、重置和存储清理覆盖 Session 的全部 Core Binding。
+7. Core 或模型不可用时明确失败，不在执行中自动换目标。
 
-### 阶段三：上下文与能力投影
-
-- 增量 Handoff 和 cursor；
-- Skills、插件、Hook、MCP 按目标 Core 投影；
-- 能力矩阵、模型目录缓存和保存校验；
-- 完成管理界面和运行记录展示。
-
-第一版不包含任意 ACP 命令在线编辑、跨 Core 并发执行、执行中途切换、自动 fallback 和额外模型总结。
-
-## 11. 必须通过的验收场景
-
-1. Codex 内切换模型不会创建新的 Provider Session。
-2. Codex -> Claude -> Codex 分别维护两个 Provider Session，切回后恢复原 Codex 上下文。
-3. 切回 Core 时只补齐它离开期间的 Run，Handoff 不重复注入。
-4. Run 排队跨越 UTC 时间边界时，Core、模型和并发使用同一份解析结果。
-5. 配置修改不影响运行中的 Run，排队 Run 使用实际准入时的最新策略。
-6. Core 切换后只有一个活跃 Core/MCP 进程树，空闲超时可以完整释放。
-7. 服务重启后，各 Core Binding 仍能分别恢复。
-8. Core 的 Token 累计不会互相覆盖，Session 总量正确。
-9. Session 存储清理会清除全部 Core 原生历史，但保留统计和 Run 审计。
-10. Core、模型或能力不可用时明确失败，不静默换目标。
-
-## 12. 可行性结论
-
-acpx 已经提供独立 Session Key、不同 Agent 命令、Provider Session 恢复和动态配置模型所需的基础能力，不需要修改 acpx。主要工作位于 Remote Agent Server 的持久化和业务编排层。
-
-该功能不是在现有模型时间段中增加一个 `provider` 字段。可安全交付的最小闭环必须同时包含：统一路由快照、每 Core Session Binding、增量 Handoff、按 Core 能力投影，以及多 Core Token/清理语义。
+这套实现刻意保持边界简单：没有 Core generation、分布式状态复制、模型生成摘要、执行中途切换和自动 fallback。后续只有在真实需求出现时才扩展这些能力。

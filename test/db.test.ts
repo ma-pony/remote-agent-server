@@ -70,10 +70,12 @@ describe("database migration", () => {
       "project_environment_revisions",
       "environment_repositories",
       "agents",
+      "agent_core_profiles",
       "agent_mcp_servers",
       "agent_session_parameters",
       "agent_mcp_values",
       "sessions",
+      "session_core_bindings",
       "runs",
       "events",
       "integration_endpoints",
@@ -108,6 +110,7 @@ describe("database migration", () => {
       .map((row) => (row as { name: string }).name);
 
     expect(tables).toEqual([
+      "agent_core_profiles",
       "agent_mcp_servers",
       "agent_mcp_values",
       "agent_provider_extensions",
@@ -122,6 +125,7 @@ describe("database migration", () => {
       "project_environment_revisions",
       "project_environments",
       "runs",
+      "session_core_bindings",
       "session_mcp_parameter_values",
       "sessions",
       "sqlite_sequence",
@@ -129,6 +133,50 @@ describe("database migration", () => {
       "webhook_deliveries",
       "webhook_subscriptions"
     ]);
+
+    const extensionPrimaryKey = (db.prepare("PRAGMA table_info(agent_provider_extensions)").all() as Array<{
+      name: string;
+      pk: number;
+    }>).filter(({ pk }) => pk > 0).sort((left, right) => left.pk - right.pk).map(({ name }) => name);
+    expect(extensionPrimaryKey).toEqual(["agent_id", "provider", "extension_id"]);
+    db.close();
+  });
+
+  it("升级扩展选择唯一键后允许不同 Provider 使用相同扩展 ID", () => {
+    const { db, seed } = createTestDatabase();
+    db.exec(`
+      DROP TABLE agent_provider_extensions;
+      CREATE TABLE agent_provider_extensions (
+        agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+        provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex')),
+        kind TEXT NOT NULL CHECK (kind IN ('plugin', 'hook')),
+        extension_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        source_fingerprint TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(agent_id, extension_id)
+      );
+    `);
+    db.prepare(`
+      INSERT INTO agent_provider_extensions
+        (agent_id, provider, kind, extension_id, name, source_fingerprint, created_at, updated_at)
+      VALUES (?, 'codex', 'plugin', 'plugin:shared', 'Shared', 'codex-fingerprint', ?, ?)
+    `).run(seed.agent.id, "2026-09-04T00:00:00.000Z", "2026-09-04T00:00:00.000Z");
+
+    migrate(db);
+    db.prepare(`
+      INSERT INTO agent_provider_extensions
+        (agent_id, provider, kind, extension_id, name, source_fingerprint, created_at, updated_at)
+      VALUES (?, 'claude_code', 'plugin', 'plugin:shared', 'Shared', 'claude-fingerprint', ?, ?)
+    `).run(seed.agent.id, "2026-09-04T00:00:00.000Z", "2026-09-04T00:00:00.000Z");
+
+    expect(db.prepare(`
+      SELECT provider FROM agent_provider_extensions
+      WHERE agent_id = ? AND extension_id = 'plugin:shared' ORDER BY provider
+    `).all(seed.agent.id)).toEqual([{ provider: "claude_code" }, { provider: "codex" }]);
+    db.close();
   });
 
   it("用 scope 自然主键保存全局并发设置且只在首次迁移写入默认值", () => {
@@ -324,13 +372,32 @@ describe("database migration", () => {
     const agent = db.prepare("SELECT id, project_environment_id FROM agents WHERE name = 'Legacy agent'").get() as {
       id: number; project_environment_id: number;
     };
-    const session = db.prepare("SELECT id, agent_id, project_environment_revision_id FROM sessions").get() as {
-      id: number; agent_id: number; project_environment_revision_id: number;
+    const session = db.prepare(`
+      SELECT id, agent_id, project_environment_revision_id, pinned_core_profile_id FROM sessions
+    `).get() as {
+      id: number; agent_id: number; project_environment_revision_id: number; pinned_core_profile_id: number;
     };
     expect(agent.id).toEqual(expect.any(Number));
     expect(agent.project_environment_id).toEqual(expect.any(Number));
     expect(session).toMatchObject({ agent_id: agent.id });
     expect(session.project_environment_revision_id).toEqual(expect.any(Number));
+    const coreProfile = db.prepare(`
+      SELECT profile.id, profile.agent_id, profile.provider
+      FROM agent_core_profiles profile
+      JOIN agents agent ON agent.default_core_profile_id = profile.id
+      WHERE agent.id = ?
+    `).get(agent.id);
+    expect(coreProfile).toMatchObject({ agent_id: agent.id, provider: "codex" });
+    expect(session.pinned_core_profile_id).toBe((coreProfile as { id: number }).id);
+    expect(db.prepare(`
+      SELECT session_id, core_profile_id, provider_session_id, context_cursor_run_id
+      FROM session_core_bindings WHERE session_id = ?
+    `).get(session.id)).toMatchObject({
+      session_id: session.id,
+      core_profile_id: (coreProfile as { id: number }).id,
+      provider_session_id: "provider-session",
+      context_cursor_run_id: expect.any(Number)
+    });
     expect(existsSync(join(dataDir, "agents", String(agent.id), "MEMORY.md"))).toBe(true);
     expect(existsSync(join(
       dataDir, "agents", String(agent.id), "provider-home", "codex", "sessions", String(session.id), "rollout.jsonl"

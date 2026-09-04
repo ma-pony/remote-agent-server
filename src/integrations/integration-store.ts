@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 
 import { insertedId } from "../db.js";
-import type { Page, Run, RunStatus } from "../domain.js";
+import type { Page, Provider, Run, RunStatus } from "../domain.js";
 import type {
   IntegrationConversation,
   IntegrationConversationStatus,
@@ -121,6 +121,11 @@ type LinkedRunRow = {
   result: string | null;
   error: string | null;
   resolved_model: string | null;
+  resolved_core_profile_id: number | null;
+  resolved_provider: Provider | null;
+  resolved_rule_index: number | null;
+  routing_policy_revision: string | null;
+  effective_concurrency: number | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -318,6 +323,11 @@ const toRun = (row: LinkedRunRow): Run => ({
   result: row.result,
   error: row.error,
   resolvedModel: row.resolved_model,
+  resolvedCoreProfileId: row.resolved_core_profile_id,
+  resolvedProvider: row.resolved_provider,
+  resolvedRuleIndex: row.resolved_rule_index,
+  routingPolicyRevision: row.routing_policy_revision,
+  effectiveConcurrency: row.effective_concurrency,
   createdAt: row.created_at,
   startedAt: row.started_at,
   finishedAt: row.finished_at,

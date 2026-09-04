@@ -889,7 +889,10 @@ describe("Integration endpoint API", () => {
     const startedInputs: string[] = [];
     runtime.startTurn = (input) => {
       startedInputs.push(input.text);
-      return input.text.includes("long work") ? {
+      const currentInput = input.text.includes("[CURRENT_USER_REQUEST]")
+        ? input.text.split("[CURRENT_USER_REQUEST]", 2)[1]!.split("[/CURRENT_USER_REQUEST]", 1)[0]!
+        : input.text;
+      return currentInput.includes("long work") ? {
         events: { async *[Symbol.asyncIterator]() {} },
         result: result.promise,
         cancel: async () => undefined,
@@ -955,7 +958,7 @@ describe("Integration endpoint API", () => {
 
     expect(cancelled.statusCode).toBe(200);
     expect(runtime.cancel).toHaveBeenCalledWith(task.sessionId);
-    expect(startedInputs).toContain("Resolve the support request.\n\nnext work");
+    expect(startedInputs.at(-1)).toContain("[CURRENT_USER_REQUEST]\nResolve the support request.\n\nnext work");
     expect(repeated.statusCode).toBe(200);
     expect(repeated.json()).toMatchObject({ taskId: task.taskId, status: "cancelled" });
   });

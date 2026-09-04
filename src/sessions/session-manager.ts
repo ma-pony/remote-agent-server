@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -21,6 +20,7 @@ import {
   SystemProviderSessionCleaner,
   type ProviderSessionCleaner
 } from "../runtime/provider-session-cleaner.js";
+import { SessionCoreBindingStore } from "./session-core-binding-store.js";
 import { WorkspaceCreateError, type WorkspaceManager } from "../workspaces/workspace-manager.js";
 
 type SessionRow = {
@@ -29,6 +29,7 @@ type SessionRow = {
   title: string;
   status: SessionStatus;
   provider_session_id: string | null;
+  pinned_core_profile_id: number | null;
   storage_cleaned_at: string | null;
   workspace_path: string;
   project_environment_revision_id: number | null;
@@ -60,6 +61,7 @@ const toSession = (row: SessionRow): Session => ({
   title: row.title,
   status: row.status,
   providerSessionId: row.provider_session_id,
+  pinnedCoreProfileId: row.pinned_core_profile_id,
   storageCleanedAt: row.storage_cleaned_at,
   workspacePath: row.workspace_path,
   projectEnvironmentRevisionId: row.project_environment_revision_id,
@@ -134,6 +136,7 @@ export type SessionManagerDependencies = {
   projectPrepareTimeoutMs?: number;
   mcpManager?: McpManager;
   providerSessionCleaner?: ProviderSessionCleaner;
+  sessionCoreBindingStore?: SessionCoreBindingStore;
 };
 
 const ENVIRONMENT_PREPARED_MARKER = ".project-environment-prepared-v1";
@@ -163,7 +166,6 @@ export const recoverIncompleteSessions = async (
  */
 export class SessionManager {
   private readonly db: Database.Database;
-  private readonly dataDir: string;
   private readonly agentManager: AgentManager;
   private readonly runtime: AgentRuntime;
   private readonly workspaceManager: WorkspaceManager;
@@ -175,6 +177,7 @@ export class SessionManager {
   private readonly projectPrepareTimeoutMs: number;
   private readonly mcpManager: McpManager;
   private readonly providerSessionCleaner: ProviderSessionCleaner;
+  private readonly sessionCoreBindingStore: SessionCoreBindingStore;
 
   constructor({
     db,
@@ -187,10 +190,10 @@ export class SessionManager {
     projectEnvironmentCommands,
     projectPrepareTimeoutMs,
     mcpManager,
-    providerSessionCleaner
+    providerSessionCleaner,
+    sessionCoreBindingStore
   }: SessionManagerDependencies) {
     this.db = db;
-    this.dataDir = dataDir;
     this.agentManager = agentManager;
     this.runtime = runtime;
     this.workspaceManager = workspaceManager;
@@ -200,6 +203,7 @@ export class SessionManager {
     this.projectPrepareTimeoutMs = projectPrepareTimeoutMs ?? DEFAULT_PROJECT_PREPARE_TIMEOUT_MS;
     this.mcpManager = mcpManager ?? new McpManager({ db, secrets: SecretStore.open({ dataDir }) });
     this.providerSessionCleaner = providerSessionCleaner ?? new SystemProviderSessionCleaner(dataDir);
+    this.sessionCoreBindingStore = sessionCoreBindingStore ?? new SessionCoreBindingStore(db);
   }
 
   /**
@@ -280,6 +284,7 @@ export class SessionManager {
       title: input.title,
       status: "idle",
       providerSessionId: null,
+      pinnedCoreProfileId: null,
       storageCleanedAt: null,
       workspacePath: workspace.workspacePath,
       projectEnvironmentRevisionId: revision.id,
@@ -496,17 +501,9 @@ export class SessionManager {
     this.claimForReset(session.id);
 
     try {
-      await this.runtime.reset({
-        sessionId: session.id,
-        agentId: agent.id,
-        provider: agent.provider,
-        workspacePath: session.workspacePath,
-        browserProfilePath: join(dirname(session.workspacePath), "browser"),
-        providerSessionId: session.providerSessionId,
-        instructions: session.instructionsSnapshot,
-        memory: readFileSync(join(this.dataDir, "agents", String(agent.id), "MEMORY.md"), "utf8"),
-        mcpServers: []
-      });
+      await this.runtime.forgetSession(id);
+      await this.purgeProviderSessions(session, agent);
+      this.sessionCoreBindingStore.clearProviderSessions(id);
     } catch (error) {
       try {
         this.releaseResetClaim(session.id, false);
@@ -542,14 +539,7 @@ export class SessionManager {
 
     try {
       const agent = this.agentManager.get(session.agentId);
-      if (agent !== undefined) {
-        await this.providerSessionCleaner.purge({
-          agentId: agent.id,
-          provider: agent.provider,
-          sessionId: session.id,
-          providerSessionId: session.providerSessionId
-        });
-      }
+      if (agent !== undefined) await this.purgeProviderSessions(session, agent);
     } catch {
       // Provider cleanup is best-effort and must not block deletion of local resources.
     }
@@ -606,13 +596,9 @@ export class SessionManager {
 
     try {
       await this.runtime.forgetSession(id);
-      await this.providerSessionCleaner.purge({
-        agentId: agent.id,
-        provider: agent.provider,
-        sessionId: session.id,
-        providerSessionId: session.providerSessionId
-      });
+      await this.purgeProviderSessions(session, agent);
       await this.workspaceManager.deleteSession(id);
+      this.sessionCoreBindingStore.clearProviderSessions(id, cleanedAt);
       const updated = this.db.prepare(`
         UPDATE sessions
         SET status = 'idle', provider_session_id = NULL, storage_cleaned_at = ?
@@ -745,7 +731,7 @@ export class SessionManager {
     return this.inImmediateTransaction(() => {
       const updatedAt = new Date().toISOString();
       const providerAssignment = clearProviderSessionId
-        ? "provider_session_id = NULL, input_tokens = NULL, output_tokens = NULL, cached_read_tokens = NULL, cached_write_tokens = NULL, thought_tokens = NULL, total_tokens = NULL,"
+        ? "provider_session_id = NULL,"
         : "";
       const result = this.db.prepare(`
         UPDATE sessions
@@ -763,6 +749,26 @@ export class SessionManager {
       if (released === undefined) throw new SessionManagerError("session_not_found");
       return released;
     });
+  }
+
+  private async purgeProviderSessions(session: Session, agent: Agent): Promise<void> {
+    const bindings = this.sessionCoreBindingStore.list(session.id);
+    const legacyCoreProfileId = agent.coreProfiles.reduce<number | undefined>(
+      (lowest, candidate) => lowest === undefined || candidate.id < lowest ? candidate.id : lowest,
+      undefined
+    );
+    await Promise.all(bindings.map(async (binding) => {
+      const profile = agent.coreProfiles.find((candidate) => candidate.id === binding.coreProfileId);
+      if (profile === undefined) return;
+      await this.providerSessionCleaner.purge({
+        agentId: agent.id,
+        provider: profile.provider,
+        sessionId: session.id,
+        coreProfileId: profile.id,
+        legacySessionNamespace: profile.id === legacyCoreProfileId,
+        providerSessionId: binding.providerSessionId
+      });
+    }));
   }
 
   private inImmediateTransaction<T>(operation: () => T): T {

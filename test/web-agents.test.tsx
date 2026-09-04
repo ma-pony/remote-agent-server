@@ -15,6 +15,16 @@ const environment = {
 const agent = {
   id: 1, name: "主力 Codex", provider: "codex", enabled: true,
   instructions: "先运行测试再给出结论。",
+  maxConcurrentRuns: null,
+  effectiveMaxConcurrentRuns: 4,
+  modelPolicy: { mode: "provider_default" },
+  providerDefaultModel: null,
+  coreRoutingMode: "session_sticky",
+  defaultCoreProfileId: 1,
+  coreProfiles: [{
+    id: 1, agentId: 1, name: "Default", provider: "codex", enabled: true,
+    maxConcurrentRuns: null, createdAt: now, updatedAt: now
+  }],
   projectEnvironmentId: environment.id, createdAt: now, updatedAt: now
 };
 const endpoint = {
@@ -40,6 +50,11 @@ beforeEach(() => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === "/api/agents") return response([agent]);
     if (url === "/api/project-environments") return response([environment]);
+    if (url === `/api/agents/${agent.id}/core-profiles/1/models`) return response({
+      supported: true,
+      currentModel: "deepseek-v4-flash",
+      availableModels: ["deepseek-v4-flash"]
+    });
     throw new Error(`Unexpected request: ${url}`);
   }));
 });
@@ -287,11 +302,17 @@ it("新建支持的 Agent 时提交智能体指令，Hermes 明确禁用该配�
 
 it("在设置页修改 Codex 智能体指令", async () => {
   window.history.replaceState({}, "", `/agents/${agent.id}/settings`);
+  const secondEnvironment = { ...environment, id: 2, name: "第二环境" };
   let patchBody: unknown;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}` && (init?.method ?? "GET") === "GET") return response(agent);
-    if (url === "/api/project-environments") return response([environment]);
+    if (url === "/api/project-environments") return response([environment, secondEnvironment]);
+    if (url === `/api/agents/${agent.id}/core-profiles/1/models`) return response({
+      supported: true,
+      currentModel: "deepseek-v4-flash",
+      availableModels: ["deepseek-v4-flash"]
+    });
     if (url === `/api/agents/${agent.id}` && init?.method === "PATCH") {
       patchBody = JSON.parse(String(init.body));
       return response({ ...agent, ...(patchBody as object) });
@@ -304,11 +325,12 @@ it("在设置页修改 Codex 智能体指令", async () => {
   const instructions = await screen.findByLabelText("智能体指令");
   expect(instructions).toHaveValue("先运行测试再给出结论。");
   fireEvent.change(instructions, { target: { value: "修改后只影响新会话。" } });
+  fireEvent.change(screen.getByLabelText("项目环境"), { target: { value: String(secondEnvironment.id) } });
   fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
 
   await waitFor(() => expect(patchBody).toMatchObject({
     name: agent.name,
-    projectEnvironmentId: environment.id,
+    projectEnvironmentId: secondEnvironment.id,
     instructions: "修改后只影响新会话。"
   }));
 });

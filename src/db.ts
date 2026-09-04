@@ -167,10 +167,12 @@ const BUSINESS_TABLES = [
   "project_environment_revisions",
   "environment_repositories",
   "agents",
+  "agent_core_profiles",
   "agent_mcp_servers",
   "agent_session_parameters",
   "agent_mcp_values",
   "sessions",
+  "session_core_bindings",
   "session_mcp_parameter_values",
   "runs",
   "events",
@@ -186,7 +188,11 @@ const FOREIGN_ID_TABLES: Record<string, Record<string, string>> = {
   project_environments: { current_revision_id: "project_environment_revisions" },
   project_environment_revisions: { project_environment_id: "project_environments" },
   environment_repositories: { project_environment_id: "project_environments" },
-  agents: { project_environment_id: "project_environments" },
+  agents: {
+    project_environment_id: "project_environments",
+    default_core_profile_id: "agent_core_profiles"
+  },
+  agent_core_profiles: { agent_id: "agents" },
   agent_mcp_servers: { agent_id: "agents", source_mcp_server_id: "agent_mcp_servers" },
   agent_session_parameters: { agent_id: "agents" },
   agent_mcp_values: {
@@ -195,7 +201,13 @@ const FOREIGN_ID_TABLES: Record<string, Record<string, string>> = {
   },
   sessions: {
     agent_id: "agents",
-    project_environment_revision_id: "project_environment_revisions"
+    project_environment_revision_id: "project_environment_revisions",
+    pinned_core_profile_id: "agent_core_profiles"
+  },
+  session_core_bindings: {
+    session_id: "sessions",
+    core_profile_id: "agent_core_profiles",
+    context_cursor_run_id: "runs"
   },
   session_mcp_parameter_values: {
     session_id: "sessions",
@@ -228,7 +240,66 @@ const tableExists = (db: Database.Database, table: string): boolean =>
 const columnNames = (db: Database.Database, table: string): string[] =>
   (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(({ name }) => name);
 
+const primaryKeyColumns = (db: Database.Database, table: string): string[] =>
+  (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string; pk: number }>)
+    .filter(({ pk }) => pk > 0)
+    .sort((left, right) => left.pk - right.pk)
+    .map(({ name }) => name);
+
 const quote = (identifier: string): string => `"${identifier.replaceAll('"', '""')}"`;
+
+const backfillCoreRouting = (db: Database.Database): void => {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO agent_core_profiles
+      (agent_id, name, provider, enabled, max_concurrent_runs, created_at, updated_at)
+    SELECT agent.id, 'Default', agent.provider, 1, NULL, ?, ?
+    FROM agents agent
+    WHERE NOT EXISTS (SELECT 1 FROM agent_core_profiles profile WHERE profile.agent_id = agent.id)
+  `).run(now, now);
+  db.prepare(`
+    UPDATE agents
+    SET default_core_profile_id = (
+      SELECT profile.id FROM agent_core_profiles profile
+      WHERE profile.agent_id = agents.id ORDER BY profile.id ASC LIMIT 1
+    )
+    WHERE default_core_profile_id IS NULL
+  `).run();
+  db.prepare(`
+    INSERT INTO session_core_bindings
+      (session_id, core_profile_id, provider_session_id, context_cursor_run_id,
+       input_tokens, output_tokens, cached_read_tokens, cached_write_tokens, thought_tokens, total_tokens,
+       last_used_at, storage_cleaned_at, created_at, updated_at)
+    SELECT session.id, agent.default_core_profile_id, session.provider_session_id, (
+        SELECT MAX(run.id) FROM runs run
+        WHERE run.session_id = session.id AND run.status IN ('succeeded', 'failed', 'cancelled')
+      ),
+      session.input_tokens, session.output_tokens, session.cached_read_tokens,
+      session.cached_write_tokens, session.thought_tokens, session.total_tokens,
+      session.updated_at, session.storage_cleaned_at, session.created_at, session.updated_at
+    FROM sessions session
+    JOIN agents agent ON agent.id = session.agent_id
+    JOIN agent_core_profiles profile ON profile.id = agent.default_core_profile_id
+    WHERE NOT EXISTS (
+      SELECT 1 FROM session_core_bindings binding WHERE binding.session_id = session.id
+    )
+      AND (
+        session.provider_session_id IS NOT NULL
+        OR EXISTS (SELECT 1 FROM runs historical_run WHERE historical_run.session_id = session.id)
+      )
+  `).run();
+  db.prepare(`
+    UPDATE sessions
+    SET pinned_core_profile_id = (
+      SELECT agent.default_core_profile_id FROM agents agent WHERE agent.id = sessions.agent_id
+    )
+    WHERE pinned_core_profile_id IS NULL
+      AND (
+        provider_session_id IS NOT NULL
+        OR EXISTS (SELECT 1 FROM runs historical_run WHERE historical_run.session_id = sessions.id)
+      )
+  `).run();
+};
 
 export type ConcurrencyDefaults = {
   globalRunConcurrency: number;
@@ -339,6 +410,8 @@ const migrateTextIds = (
         if (sourceCount !== targetCount) throw new Error(`ID migration count mismatch for ${table}`);
       }
 
+      backfillCoreRouting(db);
+
       const foreignKeyErrors = db.prepare("PRAGMA foreign_key_check").all();
       if (foreignKeyErrors.length > 0) throw new Error("ID migration produced invalid foreign keys");
 
@@ -439,9 +512,24 @@ export const migrate = (
       max_concurrent_runs INTEGER CHECK (max_concurrent_runs BETWEEN 1 AND 64),
       model_policy_json TEXT NOT NULL DEFAULT '{"mode":"provider_default"}',
       provider_default_model TEXT,
+      core_routing_mode TEXT NOT NULL DEFAULT 'session_sticky'
+        CHECK (core_routing_mode IN ('session_sticky', 'scheduled_handoff')),
+      default_core_profile_id INTEGER REFERENCES agent_core_profiles(id),
       project_environment_id INTEGER REFERENCES project_environments(id),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_core_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'hermes')),
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+      max_concurrent_runs INTEGER CHECK (max_concurrent_runs BETWEEN 1 AND 64),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(agent_id, name)
     );
 
     CREATE TABLE IF NOT EXISTS system_settings (
@@ -497,7 +585,7 @@ export const migrate = (
       source_fingerprint TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      PRIMARY KEY(agent_id, extension_id)
+      PRIMARY KEY(agent_id, provider, extension_id)
     );
 
     CREATE TABLE IF NOT EXISTS agent_mcp_values (
@@ -521,6 +609,7 @@ export const migrate = (
       title TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('idle', 'running')),
       provider_session_id TEXT,
+      pinned_core_profile_id INTEGER REFERENCES agent_core_profiles(id),
       storage_cleaned_at TEXT,
       workspace_path TEXT NOT NULL UNIQUE,
       project_environment_revision_id INTEGER REFERENCES project_environment_revisions(id),
@@ -533,6 +622,26 @@ export const migrate = (
       total_tokens INTEGER,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS session_core_bindings (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      core_profile_id INTEGER NOT NULL REFERENCES agent_core_profiles(id) ON DELETE RESTRICT,
+      provider_session_id TEXT,
+      context_cursor_run_id INTEGER REFERENCES runs(id),
+      last_model TEXT,
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      cached_read_tokens INTEGER,
+      cached_write_tokens INTEGER,
+      thought_tokens INTEGER,
+      total_tokens INTEGER,
+      last_used_at TEXT,
+      storage_cleaned_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(session_id, core_profile_id)
     );
 
     CREATE TABLE IF NOT EXISTS session_mcp_parameter_values (
@@ -553,6 +662,11 @@ export const migrate = (
       result TEXT,
       error TEXT,
       resolved_model TEXT,
+      resolved_core_profile_id INTEGER REFERENCES agent_core_profiles(id),
+      resolved_provider TEXT CHECK (resolved_provider IN ('claude_code', 'codex', 'hermes')),
+      resolved_rule_index INTEGER,
+      routing_policy_revision TEXT,
+      effective_concurrency INTEGER CHECK (effective_concurrency BETWEEN 1 AND 64),
       created_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
@@ -723,6 +837,33 @@ export const migrate = (
     ON webhook_deliveries(subscription_id, task_id, status, dispatch_order, id);
   `);
 
+  if (primaryKeyColumns(db, "agent_provider_extensions").join(",") !== "agent_id,provider,extension_id") {
+    db.transaction(() => {
+      db.exec(`
+        ALTER TABLE agent_provider_extensions RENAME TO legacy_agent_provider_extensions;
+        CREATE TABLE agent_provider_extensions (
+          agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex')),
+          kind TEXT NOT NULL CHECK (kind IN ('plugin', 'hook')),
+          extension_id TEXT NOT NULL,
+          name TEXT NOT NULL,
+          description TEXT NOT NULL DEFAULT '',
+          source_fingerprint TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY(agent_id, provider, extension_id)
+        );
+        INSERT INTO agent_provider_extensions
+          (agent_id, provider, kind, extension_id, name, description,
+           source_fingerprint, created_at, updated_at)
+        SELECT agent_id, provider, kind, extension_id, name, description,
+               source_fingerprint, created_at, updated_at
+        FROM legacy_agent_provider_extensions;
+        DROP TABLE legacy_agent_provider_extensions;
+      `);
+    }).immediate();
+  }
+
   const hasColumn = (table: string, column: string): boolean =>
     (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((item) => item.name === column);
 
@@ -767,6 +908,12 @@ export const migrate = (
   if (!hasColumn("agents", "provider_default_model")) {
     db.exec("ALTER TABLE agents ADD COLUMN provider_default_model TEXT");
   }
+  if (!hasColumn("agents", "core_routing_mode")) {
+    db.exec("ALTER TABLE agents ADD COLUMN core_routing_mode TEXT NOT NULL DEFAULT 'session_sticky' CHECK (core_routing_mode IN ('session_sticky', 'scheduled_handoff'))");
+  }
+  if (!hasColumn("agents", "default_core_profile_id")) {
+    db.exec("ALTER TABLE agents ADD COLUMN default_core_profile_id INTEGER REFERENCES agent_core_profiles(id)");
+  }
   if (!hasColumn("agent_mcp_servers", "source_mcp_server_id")) {
     db.exec("ALTER TABLE agent_mcp_servers ADD COLUMN source_mcp_server_id INTEGER");
   }
@@ -784,6 +931,9 @@ export const migrate = (
   }
   if (!hasColumn("sessions", "storage_cleaned_at")) {
     db.exec("ALTER TABLE sessions ADD COLUMN storage_cleaned_at TEXT");
+  }
+  if (!hasColumn("sessions", "pinned_core_profile_id")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN pinned_core_profile_id INTEGER REFERENCES agent_core_profiles(id)");
   }
   db.exec(`
     CREATE INDEX IF NOT EXISTS sessions_storage_cleanup_due
@@ -836,4 +986,16 @@ export const migrate = (
   if (!hasColumn("runs", "resolved_model")) {
     db.exec("ALTER TABLE runs ADD COLUMN resolved_model TEXT");
   }
+  const routeColumns = [
+    ["resolved_core_profile_id", "INTEGER REFERENCES agent_core_profiles(id)"],
+    ["resolved_provider", "TEXT CHECK (resolved_provider IN ('claude_code', 'codex', 'hermes'))"],
+    ["resolved_rule_index", "INTEGER"],
+    ["routing_policy_revision", "TEXT"],
+    ["effective_concurrency", "INTEGER CHECK (effective_concurrency BETWEEN 1 AND 64)"]
+  ] as const;
+  for (const [column, definition] of routeColumns) {
+    if (!hasColumn("runs", column)) db.exec(`ALTER TABLE runs ADD COLUMN ${column} ${definition}`);
+  }
+
+  backfillCoreRouting(db);
 };

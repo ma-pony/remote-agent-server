@@ -4,7 +4,7 @@
 
 Remote Agent Server is a self-hosted ACP agent execution gateway for business applications. Callers submit asynchronous tasks over HTTP. The server runs command-line agents such as Claude Code and Codex in isolated workspaces, then returns progress and results through status queries, events, SSE, or signed Webhooks.
 
-It turns existing agent CLIs into a durable backend for ticketing systems, CI/CD, internal platforms, and automation services. Operators use the web console to configure agents, project environments, Skills, provider extensions, MCP, model policies, concurrency, and integration endpoints. External callers need only an endpoint token and the stable Task API.
+It turns existing agent CLIs into a durable backend for ticketing systems, CI/CD, internal platforms, and automation services. Operators use the web console to configure agents, routable Core Profiles, project environments, Skills, provider extensions, MCP, model policies, concurrency, and integration endpoints. External callers need only an endpoint token and the stable Task API.
 
 The execution layer uses [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol). The current provider adapters support Claude Code, Codex, and Hermes.
 
@@ -21,7 +21,7 @@ Each provider remains responsible for reasoning, tool use, and its native sessio
 
 - **Asynchronous Task API:** submit work over HTTP, prevent duplicate execution with idempotency keys, query or cancel tasks, and continue multi-turn conversations.
 - **Reliable event delivery:** consume incremental event history, resumable SSE, or signed Webhooks without tying task execution to a live connection.
-- **Agent management:** configure providers, instructions, project environments, Skills, and MCP in one place.
+- **Agent management:** configure Core Profiles, instructions, project environments, Skills, and MCP in one place.
 - **Reusable project environments:** prepare one or more Git repositories and their dependencies before sessions start.
 - **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
 - **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
@@ -29,7 +29,7 @@ Each provider remains responsible for reasoning, tool use, and its native sessio
 - **Skill management:** discover host Skills, upload Skill ZIP files, and choose which Skills each agent receives.
 - **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
 - **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
-- **Model policies:** discover models advertised by Agent Core over ACP, follow the Core default, pin one model, or select a model for each new run with UTC weekdays and 24-hour windows.
+- **Agent Core routing:** assign Codex, Claude Code, Hermes, or other supported Core Profiles to one Agent. Pin each Session to one Core by default, or resolve Core, model, and concurrency together from UTC rules.
 - **Runtime, storage, and concurrency control:** adjust run timeout, large idle-session storage retention, and three service concurrency limits from the console, with an optional run limit per agent.
 - **Headed browser support:** run agents in a real desktop session without requiring containers.
 
@@ -44,9 +44,9 @@ External system
 Integration endpoint (auth / parameter mapping / idempotency)
    |
    v
-Task -> Conversation -> Session -> isolated Workspace -> acpx/ACP -> Provider
+Task -> Conversation -> Session -> Run Route -> isolated Workspace -> acpx/ACP -> Provider
    |                         |
-   |                         +-> Skills / provider extensions / MCP / model policy
+   |                         +-> Core / model / concurrency / Skills / provider extensions / MCP
    |
    +-> status / event history / SSE / signed Webhook
 ```
@@ -62,8 +62,8 @@ Project environment -> Agent -> Session -> Run -> acpx/ACP -> Provider
 | Object | Purpose |
 | --- | --- |
 | Project environment | A versioned, prepared set of one or more Git repositories. |
-| Agent | A provider, project environment, instructions, Skills, provider extensions, MCP, model policy, and concurrency policy. |
-| Session | An isolated workspace and a continuing agent conversation. |
+| Agent | A project environment, instructions, capabilities, and a set of routable Core Profiles. |
+| Session | An isolated workspace with one independent provider conversation for each Core it has used. |
 | Run | One input and its recorded execution inside a session. |
 | Integration endpoint | An authenticated external entry point bound to one agent. |
 | Conversation | A multi-turn external conversation that reuses one session. |
@@ -191,16 +191,16 @@ Open **Agents → New agent**:
 The agent page also provides:
 
 - **Skills:** discover host Skills, upload a ZIP archive, and enable only the Skills this agent should receive.
-- **Provider extensions:** review plugins and hooks discovered in the current provider's system configuration and enable the ones this agent needs.
+- **Provider extensions:** review plugins and hooks discovered for each Agent Core provider and enable the ones this agent needs.
 - **MCP:** add HTTP or stdio servers, check connectivity, inspect their tools, or import a system-global MCP from Codex or Claude Code.
 - **Run concurrency policy:** inherit the system run limit by default, or set an Agent-specific cap. The smaller limit is effective.
-- **Model policy:** model choices come from the current Agent Core; arbitrary model IDs cannot be entered. Follow the Core default, pin one model, or switch by UTC weekday and 24-hour window. The latter two modes are unavailable when the Core does not advertise models.
+- **Core and model routing:** add one or more Core Profiles to an Agent. Models come only from the catalog each Core advertises over ACP. Sessions pin one Core by default; explicit rule-based routing can select Core, model, and concurrency together by UTC weekday and 24-hour window.
 
-The model policy is resolved when a run leaves the queue and actually starts, so queue delay cannot select a model too early. A switch reuses the same Session and provider conversation and updates only the ACP `model` option. It never interrupts an active run; the next run receives the new model. Fixed and scheduled policies record the resolved model on every run for auditability.
+The runtime route is resolved only when a Run obtains an execution slot, so queue delay cannot lock in the wrong rule early. Model changes inside one Core resume its native provider conversation. Cross-Core changes resume the target Core's independent conversation and prepend a bounded handoff. Active Runs never switch.
 
 #### Model policy quick reference
 
-Open **Agents → target agent → Settings → Model policy**:
+Open **Agents → target agent → Settings** to configure Core Profiles, Core routing, and model policy:
 
 | Mode | Behavior | Typical use |
 | --- | --- | --- |
@@ -208,9 +208,9 @@ Open **Agents → target agent → Settings → Model policy**:
 | Fixed model | Selects one model for every new run. | Keep one agent on a predictable model. |
 | Switch by UTC rule | Uses a rule's model when both its weekday and time window match, and a fallback otherwise. | Use different models on weekdays and weekends, or switch for availability, cost, and throughput policies. |
 
-The console organizes schedules into rule groups. Each group shares one or more UTC weekdays, a model, and an optional run-concurrency limit across multiple 24-hour `HH:mm` windows—for example, weekday windows at `08:00–10:00` and `14:00–18:00` using the same model and concurrency. A start is inclusive and an end is exclusive. An end earlier than its start crosses into the next UTC day, with the selected weekday representing the start day. Earlier rule groups win when they overlap. An empty concurrency limit inherits the Agent's normal policy; a value overrides the Agent limit but remains capped by the system-wide limit. The console provides Weekdays, Weekend, and Every day presets. The fallback model and normal concurrency apply whenever no window matches. The server refreshes the Core catalog when the policy is saved and rejects models that are no longer advertised.
+The console organizes schedules into rule groups. Each group shares UTC weekdays, one Core, one model, and an optional run-concurrency limit across multiple 24-hour `HH:mm` windows—for example, weekday windows at `08:00–10:00` and `14:00–18:00` using the same route. A start is inclusive and an end is exclusive. An end earlier than its start crosses into the next UTC day, with the selected weekday representing the start day. Earlier rule groups win when they overlap. An empty concurrency limit inherits the Agent's normal policy; a value remains capped by the Agent, Core, and system-wide limits. The console provides Weekdays, Weekend, and Every day presets. The fallback Core, model, and normal concurrency apply whenever no window matches. The server refreshes every referenced Core catalog when the policy is saved and rejects models that are no longer advertised.
 
-A policy change affects only runs that start afterward. An active run does not switch, while a queued run resolves the policy against the UTC time at which it obtains an execution slot. The Session, workspace, and provider conversation remain in place. When the server resolves an explicit model, the Session page shows it and management API run responses expose it as `resolvedModel`. This field is `null` when the policy fully delegates to a Core that does not advertise its default. See [Product and architecture: Model discovery, policy, and audit](docs/design.en.md#62-model-discovery-policy-and-audit) for the API shapes and resolution flow.
+A policy change affects only Runs that start afterward. An active Run does not switch, while a queued Run resolves the policy against the UTC time at which it obtains an execution slot. The Session page and APIs record the resolved Core, provider, model, rule, and concurrency cap. See [Product and architecture: Core, model, and concurrency routing](docs/design.en.md#62-core-model-and-concurrency-routing) for the API shapes and resolution flow.
 
 Changes to Skills, provider extensions, and MCP apply on the next run. When an existing session detects a configuration change, it refreshes the provider connection. If the provider supports resumption, the original Provider Session and conversation context continue.
 
@@ -592,7 +592,7 @@ The [deployment guide](docs/deployment.md) covers macOS APFS/LaunchAgent, Linux 
 ## Documentation
 
 - [Product and architecture](docs/design.en.md): positioning, system boundaries, core objects, execution paths, and reliability design.
-- [Agent Core and model runtime routing proposal](docs/agent-core-routing.en.md): the proposed multi-Core, model, concurrency, Session-resume, and handoff architecture; not implemented yet.
+- [Agent Core runtime routing](docs/agent-core-routing.en.md): implemented semantics for multi-Core routing, models, concurrency, Session bindings, and handoff.
 - [Deployment and acceptance](docs/deployment.md): production deployment, provider authentication, filesystems, reverse proxies, and real smoke tests.
 
 ## License

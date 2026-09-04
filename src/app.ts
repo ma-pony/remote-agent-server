@@ -44,10 +44,12 @@ import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { SkillProjector } from "./runtime/skill-projector.js";
 import { SkillManager } from "./skills/skill-manager.js";
 import { RunExecutor } from "./runs/run-executor.js";
+import { ContextHandoffBuilder } from "./runs/context-handoff-builder.js";
 import { RunRepository } from "./runs/run-repository.js";
 import { registerRunRoutes } from "./runs/run-routes.js";
 import { RunScheduler } from "./runs/run-scheduler.js";
 import { SessionManager } from "./sessions/session-manager.js";
+import { SessionCoreBindingStore } from "./sessions/session-core-binding-store.js";
 import {
   SessionCleanupScheduler,
   type SessionCleanupSchedulerLike
@@ -133,6 +135,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     projectEnvironmentsRoot: deps.config.projectEnvironmentsRoot,
     prepareTimeoutMs: deps.config.projectPrepareTimeoutMs
   });
+  const sessionCoreBindingStore = new SessionCoreBindingStore(deps.db);
+  const contextHandoffBuilder = new ContextHandoffBuilder(deps.db);
   const sessionManager = new SessionManager({
     db: deps.db,
     dataDir: deps.config.dataDir,
@@ -143,7 +147,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     projectEnvironmentRevisionCleaner: projectEnvironmentBuilder,
     projectEnvironmentCommands,
     projectPrepareTimeoutMs: deps.config.projectPrepareTimeoutMs,
-    mcpManager
+    mcpManager,
+    sessionCoreBindingStore
   });
   const sessionCleanupScheduler = deps.sessionCleanupScheduler ?? new SessionCleanupScheduler({
     sessionManager,
@@ -174,6 +179,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     sessionManager,
     mcpPreparer,
     providerExtensionManager,
+    sessionCoreBindingStore,
+    contextHandoffBuilder,
     runtimeSettings: concurrencySettingsStore,
     runTimeoutMs: deps.config.runTimeoutMs
   });

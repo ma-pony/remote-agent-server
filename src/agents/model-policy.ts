@@ -13,6 +13,7 @@ const modelWindowSchema = z.object({
   start: timeSchema,
   end: timeSchema,
   model: z.string().trim().min(1).max(255),
+  coreProfileId: z.number().int().positive().optional(),
   maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional()
 }).strict().refine(
   ({ start, end }) => start !== end,
@@ -20,14 +21,19 @@ const modelWindowSchema = z.object({
 );
 
 export const agentModelPolicySchema = z.discriminatedUnion("mode", [
-  z.object({ mode: z.literal("provider_default") }).strict(),
+  z.object({
+    mode: z.literal("provider_default"),
+    coreProfileId: z.number().int().positive().optional()
+  }).strict(),
   z.object({
     mode: z.literal("fixed"),
-    model: z.string().trim().min(1).max(255)
+    model: z.string().trim().min(1).max(255),
+    coreProfileId: z.number().int().positive().optional()
   }).strict(),
   z.object({
     mode: z.literal("schedule"),
     defaultModel: z.string().trim().min(1).max(255),
+    defaultCoreProfileId: z.number().int().positive().optional(),
     windows: z.array(modelWindowSchema).min(1).max(16)
   }).strict()
 ]);
@@ -75,6 +81,16 @@ export const resolveModelPolicy = (policy: AgentModelPolicy, now: Date): string 
 
   const window = resolveModelWindow(policy, now);
   return window?.model ?? policy.defaultModel;
+};
+
+export const configuredCoreProfileIds = (policy: AgentModelPolicy): number[] => {
+  if (policy.mode === "provider_default" || policy.mode === "fixed") {
+    return policy.coreProfileId === undefined ? [] : [policy.coreProfileId];
+  }
+  return [...new Set([
+    ...(policy.defaultCoreProfileId === undefined ? [] : [policy.defaultCoreProfileId]),
+    ...policy.windows.flatMap(({ coreProfileId }) => coreProfileId === undefined ? [] : [coreProfileId])
+  ])];
 };
 
 /** Returns every model ID referenced by a policy, preserving first-use order. */

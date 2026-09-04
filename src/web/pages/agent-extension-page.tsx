@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 import { Blocks, CheckCircle2, PlugZap, ShieldCheck, XCircle } from "lucide-react";
-import { useParams } from "react-router";
+import { useOutletContext, useParams } from "react-router";
 
-import { api, errorMessage, type ProviderExtensionCatalogItem } from "@/api";
+import { api, errorMessage, type Agent, type Provider, type ProviderExtensionCatalogItem } from "@/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Field, FieldDescription, FieldLabel } from "@/components/ui/field";
+import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
 
@@ -45,31 +47,52 @@ const ExtensionRow = ({ item, busy, onToggle }: {
 export const AgentExtensionPage = () => {
   const { text } = useI18n();
   const { id = "" } = useParams();
+  const { agent } = useOutletContext<{ agent: Agent }>();
+  const providers = useMemo(() => [...new Set(agent.coreProfiles
+    .filter((profile) => profile.enabled && profile.provider !== "hermes")
+    .map((profile) => profile.provider))] as Array<Exclude<Provider, "hermes">>, [agent.coreProfiles]);
+  const [selectedProvider, setSelectedProvider] = useState<Exclude<Provider, "hermes"> | undefined>(
+    agent.provider === "hermes" ? providers[0] : agent.provider
+  );
   const [items, setItems] = useState<ProviderExtensionCatalogItem[] | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
+    if (selectedProvider !== undefined && providers.includes(selectedProvider)) return;
+    setSelectedProvider(providers[0]);
+  }, [providers, selectedProvider]);
+
+  useEffect(() => {
     const controller = new AbortController();
-    void api<ProviderExtensionCatalogItem[]>(`/agents/${id}/extensions`, { signal: controller.signal })
+    setItems(null);
+    setError("");
+    if (selectedProvider === undefined) {
+      setItems([]);
+      return () => controller.abort();
+    }
+    void api<ProviderExtensionCatalogItem[]>(
+      `/agents/${id}/extensions?provider=${encodeURIComponent(selectedProvider)}`,
+      { signal: controller.signal }
+    )
       .then(setItems)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [id]);
+  }, [id, selectedProvider]);
 
   const groups = useMemo(() => ({
     plugin: (items ?? []).filter(({ kind }) => kind === "plugin").sort((a, b) => Number(b.enabled) - Number(a.enabled)),
     hook: (items ?? []).filter(({ kind }) => kind === "hook").sort((a, b) => Number(b.enabled) - Number(a.enabled))
   }), [items]);
-  const provider = items?.[0]?.provider;
+  const provider = selectedProvider;
 
   const toggle = async (item: ProviderExtensionCatalogItem) => {
     setBusy(item.id); setError(""); setNotice("");
     try {
       const updated = await api<ProviderExtensionCatalogItem>(
         `/agents/${id}/extensions/${encodeURIComponent(item.id)}`,
-        { method: "PUT", body: JSON.stringify({ enabled: !item.enabled }) }
+        { method: "PUT", body: JSON.stringify({ enabled: !item.enabled, provider: selectedProvider }) }
       );
       setItems((current) => (current ?? []).map((candidate) => candidate.id === updated.id ? updated : candidate));
       setNotice(text("配置已保存，下一次运行会自动刷新执行器会话。", "Saved. The next run refreshes the executor session automatically."));
@@ -110,7 +133,7 @@ export const AgentExtensionPage = () => {
       <CardContent><p className="text-sm leading-6 text-muted-foreground">{text(
         "发现到的扩展默认停用，不会隐式继承主机配置。启用后只投影到当前智能体，并在下一次运行生效。",
         "Discovered extensions are disabled by default and never inherited implicitly. Enabled items are projected only to this agent and apply on the next run."
-      )}</p></CardContent>
+      )}</p>{providers.length > 1 ? <Field className="mt-4 max-w-sm"><FieldLabel htmlFor="extension-provider">{text("Agent Core 类型", "Agent core provider")}</FieldLabel><NativeSelect id="extension-provider" value={selectedProvider} onChange={(event) => setSelectedProvider(event.target.value as Exclude<Provider, "hermes">)}>{providers.map((candidate) => <NativeSelectOption key={candidate} value={candidate}>{providerName[candidate]}</NativeSelectOption>)}</NativeSelect><FieldDescription>{text("同一种执行器的多个 Core 共用这套扩展选择。", "Core profiles using the same provider share these extension selections.")}</FieldDescription></Field> : null}</CardContent>
     </Card>
     {section("plugin", text("插件", "Plugins"), text("执行器原生插件及其随附能力。", "Provider-native plugins and their bundled capabilities."), <Blocks className="size-4" />)}
     {section("hook", text("钩子", "Hooks"), text("在执行器生命周期事件上运行的本机钩子。", "Local hooks invoked at provider lifecycle events."), <PlugZap className="size-4" />)}

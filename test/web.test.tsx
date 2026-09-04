@@ -28,6 +28,16 @@ const agent = {
   name: "主力 Codex",
   provider: "codex",
   enabled: true,
+  maxConcurrentRuns: null,
+  effectiveMaxConcurrentRuns: 4,
+  modelPolicy: { mode: "provider_default" },
+  providerDefaultModel: null,
+  coreRoutingMode: "session_sticky",
+  defaultCoreProfileId: 1,
+  coreProfiles: [{
+    id: 1, agentId: "agent-1", name: "Default", provider: "codex", enabled: true,
+    maxConcurrentRuns: null, createdAt: now, updatedAt: now
+  }],
   projectEnvironmentId: "environment-1",
   createdAt: now,
   updatedAt: now
@@ -134,6 +144,12 @@ describe("最小管理界面", () => {
       effectiveMaxConcurrentRuns: 4,
       modelPolicy: { mode: "provider_default" },
       providerDefaultModel: null,
+      coreRoutingMode: "session_sticky",
+      defaultCoreProfileId: 1,
+      coreProfiles: [{
+        id: 1, agentId: 3, name: "Default", provider: "codex", enabled: true,
+        maxConcurrentRuns: null, createdAt: now, updatedAt: now
+      }],
       projectEnvironmentId: 2,
       createdAt: now,
       updatedAt: now
@@ -146,7 +162,7 @@ describe("最小管理界面", () => {
         return jsonResponse({ ...currentAgent, ...JSON.parse(patchBody), effectiveMaxConcurrentRuns: 2 });
       }
       if (url === "/api/agents/3") return jsonResponse(currentAgent);
-      if (url === "/api/agents/3/models") return jsonResponse({
+      if (url === "/api/agents/3/core-profiles/1/models") return jsonResponse({
         supported: true,
         currentModel: "deepseek-v4-flash",
         availableModels: ["deepseek-v4-flash", "glm-4.5"]
@@ -188,6 +204,12 @@ describe("最小管理界面", () => {
       effectiveMaxConcurrentRuns: 4,
       modelPolicy: { mode: "provider_default" },
       providerDefaultModel: null,
+      coreRoutingMode: "session_sticky",
+      defaultCoreProfileId: 1,
+      coreProfiles: [{
+        id: 1, agentId: 3, name: "Default", provider: "codex", enabled: true,
+        maxConcurrentRuns: null, createdAt: now, updatedAt: now
+      }],
       projectEnvironmentId: 2,
       createdAt: now,
       updatedAt: now
@@ -200,7 +222,7 @@ describe("最小管理界面", () => {
         return jsonResponse({ ...currentAgent, ...JSON.parse(patchBody) });
       }
       if (url === "/api/agents/3") return jsonResponse(currentAgent);
-      if (url === "/api/agents/3/models") return jsonResponse({
+      if (url === "/api/agents/3/core-profiles/1/models") return jsonResponse({
         supported: true,
         currentModel: "deepseek-v4-flash",
         availableModels: ["deepseek-v4-flash", "glm-4.5"]
@@ -218,7 +240,7 @@ describe("最小管理界面", () => {
     const mode = await screen.findByLabelText("选择方式");
     await waitFor(() => expect(mode).not.toBeDisabled());
     fireEvent.change(mode, { target: { value: "schedule" } });
-    expect(screen.getByLabelText("其他时间使用")).toHaveValue("deepseek-v4-flash");
+    expect(screen.getByLabelText("其他时间使用模型")).toHaveValue("deepseek-v4-flash");
     expect(screen.getByLabelText("开始（UTC · 24h）")).toHaveAttribute("type", "text");
     expect(screen.getByLabelText("开始（UTC · 24h）")).toHaveAttribute("placeholder", "08:00");
     expect(screen.getByText("7 天")).toBeInTheDocument();
@@ -269,9 +291,14 @@ describe("最小管理界面", () => {
         id: 3, name: "Crawler Agent", provider: "codex", enabled: true, instructions: "",
         maxConcurrentRuns: null, effectiveMaxConcurrentRuns: 4,
         modelPolicy: { mode: "provider_default" }, providerDefaultModel: null,
+        coreRoutingMode: "session_sticky", defaultCoreProfileId: 1,
+        coreProfiles: [{
+          id: 1, agentId: 3, name: "Default", provider: "codex", enabled: true,
+          maxConcurrentRuns: null, createdAt: now, updatedAt: now
+        }],
         projectEnvironmentId: 2, createdAt: now, updatedAt: now
       });
-      if (url === "/api/agents/3/models") return jsonResponse({ supported: false, currentModel: null, availableModels: [] });
+      if (url === "/api/agents/3/core-profiles/1/models") return jsonResponse({ supported: false, currentModel: null, availableModels: [] });
       if (url === "/api/project-environments") return jsonResponse([{
         id: 2, name: "Crawler environment", currentRevisionId: 7, lastCheckedAt: now,
         workspacePath: "/workspace", sync: { status: "idle", automatic: true, intervalMs: 1000, nextScheduledAt: now },

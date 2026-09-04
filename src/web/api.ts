@@ -15,16 +15,18 @@ export type RuntimeSettings = {
 };
 
 export type AgentModelPolicy =
-  | { mode: "provider_default" }
-  | { mode: "fixed"; model: string }
+  | { mode: "provider_default"; coreProfileId?: number }
+  | { mode: "fixed"; model: string; coreProfileId?: number }
   | {
     mode: "schedule";
     defaultModel: string;
+    defaultCoreProfileId?: number;
     windows: Array<{
       days: Array<"mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun">;
       start: string;
       end: string;
       model: string;
+      coreProfileId?: number;
       maxConcurrentRuns?: number | null;
     }>;
   };
@@ -33,6 +35,19 @@ export type AgentModelCatalog = {
   supported: boolean;
   currentModel: string | null;
   availableModels: string[];
+};
+
+export type CoreRoutingMode = "session_sticky" | "scheduled_handoff";
+
+export type AgentCoreProfile = {
+  id: number;
+  agentId: number;
+  name: string;
+  provider: Provider;
+  enabled: boolean;
+  maxConcurrentRuns: number | null;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type Agent = {
@@ -45,6 +60,9 @@ export type Agent = {
   effectiveMaxConcurrentRuns: number;
   modelPolicy: AgentModelPolicy;
   providerDefaultModel: string | null;
+  coreRoutingMode: CoreRoutingMode;
+  defaultCoreProfileId: number;
+  coreProfiles: AgentCoreProfile[];
   projectEnvironmentId: number | null;
   createdAt: string;
   updatedAt: string;
@@ -132,6 +150,7 @@ export type Session = {
   title: string;
   status: "idle" | "running";
   providerSessionId: string | null;
+  pinnedCoreProfileId: number | null;
   storageCleanedAt: string | null;
   workspacePath: string;
   projectEnvironmentRevisionId: number | null;
@@ -236,6 +255,11 @@ export type Run = {
   result: string | null;
   error: string | null;
   resolvedModel: string | null;
+  resolvedCoreProfileId: number | null;
+  resolvedProvider: Provider | null;
+  resolvedRuleIndex: number | null;
+  routingPolicyRevision: string | null;
+  effectiveConcurrency: number | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

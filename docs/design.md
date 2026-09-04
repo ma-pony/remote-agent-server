@@ -10,7 +10,7 @@ Remote Agent Server 是一个面向业务系统的自托管 ACP Agent 执行网�
 
 Agent 的推理、工具和原生会话由 Provider 负责。Remote Agent Server 管理以下平台职责：
 
-- Agent 与 Provider 配置；
+- Agent Core Profile 与运行路由配置；
 - 项目环境准备和版本发布；
 - Session Workspace 隔离；
 - ACP Session 创建、恢复、取消和重置；
@@ -38,9 +38,9 @@ Agent 的推理、工具和原生会话由 Provider 负责。Remote Agent Server
 接入端点（Endpoint Token / 参数映射 / 幂等）
    |
    v
-Task -> Conversation -> Session -> Run -> acpx/ACP -> Provider
-   |                         |                 |
-   |                         |                 +-> Claude Code / Codex / Hermes
+Task -> Conversation -> Session -> Run -> Runtime Route -> acpx/ACP -> Provider
+   |                         |                        |
+   |                         |                        +-> Claude Code / Codex / Hermes
    |                         |
    |                         +-> Workspace / Skills / 执行器扩展 / MCP
    |
@@ -57,9 +57,10 @@ Web 控制台复用同一套 Session、Run 和 Event 模型。控制台创建的
 | --- | --- |
 | 项目环境 | 保存一个或多个 Git 仓库、准备命令和当前可用版本。 |
 | 项目环境版本 | 一次完整构建的结果；发布后作为 Session Workspace 的快照来源。 |
-| Agent | 绑定 Provider、项目环境、指令、Skills、执行器扩展、MCP、模型策略和并发策略。 |
-| Session | 一个隔离 Workspace 和一段可续接的 Provider 对话。 |
-| Run | Session 中的一次输入、执行状态、结果和 Token 用量。 |
+| Agent | 绑定项目环境、指令、能力和一组可路由的 Core Profile。 |
+| Core Profile | 一个稳定的 Provider 执行身份，拥有独立会话绑定和可选并发上限。 |
+| Session | 一个隔离 Workspace 和各 Core 独立的可续接 Provider 对话。 |
+| Run | Session 中的一次输入，固化实际 Core、Provider、模型、并发上限与执行结果。 |
 | Event | Run 产生的消息、工具、状态与错误记录，按 `seq` 追加。 |
 | 接入端点 | 外部系统的认证与参数映射入口，固定绑定一个 Agent。 |
 | Conversation | 调用方提供的业务会话键，负责复用 Session 并串行多轮 Task。 |
@@ -98,43 +99,46 @@ Web 控制台复用同一套 Session、Run 和 Event 模型。控制台创建的
 1. 管理员选择 Agent 创建 Session。
 2. 服务固化 Agent 当前项目环境版本，并创建写时复制 Workspace。
 3. 用户发送消息，服务创建 `queued` Run。
-4. Run 调度器检查全局、Agent 和 Session 并发约束。
-5. 服务准备 Agent Provider Home，投影 Skills、执行器扩展和 MCP，并按当前 UTC 时间解析模型策略。
-6. Runtime 创建或恢复 ACP Session；需要切换时通过 ACP 更新 Core 暴露的 `model` 配置，再发送本轮输入。
-7. Provider 事件归一化后写入 Event Store，并实时提供给页面。
-8. Runtime 返回后，服务保存结果和 Token 用量，更新 Run 与 Session 状态。
+4. Run 调度器检查全局、Agent、Core Profile 和 Session 并发约束。
+5. Run 获得执行槽位时，服务用同一 UTC 快照解析 Core、Provider、模型和并发上限，并将路由写入 Run。
+6. 服务按目标 Core 准备 Provider Home、Skills、执行器扩展和 MCP，再创建或恢复该 Core 的 ACP Session。
+7. 若路由切换 Core，服务在当前请求前注入该 Core 尚未见过的有界执行摘要。
+8. Provider 事件归一化后写入 Event Store，并实时提供给页面。
+9. Runtime 返回后，服务保存结果、Core Binding 用量和 Handoff 游标，更新 Run 与 Session 状态。
 
 同一 Session 的 Run 严格串行。不同 Session 可以在全局和 Agent 上限内并行。
 
-可选模型完全以 Agent Core 通过 ACP 返回的目录为准。Core 没有暴露模型列表时，Agent 只能使用 Core 默认行为。时间策略不改变 Session 生命周期，也不会为了切换模型创建新的业务 Session；实际模型写入 Run 记录。
+默认的 `session_sticky` 模式在首个 Run 后固定 Core，优先保持原生上下文。只有显式选择 `scheduled_handoff` 时才按时间策略切换 Core。两种模式都不改变业务 Session、Workspace 或 Conversation。
 
-### 6.2 模型发现、策略与审计
+### 6.2 Core、模型和并发路由
 
-当前实现固定一个 Agent Core，仅在该 Core 内选择模型。允许同一 Agent 按时间切换 Core、模型和并发的后续架构已记录在 [Agent Core 与模型运行路由设计提案](agent-core-routing.md)；该提案尚未实现，不代表当前 API 行为。
+一个 Agent 可配置多个 Core Profile。每个 Profile 固定 Provider，可单独设置并发上限，并通过 ACP 发现自己可用的模型。完整语义见 [Agent Core 运行路由](agent-core-routing.md)。
 
 模型路由建立在 Agent Core 的 ACP 配置能力上，不维护一份脱离 Core 的全局模型表：
 
-1. `GET /api/agents/:id/models` 使用 Agent 当前 Provider、指令和可用项目环境启动一次短生命周期探测，通过 ACP 状态读取 `currentModel` 和 `availableModels`，读取完成后关闭探测进程。
+1. `GET /api/agents/:id/core-profiles/:profileId/models` 启动一次短生命周期探测，通过 ACP 读取该 Core 的 `currentModel` 和 `availableModels`，完成后关闭探测进程。
 2. 管理台只允许从 `availableModels` 中选择。`PATCH /api/agents/:id` 保存策略前会重新发现目录；Core 不支持模型目录或模型已经下线时，服务拒绝固定/定时策略。
 3. Run 在队列中不预选模型。执行器获得并发槽位、把 Run 标为 `running` 后，才按当前 UTC 时刻解析策略。
-4. Runtime 创建或恢复同一个 ACP Session，并在发送本轮输入前应用解析出的 `model` 配置。模型切换不会创建新的业务 Session、Workspace 或 Conversation。
-5. 明确解析出的模型写入 Run 的 `resolvedModel`，供 Session 页面、管理 API 和 Integration Task 查询审计。完全委托给 Core 且 Core 未公开默认模型时，该字段为 `null`。
+4. Runtime 使用 Session 与 Core Profile 的独立 Binding 创建或恢复 ACP Session。切换 Core 只更换 Runtime Handle，不创建新的业务 Session、Workspace 或 Conversation。
+5. Run 记录 `resolvedCoreProfileId`、`resolvedProvider`、`resolvedModel`、`resolvedRuleIndex`、`routingPolicyRevision` 和 `effectiveConcurrency`，供页面与 API 审计。
 
 Agent 的 `modelPolicy` 有三种格式：
 
 ```json
-{ "mode": "provider_default" }
+{ "mode": "provider_default", "coreProfileId": 1 }
 
-{ "mode": "fixed", "model": "core-advertised-model-id" }
+{ "mode": "fixed", "coreProfileId": 1, "model": "core-advertised-model-id" }
 
 {
   "mode": "schedule",
+  "defaultCoreProfileId": 1,
   "defaultModel": "model-used-outside-windows",
   "windows": [
     {
       "days": ["mon", "tue", "wed", "thu", "fri"],
       "start": "08:00",
       "end": "20:00",
+      "coreProfileId": 2,
       "model": "model-a",
       "maxConcurrentRuns": 4
     },
@@ -148,7 +152,7 @@ Agent 的 `modelPolicy` 有三种格式：
 }
 ```
 
-`days` 是必填字段，使用 `mon`、`tue`、`wed`、`thu`、`fri`、`sat`、`sun`；每个时间段至少选择一天且不能重复。API 接受 `00:00` 至 `23:59` 之间的 UTC 24 小时制 `HH:mm`，起止时间不能相同。开始时间包含、结束时间不包含；结束早于开始时跨到下一 UTC 日，`days` 表示时间段开始的星期。同一个模型可以出现在多个时间段中。`maxConcurrentRuns` 可省略或设为 `null` 以继承 Agent 默认并发，也可以设为 1–64 覆盖该时间段的 Agent 上限；系统全局上限始终优先。未同时命中星期和时间时使用 `defaultModel` 和 Agent 默认并发；多个时间段重叠时配置中排在前面的优先。策略最多包含 16 个时间段。
+`days` 是必填字段，使用 `mon`、`tue`、`wed`、`thu`、`fri`、`sat`、`sun`；每个时间段至少选择一天且不能重复。API 接受 `00:00` 至 `23:59` 之间的 UTC 24 小时制 `HH:mm`，起止时间不能相同。开始时间包含、结束时间不包含；结束早于开始时跨到下一 UTC 日，`days` 表示时间段开始的星期。同一个 Core 和模型可以出现在多个时间段中。`maxConcurrentRuns` 可省略或设为 `null` 以继承 Agent 默认并发，也可以设为 1–64 覆盖该时间段的 Agent 上限；系统全局上限始终优先。未同时命中星期和时间时使用 `defaultCoreProfileId`、`defaultModel` 和 Agent 默认并发；多个时间段重叠时配置中排在前面的优先。策略最多包含 16 个时间段。
 
 管理台把连续且 `days`、`model`、`maxConcurrentRuns` 相同的时间段合并为一个规则组编辑，星期、模型和并发只设置一次，组内可以维护多个起止时间。保存时仍展开为上述 `windows` 协议，避免界面分组影响运行时解析和外部 API。
 
@@ -201,7 +205,7 @@ Provider 的历史会话、日志和缓存不会复制到 Agent Provider Home。
 
 - 全局 Run、Agent Run、Webhook Delivery 和项目环境构建并发可以在线调整。
 - Session 和 Conversation 内部串行执行。
-- 同一 Webhook 订阅按顺序投递。
+- Webhook Delivery 可在全局并发上限内并行投递；接收方使用稳定 `eventId` 去重。
 - 同一项目环境的重复同步请求会被合并。
 - Event 先持久化再提供查询，`seq` 支持断线续读。
 - SSE 连接断开不会取消 Run。

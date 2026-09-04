@@ -7,6 +7,36 @@ import {
   resolveModelWindow,
   type AgentModelPolicy
 } from "../src/agents/model-policy.js";
+import { resolveRunConcurrency, resolveRunRoute } from "../src/agents/runtime-route.js";
+import type { Agent } from "../src/domain.js";
+
+const routedAgent = (overrides: Partial<Agent> = {}): Agent => ({
+  id: 1,
+  name: "Routing agent",
+  provider: "codex",
+  enabled: true,
+  instructions: "",
+  maxConcurrentRuns: 6,
+  effectiveMaxConcurrentRuns: 6,
+  modelPolicy: { mode: "provider_default" },
+  providerDefaultModel: "codex-default",
+  coreRoutingMode: "session_sticky",
+  defaultCoreProfileId: 10,
+  coreProfiles: [
+    {
+      id: 10, agentId: 1, name: "Codex", provider: "codex", enabled: true,
+      maxConcurrentRuns: 4, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z"
+    },
+    {
+      id: 20, agentId: 1, name: "Claude", provider: "claude_code", enabled: true,
+      maxConcurrentRuns: 3, createdAt: "2026-09-01T00:00:00Z", updatedAt: "2026-09-01T00:00:00Z"
+    }
+  ],
+  projectEnvironmentId: 1,
+  createdAt: "2026-09-01T00:00:00Z",
+  updatedAt: "2026-09-01T00:00:00Z",
+  ...overrides
+});
 
 describe("Agent model policy", () => {
   it("uses the provider default when no model override is configured", () => {
@@ -128,5 +158,84 @@ describe("Agent model policy", () => {
     };
 
     expect(configuredModels(policy)).toEqual(["deepseek-v4-flash", "glm-4.5"]);
+  });
+});
+
+describe("Agent Core runtime routing", () => {
+  it("pins a sticky Session to its first Core while still resolving the current model", () => {
+    const agent = routedAgent({
+      modelPolicy: {
+        mode: "schedule",
+        defaultModel: "codex-default",
+        windows: [{ days: ["tue"], start: "08:00", end: "20:00", model: "codex-fast" }]
+      }
+    });
+
+    const first = resolveRunRoute({
+      agent,
+      pinnedCoreProfileId: null,
+      globalConcurrency: 8,
+      now: new Date("2026-09-01T09:00:00Z")
+    });
+    const resumed = resolveRunRoute({
+      agent,
+      pinnedCoreProfileId: 10,
+      globalConcurrency: 8,
+      now: new Date("2026-09-01T21:00:00Z")
+    });
+
+    expect(first).toMatchObject({ coreProfileId: 10, provider: "codex", model: "codex-fast", pinSessionCore: true });
+    expect(resumed).toMatchObject({ coreProfileId: 10, provider: "codex", model: "codex-default", pinSessionCore: false });
+  });
+
+  it("selects Core, model and concurrency from the same schedule snapshot", () => {
+    const agent = routedAgent({
+      coreRoutingMode: "scheduled_handoff",
+      modelPolicy: {
+        mode: "schedule",
+        defaultCoreProfileId: 10,
+        defaultModel: "codex-default",
+        windows: [{
+          days: ["tue"], start: "08:00", end: "20:00", coreProfileId: 20,
+          model: "claude-sonnet", maxConcurrentRuns: 2
+        }]
+      }
+    });
+
+    expect(resolveRunRoute({
+      agent,
+      pinnedCoreProfileId: null,
+      globalConcurrency: 8,
+      now: new Date("2026-09-01T09:00:00Z")
+    })).toMatchObject({
+      coreProfileId: 20,
+      provider: "claude_code",
+      model: "claude-sonnet",
+      ruleIndex: 0,
+      effectiveConcurrency: 2,
+      pinSessionCore: false
+    });
+  });
+
+  it("lets a schedule override the Agent default while retaining the selected Core limit", () => {
+    const agent = routedAgent({
+      maxConcurrentRuns: 1,
+      coreRoutingMode: "scheduled_handoff",
+      modelPolicy: {
+        mode: "schedule",
+        defaultCoreProfileId: 10,
+        defaultModel: "codex-default",
+        windows: [{
+          days: ["tue"], start: "08:00", end: "20:00", coreProfileId: 20,
+          model: "claude-sonnet", maxConcurrentRuns: 6
+        }]
+      }
+    });
+    const now = new Date("2026-09-01T09:00:00Z");
+
+    expect(resolveRunConcurrency({ agent, coreProfileId: 20, globalConcurrency: 8, now }))
+      .toEqual({ agent: 6, coreProfile: 3, effective: 3 });
+    expect(resolveRunRoute({ agent, pinnedCoreProfileId: null, globalConcurrency: 8, now }))
+      .toMatchObject({ effectiveConcurrency: 3 });
   });
 });

@@ -343,6 +343,64 @@ describe("AcpxAgentRuntime", () => {
     expect(options.agentRegistry.list()).toContain(target);
   });
 
+  it("keeps the legacy runtime identity on the initial Core and isolates later Cores", async () => {
+    const defaultRoot = makeRoot();
+    const defaultAcp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValueOnce(defaultAcp);
+    const defaultRuntime = new AcpxAgentRuntime(makeConfig(defaultRoot));
+
+    await defaultRuntime.ensureSession(sessionInput(defaultRoot, {
+      coreProfileId: 42,
+      legacySessionNamespace: true
+    }));
+
+    expect(defaultAcp.ensureSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: `remote-agent:${SESSION_ID}`,
+      agent: `remote:codex:${AGENT_ID}:${SESSION_ID}`
+    }));
+    const defaultOptions = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
+    expect(defaultOptions.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`)).toContain(
+      `CODEX_HOME='${join(
+        makeConfig(defaultRoot).dataDir,
+        "agents",
+        AGENT_PATH_ID,
+        "provider-home",
+        "codex",
+        "sessions",
+        SESSION_PATH_ID
+      )}'`
+    );
+
+    const secondaryRoot = makeRoot();
+    const secondaryAcp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValueOnce(secondaryAcp);
+    const secondaryRuntime = new AcpxAgentRuntime(makeConfig(secondaryRoot));
+
+    await secondaryRuntime.ensureSession(sessionInput(secondaryRoot, {
+      coreProfileId: 43,
+      legacySessionNamespace: false
+    }));
+
+    expect(secondaryAcp.ensureSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionKey: `remote-agent:${SESSION_ID}:core:43`,
+      agent: `remote:codex:${AGENT_ID}:43:${SESSION_ID}`
+    }));
+    const secondaryOptions = acpxMocks.createAcpRuntime.mock.calls[1]?.[0] as AcpRuntimeOptions;
+    expect(secondaryOptions.agentRegistry.resolve(`remote:codex:${AGENT_ID}:43:${SESSION_ID}`)).toContain(
+      `CODEX_HOME='${join(
+        makeConfig(secondaryRoot).dataDir,
+        "agents",
+        AGENT_PATH_ID,
+        "provider-home",
+        "codex",
+        "profiles",
+        "43",
+        "sessions",
+        SESSION_PATH_ID
+      )}'`
+    );
+  });
+
   it("拒绝可注入 Registry target 的非法 ID", async () => {
     const root = makeRoot();
     acpxMocks.createAcpRuntime.mockReturnValue(runtimeStub());
