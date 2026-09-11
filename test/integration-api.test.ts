@@ -50,6 +50,7 @@ const createTestApp = async (
   agentId: number;
   db: ReturnType<typeof createTestDatabase>["db"];
   integrationStore: IntegrationStore;
+  restart(): Promise<FastifyInstance>;
 }> => {
   const { db, seed } = createTestDatabase();
   const integrationStore = new IntegrationStore({ db });
@@ -66,7 +67,7 @@ const createTestApp = async (
     createRevision: async () => undefined,
     removeRevision: async () => undefined
   };
-  const app = buildApp({
+  const options: Parameters<typeof buildApp>[0] = {
     config: {
       host: "127.0.0.1",
       port: 3000,
@@ -86,7 +87,8 @@ const createTestApp = async (
     runtime,
     workspaceManager,
     integrationStore
-  });
+  };
+  let app = buildApp(options);
   apps.push({
     app,
     close: async () => {
@@ -96,7 +98,12 @@ const createTestApp = async (
     }
   });
   await app.ready();
-  return { app, agentId: seed.agent.id, db, integrationStore };
+  return { app, agentId: seed.agent.id, db, integrationStore, restart: async () => {
+    await app.close();
+    app = buildApp({ ...options, integrationStore: new IntegrationStore({ db }) });
+    await app.ready();
+    return app;
+  } };
 };
 
 afterEach(async () => {
@@ -128,6 +135,171 @@ describe("Native webhook ingress", () => {
     }
     return { ...context, endpointId: endpoint.id, token, configUrl, url: "/integration/v1/endpoints/native-events/webhook" };
   };
+
+  it("按 MR 作者筛选，忽略结果持久化且改规则后重投不创建任务", async () => {
+    const { app, url, configUrl, db, endpointId } = await setup("gitlab");
+    const filter = { all: [
+      { field: "payload.project.id", op: "eq", value: 42 },
+      { field: "payload.object_attributes.author_id", op: "in", value: [101, 102] }
+    ] };
+    const configure = (value: unknown) => app.inject({ method: "PUT", url: configUrl, headers: authHeaders(),
+      payload: { provider: "gitlab", authMode: "token", enabled: true, filter: value } });
+    const saved = await configure(filter);
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({ filter, filterVersion: 2 });
+    const event = { object_kind: "merge_request", user: { id: 101 }, project: { id: 42 },
+      object_attributes: { author_id: 900, state: "opened", action: "open" } };
+    const send = (id: string, body = event) => app.inject({ method: "POST", url, payload: body,
+      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook", "idempotency-key": id } });
+    const ignored = await send("bot-mr");
+    expect(ignored.statusCode).toBe(200);
+    expect(ignored.json()).toEqual({ status: "ignored", reason: "filter_not_matched" });
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 0 });
+    await configure(null);
+    migrate(db);
+    expect((await send("bot-mr")).json()).toEqual(ignored.json());
+    expect((await send("bot-mr", { ...event, user: { id: 2 } })).statusCode).toBe(409);
+    await configure(filter);
+    const developer = { ...event, user: { id: 900 }, object_attributes: { ...event.object_attributes, author_id: 101 } };
+    const responses = await Promise.all([send("developer-mr", developer), send("developer-mr", developer)]);
+    expect(responses.map((response) => response.statusCode)).toEqual([202, 202]);
+    expect(responses[0]!.json().taskId).toBe(responses[1]!.json().taskId);
+    await configure({ field: "eventType", op: "eq", value: "Push Hook" });
+    expect((await send("developer-mr", developer)).json().taskId).toBe(responses[0]!.json().taskId);
+    const history = await app.inject({ method: "GET", url: `${configUrl}/receipts`, headers: authHeaders() });
+    expect(history.statusCode).toBe(200);
+    expect(history.json()).toMatchObject([
+      { deliveryId: "developer-mr", decision: "accepted", taskId: responses[0]!.json().taskId },
+      { deliveryId: "bot-mr", decision: "ignored", reason: "filter_not_matched", filterVersion: 2 }
+    ]);
+    expect(history.body).not.toContain("author_id");
+    expect(history.body).not.toContain(secret);
+    expect((await app.inject({ method: "GET", url: `${configUrl}/receipts` })).statusCode).toBe(401);
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks WHERE endpoint_id = ?").get(endpointId)).toEqual({ count: 1 });
+  });
+
+  it("任务入库失败后重启仍沿用原筛选决定，成功任务重启重投不重复执行", async () => {
+    const context = await setup("gitlab");
+    let app = context.app;
+    const request = { method: "POST" as const, url: context.url, payload: { object_kind: "merge_request" },
+      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook", "idempotency-key": "recover-admission" } };
+    const failingWrite = vi.spyOn(context.integrationStore, "createTaskInTransaction").mockImplementationOnce(() => { throw new Error("injected transaction failure"); });
+    const failed = await app.inject(request);
+    expect(failed.statusCode).toBe(500);
+    failingWrite.mockRestore();
+    expect(context.db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 0 });
+    const ignored = await app.inject({ ...request, headers: { ...request.headers, "idempotency-key": "ignore-before-restart" },
+      payload: { object_kind: "merge_request" } });
+    expect(ignored.statusCode).toBe(202);
+    await app.inject({ method: "PUT", url: context.configUrl, headers: authHeaders(),
+      payload: { provider: "gitlab", authMode: "token", enabled: true, filter: { field: "eventType", op: "eq", value: "Push Hook" } } });
+    const excluded = { ...request, headers: { ...request.headers, "idempotency-key": "excluded" } };
+    expect((await app.inject(excluded)).statusCode).toBe(200);
+    app = await context.restart();
+    const recovered = await app.inject(request);
+    expect(recovered.statusCode).toBe(202);
+    const taskId = recovered.json().taskId as number;
+    await vi.waitFor(() => expect(context.integrationStore.getTask(taskId)?.status).toBe("succeeded"));
+    app = await context.restart();
+    expect((await app.inject(request)).json().taskId).toBe(taskId);
+    await app.inject({ method: "PUT", url: context.configUrl, headers: authHeaders(),
+      payload: { provider: "gitlab", authMode: "token", enabled: true, filter: null } });
+    expect((await app.inject(excluded)).json()).toEqual({ status: "ignored", reason: "filter_not_matched" });
+    expect(context.db.prepare("SELECT count(*) AS count FROM runs WHERE session_id = ?").get(recovered.json().sessionId)).toEqual({ count: 1 });
+  });
+
+  it("筛选预览与接收使用相同语义，负向比较不放过缺失字段或类型不符", async () => {
+    const { app, url, configUrl, db } = await setup("github");
+    const filter = { all: [
+      { field: "eventType", op: "eq", value: "pull_request" },
+      { field: "payload.pull_request.user.id", op: "not_in", value: [900] }
+    ] };
+    const preview = (payload: unknown, rule: unknown = filter) => app.inject({ method: "POST", url: `${configUrl}/preview`, headers: authHeaders(),
+      payload: { provider: "github", eventType: "pull_request", payload, filter: rule } });
+    for (const [payload, matched] of [
+      [{ sender: { id: 101 } }, false],
+      [{ pull_request: { user: { id: "101" } } }, false],
+      [{ pull_request: { user: { id: 900 } } }, false],
+      [{ pull_request: { user: { id: 101 } }, sender: { id: 900 } }, true]
+    ] as const) {
+      const result = await preview(payload);
+      expect(result.statusCode).toBe(200);
+      expect(result.json().matched).toBe(matched);
+      expect(result.json().checks.length).toBe(2);
+    }
+    expect((await preview({}, { field: "payload.x", op: "exists", value: false })).json().matched).toBe(true);
+    expect((await app.inject({ method: "POST", url: `${configUrl}/preview`, payload: {} })).statusCode).toBe(401);
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+    await app.inject({ method: "PUT", url: configUrl, headers: authHeaders(), payload: { provider: "github", authMode: "signature", enabled: true, filter } });
+    const body = JSON.stringify({ pull_request: { user: { id: 900 } }, sender: { id: 101 } });
+    const response = await app.inject({ method: "POST", url, payload: body, headers: {
+      "content-type": "application/json", "x-github-event": "pull_request", "x-github-delivery": "filtered-pr", "x-hub-signature-256": signature(body)
+    } });
+    expect(response.json()).toEqual({ status: "ignored", reason: "filter_not_matched" });
+  });
+
+  it.each(["gitlab", "github"] as const)("%s 多条件：包含 CodeReview 标签且 MR / PR 作者不是指定 Agent", async (provider) => {
+    const { app, configUrl, url, db } = await setup(provider);
+    const filter = { all: provider === "gitlab" ? [
+      { field: "payload.labels.*.title", op: "contains", value: "CodeReview" },
+      { field: "payload.object_attributes.author_id", op: "neq", value: 900 }
+    ] : [
+      { field: "payload.pull_request.labels.*.name", op: "contains", value: "CodeReview" },
+      { field: "payload.pull_request.user.login", op: "neq", value: "xxx" }
+    ] };
+    const save = await app.inject({ method: "PUT", url: configUrl, headers: authHeaders(), payload: {
+      provider, authMode: provider === "gitlab" ? "token" : "signature", enabled: true, filter
+    } });
+    expect(save.statusCode).toBe(200);
+    const eventType = provider === "gitlab" ? "Merge Request Hook" : "pull_request";
+    let sequence = 0;
+    for (const [labels, author, expected] of [
+      [["other", "CodeReview"], "developer", 202],
+      [["CodeReview", "other"], "developer", 202],
+      [["CodeReview"], "xxx", 200],
+      [["other"], "developer", 200],
+      [["codereview"], "developer", 200],
+      [[], "developer", 200],
+      [undefined, "developer", 200],
+      [["CodeReview"], undefined, 200]
+    ] as const) {
+      const payload = provider === "gitlab" ? { object_kind: "merge_request", user: { id: 900, username: "xxx" },
+        labels: labels?.map((title) => ({ title })), object_attributes: { author_id: author === undefined ? undefined : author === "xxx" ? 900 : 101 }
+      } : { action: "opened", sender: { login: "xxx" }, pull_request: { labels: labels?.map((name) => ({ name })), user: { login: author } } };
+      const preview = await app.inject({ method: "POST", url: `${configUrl}/preview`, headers: authHeaders(),
+        payload: { provider, eventType, payload, filter } });
+      expect(preview.json().matched).toBe(expected === 202);
+      const body = JSON.stringify(payload);
+      const id = `label-and-author-${++sequence}`;
+      const headers = provider === "gitlab" ? { "x-gitlab-token": secret, "x-gitlab-event": eventType, "idempotency-key": id }
+        : { "x-github-event": eventType, "x-github-delivery": id, "x-hub-signature-256": signature(body) };
+      const received = await app.inject({ method: "POST", url, headers: { "content-type": "application/json", ...headers }, payload: body });
+      expect(received.statusCode).toBe(expected);
+    }
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 2 });
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 2 });
+  });
+
+  it("拒绝非法规则并保留原配置，省略规则保留而 null 清除", async () => {
+    const { app, configUrl } = await setup("gitlab");
+    const save = (filter: unknown) => app.inject({ method: "PUT", url: configUrl, headers: authHeaders(),
+      payload: { provider: "gitlab", authMode: "token", enabled: true, filter } });
+    let deep: unknown = { field: "eventType", op: "eq", value: "Push Hook" };
+    for (let i = 0; i < 10; i++) deep = { all: [deep] };
+    for (const filter of [
+      { all: [] }, { any: [] }, { field: "payload.__proto__.id", op: "eq", value: 1 },
+      { field: "payload.id", op: "regex", value: ".*" }, { field: "payload.id", op: "in", value: [] },
+      { field: "payload.id", op: "in", value: [1, "2"] }, { field: "payload.id", op: "exists", value: "true" },
+      { field: "payload.id", op: "eq", value: {} }, { field: "headers.token", op: "eq", value: "x" },
+      { all: Array.from({ length: 60 }, () => ({ field: "eventType", op: "eq", value: "push" })) }, deep
+    ]) expect((await save(filter)).statusCode).toBe(400);
+    const filter = { field: "payload.object_attributes.author_id", op: "in", value: [101] };
+    expect((await save(filter)).statusCode).toBe(200);
+    const preserved = await app.inject({ method: "PUT", url: configUrl, headers: authHeaders(), payload: { provider: "gitlab", authMode: "token", enabled: true } });
+    expect(preserved.json()).toMatchObject({ filter, filterVersion: 2 });
+    expect((await save(null)).json()).toMatchObject({ filter: null, filterVersion: 3 });
+  });
 
   it("原生 GitHub JSON 验签后入库并执行，重投复用同一 Task", async () => {
     const { app, url, db } = await setup("github");
@@ -252,9 +424,14 @@ describe("Native webhook ingress", () => {
     const configured = await app.inject({ method: "PUT", url: configUrl, headers: authHeaders(),
       payload: { provider: "gitlab", authMode: "token", enabled: true, secret } });
     expect(configured.statusCode).toBe(200);
+    const ciphertext = db.prepare("SELECT encrypted_secret FROM integration_webhook_receivers WHERE endpoint_id = ?").get(endpointId);
+    db.exec("ALTER TABLE integration_webhook_receivers DROP COLUMN filter_json");
+    db.exec("ALTER TABLE integration_webhook_receivers DROP COLUMN filter_version");
     migrate(db);
+    migrate(db);
+    expect(db.prepare("SELECT encrypted_secret FROM integration_webhook_receivers WHERE endpoint_id = ?").get(endpointId)).toEqual(ciphertext);
     expect((await app.inject({ method: "GET", url: configUrl, headers: authHeaders() })).json())
-      .toEqual({ provider: "gitlab", authMode: "token", enabled: true, secretConfigured: true });
+      .toEqual({ provider: "gitlab", authMode: "token", enabled: true, secretConfigured: true, filter: null, filterVersion: 1 });
     expect((await app.inject({ method: "DELETE", url: `/api/integration-endpoints/${endpointId}`, headers: authHeaders() })).statusCode)
       .toBe(204);
     expect(db.prepare("SELECT count(*) AS count FROM integration_webhook_receivers").get()).toEqual({ count: 0 });
@@ -268,7 +445,7 @@ describe("Native webhook ingress", () => {
         ...(delivery === undefined ? {} : { "x-github-delivery": delivery }), "x-hub-signature-256": signature(body) }
     });
     expect((await request('{"zen":"Keep it logically awesome."}', "ping")).statusCode).toBe(200);
-    for (const body of ["null", "[]", '"text"', "{invalid"]) {
+    for (const body of ["null", "[]", '"text"', "{invalid", '{"nested":'.repeat(9000) + "0" + "}".repeat(9000)]) {
       expect((await request(body)).statusCode).toBe(400);
     }
     expect((await request(payload, "push", "")).statusCode).toBe(400);

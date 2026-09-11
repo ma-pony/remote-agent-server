@@ -12,10 +12,14 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { WebhookFilterEditor, draftFilter, parseFilterDraft, type FilterDraft } from "@/components/webhook-filter-editor";
+import { WebhookFilterPreview } from "@/components/webhook-filter-preview";
+import { WebhookReceiptHistory } from "@/components/webhook-receipt-history";
 
 export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEndpoint }) => {
   const { text } = useI18n();
   const [receiver, setReceiver] = useState<WebhookReceiver | null | undefined>();
+  const [filterDraft, setFilterDraft] = useState<FilterDraft | null>(null);
   const [providers, setProviders] = useState<WebhookProviderDefinition[]>([]);
   const [provider, setProvider] = useState("");
   const [authMode, setAuthMode] = useState<WebhookReceiver["authMode"]>("signature");
@@ -41,6 +45,7 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
       setProvider(result?.provider ?? definitions[0]?.id ?? "");
       setAuthMode(result?.authMode ?? definitions[0]?.authModes[0] ?? "signature");
       setEnabled(result?.enabled ?? true);
+      setFilterDraft(draftFilter(result?.filter ?? null));
     }).catch((reason: unknown) => {
       if (!controller.signal.aborted) setError(errorMessage(reason));
     });
@@ -50,17 +55,18 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
   const url = `${window.location.origin}/integration/v1/endpoints/${endpoint.slug}/webhook`;
   const definition = providers.find((item) => item.id === provider);
   const secretRequired = receiver == null || receiver.provider !== provider || receiver.authMode !== authMode;
-  const canSave = receiver !== undefined && definition !== undefined && definition.authModes.includes(authMode)
+  const parsedFilter = parseFilterDraft(filterDraft);
+  const canSave = parsedFilter.valid && receiver !== undefined && definition !== undefined && definition.authModes.includes(authMode)
     && !busy && (!secretRequired || secret.trim() !== "");
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!canSave || definition === undefined) return;
+    if (!canSave || definition === undefined || !parsedFilter.valid) return;
     setBusy(true);
     setError("");
     setSaved(false);
     try {
       const result = await integrationApi.configureWebhookReceiver(endpoint.id, {
-        provider: definition.id, authMode, enabled, ...(secret === "" ? {} : { secret })
+        provider: definition.id, authMode, enabled, filter: parsedFilter.filter, ...(secret === "" ? {} : { secret })
       });
       setReceiver(result);
       setSecret("");
@@ -80,7 +86,7 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2"><Webhook />{text("接收平台 Webhook", "Receive platform webhooks")}</CardTitle>
-            <CardDescription>{text("使用平台默认 Webhook，请求验证后自动创建任务并调用绑定的智能体。", "Use native platform webhooks to verify events, create tasks, and invoke the linked agent.")}</CardDescription>
+            <CardDescription>{text("使用平台默认 Webhook，请求验证且命中筛选规则后创建任务并调用绑定的智能体。", "Use native platform webhooks to verify and filter events, create tasks, and invoke the linked agent.")}</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={(event) => { void submit(event); }}>
@@ -98,10 +104,12 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
                   <NativeSelect id="receiver-provider" disabled={busy} value={provider} onChange={(event) => {
                     setProvider(event.target.value);
                     setAuthMode(providers.find((item) => item.id === event.target.value)?.authModes[0] ?? "signature");
+                    setFilterDraft(null);
                     setSecret(""); setSaved(false);
                   }}>
                     {providers.map((item) => <NativeSelectOption key={item.id} value={item.id}>{text(item.name, item.name)}</NativeSelectOption>)}
                   </NativeSelect>
+                  <FieldDescription>{text("切换平台会清除当前筛选草稿，请为新平台重新设置规则。", "Switching platforms clears the current filter draft. Configure rules for the new platform.")}</FieldDescription>
                 </Field>
                 <Field>
                   <FieldLabel htmlFor="receiver-auth-mode">{text("验证方式", "Authentication")}</FieldLabel>
@@ -129,6 +137,8 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
                   </NativeSelect>
                   {!endpoint.enabled ? <FieldDescription>{text("接入端点已停用，启用端点后才能接收事件。", "The integration endpoint is disabled. Enable it before receiving events.")}</FieldDescription> : null}
                 </Field>
+                <WebhookFilterEditor draft={filterDraft} onChange={(draft) => { setFilterDraft(draft); setSaved(false); }} definition={definition} disabled={busy} />
+                <WebhookFilterPreview endpointId={endpoint.id} definition={definition} filter={parsedFilter.valid ? parsedFilter.filter : null} disabled={busy || !parsedFilter.valid} />
                 <div className="flex items-center gap-3">
                   <Button type="submit" disabled={!canSave}>{busy ? text("保存中…", "Saving…") : text("保存接收配置", "Save receiver")}</Button>
                   <Badge variant={receiver?.enabled && endpoint.enabled ? "default" : "secondary"}>
@@ -140,11 +150,12 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
           </CardContent>
         </Card>
         {saved ? <Alert role="status"><Check /><AlertTitle>{text("接收配置已保存", "Receiver saved")}</AlertTitle><AlertDescription>{text("将地址和相同 Secret 填入平台 Webhook 设置，选择需要触发的事件。", "Enter the URL and matching secret in the platform's webhook settings, then select the events to trigger.")}</AlertDescription></Alert> : null}
+        <WebhookReceiptHistory key={endpoint.id} endpointId={endpoint.id} />
         <Card>
           <CardHeader><CardTitle>{text("事件如何触发任务", "How events trigger tasks")}</CardTitle></CardHeader>
           <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
-            <p>{text("每个新事件创建独立任务，事件类型和默认 JSON 载荷会连同端点固定提示发送给智能体。相同投递 ID 的重试会返回原任务。", "Each new event creates an independent task. Its type and native JSON payload are sent with the endpoint's fixed prompt. Retries with the same delivery ID return the original task.")}</p>
-            <p>{text("在平台选择触发事件。GitHub ping 仅检查连接；GitLab 的测试事件也会创建任务。", "Select triggering events on the platform. GitHub ping only checks the connection; GitLab test events also create tasks.")}</p>
+            <p>{text("每个命中规则的新事件创建独立任务，事件类型和默认 JSON 载荷会连同端点固定提示发送给智能体。相同投递 ID 的重试会返回原任务。", "Each matching new event creates an independent task. Its type and native JSON payload are sent with the endpoint's fixed prompt. Retries with the same delivery ID return the original task.")}</p>
+            <p>{text("在平台选择触发事件。GitHub ping 仅检查连接；GitLab 的测试事件同样经过筛选，命中时会创建任务。", "Select triggering events on the platform. GitHub ping only checks the connection; GitLab test events are also filtered and create tasks when matched.")}</p>
             <p>{text("需要智能体参数时，可在参数映射中用 project.id 等载荷路径读取值，也可使用固定值。", "For agent parameters, map payload paths such as project.id or use fixed values.")}</p>
             <div className="flex flex-wrap gap-3">
               <Button asChild variant="outline" size="sm"><Link to={`/integration-endpoints/${endpoint.id}/mappings`}>{text("配置参数映射", "Configure mappings")}</Link></Button>

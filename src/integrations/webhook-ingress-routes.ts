@@ -6,12 +6,14 @@ import { handleIntegrationError } from "./integration-routes.js";
 import { webhookProviderIds } from "./integration-types.js";
 import { WebhookIngressError } from "./webhook-adapters/adapter.js";
 import { listWebhookProviders } from "./webhook-adapters/index.js";
+import { webhookFilterSchema } from "./webhook-filter.js";
 import { WebhookIngress } from "./webhook-ingress.js";
 
 const receiverSchema = z.object({
   provider: z.enum(webhookProviderIds),
   authMode: z.enum(["signature", "token"]),
   enabled: z.boolean(),
+  filter: webhookFilterSchema.nullable().optional(),
   secret: z.string().min(1).max(1024).refine((value) => value.trim() !== "").optional()
 }).strict();
 
@@ -40,6 +42,17 @@ export const registerWebhookReceiverAdminRoutes = (app: FastifyInstance, ingress
     } catch (error) {
       return handleIngressError(reply, error);
     }
+  });
+  app.get<{ Params: { id: string } }>("/integration-endpoints/:id/webhook-receiver/receipts", (request, reply) => {
+    try { return ingress.receipts(Number(request.params.id)); }
+    catch (error) { return handleIngressError(reply, error); }
+  });
+  app.post<{ Params: { id: string } }>("/integration-endpoints/:id/webhook-receiver/preview", (request, reply) => {
+    const parsed = z.object({ provider: z.enum(webhookProviderIds), eventType: z.string().trim().min(1).max(512),
+      payload: z.record(z.string(), z.unknown()), filter: webhookFilterSchema.nullable() }).strict().safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid webhook filter preview" } });
+    try { return ingress.preview(Number(request.params.id), parsed.data); }
+    catch (error) { return handleIngressError(reply, error); }
   });
   app.put<{ Params: { id: string } }>("/integration-endpoints/:id/webhook-receiver", (request, reply) => {
     const parsed = receiverSchema.safeParse(request.body);

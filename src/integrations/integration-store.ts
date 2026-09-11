@@ -14,6 +14,8 @@ import type {
   WebhookDelivery,
   WebhookDeliveryStatus,
   WebhookReceiver,
+  WebhookReceipt,
+  WebhookReceiptDetail,
   WebhookSubscription
 } from "./integration-types.js";
 
@@ -338,20 +340,52 @@ export class IntegrationStore {
 
   getWebhookReceiver(endpointId: number): WebhookReceiver | undefined {
     const row = this.db.prepare(`
-      SELECT provider, auth_mode AS authMode, enabled, encrypted_secret AS encryptedSecret
+      SELECT provider, auth_mode AS authMode, enabled, encrypted_secret AS encryptedSecret,
+        filter_json AS filterJson, filter_version AS filterVersion
       FROM integration_webhook_receivers WHERE endpoint_id = ?
-    `).get(endpointId) as (Omit<WebhookReceiver, "enabled"> & { enabled: 0 | 1 }) | undefined;
-    return row === undefined ? undefined : { ...row, enabled: row.enabled === 1 };
+    `).get(endpointId) as (Omit<WebhookReceiver, "enabled" | "filter"> & { enabled: 0 | 1; filterJson: string | null }) | undefined;
+    if (row === undefined) return undefined;
+    const { filterJson, ...receiver } = row;
+    return { ...receiver, enabled: receiver.enabled === 1, filter: filterJson === null ? null : JSON.parse(filterJson) as WebhookReceiver["filter"] };
   }
 
   setWebhookReceiver(endpointId: number, receiver: WebhookReceiver): void {
     this.db.prepare(`
-      INSERT INTO integration_webhook_receivers (endpoint_id, provider, auth_mode, enabled, encrypted_secret)
-      VALUES (?, ?, ?, ?, ?)
+      INSERT INTO integration_webhook_receivers (endpoint_id, provider, auth_mode, enabled, encrypted_secret, filter_json, filter_version)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(endpoint_id) DO UPDATE SET
         provider = excluded.provider, auth_mode = excluded.auth_mode,
-        enabled = excluded.enabled, encrypted_secret = excluded.encrypted_secret
-    `).run(endpointId, receiver.provider, receiver.authMode, receiver.enabled ? 1 : 0, receiver.encryptedSecret);
+        enabled = excluded.enabled, encrypted_secret = excluded.encrypted_secret,
+        filter_json = excluded.filter_json, filter_version = excluded.filter_version
+    `).run(endpointId, receiver.provider, receiver.authMode, receiver.enabled ? 1 : 0, receiver.encryptedSecret,
+      receiver.filter === null ? null : JSON.stringify(receiver.filter), receiver.filterVersion);
+  }
+
+  getWebhookReceipt(endpointId: number, provider: string, deliveryId: string): WebhookReceipt | undefined {
+    return this.db.prepare(`SELECT id, provider, delivery_id AS deliveryId, event_type AS eventType,
+      fingerprint, filter_version AS filterVersion, decision, reason, created_at AS createdAt
+      FROM integration_webhook_receipts WHERE endpoint_id = ? AND provider = ? AND delivery_id = ?
+    `).get(endpointId, provider, deliveryId) as WebhookReceipt | undefined;
+  }
+
+  createWebhookReceipt(endpointId: number, receipt: Omit<WebhookReceipt, "id" | "createdAt">): WebhookReceipt {
+    this.db.prepare(`INSERT INTO integration_webhook_receipts
+      (endpoint_id, provider, delivery_id, event_type, fingerprint, filter_version, decision, reason, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(endpointId, receipt.provider, receipt.deliveryId, receipt.eventType, receipt.fingerprint,
+      receipt.filterVersion, receipt.decision, receipt.reason, new Date().toISOString());
+    return this.getWebhookReceipt(endpointId, receipt.provider, receipt.deliveryId)!;
+  }
+
+  listWebhookReceipts(endpointId: number): WebhookReceiptDetail[] {
+    return this.db.prepare(`SELECT receipt.id, receipt.provider, receipt.delivery_id AS deliveryId,
+      receipt.event_type AS eventType, receipt.filter_version AS filterVersion, receipt.decision,
+      receipt.reason, receipt.created_at AS createdAt, task.id AS taskId
+      FROM integration_webhook_receipts receipt
+      LEFT JOIN integration_tasks task ON task.endpoint_id = receipt.endpoint_id
+        AND task.request_id = receipt.provider || ':' || receipt.delivery_id
+      WHERE receipt.endpoint_id = ? ORDER BY receipt.id DESC LIMIT 30
+    `).all(endpointId) as WebhookReceiptDetail[];
   }
 
   listEndpoints(): IntegrationEndpoint[] {

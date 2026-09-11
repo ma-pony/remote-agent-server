@@ -1,9 +1,10 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
 import type {
-  WebhookReceiverDetail as WebhookReceiver, WebhookReceiverInput, WebhookProviderDefinition
+  WebhookReceiverDetail as WebhookReceiver, WebhookReceiverInput, WebhookProviderDefinition, WebhookReceiptDetail
 } from "../integrations/integration-types.js";
 
-export type { WebhookReceiver, WebhookReceiverInput, WebhookProviderDefinition };
+export type { WebhookReceiver, WebhookReceiverInput, WebhookProviderDefinition, WebhookReceiptDetail };
+import type { WebhookFilter, WebhookFilterEvent, WebhookFilterResult } from "../integrations/webhook-filter.js";
 
 export type Provider = "claude_code" | "codex" | "hermes";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -478,6 +479,13 @@ export const integrationApi = {
   listWebhookProviders: (signal?: AbortSignal) => api<WebhookProviderDefinition[]>("/integration-webhook-providers", { signal }),
   getWebhookReceiver: (id: number, signal?: AbortSignal) => api<WebhookReceiver | null>(
     `/integration-endpoints/${id}/webhook-receiver`, { signal }
+  ),
+  previewWebhookFilter: (id: number, input: WebhookFilterEvent & { provider: WebhookReceiver["provider"]; filter: WebhookFilter | null }, signal?: AbortSignal) =>
+    api<WebhookFilterResult & { reason: string }>(`/integration-endpoints/${id}/webhook-receiver/preview`, {
+      method: "POST", body: JSON.stringify(input), signal
+    }),
+  listWebhookReceipts: (id: number, signal?: AbortSignal) => api<WebhookReceiptDetail[]>(
+    `/integration-endpoints/${id}/webhook-receiver/receipts`, { signal }
   ),
   configureWebhookReceiver: (id: number, input: WebhookReceiverInput) => api<WebhookReceiver>(
     `/integration-endpoints/${id}/webhook-receiver`, { method: "PUT", body: JSON.stringify(input) }

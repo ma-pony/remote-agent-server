@@ -1,3 +1,5 @@
+import type { WebhookFilter } from "./webhook-filter.js";
+
 export type IntegrationTaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 export type IntegrationConversationStatus = "active" | "ended";
 export type WebhookDeliveryStatus = "pending" | "delivering" | "succeeded" | "failed";
@@ -56,15 +58,34 @@ export type WebhookProviderDefinition = {
   name: string;
   authModes: WebhookAuthMode[];
   secretHint: { zh: string; en: string };
+  filterFields: Array<{ path: string; label: { zh: string; en: string } }>;
+  filterPresets: Array<{ id: string; name: { zh: string; en: string }; filter: WebhookFilter }>;
 };
 export type WebhookReceiver = {
   provider: WebhookProvider;
   authMode: WebhookAuthMode;
   enabled: boolean;
   encryptedSecret: string;
+  filter: WebhookFilter | null;
+  filterVersion: number;
 };
 export type WebhookReceiverDetail = Omit<WebhookReceiver, "encryptedSecret"> & { secretConfigured: true };
-export type WebhookReceiverInput = Omit<WebhookReceiver, "encryptedSecret"> & { secret?: string };
+export type WebhookReceiverInput = Omit<WebhookReceiver, "encryptedSecret" | "filter" | "filterVersion"> & {
+  secret?: string;
+  filter?: WebhookFilter | null;
+};
+export type WebhookReceipt = {
+  id: number;
+  provider: WebhookProvider;
+  deliveryId: string;
+  eventType: string;
+  fingerprint: string;
+  filterVersion: number;
+  decision: "accepted" | "ignored";
+  reason: "filter_matched" | "filter_not_matched" | "ping";
+  createdAt: string;
+};
+export type WebhookReceiptDetail = Omit<WebhookReceipt, "fingerprint"> & { taskId: number | null };
 
 export type IntegrationConversation = {
   id: number;

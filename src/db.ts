@@ -609,6 +609,22 @@ export const migrate = (
       encrypted_secret TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS integration_webhook_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      endpoint_id INTEGER NOT NULL REFERENCES integration_endpoints(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      delivery_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      fingerprint TEXT NOT NULL,
+      filter_version INTEGER NOT NULL,
+      decision TEXT NOT NULL CHECK (decision IN ('accepted', 'ignored')),
+      reason TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(endpoint_id, provider, delivery_id)
+    );
+    CREATE INDEX IF NOT EXISTS integration_webhook_receipts_recent
+    ON integration_webhook_receipts(endpoint_id, id DESC);
+
     CREATE TABLE IF NOT EXISTS integration_conversations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       endpoint_id INTEGER NOT NULL REFERENCES integration_endpoints(id),
@@ -812,6 +828,12 @@ export const migrate = (
     "total_tokens"
   ]) {
     if (!hasColumn("sessions", column)) db.exec(`ALTER TABLE sessions ADD COLUMN ${column} INTEGER`);
+  }
+  if (!hasColumn("integration_webhook_receivers", "filter_json")) {
+    db.exec("ALTER TABLE integration_webhook_receivers ADD COLUMN filter_json TEXT");
+  }
+  if (!hasColumn("integration_webhook_receivers", "filter_version")) {
+    db.exec("ALTER TABLE integration_webhook_receivers ADD COLUMN filter_version INTEGER NOT NULL DEFAULT 1");
   }
   if (!hasColumn("integration_tasks", "event_sequences_json")) {
     db.exec("ALTER TABLE integration_tasks ADD COLUMN event_sequences_json TEXT NOT NULL DEFAULT '{}'");

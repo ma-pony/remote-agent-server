@@ -261,9 +261,9 @@ POST /integration/v1/endpoints/:slug/webhook
 | GitHub | Payload URL and Secret; JSON and form `payload` are supported | HMAC-SHA256 over the original request body, using `X-Hub-Signature-256` |
 | GitLab | URL and generated Signing token (`whsec_` prefix), or Secret token for older versions; keep native JSON | `webhook-signature` HMAC-SHA256, or legacy `X-Gitlab-Token` |
 
-Each endpoint has one source platform. Separate GitHub and GitLab endpoints can share an Agent. Set the business instructions in the endpoint's fixed prompt, for example, “Review this code change and report your findings.” The event type and native JSON payload become the task message and use the existing Task persistence, queue, and execution flow. Each new delivery creates an independent Task and Session; PRs, MRs, and branches do not automatically share a Conversation.
+Each endpoint has one source platform. Separate GitHub and GitLab endpoints can share an Agent. Set the business instructions in the endpoint's fixed prompt, for example, “Review this code change and report your findings.” The event type and native JSON payload become the task message and use the existing Task persistence, queue, and execution flow. Each matching new delivery creates an independent Task and Session; PRs, MRs, and branches do not automatically share a Conversation.
 
-- Accepted business events return `202` with the existing Task response. GitHub `ping` returns `200` and `{"status":"ignored","reason":"ping"}` without creating a task. GitLab test deliveries do create tasks.
+- Accepted business events return `202` with the existing Task response. GitHub `ping` returns `200` and `{"status":"ignored","reason":"ping"}` without creating a task. GitLab test deliveries also pass through filtering and create tasks when matched.
 - The generated `requestId` is `github:<X-GitHub-Delivery>` or `gitlab:<delivery ID>`. GitLab delivery headers are checked in order: `webhook-id`, `Idempotency-Key`, then `X-Gitlab-Webhook-UUID`. Repeating an ID with the same input within one endpoint returns the original Task; different input returns `409 idempotency_conflict`.
 - A parameter mapping's request field is a payload path for this entry point, such as GitLab's `project.id` or `object_attributes.iid`, or GitHub's `repository.full_name`. String, number, and boolean values become strings. Fixed mappings still work. Missing required parameters reject task admission.
 - Missing receiver configuration or invalid credentials returns `401 invalid_webhook_credentials`; a disabled receiver or endpoint returns `403 endpoint_disabled`; missing event type or delivery ID, or an invalid JSON object, returns `400 invalid_webhook_request`. The default request-body limit remains 1 MiB; larger requests return `413`.
@@ -280,6 +280,41 @@ The management API uses the server `API_TOKEN`. `GET /api/integration-webhook-pr
   "secret": "<same Secret as the platform>"
 }
 ```
+
+#### Event filters
+
+In **Receive events**, apply the **MR / PR review events** preset, then add project, author, or label conditions. “Match all” means AND; “Match any” means OR. Groups can be nested. The preset selects open, non-draft requests on creation, reopening, new commits, or becoming ready for review. Ordinary GitLab title, label, or approval updates do not trigger this preset; unknown draft status is also rejected. Adding a label alone does not trigger a review; adjust the action conditions if that behavior is required. The preset does not classify authors; add account rules separately.
+
+For example, a GitLab MR whose labels contain `CodeReview` and whose author is not account ID `900`:
+
+```json
+{
+  "all": [
+    { "field": "eventType", "op": "eq", "value": "Merge Request Hook" },
+    { "field": "payload.labels.*.title", "op": "contains", "value": "CodeReview" },
+    { "field": "payload.object_attributes.author_id", "op": "neq", "value": 900 }
+  ]
+}
+```
+
+Save this object as the receiver's `filter` field. GitHub labels use `payload.pull_request.labels.*.name`, and the author login is `payload.pull_request.user.login`. Native GitLab MR events identify the author through `payload.object_attributes.author_id`; `payload.user.id` is the event actor and must not substitute for the author. GitHub's `payload.sender.id` is also the actor. To review only developer MRs, prefer an author ID allowlist with `in: [101,102]`, or maintain a complete agent ID denylist with `not_in`. Replace example IDs with actual account IDs.
+
+- Fields must be `eventType` or dot-separated paths beginning with `payload.`. A path may contain one `*` to project array elements, such as `labels.*.title`. Filters cannot read headers or execute scripts.
+- `eq` / `neq` compare a scalar; `in` / `not_in` check a scalar against a configured list; `contains` checks whether an event array contains a configured scalar, useful for labels; `exists` takes a boolean requiring presence or absence. A wildcard field is present when at least one element has the selected field; empty arrays or only missing fields count as absent. Strings are exact and case-sensitive.
+- No coercion: numeric `101` differs from string `"101"`. Missing fields and type mismatches fail comparisons, including negative comparisons. `null` is present; empty arrays never match `contains`.
+- Limits: 50 rule nodes, 6 nesting levels, non-empty groups, 100 same-type scalars per list, 256-character field paths, and 1024-character comparison strings. Invalid rules return `400 invalid_request` and preserve the previous configuration.
+- Omitting `filter` on a same-provider update preserves it; `null` clears it. Switching provider while omitting `filter` clears the rules. The management UI clears the current filter draft on a platform switch; configure rules for the new platform before saving. Configuration reads include `filter` and `filterVersion`; rule or provider changes increment the version. Existing receivers default to no filtering.
+- Non-matches return `200 {"status":"ignored","reason":"filter_not_matched"}`, without a Task, Session, Run, or model call. Failed authentication creates no receipt.
+- Each authenticated, valid delivery records one filter decision. Retries with the same provider, endpoint, and delivery ID keep that decision; changing rules never admits previously ignored deliveries. Changed event content returns `409 idempotency_conflict`; admitted deliveries return the original task. Authentication and enabled status are still checked on every request.
+
+**Preview filter** evaluates current unsaved rules and explains individual conditions. It verifies no platform signature, creates no task, and stores no sample payload. **Recent receipts** refreshes the latest 30 records on demand, showing provider, event type, delivery ID, rule version, decision, timestamp, and Task link. If filtering passed but admission failed, the record indicates that a platform retry is needed. Receipts contain neither raw payloads nor authentication data; decisions remain until endpoint deletion, including after Session storage cleanup.
+
+Management API:
+
+- `POST /api/integration-endpoints/:id/webhook-receiver/preview` accepts `{ "provider": "gitlab", "eventType": "Merge Request Hook", "payload": {}, "filter": null }` and returns `{ "matched": true, "reason": "filter_matched", "checks": [] }`. A successful preview does not guarantee authentication, enabled status, or valid parameters on actual delivery.
+- `GET /api/integration-endpoints/:id/webhook-receiver/receipts` returns the latest 30 decisions and requires management authentication. The provider catalog also exposes `filterFields` suggestions and `filterPresets`.
+
+Filtering only controls task admission. Separate delivery IDs for the same MR revision are not deduplicated automatically; the review Skill / Agent remains responsible for comment deduplication and publication.
 
 Open the endpoint's Tasks tab to inspect execution. Outgoing webhooks still deliver task progress and results. Posting comments back to GitHub or GitLab requires separately configured Agent tools and permissions.
 

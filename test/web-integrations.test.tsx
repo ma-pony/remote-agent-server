@@ -104,11 +104,46 @@ it("原生 Webhook 页面配置平台 Secret，成功后清空且切换平台需
   fireEvent.change(screen.getByLabelText("Webhook Secret"), { target: { value: "native-platform-secret" } });
   fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
   await screen.findByText("接收配置已保存");
-  expect(saved).toEqual({ provider: "gitlab", authMode: "token", enabled: true, secret: "native-platform-secret" });
+  expect(saved).toEqual({ provider: "gitlab", authMode: "token", enabled: true, secret: "native-platform-secret", filter: null });
   expect(screen.getByLabelText("Webhook Secret")).toHaveValue("");
   expect(screen.getByRole("button", { name: "保存接收配置" })).toBeEnabled();
   fireEvent.change(provider, { target: { value: "github" } });
   expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+});
+
+it.each([
+  ["gitlab", "github", "payload.object_attributes.author_id"],
+  ["github", "gitlab", "payload.pull_request.user.id"]
+])("切换来源平台 %s → %s 时清除旧平台规则", async (initialProvider, nextProvider, authorField) => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/receiver`);
+  let saved: Record<string, unknown> | null = null;
+  const receiver = { provider: initialProvider, authMode: "signature", enabled: true, secretConfigured: true,
+    filter: { field: authorField, op: "neq", value: 900 }, filterVersion: 1 };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === "/api/integration-webhook-providers") return jsonResponse(["github", "gitlab"].map((id) => ({
+      id, name: id, authModes: ["signature"], secretHint: { zh: "平台 Secret", en: "Platform secret" },
+      filterFields: [], filterPresets: []
+    })));
+    if (url.endsWith("/webhook-receiver")) {
+      if (init?.method === "PUT") {
+        saved = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return jsonResponse({ ...receiver, ...saved, filterVersion: 2 });
+      }
+      return jsonResponse(receiver);
+    }
+    throw new Error(`Unexpected request ${url}`);
+  }));
+  render(<App />);
+  expect(await screen.findByLabelText("字段路径")).toHaveValue(authorField);
+  fireEvent.change(screen.getByLabelText("来源平台"), { target: { value: nextProvider } });
+  expect(screen.queryByLabelText("字段路径")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Webhook Secret"), { target: { value: "replacement-platform-secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
+  await screen.findByText("接收配置已保存");
+  expect(saved).toMatchObject({ provider: nextProvider, filter: null });
 });
 
 it("原生 Webhook 页面加载失败可重试，保存失败保留输入并显示错误", async () => {
@@ -139,6 +174,77 @@ it("原生 Webhook 页面加载失败可重试，保存失败保留输入并显�
   await screen.findByText("配置保存失败");
   expect(secretInput).toHaveValue("replacement-secret");
   expect(screen.getByRole("button", { name: "保存接收配置" })).toBeEnabled();
+});
+
+it("筛选编辑器校验条件、预览草稿并保存，接收记录解释忽略原因", async () => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/receiver`);
+  let saved: Record<string, unknown> | null = null;
+  let failPreview = false;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === "/api/integration-webhook-providers") return jsonResponse([{
+      id: "gitlab", name: "GitLab", authModes: ["token"], secretHint: { zh: "Secret", en: "Secret" },
+      filterFields: [{ path: "payload.object_attributes.author_id", label: { zh: "MR 作者 ID", en: "MR author ID" } }],
+      filterPresets: [{ id: "code-review", name: { zh: "MR / PR 审核事件", en: "MR / PR review events" },
+        filter: { all: [{ field: "eventType", op: "eq", value: "Merge Request Hook" }] } }]
+    }]);
+    if (url.endsWith("/webhook-receiver/preview")) {
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        provider: "gitlab", eventType: "Merge Request Hook", payload: { object_kind: "merge_request" },
+        filter: { all: [{ field: "eventType", op: "eq", value: "Merge Request Hook" },
+          { field: "payload.object_attributes.author_id", op: "neq", value: 900 },
+          { field: "payload.labels.*.title", op: "contains", value: "CodeReview" }] }
+      });
+      return failPreview ? jsonResponse({ error: { message: "预览暂不可用" } }, 503)
+        : jsonResponse({ matched: false, reason: "filter_not_matched", checks: [
+          { path: "$.all.1", field: "payload.object_attributes.author_id", op: "in", matched: false, reason: "missing_field" }
+        ] });
+    }
+    if (url.endsWith("/webhook-receiver/receipts")) return jsonResponse([
+      { id: 1, provider: "gitlab", deliveryId: "event-bot", eventType: "Merge Request Hook", decision: "ignored",
+        reason: "filter_not_matched", filterVersion: 2, taskId: null, createdAt: now }
+    ]);
+    if (url.endsWith("/webhook-receiver")) {
+      if (init?.method === "PUT") saved = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return jsonResponse({ provider: "gitlab", authMode: "token", enabled: true, secretConfigured: true,
+        filter: saved?.filter ?? null, filterVersion: saved === null ? 1 : 2 });
+    }
+    throw new Error(`Unexpected request ${url}`);
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "应用 MR / PR 审核事件" }));
+  fireEvent.click(screen.getByRole("button", { name: "添加条件" }));
+  const fields = screen.getAllByLabelText("字段路径");
+  fireEvent.change(fields[1]!, { target: { value: "payload.object_attributes.author_id" } });
+  fireEvent.change(screen.getAllByLabelText("比较方式")[1]!, { target: { value: "neq" } });
+  const value = screen.getAllByLabelText("比较值（JSON）")[1]!;
+  fireEvent.change(value, { target: { value: "[" } });
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "预览筛选" })).toBeDisabled();
+  fireEvent.change(value, { target: { value: "900" } });
+  fireEvent.click(screen.getByRole("button", { name: "添加条件" }));
+  fireEvent.change(screen.getAllByLabelText("字段路径")[2]!, { target: { value: "payload.labels.*.title" } });
+  fireEvent.change(screen.getAllByLabelText("比较方式")[2]!, { target: { value: "contains" } });
+  fireEvent.change(screen.getAllByLabelText("比较值（JSON）")[2]!, { target: { value: '"CodeReview"' } });
+  fireEvent.change(screen.getByLabelText("预览事件类型"), { target: { value: "Merge Request Hook" } });
+  fireEvent.change(screen.getByLabelText("示例事件载荷（JSON）"), { target: { value: '{"object_kind":"merge_request"}' } });
+  fireEvent.click(screen.getByRole("button", { name: "预览筛选" }));
+  expect(await screen.findByText("不会创建任务" )).toBeVisible();
+  expect(await screen.findByText(/payload.object_attributes.author_id · 字段缺失/)).toBeVisible();
+  failPreview = true;
+  fireEvent.click(screen.getByRole("button", { name: "预览筛选" }));
+  expect(await screen.findByText("预览暂不可用")).toBeVisible();
+  expect(screen.queryByText("不会创建任务")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
+  await screen.findByText("接收配置已保存");
+  expect(saved).toMatchObject({ filter: { all: [{ field: "eventType", op: "eq", value: "Merge Request Hook" },
+    { field: "payload.object_attributes.author_id", op: "neq", value: 900 },
+          { field: "payload.labels.*.title", op: "contains", value: "CodeReview" }] } });
+  fireEvent.click(screen.getByRole("button", { name: "刷新接收记录" }));
+  expect(await screen.findByText("event-bot")).toBeVisible();
+  expect(screen.getByText("未命中筛选规则")).toBeVisible();
 });
 
 it("接入端点列表分别展示排队和运行任务数", async () => {

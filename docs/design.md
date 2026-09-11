@@ -170,19 +170,27 @@ Agent 的 `modelPolicy` 有三种格式：
 
 `WebhookIngress` 是 GitHub 和 GitLab 共用的接收组件。公开入口 `/integration/v1/endpoints/:slug/webhook` 在独立 Fastify 作用域内保留原始请求体，支持 JSON 和 GitHub 表单 `payload`；其他 API 的 JSON 解析不变。端点的接收器配置保存在 `integration_webhook_receivers`，一端点一条配置，Secret 通过现有 SecretStore 加密，删除端点时级联删除。
 
-接收顺序是：查找端点和来源配置 → 使用原始请求体验证 GitHub HMAC-SHA256 或校验 GitLab 签名 / Token → 检查启用状态 → 校验事件类型、投递 ID 和 JSON 对象 → 将载荷路径映射成已声明参数 → 调用 `IntegrationCoordinator.submit`。GitHub `ping` 只返回确认。正常事件使用带平台前缀的投递 ID 作为 `requestId`，以事件类型和默认载荷作为消息，复用现有事务入库、幂等锁、Session 创建、队列、事件投影及重启恢复。接收层不另建任务队列；返回 `202` 表示 Task 已持久化。
+接收顺序是：查找端点和来源配置 → 使用原始请求体验证 GitHub HMAC-SHA256 或校验 GitLab 签名 / Token → 检查启用状态 → 校验事件类型、投递 ID 和 JSON 对象 → 查重 / 评估并保存筛选决定 → 命中时将载荷路径映射成已声明参数 → 调用 `IntegrationCoordinator.submit`。GitHub `ping` 只返回确认。正常事件使用带平台前缀的投递 ID 作为 `requestId`，以事件类型和默认载荷作为消息，复用现有事务入库、幂等锁、Session 创建、队列、事件投影及重启恢复。接收层不另建任务队列；返回 `202` 表示 Task 已持久化。
 
-每个新投递对应独立 Task/Session，不推断 PR/MR 会话。重复 ID 携带相同输入复用原 Task，不同输入返回幂等冲突。GitLab 优先使用 `webhook-id`，其次 `Idempotency-Key`，最后 `X-Gitlab-Webhook-UUID`。参数映射只读取载荷自身的点分路径，标量值转换为字符串；必填参数验证继续由现有 Endpoint Manager 负责。
+每个命中规则的新投递对应独立 Task/Session，不推断 PR/MR 会话。重复 ID 携带相同输入复用原 Task，不同输入返回幂等冲突。GitLab 优先使用 `webhook-id`，其次 `Idempotency-Key`，最后 `X-Gitlab-Webhook-UUID`。参数映射只读取载荷自身的点分路径，标量值转换为字符串；必填参数验证继续由现有 Endpoint Manager 负责。
 
 GitLab 配置为 `authMode: signature` 时校验 Signing token（`whsec_` 前缀）：Base64 解码密钥，对 `webhook-id.webhook-timestamp.原始请求体` 计算 HMAC-SHA256，再与 `webhook-signature` 中的候选签名作常量时间比较，并限制时间偏差为 5 分钟。此模式不允许明文 Token 降级；`authMode: token` 明确使用 `X-Gitlab-Token` 校验，Secret 文本不决定认证策略。
 
-管理 API 仅返回来源、验证方式、启用状态和 `secretConfigured`。省略 Secret 的更新保留原密文，切换平台或验证方式需要新 Secret。停用接收器只影响后续入站请求，已入库任务继续由现有调度器负责。原生载荷作为用户输入进入 Task 消息及其既有用户消息事件；鉴权头和接收 Secret 不进入消息或公开事件。
+管理 API 返回来源、验证方式、启用状态、`secretConfigured`、`filter` 和 `filterVersion`。省略 Secret 的更新保留原密文，切换平台或验证方式需要新 Secret。停用接收器只影响后续入站请求，已入库任务继续由现有调度器负责。原生载荷作为用户输入进入 Task 消息及其既有用户消息事件；鉴权头和接收 Secret 不进入消息或公开事件。
+
+筛选配置存于接收器的 `filter_json` / `filter_version`，旧库启动迁移默认不筛选。每个有效投递在 `integration_webhook_receipts` 中以 `(endpoint_id, provider, delivery_id)` 唯一保存首次决定、事件类型、消息 SHA-256、规则版本和时间；不另存原始载荷或秘密。认证、启用检查、解析失败不创建记录。同一 ID 的内容指纹冲突返回 409；忽略结果返回 200，已入库结果返回 202。版本只在平台或规则改变时递增，新的规则只影响新的投递。
+
+决定写入发生在 Session I/O 前，忽略事件至此结束。放行事件通过现有 Coordinator 入库；同进程的重复投递共享正在进行的入队 Promise。两阶段通过现有确定性 `requestId` 恢复：进程在创建 Task 前退出，平台重试沿用已保存决定再次尝试；Task 已提交时退出，重试直接返回该 Task，不重新解析参数或触发运行。接收记录通过该键关联 Task，无需额外回填事务。入库失败保留放行决定，管理页显示尚未入队并等待平台重试；不增加后台入站重试队列。升级前已存在的原生 Task 优先保留其放行事实。
+
+决定元数据跟随端点删除级联清理，不跟随 Session 存储清理；查询最近 30 条，不返回指纹、原始载荷、规则比较值或认证信息。预览是受管理鉴权保护的纯操作，可检查未保存规则并返回条件路径、匹配状态及缺失 / 类型 / 值不符原因。接收 ID 去重不等于 MR 版本或评论去重，后者属于具体审核流程。
 
 ### 6.5 Webhook 扩展边界
 
 - 路由只负责 HTTP 传输、原始字节、管理鉴权、输入校验和错误映射。
 - `webhook-adapters/` 中的 `WebhookAdapter` 负责来源协议：声明支持的验证方式、校验 Secret、验证请求、输出统一的事件类型、投递 ID 和载荷；连接测试可返回忽略原因。适配器不访问数据库、不创建 Session、不启动 Agent。
-- `WebhookIngress` 负责接收配置、已声明参数提取和调用现有 Coordinator。Task 的事务、幂等、Session、并发、取消和恢复由原有组件统一管理。
+- `webhook-filter.ts` 定义受限规则契约和纯函数求值器，前后端共用验证；`all/any` 组合标量比较、存在判断及数组包含判断，缺失和类型错误不会通过负向比较。字段路径只读事件与载荷自有属性，允许一次数组通配。预览与入站使用同一求值器。
+- 适配器目录同时声明字段提示与审核预设，UI 不硬编码平台规则。
+- `WebhookIngress` 负责接收配置、筛选决定、已声明参数提取和调用现有 Coordinator。Task 的事务、幂等、Session、并发、取消和恢复由原有组件统一管理。
 
 新增来源时实现适配器、加入静态注册表和来源类型，并添加原生请求测试。管理平台目录从注册表生成，前后端共用接收配置类型；数据库的来源与验证方式列保存字符串，具体支持范围由适配器校验，因此新增来源不需要新增业务表或修改 Task 调度。这里不提供运行时加载插件、自定义脚本或通用工作流引擎。
 

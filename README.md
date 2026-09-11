@@ -261,16 +261,16 @@ POST /integration/v1/endpoints/:slug/webhook
 | GitHub | Payload URL、Secret；支持 JSON 和表单 `payload` | 原始请求体的 `X-Hub-Signature-256` HMAC-SHA256 签名 |
 | GitLab | URL、生成的 Signing token（`whsec_` 开头）；旧版可用 Secret token；保留默认 JSON | `webhook-signature` HMAC-SHA256 签名，或旧版 `X-Gitlab-Token` |
 
-每个端点配置一个来源平台；可分别创建 GitHub 和 GitLab 端点并绑定同一 Agent。业务规则写在端点的固定提示中，例如“检查这次代码变更并给出审查结论”。事件类型和原生 JSON 载荷作为任务正文，进入现有 Task 入库、排队和执行流程。每个新投递创建独立 Task 和 Session；不会自动按 PR、MR 或分支续接 Conversation。
+每个端点配置一个来源平台；可分别创建 GitHub 和 GitLab 端点并绑定同一 Agent。业务规则写在端点的固定提示中，例如“检查这次代码变更并给出审查结论”。事件类型和原生 JSON 载荷作为任务正文，进入现有 Task 入库、排队和执行流程。每个命中筛选规则的新投递创建独立 Task 和 Session；不会自动按 PR、MR 或分支续接 Conversation。
 
-- 验证并入库成功返回 `202` 和现有 Task 响应。GitHub `ping` 返回 `200`、`{"status":"ignored","reason":"ping"}`，不创建任务。GitLab 的测试投递会正常创建任务。
+- 验证并入库成功返回 `202` 和现有 Task 响应。GitHub `ping` 返回 `200`、`{"status":"ignored","reason":"ping"}`，不创建任务。GitLab 的测试投递也经过筛选，命中时创建任务。
 - `requestId` 自动生成为 `github:<X-GitHub-Delivery>` 或 `gitlab:<投递ID>`。GitLab 按 `webhook-id`、`Idempotency-Key`、`X-Gitlab-Webhook-UUID` 的顺序读取投递 ID。同一端点重投相同 ID、相同输入返回原 Task；输入不同返回 `409 idempotency_conflict`。
 - 参数映射的“请求字段”在此入口中表示载荷路径，例如 GitLab 的 `project.id`、`object_attributes.iid`，或 GitHub 的 `repository.full_name`。字符串、数字、布尔值转换成字符串；固定值映射继续适用。缺少必填参数会拒绝入库。
 - 未配置接收器或凭证错误返回 `401 invalid_webhook_credentials`；接收器或端点停用返回 `403 endpoint_disabled`；缺少事件类型、投递 ID 或无效 JSON 对象返回 `400 invalid_webhook_request`。请求体沿用服务默认的 1 MiB 上限，超出返回 `413`。
 - `authMode` 必填：GitHub 使用 `signature`；GitLab 可选择 `signature`（Signing token）或 `token`（Secret token），验证方式由配置决定。签名模式下 GitLab 的 `whsec_` Signing token 按原生标准校验投递 ID、时间戳和原始请求体；接受多个候选签名，时间戳与服务时间相差不得超过 5 分钟。该模式必须带有效签名，不能用明文 Token 代替。Token 模式支持任意合法 Secret token，包括以 `whsec_` 开头的值。
 - Secret 加密保存，读取配置只返回 `secretConfigured`。更新时省略 `secret` 保留原值；切换平台或验证方式必须提供新 Secret。接收 Secret 与外部 Task API 的 Endpoint Token、事件回调签名密钥分别管理。
 
-管理 API 使用服务器 `API_TOKEN`。`GET /api/integration-webhook-providers` 返回已注册平台、验证方式和配置提示，供管理页面使用。接收配置接口：`GET /api/integration-endpoints/:id/webhook-receiver` 返回配置或 `null`；`PUT` 在同一地址保存以下配置：
+管理 API 使用服务器 `API_TOKEN`。`GET /api/integration-webhook-providers` 返回已注册平台、验证方式、配置提示、筛选字段及预设，供管理页面使用。接收配置接口：`GET /api/integration-endpoints/:id/webhook-receiver` 返回配置或 `null`；`PUT` 在同一地址保存以下配置：
 
 ```json
 {
@@ -280,6 +280,41 @@ POST /integration/v1/endpoints/:slug/webhook
   "secret": "<与平台设置一致的 Secret>"
 }
 ```
+
+#### 事件筛选
+
+在“接收事件”中应用 **MR / PR 审核事件** 预设，再添加项目、作者、标签等条件。选择“满足全部条件”表示 AND，“满足任一条件”表示 OR；条件组可以嵌套。预设选择非草稿且仍开启的请求：新建、重新开启、新提交或转为可审核。GitLab 的普通标题、标签、审批等更新不会触发该预设；未知草稿状态也不放行。添加标签不会单独触发审核；若需要该行为，调整动作条件。预设不判断作者身份，需要自行添加账号规则。
+
+例如，GitLab MR 的 labels 中包含 `CodeReview`，并且作者不是 ID `900` 的账号：
+
+```json
+{
+  "all": [
+    { "field": "eventType", "op": "eq", "value": "Merge Request Hook" },
+    { "field": "payload.labels.*.title", "op": "contains", "value": "CodeReview" },
+    { "field": "payload.object_attributes.author_id", "op": "neq", "value": 900 }
+  ]
+}
+```
+
+以上对象作为接收配置的 `filter` 字段保存。GitHub 标签路径为 `payload.pull_request.labels.*.name`；作者账号可用 `payload.pull_request.user.login`。GitLab 原生 MR 事件使用 `payload.object_attributes.author_id`；`payload.user.id` 是事件操作者，不能替代作者。GitHub 的 `payload.sender.id` 同样是操作者。只审核开发人员 MR 时，建议为作者 ID 配置 `in: [101,102]` 白名单；也可用 `not_in` 维护完整的 Agent ID 黑名单。示例 ID 需替换为实际账号 ID。
+
+- 字段只允许 `eventType` 或 `payload.` 开头的点分路径；一个路径最多允许一个 `*`，用于提取数组元素，如 `labels.*.title`。不读取请求头或执行脚本。
+- `eq` / `neq` 比较单个标量；`in` / `not_in` 判断标量是否属于配置列表；`contains` 判断事件数组是否包含配置标量，适合标签；`exists` 的布尔值指定字段必须存在或缺失，通配路径以至少一个元素存在目标字段为准，空数组或所有元素均缺失该字段时视为不存在。字符串精确匹配、区分大小写。
+- 不做类型转换：数字 `101` 不等于字符串 `"101"`。字段缺失或类型不符时比较不匹配，负向比较也不放行。`null` 是已存在的值，空数组不能命中 `contains`。
+- 规则最多 50 个节点、6 层嵌套，组不能为空；列表最多 100 个同类型标量；字段路径最多 256 字符，比较字符串最多 1024 字符。无效规则返回 `400 invalid_request`，保留原配置。
+- 同平台更新省略 `filter` 保留规则，传 `null` 清除规则；切换平台且省略 `filter` 时清除规则。管理界面切换平台会清除当前筛选草稿，保存前应为新平台重新设置规则。读取配置返回 `filter` 和 `filterVersion`，规则或平台变化时版本递增。旧配置默认不筛选。
+- 未命中返回 `200 {"status":"ignored","reason":"filter_not_matched"}`，不创建 Task、Session 或 Run，也不调用模型。认证失败不写接收记录。
+- 每个已认证且有效的投递保存一次筛选决定。相同平台、端点、投递 ID 的重试沿用首次决定；修改规则不会重新放行已忽略事件。事件内容变化返回 `409 idempotency_conflict`，已接收事件重试返回原任务。认证及启用状态仍在每次请求时检查。
+
+**预览筛选**使用当前尚未保存的规则，展示是否命中及逐条条件原因，不验证平台签名、不创建任务、不保存示例载荷。**最近接收记录**按需刷新最近 30 条，展示平台、事件类型、投递 ID、规则版本、筛选决定、时间和关联 Task。筛选通过但入库失败时显示等待平台重试；记录不包含原始载荷或认证信息。已保存的决定保留到端点删除，不随 Session 存储清理删除。
+
+管理 API：
+
+- `POST /api/integration-endpoints/:id/webhook-receiver/preview`，请求为 `{ "provider": "gitlab", "eventType": "Merge Request Hook", "payload": {}, "filter": null }`，返回 `{ "matched": true, "reason": "filter_matched", "checks": [] }`；预览通过仍不保证真实投递通过认证、启用状态和参数验证。
+- `GET /api/integration-endpoints/:id/webhook-receiver/receipts`，返回最近 30 条筛选记录；需要管理鉴权。平台目录同时提供 `filterFields` 字段提示和 `filterPresets` 预设。
+
+筛选只控制是否启动任务；不同投递 ID 的相同 MR 版本不会自动去重，审核评论去重和写回仍由审核 Skill / Agent 负责。
 
 接收成功后在端点的“任务”页查看执行情况。事件回调仍用于向外发送任务进度和结果；自动写回 GitHub/GitLab 评论需要另行给 Agent 配置相应工具和权限。
 
