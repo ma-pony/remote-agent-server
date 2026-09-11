@@ -522,6 +522,7 @@ export const migrate = (
       status TEXT NOT NULL CHECK (status IN ('idle', 'running')),
       provider_session_id TEXT,
       storage_cleaned_at TEXT,
+      pending_operation TEXT CHECK (pending_operation IN ('cleanup', 'delete', 'reset')),
       workspace_path TEXT NOT NULL UNIQUE,
       project_environment_revision_id INTEGER REFERENCES project_environment_revisions(id),
       instructions_snapshot TEXT NOT NULL DEFAULT '',
@@ -733,6 +734,10 @@ export const migrate = (
 
   const hasColumn = (table: string, column: string): boolean =>
     (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).some((item) => item.name === column);
+
+  if (!hasColumn("sessions", "pending_operation")) {
+    db.exec("ALTER TABLE sessions ADD COLUMN pending_operation TEXT CHECK (pending_operation IN ('cleanup', 'delete', 'reset'))");
+  }
 
   if (!hasColumn("system_settings", "run_timeout_minutes")) {
     db.exec("ALTER TABLE system_settings ADD COLUMN run_timeout_minutes INTEGER NOT NULL DEFAULT 60 CHECK (run_timeout_minutes BETWEEN 1 AND 1440)");

@@ -23,7 +23,7 @@ export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
   }) {}
 
   start(): void {
-    if (this.stopped || this.timer !== undefined || this.retentionMs() === 0 && this.dependencies.runtimeSettings === undefined) return;
+    if (this.stopped || this.timer !== undefined) return;
     void this.runCleanup().catch((error: unknown) => (this.dependencies.onError ?? console.error)(error));
     this.timer = setInterval(() => {
       void this.runCleanup().catch((error: unknown) => (this.dependencies.onError ?? console.error)(error));
@@ -33,7 +33,6 @@ export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
 
   runCleanup(): Promise<void> {
     const retentionMs = this.retentionMs();
-    if (retentionMs === 0) return Promise.resolve();
     this.running ??= this.cleanup(retentionMs).finally(() => { this.running = undefined; });
     return this.running;
   }
@@ -46,10 +45,11 @@ export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
 
   private async cleanup(retentionMs: number): Promise<void> {
     const now = this.dependencies.now?.() ?? new Date();
-    const cutoff = new Date(now.getTime() - retentionMs).toISOString();
+    // Disabling retention prevents new claims but still completes already admitted cleanup.
+    const cutoff = retentionMs === 0 ? "" : new Date(now.getTime() - retentionMs).toISOString();
     for (const id of this.dependencies.sessionManager.listExpiredIds(cutoff)) {
       try {
-        await this.dependencies.sessionManager.cleanupStorage(id, now.toISOString());
+        await this.dependencies.sessionManager.cleanupStorage(id, cutoff, now.toISOString());
       } catch (error) {
         if (error instanceof SessionManagerError && (error.code === "session_not_found" || error.code === "session_busy")) {
           continue;

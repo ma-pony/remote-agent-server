@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -289,6 +289,58 @@ describe("RunRepository", () => {
     expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(runningSession.id)).toEqual({ status: "idle" });
     expect(db.prepare("SELECT status FROM sessions WHERE id = ?").get(queuedSession.id)).toEqual({ status: "running" });
     expect(repository.listQueued()).toMatchObject([{ sessionId: queuedSession.id, status: "queued" }]);
+    db.close();
+  });
+
+  it("重复重启只在中断 Run 时更新所属 Session 的最后活动时间", () => {
+    const { db, seed } = createTestDatabase();
+    const runningSession = seed.session();
+    const queuedSession = seed.session();
+    const repository = new RunRepository({ db });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-08-20T00:00:00.000Z"));
+      const running = repository.create({ sessionId: runningSession.id, input: "interrupted" });
+      repository.markRunning(running.id);
+      const queued = repository.create({ sessionId: queuedSession.id, input: "waiting" });
+
+      vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+      repository.recoverAfterRestart();
+      vi.setSystemTime(new Date("2026-08-25T00:00:00.000Z"));
+      repository.recoverAfterRestart();
+
+      expect(db.prepare("SELECT status, updated_at FROM sessions WHERE id = ?").get(runningSession.id)).toEqual({
+        status: "idle",
+        updated_at: "2026-08-24T00:00:00.000Z"
+      });
+      expect(repository.get(running.id)).toMatchObject({
+        status: "failed", error: "server_restarted", finishedAt: "2026-08-24T00:00:00.000Z"
+      });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM events WHERE run_id = ? AND type = 'error'").get(running.id))
+        .toEqual({ count: 1 });
+      expect(db.prepare("SELECT status, updated_at FROM sessions WHERE id = ?").get(queuedSession.id)).toEqual({
+        status: "running",
+        updated_at: "2026-08-20T00:00:00.000Z"
+      });
+      expect(repository.get(queued.id)).toMatchObject({ status: "queued", error: null, finishedAt: null });
+    } finally {
+      vi.useRealTimers();
+      db.close();
+    }
+  });
+
+  it("重启恢复保留空闲和已清理 Session 的原始活动时间", () => {
+    const { db, seed } = createTestDatabase();
+    const idleSession = seed.session();
+    const cleanedSession = seed.session();
+    seed.run(idleSession.id, "succeeded");
+    db.prepare("UPDATE sessions SET storage_cleaned_at = ? WHERE id = ?")
+      .run("2026-08-20T00:00:00.000Z", cleanedSession.id);
+    const before = db.prepare("SELECT * FROM sessions ORDER BY id").all();
+
+    new RunRepository({ db }).recoverAfterRestart();
+
+    expect(db.prepare("SELECT * FROM sessions ORDER BY id").all()).toEqual(before);
     db.close();
   });
 
@@ -970,6 +1022,39 @@ describe("Server startup and shutdown", () => {
     platform: "linux" as const,
     listen: async (app: FastifyInstance) => app.ready(),
     installSignalHandlers: false
+  });
+
+  it("启动派发 queued Run 前先完成中断的 Session 删除", async () => {
+    const root = mkdtempSync(join(tmpdir(), "remote-agent-maintenance-startup-"));
+    tempDirectories.push(root);
+    const databasePath = join(root, "server.sqlite3");
+    seedRestartDatabase(databasePath, root, false);
+    const workspacePath = join(root, "sessions", "3", "workspace");
+    mkdirSync(workspacePath, { recursive: true });
+    const db = openDatabase(databasePath);
+    db.prepare(`
+      INSERT INTO sessions (id, agent_id, title, status, pending_operation, workspace_path, created_at, updated_at)
+      VALUES (3, 1, 'Interrupted deletion', 'running', 'delete', ?, ?, ?)
+    `).run(workspacePath, "2026-08-12T00:00:00.000Z", "2026-08-12T00:00:00.000Z");
+    db.close();
+    const runtime = createFakeRuntime();
+    runtime.ensureSession = async () => {
+      const observer = openDatabase(databasePath);
+      try {
+        expect(observer.prepare("SELECT id FROM sessions WHERE id = 3").get()).toBeUndefined();
+        expect(existsSync(workspacePath)).toBe(false);
+      } finally {
+        observer.close();
+      }
+      return { providerSessionId: null };
+    };
+
+    const server = await startServer(startOptions(root, runtime, { run: async () => ({ stdout: "", stderr: "" }) }));
+    try {
+      await vi.waitFor(() => expect(server.runRepository.get(QUEUED_RUN_ID)?.status).toBe("succeeded"));
+    } finally {
+      await server.close();
+    }
   });
 
   it("按 Btrfs check → recovery → queued 调度 → listen 启动，且不重放旧 running 输入", async () => {

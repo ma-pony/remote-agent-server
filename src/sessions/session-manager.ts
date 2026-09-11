@@ -22,6 +22,7 @@ import {
   type ProviderSessionCleaner
 } from "../runtime/provider-session-cleaner.js";
 import { WorkspaceCreateError, type WorkspaceManager } from "../workspaces/workspace-manager.js";
+import { completeSessionMaintenance, finishSessionMaintenance, type SessionMaintenanceOperation } from "./session-maintenance.js";
 
 type SessionRow = {
   id: number;
@@ -140,6 +141,16 @@ const ENVIRONMENT_PREPARED_MARKER = ".project-environment-prepared-v1";
 const ENVIRONMENT_SNAPSHOT_MARKER = ".project-environment-snapshot-v2";
 const DEFAULT_PROJECT_PREPARE_TIMEOUT_MS = 30 * 60 * 1000;
 
+const cleanupIncompleteSession = async (db: Database.Database, workspaceManager: WorkspaceManager, id: number): Promise<void> => {
+  try {
+    await workspaceManager.deleteSession(id);
+  } catch (_error) {
+    // Keep the non-runnable record so the next recovery can retry workspace removal.
+    return;
+  }
+  db.prepare("DELETE FROM sessions WHERE id = ? AND workspace_path LIKE 'pending:%'").run(id);
+};
+
 /** Removes Session creations interrupted before their Workspace became ready. */
 export const recoverIncompleteSessions = async (
   db: Database.Database,
@@ -149,12 +160,7 @@ export const recoverIncompleteSessions = async (
     "SELECT id FROM sessions WHERE workspace_path LIKE 'pending:%' ORDER BY id"
   ).all() as Array<{ id: number }>;
   for (const { id } of incomplete) {
-    try {
-      await workspaceManager.deleteSession(id);
-    } catch (_error) {
-      // The incomplete database record must not become runnable; leftover files are harmless.
-    }
-    db.prepare("DELETE FROM sessions WHERE id = ? AND workspace_path LIKE 'pending:%'").run(id);
+    await cleanupIncompleteSession(db, workspaceManager, id);
   }
 };
 
@@ -163,6 +169,7 @@ export const recoverIncompleteSessions = async (
  */
 export class SessionManager {
   private readonly db: Database.Database;
+  private readonly maintenanceInProgress = new Set<number>();
   private readonly dataDir: string;
   private readonly agentManager: AgentManager;
   private readonly runtime: AgentRuntime;
@@ -234,7 +241,7 @@ export class SessionManager {
     try {
       workspace = await this.workspaceManager.createSession(id, revision.workspacePath);
     } catch (error) {
-      this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+      await cleanupIncompleteSession(this.db, this.workspaceManager, id);
       await this.cleanupEnvironmentRevisions(revision.projectEnvironmentId);
       if (error instanceof WorkspaceCreateError) throw error;
       throw new WorkspaceCreateError();
@@ -244,12 +251,7 @@ export class SessionManager {
       await mkdir(workspace.runtimePath, { recursive: true });
       await writeFile(join(workspace.runtimePath, ENVIRONMENT_SNAPSHOT_MARKER), "ready\n", "utf8");
     } catch (_error) {
-      this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
-      try {
-        await this.workspaceManager.deleteSession(id);
-      } catch (_cleanupError) {
-        // The preparation failure remains authoritative.
-      }
+      await cleanupIncompleteSession(this.db, this.workspaceManager, id);
       await this.cleanupEnvironmentRevisions(revision.projectEnvironmentId);
       throw new WorkspaceCreateError();
     }
@@ -262,12 +264,7 @@ export class SessionManager {
         this.mcpManager.insertSessionValuesInTransaction(id, mcpValues);
       });
     } catch (_error) {
-      this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
-      try {
-        await this.workspaceManager.deleteSession(id);
-      } catch (_rollbackError) {
-        // The database failure remains the primary error; rollback was still attempted.
-      }
+      await cleanupIncompleteSession(this.db, this.workspaceManager, id);
       await this.cleanupEnvironmentRevisions(revision.projectEnvironmentId);
       throw new SessionManagerError("session_create_failed");
     }
@@ -422,7 +419,9 @@ export class SessionManager {
   listExpiredIds(cutoff: string): number[] {
     const rows = this.db.prepare(`
       SELECT id FROM sessions
-      WHERE status = 'idle' AND storage_cleaned_at IS NULL AND updated_at < ?
+      WHERE storage_cleaned_at IS NULL
+        AND ((status = 'idle' AND pending_operation IS NULL AND updated_at < ?)
+          OR (status = 'running' AND pending_operation = 'cleanup'))
         AND NOT EXISTS (
           SELECT 1 FROM runs
           WHERE session_id = sessions.id AND status IN ('queued', 'running')
@@ -487,194 +486,135 @@ export class SessionManager {
    * Resets the Provider's persisted runtime state, then clears the recorded ID.
    */
   async resetProviderSession(id: number): Promise<Session> {
-    const session = this.get(id);
-    if (session === undefined) throw new SessionManagerError("session_not_found");
-    if (session.storageCleanedAt !== null) throw new SessionManagerError("session_storage_cleaned");
-
-    const agent = this.agentManager.get(session.agentId);
-    if (agent === undefined) throw new SessionManagerError("agent_not_found");
-    this.claimForReset(session.id);
-
-    try {
-      await this.runtime.reset({
-        sessionId: session.id,
-        agentId: agent.id,
-        provider: agent.provider,
-        workspacePath: session.workspacePath,
-        browserProfilePath: join(dirname(session.workspacePath), "browser"),
-        providerSessionId: session.providerSessionId,
-        instructions: session.instructionsSnapshot,
-        memory: readFileSync(join(this.dataDir, "agents", String(agent.id), "MEMORY.md"), "utf8"),
-        mcpServers: []
-      });
-    } catch (error) {
-      try {
-        this.releaseResetClaim(session.id, false);
-      } catch (releaseError) {
-        throw new SessionManagerError("runtime_reset_failed", {
-          cause: new AggregateError([error, releaseError], "Runtime reset and Session claim release failed")
-        });
-      }
-      throw new SessionManagerError("runtime_reset_failed", { cause: error });
-    }
-
-    try {
-      return this.releaseResetClaim(session.id, true);
-    } catch (error) {
-      throw new SessionManagerError("runtime_reset_failed", { cause: error });
-    }
-  }
-
-  /** Permanently removes an idle Session and every resource it owns. */
-  async delete(id: number): Promise<void> {
-    const session = this.get(id);
-    if (session === undefined) throw new SessionManagerError("session_not_found");
-    const revision = session.projectEnvironmentRevisionId === null
-      ? undefined
-      : this.projectEnvironmentStore.getRevision(session.projectEnvironmentRevisionId);
-    this.claimForDelete(id);
-
-    try {
-      await this.runtime.forgetSession(id);
-    } catch {
-      // Provider cleanup is best-effort and must not block deletion of local resources.
-    }
-
-    try {
-      const agent = this.agentManager.get(session.agentId);
-      if (agent !== undefined) {
-        await this.providerSessionCleaner.purge({
-          agentId: agent.id,
-          provider: agent.provider,
-          sessionId: session.id,
-          providerSessionId: session.providerSessionId
-        });
-      }
-    } catch {
-      // Provider cleanup is best-effort and must not block deletion of local resources.
-    }
-
-    try {
-      await this.workspaceManager.deleteSession(id);
-    } catch (error) {
-      this.releaseDeleteClaim(id, true, error);
-    }
-
-    try {
-      this.inImmediateTransaction(() => {
-        this.db.prepare(`
-          DELETE FROM webhook_deliveries
-          WHERE task_id IN (SELECT id FROM integration_tasks WHERE session_id = ?)
-        `).run(id);
-        this.db.prepare(`
-          DELETE FROM integration_task_events
-          WHERE task_id IN (SELECT id FROM integration_tasks WHERE session_id = ?)
-        `).run(id);
-        this.db.prepare("DELETE FROM integration_tasks WHERE session_id = ?").run(id);
-        this.db.prepare("DELETE FROM integration_conversations WHERE session_id = ?").run(id);
-        this.db.prepare("DELETE FROM events WHERE run_id IN (SELECT id FROM runs WHERE session_id = ?)").run(id);
-        this.db.prepare("DELETE FROM runs WHERE session_id = ?").run(id);
-        const deleted = this.db.prepare("DELETE FROM sessions WHERE id = ? AND status = 'running'").run(id);
-        if (deleted.changes !== 1) throw new Error("session_delete_claim_lost");
-      });
-    } catch (error) {
-      try {
-        this.releaseDeleteClaim(id, true, error);
-      } catch (releaseError) {
-        if (releaseError instanceof SessionManagerError) throw releaseError;
-        throw new SessionManagerError("session_delete_failed", { cause: releaseError });
-      }
-    }
-
-    if (revision !== undefined && this.projectEnvironmentRevisionCleaner !== undefined) {
-      try {
-        await this.projectEnvironmentRevisionCleaner.cleanupOldRevisions(revision.projectEnvironmentId);
-      } catch (error) {
-        console.error(error);
-      }
-    }
-  }
-
-  /** Releases Workspace and Provider conversation storage while retaining the Session and its statistics. */
-  async cleanupStorage(id: number, cleanedAt = new Date().toISOString()): Promise<void> {
-    const session = this.get(id);
-    if (session === undefined) throw new SessionManagerError("session_not_found");
-    if (session.storageCleanedAt !== null) return;
-    const agent = this.agentManager.get(session.agentId);
-    if (agent === undefined) throw new SessionManagerError("agent_not_found");
-    this.claimForStorageCleanup(id);
-
-    try {
-      await this.runtime.forgetSession(id);
-      await this.providerSessionCleaner.purge({
-        agentId: agent.id,
-        provider: agent.provider,
-        sessionId: session.id,
-        providerSessionId: session.providerSessionId
-      });
-      await this.workspaceManager.deleteSession(id);
-      const updated = this.db.prepare(`
-        UPDATE sessions
-        SET status = 'idle', provider_session_id = NULL, storage_cleaned_at = ?
-        WHERE id = ? AND status = 'running' AND storage_cleaned_at IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM runs
-            WHERE session_id = sessions.id AND status IN ('queued', 'running')
-          )
-      `).run(cleanedAt, id);
-      if (updated.changes !== 1) throw new Error("session_cleanup_claim_lost");
-    } catch (error) {
-      try {
-        this.db.prepare(`
-          UPDATE sessions SET status = 'idle'
-          WHERE id = ? AND status = 'running' AND storage_cleaned_at IS NULL
-            AND NOT EXISTS (
-              SELECT 1 FROM runs
-              WHERE session_id = sessions.id AND status IN ('queued', 'running')
-            )
-        `).run(id);
-      } catch (releaseError) {
-        throw new SessionManagerError("session_cleanup_failed", {
-          cause: new AggregateError([error, releaseError], "Session storage cleanup and claim release failed")
-        });
-      }
-      throw new SessionManagerError("session_cleanup_failed", { cause: error });
-    }
-  }
-
-  private claimForStorageCleanup(id: number): void {
-    this.inImmediateTransaction(() => {
-      const result = this.db.prepare(`
-        UPDATE sessions SET status = 'running'
-        WHERE id = ? AND status = 'idle' AND storage_cleaned_at IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM runs
-            WHERE session_id = sessions.id AND status IN ('queued', 'running')
-          )
-      `).run(id);
-      if (result.changes === 1) return;
+    return this.withMaintenance(id, async () => {
       const session = this.get(id);
       if (session === undefined) throw new SessionManagerError("session_not_found");
-      if (session.storageCleanedAt !== null) return;
+      if (session.storageCleanedAt !== null) throw new SessionManagerError("session_storage_cleaned");
+      const agent = this.agentManager.get(session.agentId);
+      if (agent === undefined) throw new SessionManagerError("agent_not_found");
+      const claim = this.claimMaintenance(id, "reset");
+      if (claim === "resuming") {
+        try {
+          await this.runtime.forgetSession(id);
+          await completeSessionMaintenance({
+            db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner
+          }, id, "reset");
+          return this.get(id)!;
+        } catch (error) {
+          throw new SessionManagerError("runtime_reset_failed", { cause: error });
+        }
+      }
+
+      try {
+        await this.runtime.reset({
+          sessionId: session.id,
+          agentId: agent.id,
+          provider: agent.provider,
+          workspacePath: session.workspacePath,
+          browserProfilePath: join(dirname(session.workspacePath), "browser"),
+          providerSessionId: session.providerSessionId,
+          instructions: session.instructionsSnapshot,
+          memory: readFileSync(join(this.dataDir, "agents", String(agent.id), "MEMORY.md"), "utf8"),
+          mcpServers: []
+        });
+      } catch (error) {
+        try {
+          this.releaseResetClaim(id, false);
+        } catch (releaseError) {
+          throw new SessionManagerError("runtime_reset_failed", {
+            cause: new AggregateError([error, releaseError], "Runtime reset and Session claim release failed")
+          });
+        }
+        throw new SessionManagerError("runtime_reset_failed", { cause: error });
+      }
+      try {
+        return this.releaseResetClaim(id, true);
+      } catch (error) {
+        throw new SessionManagerError("runtime_reset_failed", { cause: error });
+      }
+    });
+  }
+
+  /** Permanently removes an idle Session and every resource it owns; failed deletion can be retried. */
+  async delete(id: number): Promise<void> {
+    return this.withMaintenance(id, async () => {
+      const session = this.get(id);
+      if (session === undefined) throw new SessionManagerError("session_not_found");
+      const revision = session.projectEnvironmentRevisionId === null
+        ? undefined
+        : this.projectEnvironmentStore.getRevision(session.projectEnvironmentRevisionId);
+      this.claimMaintenance(id, "delete");
+      try {
+        await this.runtime.forgetSession(id);
+      } catch {
+        // Runtime cleanup is best-effort; durable files still have to be removed successfully.
+      }
+      try {
+        await completeSessionMaintenance({
+          db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner
+        }, id, "delete");
+      } catch (error) {
+        // Keep the claim: some storage may already be gone and must not be reused.
+        throw new SessionManagerError("session_delete_failed", { cause: error });
+      }
+      if (revision !== undefined) await this.cleanupEnvironmentRevisions(revision.projectEnvironmentId);
+    });
+  }
+
+  /** Releases storage only after atomically checking expiry, or resumes a previously admitted cleanup. */
+  async cleanupStorage(id: number, cutoff: string, cleanedAt = new Date().toISOString()): Promise<void> {
+    return this.withMaintenance(id, async () => {
+      if (this.claimMaintenance(id, "cleanup", cutoff) === "skipped") return;
+      try {
+        await this.runtime.forgetSession(id);
+        await completeSessionMaintenance({
+          db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner
+        }, id, "cleanup", cleanedAt);
+      } catch (error) {
+        // The next scheduler pass retries this durable claim without reopening partially removed storage.
+        throw new SessionManagerError("session_cleanup_failed", { cause: error });
+      }
+    });
+  }
+
+  private claimMaintenance(
+    id: number,
+    operation: SessionMaintenanceOperation,
+    cutoff = ""
+  ): "claimed" | "resuming" | "skipped" {
+    return this.inImmediateTransaction(() => {
+      const result = this.db.prepare(`
+        UPDATE sessions SET status = 'running', pending_operation = ?,
+          updated_at = CASE WHEN ? = 'cleanup' THEN updated_at ELSE ? END
+        WHERE id = ? AND status = 'idle' AND pending_operation IS NULL
+          AND (? = 'delete' OR storage_cleaned_at IS NULL)
+          AND (? != 'cleanup' OR updated_at < ?)
+          AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = sessions.id AND status IN ('queued', 'running'))
+      `).run(operation, operation, new Date().toISOString(), id, operation, operation, cutoff);
+      if (result.changes === 1) return "claimed";
+      const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as
+        | (SessionRow & { pending_operation: SessionMaintenanceOperation | null })
+        | undefined;
+      if (row === undefined) throw new SessionManagerError("session_not_found");
+      if (operation === "cleanup" && row.storage_cleaned_at !== null) return "skipped";
+      const active = this.db.prepare("SELECT 1 FROM runs WHERE session_id = ? AND status IN ('queued', 'running')").get(id);
+      if (active !== undefined) throw new SessionManagerError("session_busy");
+      if (row.status === "running" && row.pending_operation === operation) return "resuming";
+      if (operation === "cleanup" && row.status === "idle" && row.pending_operation === null && row.updated_at >= cutoff) {
+        return "skipped";
+      }
       throw new SessionManagerError("session_busy");
     });
   }
 
-  private claimForDelete(id: number): void {
-    this.inImmediateTransaction(() => {
-      const updatedAt = new Date().toISOString();
-      const result = this.db.prepare(`
-        UPDATE sessions SET status = 'running', updated_at = ?
-        WHERE id = ? AND status = 'idle'
-          AND NOT EXISTS (
-            SELECT 1 FROM runs
-            WHERE session_id = sessions.id AND status IN ('queued', 'running')
-          )
-      `).run(updatedAt, id);
-      if (result.changes === 1) return;
-      if (this.get(id) === undefined) throw new SessionManagerError("session_not_found");
-      throw new SessionManagerError("session_busy");
-    });
+  private async withMaintenance<T>(id: number, operation: () => Promise<T>): Promise<T> {
+    if (this.maintenanceInProgress.has(id)) throw new SessionManagerError("session_busy");
+    this.maintenanceInProgress.add(id);
+    try {
+      return await operation();
+    } finally {
+      this.maintenanceInProgress.delete(id);
+    }
   }
 
   private async prepareWorkspaceRevision(
@@ -709,60 +649,22 @@ export class SessionManager {
     }
   }
 
-  private releaseDeleteClaim(id: number, clearProviderSessionId: boolean, cause: unknown): never {
-    try {
+  private releaseResetClaim(id: number, clearProviderSessionId: boolean): Session {
+    if (clearProviderSessionId) {
+      finishSessionMaintenance(this.db, id, "reset");
+    } else {
       this.inImmediateTransaction(() => {
-        const providerAssignment = clearProviderSessionId ? "provider_session_id = NULL," : "";
         const result = this.db.prepare(`
-          UPDATE sessions SET ${providerAssignment} status = 'idle', updated_at = ?
-          WHERE id = ? AND status = 'running'
-            AND NOT EXISTS (
-              SELECT 1 FROM runs
-              WHERE session_id = sessions.id AND status IN ('queued', 'running')
-            )
+          UPDATE sessions SET status = 'idle', pending_operation = NULL, updated_at = ?
+          WHERE id = ? AND status = 'running' AND pending_operation = 'reset'
+            AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = sessions.id AND status IN ('queued', 'running'))
         `).run(new Date().toISOString(), id);
-        if (result.changes !== 1) throw new Error("session_delete_claim_release_failed");
-      });
-    } catch (releaseError) {
-      throw new SessionManagerError("session_delete_failed", {
-        cause: new AggregateError([cause, releaseError], "Session deletion and claim release failed")
+        if (result.changes !== 1) throw new Error("session_reset_claim_release_failed");
       });
     }
-    throw new SessionManagerError("session_delete_failed", { cause });
-  }
-
-  private claimForReset(id: number): void {
-    this.inImmediateTransaction(() => {
-      const updatedAt = new Date().toISOString();
-      const result = this.db
-        .prepare("UPDATE sessions SET status = 'running', updated_at = ? WHERE id = ? AND status = 'idle'")
-        .run(updatedAt, id);
-      if (result.changes !== 1) throw new SessionManagerError("session_busy");
-    });
-  }
-
-  private releaseResetClaim(id: number, clearProviderSessionId: boolean): Session {
-    return this.inImmediateTransaction(() => {
-      const updatedAt = new Date().toISOString();
-      const providerAssignment = clearProviderSessionId
-        ? "provider_session_id = NULL, input_tokens = NULL, output_tokens = NULL, cached_read_tokens = NULL, cached_write_tokens = NULL, thought_tokens = NULL, total_tokens = NULL,"
-        : "";
-      const result = this.db.prepare(`
-        UPDATE sessions
-        SET ${providerAssignment} status = 'idle', updated_at = ?
-        WHERE id = ?
-          AND status = 'running'
-          AND NOT EXISTS (
-            SELECT 1 FROM runs
-            WHERE session_id = sessions.id AND status IN ('queued', 'running')
-          )
-      `).run(updatedAt, id);
-      if (result.changes !== 1) throw new Error("session_reset_claim_release_failed");
-
-      const released = this.get(id);
-      if (released === undefined) throw new SessionManagerError("session_not_found");
-      return released;
-    });
+    const session = this.get(id);
+    if (session === undefined) throw new SessionManagerError("session_not_found");
+    return session;
   }
 
   private inImmediateTransaction<T>(operation: () => T): T {

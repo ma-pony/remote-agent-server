@@ -201,6 +201,12 @@ Python projects using `uv` receive a relocatable virtual environment. The server
 
 Session retention removes large workspace, browser, and native provider-session data. Session, Run, Event, integration links, and token statistics remain available.
 
+Cleanup eligibility uses an idle Session's `updated_at` and excludes Sessions with queued or running Runs. After listing candidates, the cleanup claim rechecks the cutoff in the same transaction so activity while earlier directories are being removed is respected. Restart recovery updates activity timestamps only for Sessions with interrupted running Runs. Restarting does not extend retention for already idle or cleaned Sessions. Run terminal states, error events, and Session recovery are committed in one transaction; repeating recovery does not refresh activity timestamps again.
+
+A nullable internal `pending_operation` field records `cleanup`, `delete`, or `reset`. The marker and the `running` claim are committed before external work; an in-process guard also rejects concurrent maintenance on one Session. Normal completion and restart recovery share transactional finalization that checks operation ownership, busy state, and absence of active Runs before clearing the marker or deleting records. Generic Run recovery does not release marked Sessions.
+
+Startup retries incomplete-creation cleanup, recovers maintenance, then recovers and schedules Runs. Unfinished cleanup and deletion retain their marker and busy state. Later cleanup passes retry admitted storage cleanup even after retention changes or automatic cleanup is disabled; the delete API can retry a pending deletion. Both failed-creation compensation and startup recovery remove pending Session records only after directory deletion succeeds. Reset recovery removes the old local Provider/ACP conversation and clears current-context cumulative usage while preserving the Workspace and Run history. The next Run creates a new Provider context.
+
 ## 8. Agent capability projection
 
 Each agent has an independent Provider Home. The service discovers reusable capabilities from the service user's provider configuration, then requires an explicit agent selection:

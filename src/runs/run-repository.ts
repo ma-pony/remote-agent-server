@@ -432,12 +432,16 @@ export class RunRepository {
           now
         );
       }
+      // Only interrupted Runs count as new activity. Releasing a stale cleanup claim does not.
+      this.db
+        .prepare("UPDATE sessions SET updated_at = ? WHERE id IN (SELECT session_id FROM runs WHERE status = 'running')")
+        .run(now);
       this.db
         .prepare("UPDATE runs SET status = 'failed', error = 'server_restarted', finished_at = ? WHERE status = 'running'")
         .run(now);
       this.db
-        .prepare("UPDATE sessions SET status = 'idle', updated_at = ? WHERE workspace_path NOT LIKE 'pending:%' AND id NOT IN (SELECT session_id FROM runs WHERE status = 'queued')")
-        .run(now);
+        .prepare("UPDATE sessions SET status = 'idle' WHERE status = 'running' AND pending_operation IS NULL AND workspace_path NOT LIKE 'pending:%' AND id NOT IN (SELECT session_id FROM runs WHERE status = 'queued')")
+        .run();
     });
   }
 

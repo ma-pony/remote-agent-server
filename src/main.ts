@@ -16,12 +16,14 @@ import { McpManager } from "./mcp/mcp-manager.js";
 import { SecretStore } from "./mcp/secret-store.js";
 import { ConcurrencySettingsStore } from "./settings/concurrency-settings-store.js";
 import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
+import { SystemProviderSessionCleaner } from "./runtime/provider-session-cleaner.js";
 import { ProjectEnvironmentStore } from "./project-environments/project-environment-store.js";
 import { ProviderExtensionManager } from "./provider-extensions/provider-extension-manager.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { applyServicePath, removeServiceSecretsFromEnvironment } from "./runtime/service-path.js";
 import { RunRepository } from "./runs/run-repository.js";
 import { recoverIncompleteSessions } from "./sessions/session-manager.js";
+import { recoverSessionMaintenance } from "./sessions/session-maintenance.js";
 import { assertWebBuildAvailable } from "./web-build.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import { type FileSystemInspector } from "./workspaces/apfs-workspace.js";
@@ -83,6 +85,11 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     });
     await workspaceManager.check();
     await recoverIncompleteSessions(db, workspaceManager);
+    await recoverSessionMaintenance({
+      db,
+      workspaceManager,
+      providerSessionCleaner: new SystemProviderSessionCleaner(config.dataDir)
+    });
 
     const projectEnvironmentStore = new ProjectEnvironmentStore({ db });
     const interruptedRevisions = projectEnvironmentStore.recoverPreparing();

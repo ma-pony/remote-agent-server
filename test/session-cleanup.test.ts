@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
+import { RunRepository } from "../src/runs/run-repository.js";
 import { SessionCleanupScheduler } from "../src/sessions/session-cleanup-scheduler.js";
 import { SessionManager } from "../src/sessions/session-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
@@ -15,7 +16,7 @@ afterEach(() => {
   tempDirectories.splice(0).forEach((path) => rmSync(path, { recursive: true, force: true }));
 });
 
-const createHarness = () => {
+const createHarness = (options: { beforeWorkspaceDelete?: (id: number) => Promise<void> } = {}) => {
   const { db, seed } = createTestDatabase();
   const root = mkdtempSync(join(tmpdir(), "session-cleanup-"));
   tempDirectories.push(root);
@@ -29,6 +30,7 @@ const createHarness = () => {
       check: async () => undefined,
       createSession: async () => { throw new Error("unused"); },
       deleteSession: async (id) => {
+        await options.beforeWorkspaceDelete?.(id);
         rmSync(join(root, "sessions", String(id)), { recursive: true, force: true });
       },
       createRevision: async () => undefined,
@@ -48,6 +50,118 @@ const createHarness = () => {
 };
 
 describe("SessionCleanupScheduler", () => {
+  it.each([0, 365 * 24])("存储清理失败后阻止复用，保留期改为 %s 小时也继续已开始的清理", async (nextRetentionHours) => {
+    let shouldFail = true;
+    const { db, manager, root, insertSession } = createHarness({
+      beforeWorkspaceDelete: async () => { if (shouldFail) throw new Error("workspace busy"); }
+    });
+    insertSession(101, "idle", "2026-08-01T00:00:00.000Z");
+    let retentionHours = 7 * 24;
+    const errors: unknown[] = [];
+    const scheduler = new SessionCleanupScheduler({
+      sessionManager: manager,
+      runtimeSettings: { getRuntime: () => ({ runTimeoutMinutes: 60, sessionStorageRetentionHours: retentionHours }) },
+      retentionMs: 0,
+      intervalMs: 60 * 60 * 1000,
+      now: () => new Date("2026-08-24T00:00:00.000Z"),
+      onError: (error) => { errors.push(error); }
+    });
+
+    await scheduler.runCleanup();
+
+    expect(errors).toHaveLength(1);
+    expect(db.prepare("SELECT * FROM sessions WHERE id = 101").get()).toMatchObject({
+      status: "running", pending_operation: "cleanup", updated_at: "2026-08-01T00:00:00.000Z"
+    });
+    expect(() => new RunRepository({ db }).create({ sessionId: 101, input: "unsafe reuse" }))
+      .toThrow(expect.objectContaining({ code: "session_busy" }));
+    shouldFail = false;
+    retentionHours = nextRetentionHours;
+
+    await scheduler.runCleanup();
+
+    expect(existsSync(join(root, "sessions", "101"))).toBe(false);
+    expect(manager.get(101)?.storageCleanedAt).toBe("2026-08-24T00:00:00.000Z");
+    expect(db.prepare("SELECT * FROM sessions WHERE id = 101").get()).toMatchObject({
+      status: "idle", pending_operation: null, updated_at: "2026-08-01T00:00:00.000Z"
+    });
+    db.close();
+  });
+
+  it("清理前一个 Session 期间完成新 Run 的候选 Session 不再被删除", async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const deletingFirst = new Promise<void>((resolve) => { started = resolve; });
+    const { db, manager, root, insertSession } = createHarness({
+      beforeWorkspaceDelete: async (id) => {
+        if (id === 101) { started(); await blocked; }
+      }
+    });
+    insertSession(101, "idle", "2026-08-01T00:00:00.000Z");
+    insertSession(102, "idle", "2026-08-01T00:00:00.000Z");
+    const scheduler = new SessionCleanupScheduler({
+      sessionManager: manager,
+      retentionMs: 7 * 24 * 60 * 60 * 1000,
+      intervalMs: 60 * 60 * 1000
+    });
+    const cleanup = scheduler.runCleanup();
+    await deletingFirst;
+    const repository = new RunRepository({ db });
+    const run = repository.create({ sessionId: 102, input: "new activity" });
+    repository.markRunning(run.id);
+    repository.finish(run.id, { status: "succeeded", result: "fresh work" });
+    release();
+    await cleanup;
+
+    expect(existsSync(join(root, "sessions", "101"))).toBe(false);
+    expect(existsSync(join(root, "sessions", "102"))).toBe(true);
+    expect(manager.get(102)?.storageCleanedAt).toBeNull();
+    expect(repository.get(run.id)?.status).toBe("succeeded");
+    db.close();
+  });
+
+  it.each(["idle", "running"] as const)("重启后仍清理已过期的 %s Session，不延长存储保留期", async (status) => {
+    const { db, manager, root, insertSession } = createHarness();
+    insertSession(101, status, "2026-08-01T00:00:00.000Z");
+    insertSession(102, "idle", "2026-08-23T00:00:00.000Z");
+    insertSession(103, "running", "2026-08-01T00:00:00.000Z");
+    insertSession(104, "running", "2026-08-01T00:00:00.000Z");
+    db.prepare(`
+      INSERT INTO runs (session_id, status, input, created_at)
+      VALUES (103, 'queued', 'waiting', '2026-08-01T00:00:00.000Z'),
+        (104, 'running', 'interrupted', '2026-08-01T00:00:00.000Z')
+    `).run();
+    const scheduler = new SessionCleanupScheduler({
+      sessionManager: manager,
+      retentionMs: 7 * 24 * 60 * 60 * 1000,
+      intervalMs: 60 * 60 * 1000,
+      now: () => new Date("2026-08-24T00:00:00.000Z")
+    });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-08-24T00:00:00.000Z"));
+      // A cleanup interrupted after claiming storage leaves a running Session without an active Run.
+      new RunRepository({ db }).recoverAfterRestart();
+
+      await scheduler.runCleanup();
+
+      expect(existsSync(join(root, "sessions", "101"))).toBe(false);
+      expect(manager.get(101)).toMatchObject({
+        status: "idle",
+        updatedAt: "2026-08-01T00:00:00.000Z",
+        storageCleanedAt: "2026-08-24T00:00:00.000Z"
+      });
+      for (const id of [102, 103, 104]) {
+        expect(existsSync(join(root, "sessions", String(id)))).toBe(true);
+        expect(manager.get(id)?.storageCleanedAt).toBeNull();
+      }
+    } finally {
+      vi.useRealTimers();
+      db.close();
+    }
+  });
+
   it("按最后活动时间清理过期会话的大体积存储并保留记录和统计", async () => {
     const { db, manager, root, insertSession } = createHarness();
     insertSession(101, "idle", "2026-08-01T00:00:00.000Z");

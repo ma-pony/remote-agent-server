@@ -539,3 +539,11 @@ pnpm smoke:integrations
 5. 结束 Conversation 后，相同 Key 的第三轮创建新 Session。
 
 每个 HTTP 请求和响应 Body 读取都有 Abort deadline。失败时命令非零退出并打印已经取得的 Endpoint、Task、Session、Run 和 Delivery ID，不打印 Token 或 signing secret。脚本默认不删除记录，便于在管理界面审计；确认无用后由管理员手动停用 Endpoint。可用 `SMOKE_TASK_TIMEOUT_MS`、`SMOKE_REQUEST_TIMEOUT_MS` 和 `SMOKE_POLL_INTERVAL_MS` 调整等待时间。
+
+## 8. Session 存储清理与中断恢复
+
+升级时按正常流程停止旧进程、备份数据库和 `secret.key`，再启动新版本。启动迁移会为现有 Session 增加可空的 `pending_operation` 字段；不会改写历史活动时间。服务在调度 Run 前，先重试创建中断的目录删除，并完成持久化标记中的清理、删除或重置。
+
+如果出现 `session_maintenance_recovery_failed sessionId=<id> operation=<operation>`，对应 Session 会保持占用，以免使用已被部分删除的目录。排除磁盘或权限问题后，自动存储清理会在下一轮重试；手动删除和重置可以重试原管理 API，或在下次服务启动时恢复。关闭自动清理只停止新的清理任务，不取消已经开始的清理。
+
+创建失败且目录无法删除时，服务会保留 `workspace_path` 为 `pending:` 的记录，供下次启动重试。不要手动把这些记录改成空闲。修复前已丢失数据库记录的孤立目录，以及已被错误刷新的活动时间，无法由本次迁移自动还原，需要依据备份或历史记录单独核验。

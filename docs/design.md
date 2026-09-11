@@ -201,6 +201,12 @@ Python `uv` 项目使用可迁移虚拟环境。服务器要求 uv `>= 0.10.8`�
 
 Session 保留策略只清理占用空间较大的 Workspace、浏览器数据和 Provider 原生会话。Session、Run、Event、外部接入关联和 Token 统计继续保留。
 
+清理资格依据空闲 Session 的 `updated_at`，并排除仍有 queued/running Run 的 Session。清理器取出候选列表后，在取得占用的同一事务中再次检查截止时间，防止等待其他目录删除期间发生的新活动被忽略。重启恢复只为被中断的 running Run 更新所属 Session 的活动时间；已空闲或已清理的 Session 不因重启延长保留期。Run 终态、错误事件和 Session 恢复在同一事务内写入，重复恢复不会再次刷新活动时间。
+
+Session 使用可空的内部字段 `pending_operation` 持久化 `cleanup`、`delete` 或 `reset`。标记与 `running` 占用状态一起提交后才执行外部操作；进程内还会拒绝同一 Session 的并发维护。正常完成与重启恢复复用事务性收尾逻辑，验证操作类型、占用状态和无活动 Run 后，才清除标记或删除记录。一般 Run 恢复不会释放带维护标记的 Session。
+
+启动时先重试创建中断的目录清理，再恢复维护操作，最后恢复和调度 Run。清理或删除未完成时保留标记与占用；已开始的存储清理在后续清理轮次重试，不受新的保留期或关闭自动清理影响，删除可由原删除接口重试。创建失败的补偿与启动恢复都在目录删除成功后才移除 pending Session 记录。重置恢复清除旧 Provider/ACP 本地会话和当前上下文累计值，保留 Workspace 与 Run 历史；随后新 Run 创建新的 Provider 上下文。
+
 ## 8. Agent 能力投影
 
 每个 Agent 使用独立 Provider Home。服务从运行用户的 Provider 配置中发现可复用能力，再由管理员明确选择：

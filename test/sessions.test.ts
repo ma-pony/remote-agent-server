@@ -138,6 +138,65 @@ describe("Session API", () => {
     db.close();
   });
 
+  it("创建中断的 Workspace 删除失败时保留记录并在下次启动重试", async () => {
+    const { db, seed } = createTestDatabase();
+    const root = mkdtempSync(join(tmpdir(), "incomplete-session-retry-"));
+    tempDirs.push(root);
+    const workspacePath = join(root, "workspace");
+    mkdirSync(workspacePath);
+    const { id } = seed.session();
+    db.prepare("UPDATE sessions SET status = 'running', workspace_path = 'pending:create' WHERE id = ?").run(id);
+    let attempt = 0;
+    const workspaceManager = {
+      check: async () => undefined,
+      createSession: async () => { throw new Error("unused"); },
+      deleteSession: async () => {
+        if (++attempt === 1) throw Object.assign(new Error("busy"), { code: "EBUSY" });
+        rmSync(workspacePath, { recursive: true, force: true });
+      },
+      createRevision: async () => undefined,
+      removeRevision: async () => undefined
+    };
+
+    await recoverIncompleteSessions(db, workspaceManager);
+
+    expect(db.prepare("SELECT status, workspace_path FROM sessions WHERE id = ?").get(id))
+      .toEqual({ status: "running", workspace_path: "pending:create" });
+    expect(existsSync(workspacePath)).toBe(true);
+
+    await recoverIncompleteSessions(db, workspaceManager);
+
+    expect(existsSync(workspacePath)).toBe(false);
+    expect(db.prepare("SELECT id FROM sessions WHERE id = ?").get(id)).toBeUndefined();
+    db.close();
+  });
+
+  it("创建失败且回滚目录失败时也保留 pending Session", async () => {
+    const { app, db, dataDir } = await createTestApp({
+      commandRunner: {
+        run: async (_command, args) => {
+          if (args[1] === "snapshot") {
+            mkdirSync(args[3]);
+            throw new Error("snapshot failed after creating workspace");
+          }
+          if (args[1] === "delete") throw new Error("workspace busy");
+          return { stdout: "", stderr: "" };
+        }
+      }
+    });
+    const agent = await createAgent(app);
+
+    const response = await app.inject({
+      method: "POST", url: "/api/sessions", headers: authHeaders(), payload: { agentId: agent.id, title: "failed creation" }
+    });
+
+    expect(response.statusCode).toBe(500);
+    const row = db.prepare("SELECT id, status, workspace_path FROM sessions").get() as
+      { id: number; status: string; workspace_path: string } | undefined;
+    expect(row).toMatchObject({ status: "running", workspace_path: expect.stringMatching(/^pending:/) });
+    expect(existsSync(join(dataDir, "sessions", String(row!.id), "workspace"))).toBe(true);
+  });
+
   it("列表按创建时间倒序分页，并在全部会话中搜索", async () => {
     const { app, db } = await createTestApp();
     const agent = await createAgent(app);
@@ -735,7 +794,7 @@ describe("Session API", () => {
         if (args[1] === "delete") {
           expect(snapshotCompleted).toBe(true);
           expect(existsSync(args[2])).toBe(true);
-          expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+          expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
         }
         return { stdout: "", stderr: "" };
       }
@@ -1078,14 +1137,15 @@ describe("Session API", () => {
     expect(existsSync(dirname(session.workspacePath))).toBe(false);
   });
 
-  it("Workspace 清理失败时清除 Provider ID、释放 claim 并保留历史", async () => {
+  it("Workspace 删除失败后保持占用和历史，拒绝新 Run 并允许重试删除", async () => {
+    let shouldFail = true;
     const reset = vi.fn(async (_input: RuntimeSessionInput): Promise<void> => undefined);
     const { app, db } = await createTestApp({
       runtime: createFakeRuntime(reset),
       commandRunner: {
         run: async (_command, args) => {
           if (args[1] === "snapshot") mkdirSync(args[3]);
-          if (args[1] === "delete") throw new Error("workspace delete failed");
+          if (args[1] === "delete" && shouldFail) throw new Error("workspace delete failed");
           return { stdout: "", stderr: "" };
         }
       }
@@ -1099,11 +1159,22 @@ describe("Session API", () => {
     const response = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
 
     expect(response.statusCode).toBe(500);
-    expect(db.prepare("SELECT status, provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
-      status: "idle",
-      provider_session_id: null
+    expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(session.id)).toMatchObject({
+      status: "running",
+      pending_operation: "delete",
+      provider_session_id: "provider-session-1"
     });
     expect(db.prepare("SELECT count(*) AS count FROM runs WHERE session_id = ?").get(session.id)).toEqual({ count: 1 });
     expect(existsSync(dirname(session.workspacePath))).toBe(true);
+
+    const rejected = await app.inject({
+      method: "POST", url: `/api/sessions/${session.id}/runs`, headers: authHeaders(), payload: { input: "unsafe reuse" }
+    });
+    expect(rejected.statusCode).toBe(409);
+    shouldFail = false;
+    const retried = await app.inject({ method: "DELETE", url: `/api/sessions/${session.id}`, headers: authHeaders() });
+    expect(retried.statusCode).toBe(204);
+    expect(db.prepare("SELECT id FROM sessions WHERE id = ?").get(session.id)).toBeUndefined();
+    expect(existsSync(dirname(session.workspacePath))).toBe(false);
   });
 });

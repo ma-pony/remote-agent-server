@@ -230,7 +230,9 @@ Open **System settings → Runtime and concurrency** to adjust:
 
 The database stores these settings. Run timeout applies to newly started runs, storage retention applies at the next cleanup, and concurrency changes affect later scheduling immediately. Raising a limit dispatches queued work; lowering one does not cancel active work. The service always keeps runs in one Session serial, reuses one Session for one external Conversation, delivers each Webhook subscription in order, and coalesces duplicate synchronization requests for the same project environment.
 
-The service runs storage cleanup once at startup and then every ten minutes. Expired idle Sessions lose only their Workspace, browser data, and provider-native conversation; Session, Run, event, integration, and token-usage records remain available.
+The service runs storage cleanup once at startup and then every ten minutes. Retention is measured from the Session's last activity; restarting the service does not restart the retention period for already idle Sessions. Expired idle Sessions lose only their Workspace, browser data, and provider-native conversation; Session, Run, event, integration, and token-usage records remain available.
+
+Cleanup rechecks expiry when claiming a Session. A failed cleanup or deletion keeps the Session busy to prevent reuse of partially removed storage. Later cleanup passes retry automatic cleanup; callers can retry a manual deletion through the delete API. Disabling automatic cleanup stops new cleanup claims while allowing operations already started to finish. Restart recovery handles unfinished cleanup, deletion, and reset operations before scheduling Runs.
 
 These limits control the current Remote Agent Server process. The project is designed for single-process deployment and does not provide distributed concurrency quotas across multiple service instances.
 
