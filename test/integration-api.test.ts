@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
+import { migrate } from "../src/db.js";
 import { IntegrationStore } from "../src/integrations/integration-store.js";
 import type { AgentRuntime, RuntimeTurnResult } from "../src/runtime/agent-runtime.js";
 import type { WorkspaceManager } from "../src/workspaces/workspace-manager.js";
@@ -99,6 +101,232 @@ const createTestApp = async (
 
 afterEach(async () => {
   await Promise.all(apps.splice(0).map(({ close }) => close()));
+});
+
+describe("Native webhook ingress", () => {
+  const secret = "native-webhook-test-secret";
+  const payload = JSON.stringify({
+    ref: "refs/heads/main", before: "a".repeat(40), after: "b".repeat(40),
+    repository: { id: 42, full_name: "example/project" },
+    head_commit: { message: "修复 \"Webhook\"\n验证默认请求" }
+  }, null, 2);
+  const signature = (body: string, key = secret) =>
+    `sha256=${createHmac("sha256", key).update(body).digest("hex")}`;
+  const setup = async (provider: "github" | "gitlab", configure = true) => {
+    const context = await createTestApp();
+    const created = await context.app.inject({
+      method: "POST", url: "/api/integration-endpoints", headers: authHeaders(),
+      payload: validEndpointInput(context.agentId, "native-events")
+    });
+    const { endpoint, token } = created.json() as { endpoint: { id: number }; token: string };
+    const configUrl = `/api/integration-endpoints/${endpoint.id}/webhook-receiver`;
+    if (configure) {
+      const configured = await context.app.inject({
+        method: "PUT", url: configUrl, headers: authHeaders(), payload: { provider, authMode: provider === "github" ? "signature" : "token", enabled: true, secret }
+      });
+      expect(configured.statusCode).toBe(200);
+    }
+    return { ...context, endpointId: endpoint.id, token, configUrl, url: "/integration/v1/endpoints/native-events/webhook" };
+  };
+
+  it("原生 GitHub JSON 验签后入库并执行，重投复用同一 Task", async () => {
+    const { app, url, db } = await setup("github");
+    const request = {
+      method: "POST" as const, url, payload,
+      headers: { "content-type": "application/json", "x-github-event": "push",
+        "x-github-delivery": "github-delivery-1", "x-hub-signature-256": signature(payload) }
+    };
+    const responses = await Promise.all([app.inject(request), app.inject(request)]);
+    expect(responses.map((item) => item.statusCode)).toEqual([202, 202]);
+    expect(responses[0]!.json().taskId).toBe(responses[1]!.json().taskId);
+    const taskId = responses[0]!.json().taskId as number;
+    await vi.waitFor(() => expect(db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(taskId))
+      .toEqual({ status: "succeeded" }));
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 1 });
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
+    const row = db.prepare("SELECT request_id, message, effective_prompt FROM integration_tasks WHERE id = ?").get(taskId) as {
+      request_id: string; message: string; effective_prompt: string;
+    };
+    expect(row.request_id).toBe("github:github-delivery-1");
+    expect(row.message).toContain("example/project");
+    expect(row.message).toContain("github");
+    expect(row.effective_prompt).toContain("Resolve the support request.");
+    expect(row.message).not.toContain(secret);
+    const changed = JSON.stringify({ action: "changed" });
+    const conflict = await app.inject({ ...request, payload: changed,
+      headers: { ...request.headers, "x-hub-signature-256": signature(changed) } });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error.code).toBe("idempotency_conflict");
+  });
+
+  it("原生 GitHub 表单 payload 使用原始字节验签", async () => {
+    const { app, url } = await setup("github");
+    const form = new URLSearchParams({ payload }).toString();
+    const response = await app.inject({ method: "POST", url, payload: form,
+      headers: { "content-type": "application/x-www-form-urlencoded", "x-github-event": "push",
+        "x-github-delivery": "form-delivery", "x-hub-signature-256": signature(form) } });
+    expect(response.statusCode).toBe(202);
+  });
+
+  it.each(["idempotency-key", "x-gitlab-webhook-uuid"])("原生 GitLab Token 和 %s 支持入库去重", async (idHeader) => {
+    const { app, url, db } = await setup("gitlab");
+    const request = { method: "POST" as const, url,
+      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook", [idHeader]: "gitlab-delivery-1" },
+      payload: { object_kind: "merge_request", project: { id: 42, web_url: "https://gitlab.example.com/example/project" },
+        object_attributes: { iid: 7, action: "open", title: "检查合并请求" } } };
+    const first = await app.inject(request);
+    const retry = await app.inject(request);
+    expect(first.statusCode).toBe(202);
+    expect(retry.json().taskId).toBe(first.json().taskId);
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 1 });
+  });
+
+  it("无效凭证、被篡改请求和错误平台不能创建 Session 或 Task", async () => {
+    const { app, url, db } = await setup("github");
+    for (const headers of [
+      {}, { "x-hub-signature-256": signature(payload, "wrong-secret") },
+      { "x-hub-signature-256": signature(JSON.stringify(JSON.parse(payload))) },
+      { "x-gitlab-token": secret, "x-gitlab-event": "Push Hook" }
+    ]) {
+      const response = await app.inject({ method: "POST", url, payload,
+        headers: { "content-type": "application/json", "x-github-event": "push", "x-github-delivery": "invalid", ...headers } });
+      expect(response.statusCode).toBe(401);
+      expect(response.body).not.toContain(secret);
+    }
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 0 });
+  });
+
+  it("GitLab signing token 校验原始载荷、多签名和时间窗，不能降级为明文 Token", async () => {
+    const { app, url, configUrl, db } = await setup("gitlab");
+    const key = Buffer.from("0123456789abcdef0123456789abcdef");
+    const signingToken = `whsec_${key.toString("base64")}`;
+    const configured = await app.inject({ method: "PUT", url: configUrl, headers: authHeaders(),
+      payload: { provider: "gitlab", authMode: "signature", enabled: true, secret: signingToken } });
+    expect(configured.statusCode).toBe(200);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const sign = (time: string) => `v1,${createHmac("sha256", key).update(`signed-event.${time}.`).update(payload).digest("base64")}`;
+    const headers = { "content-type": "application/json", "x-gitlab-event": "Push Hook",
+      "webhook-id": "signed-event", "webhook-timestamp": timestamp,
+      "webhook-signature": `v1,invalid ${sign(timestamp)}` };
+    const first = await app.inject({ method: "POST", url, payload, headers });
+    expect(first.statusCode).toBe(202);
+    const retry = await app.inject({ method: "POST", url, payload, headers });
+    expect(retry.json().taskId).toBe(first.json().taskId);
+    for (const delta of [-3600, 3600]) {
+      const time = String(Number(timestamp) + delta);
+      const response = await app.inject({ method: "POST", url, payload,
+        headers: { ...headers, "webhook-timestamp": time, "webhook-signature": sign(time) } });
+      expect(response.statusCode).toBe(401);
+    }
+    expect((await app.inject({ method: "POST", url, payload: `${payload} `, headers })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url, payload,
+      headers: { ...headers, "webhook-id": "tampered-id" } })).statusCode).toBe(401);
+    expect((await app.inject({ method: "POST", url, payload,
+      headers: { "content-type": "application/json", "x-gitlab-event": "Push Hook",
+        "idempotency-key": "downgrade", "x-gitlab-token": signingToken } })).statusCode).toBe(401);
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 1 });
+  });
+
+  it("验证方式由显式配置决定，普通 Token 可使用 whsec_ 前缀且切换方式需新密钥", async () => {
+    const { app, configUrl, url } = await setup("gitlab");
+    const token = `whsec_${Buffer.from("a valid plain token").toString("base64")}`;
+    const save = (input: unknown) => app.inject({ method: "PUT", url: configUrl, headers: authHeaders(), payload: input });
+    expect((await save({ provider: "gitlab", authMode: "token", enabled: true, secret: token })).statusCode).toBe(200);
+    const response = await app.inject({ method: "POST", url, payload: { object_kind: "push" },
+      headers: { "x-gitlab-token": token, "x-gitlab-event": "Push Hook", "idempotency-key": "plain-prefixed-token" } });
+    expect(response.statusCode).toBe(202);
+    expect((await save({ provider: "gitlab", authMode: "signature", enabled: true })).statusCode).toBe(400);
+    expect((await save({ provider: "github", authMode: "token", enabled: true, secret })).statusCode).toBe(400);
+    const catalog = await app.inject({ method: "GET", url: "/api/integration-webhook-providers", headers: authHeaders() });
+    expect(catalog.json()).toMatchObject([
+      { id: "github", name: "GitHub", authModes: ["signature"] },
+      { id: "gitlab", name: "GitLab", authModes: ["signature", "token"] }
+    ]);
+  });
+
+  it("旧数据库升级创建接收配置表，重复迁移保留配置且删除端点清理配置", async () => {
+    const { app, configUrl, endpointId, db } = await setup("gitlab", false);
+    db.exec("DROP TABLE integration_webhook_receivers");
+    migrate(db);
+    const configured = await app.inject({ method: "PUT", url: configUrl, headers: authHeaders(),
+      payload: { provider: "gitlab", authMode: "token", enabled: true, secret } });
+    expect(configured.statusCode).toBe(200);
+    migrate(db);
+    expect((await app.inject({ method: "GET", url: configUrl, headers: authHeaders() })).json())
+      .toEqual({ provider: "gitlab", authMode: "token", enabled: true, secretConfigured: true });
+    expect((await app.inject({ method: "DELETE", url: `/api/integration-endpoints/${endpointId}`, headers: authHeaders() })).statusCode)
+      .toBe(204);
+    expect(db.prepare("SELECT count(*) AS count FROM integration_webhook_receivers").get()).toEqual({ count: 0 });
+  });
+
+  it("GitHub ping 仅确认连接，非法载荷或缺少投递 ID 不执行", async () => {
+    const { app, url, db } = await setup("github");
+    const request = (body: string, event = "push", delivery: string | undefined = "delivery") => app.inject({
+      method: "POST", url, payload: body,
+      headers: { "content-type": "application/json", "x-github-event": event,
+        ...(delivery === undefined ? {} : { "x-github-delivery": delivery }), "x-hub-signature-256": signature(body) }
+    });
+    expect((await request('{"zen":"Keep it logically awesome."}', "ping")).statusCode).toBe(200);
+    for (const body of ["null", "[]", '"text"', "{invalid"]) {
+      expect((await request(body)).statusCode).toBe(400);
+    }
+    expect((await request(payload, "push", "")).statusCode).toBe(400);
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 0 });
+  });
+
+  it("接收配置需管理鉴权，加密 Secret 并允许留空保留、轮换和停用", async () => {
+    const { app, url, configUrl, endpointId, db } = await setup("gitlab", false);
+    expect((await app.inject({ method: "GET", url: configUrl })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: configUrl, headers: authHeaders() })).json()).toBeNull();
+    const put = (body: unknown) => app.inject({ method: "PUT", url: configUrl, headers: authHeaders(), payload: body });
+    expect((await put({ provider: "gitlab", authMode: "token", enabled: true })).statusCode).toBe(400);
+    expect((await put({ provider: "unknown", enabled: true, secret })).statusCode).toBe(400);
+    const configured = await put({ provider: "gitlab", authMode: "token", enabled: true, secret });
+    expect(configured.statusCode).toBe(200);
+    expect(configured.json()).toMatchObject({ provider: "gitlab", authMode: "token", enabled: true, secretConfigured: true });
+    expect(configured.body).not.toContain(secret);
+    const stored = db.prepare("SELECT encrypted_secret FROM integration_webhook_receivers WHERE endpoint_id = ?").get(endpointId) as {
+      encrypted_secret: string;
+    };
+    expect(stored.encrypted_secret).not.toContain(secret);
+    expect((await put({ provider: "gitlab", authMode: "token", enabled: true })).statusCode).toBe(200);
+    const send = (token: string) => app.inject({ method: "POST", url,
+      headers: { "x-gitlab-token": token, "x-gitlab-event": "Push Hook", "idempotency-key": "rotation-event" },
+      payload: { object_kind: "push", project_id: 42 } });
+    expect((await send("wrong-token")).statusCode).toBe(401);
+    expect((await put({ provider: "gitlab", authMode: "token", enabled: true, secret: "rotated-native-secret" })).statusCode).toBe(200);
+    expect((await send(secret)).statusCode).toBe(401);
+    expect((await send("rotated-native-secret")).statusCode).toBe(202);
+    await put({ provider: "gitlab", authMode: "token", enabled: false });
+    expect((await send("rotated-native-secret")).statusCode).toBe(403);
+  });
+
+  it("默认载荷可通过现有参数映射读取嵌套标量", async () => {
+    const { app, url, configUrl, endpointId, agentId, db } = await setup("gitlab");
+    db.prepare("INSERT INTO agent_session_parameters (agent_id, key, label, required, secret, created_at, updated_at) VALUES (?, ?, ?, 1, 0, ?, ?)")
+      .run(agentId, "project_id", "Project", "2026-09-11", "2026-09-11");
+    const mapping = await app.inject({ method: "PATCH", url: `/api/integration-endpoints/${endpointId}`, headers: authHeaders(),
+      payload: { parameterMappings: [{ parameterKey: "project_id", source: "request", requestKey: "project.id" }] } });
+    expect(mapping.statusCode).toBe(200);
+    const accepted = await app.inject({ method: "POST", url,
+      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Push Hook", "idempotency-key": "mapped-event" },
+      payload: { object_kind: "push", project: { id: 42 } } });
+    expect(accepted.statusCode).toBe(202);
+    const values = db.prepare("SELECT plain_value FROM session_mcp_parameter_values WHERE session_id = ?")
+      .all(accepted.json().sessionId);
+    expect(values).toEqual([{ plain_value: "42" }]);
+    await vi.waitFor(() => expect(db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(accepted.json().taskId))
+      .toEqual({ status: "succeeded" }));
+    const disabled = await app.inject({ method: "PATCH", url: `/api/integration-endpoints/${endpointId}`, headers: authHeaders(),
+      payload: { enabled: false } });
+    expect(disabled.statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: configUrl, headers: authHeaders() })).statusCode).toBe(200);
+    const refused = await app.inject({ method: "POST", url,
+      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Push Hook", "idempotency-key": "disabled-event" },
+      payload: { object_kind: "push", project: { id: 42 } } });
+    expect(refused.statusCode).toBe(403);
+  });
 });
 
 describe("Integration endpoint API", () => {

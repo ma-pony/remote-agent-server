@@ -6,6 +6,7 @@ import {
 import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from "react-router";
 
 import { EmptyState, PageContainer, PageHeader, SectionHeader } from "@/components/page-header";
+import { WebhookReceiverSettings } from "@/components/webhook-receiver-settings";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
@@ -178,6 +179,11 @@ type EndpointContext = {
 };
 const useEndpoint = () => useOutletContext<EndpointContext>();
 
+export const IntegrationEndpointReceiverPage = () => {
+  const { endpoint } = useEndpoint();
+  return <WebhookReceiverSettings key={endpoint.id} endpoint={endpoint} />;
+};
+
 export const IntegrationEndpointDetailLayout = () => {
   const { text } = useI18n();
   const { id = "" } = useParams();
@@ -204,7 +210,7 @@ export const IntegrationEndpointDetailLayout = () => {
   const suffix = location.pathname.slice(base.length).replace(/^\//, "");
   const section = suffix === "" ? "overview" : suffix;
   const agentName = agents.find((item) => item.id === endpoint.agentId)?.name ?? String(endpoint.agentId);
-  return <PageContainer width="wide"><Button asChild variant="ghost" className="mb-4"><Link to="/integration-endpoints"><ArrowLeft />{text("返回接入端点", "Back to endpoints")}</Link></Button><PageHeader title={endpoint.name} description={`/${endpoint.slug} · ${agentName}`} action={<Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge>} />{oneTimeToken === "" ? null : <div className="mb-6"><OneTimeSecret title={text("请立即保存，此访问令牌不会再次显示", "Save this access token now. It will not be shown again.")} value={oneTimeToken} onDismiss={() => setOneTimeToken("")} /></div>}<Tabs value={section}><TabsList variant="line" aria-label={text("接入端点管理", "Integration endpoint management")}><TabsTrigger value="overview" asChild><Link to={base}>{text("概览", "Overview")}</Link></TabsTrigger><TabsTrigger value="usage" asChild><Link to={`${base}/usage`}>{text("调用说明", "Usage")}</Link></TabsTrigger><TabsTrigger value="mappings" asChild><Link to={`${base}/mappings`}>{text("参数映射", "Mappings")}</Link></TabsTrigger><TabsTrigger value="webhooks" asChild><Link to={`${base}/webhooks`}>{text("事件回调", "Webhooks")}</Link></TabsTrigger><TabsTrigger value="conversations" asChild><Link to={`${base}/conversations`}>{text("业务对话", "Conversations")}</Link></TabsTrigger><TabsTrigger value="tasks" asChild><Link to={`${base}/tasks`}>{text("任务", "Tasks")}</Link></TabsTrigger><TabsTrigger value="settings" asChild><Link to={`${base}/settings`}>{text("设置", "Settings")}</Link></TabsTrigger></TabsList></Tabs><div className="mt-6"><Outlet context={{ endpoint, agentName, agents, setEndpoint } satisfies EndpointContext} /></div></PageContainer>;
+  return <PageContainer width="wide"><Button asChild variant="ghost" className="mb-4"><Link to="/integration-endpoints"><ArrowLeft />{text("返回接入端点", "Back to endpoints")}</Link></Button><PageHeader title={endpoint.name} description={`/${endpoint.slug} · ${agentName}`} action={<Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge>} />{oneTimeToken === "" ? null : <div className="mb-6"><OneTimeSecret title={text("请立即保存，此访问令牌不会再次显示", "Save this access token now. It will not be shown again.")} value={oneTimeToken} onDismiss={() => setOneTimeToken("")} /></div>}<Tabs value={section}><TabsList variant="line" aria-label={text("接入端点管理", "Integration endpoint management")}><TabsTrigger value="overview" asChild><Link to={base}>{text("概览", "Overview")}</Link></TabsTrigger><TabsTrigger value="usage" asChild><Link to={`${base}/usage`}>{text("调用说明", "Usage")}</Link></TabsTrigger><TabsTrigger value="mappings" asChild><Link to={`${base}/mappings`}>{text("参数映射", "Mappings")}</Link></TabsTrigger><TabsTrigger value="receiver" asChild><Link to={`${base}/receiver`}>{text("接收事件", "Receive events")}</Link></TabsTrigger><TabsTrigger value="webhooks" asChild><Link to={`${base}/webhooks`}>{text("事件回调", "Webhooks")}</Link></TabsTrigger><TabsTrigger value="conversations" asChild><Link to={`${base}/conversations`}>{text("业务对话", "Conversations")}</Link></TabsTrigger><TabsTrigger value="tasks" asChild><Link to={`${base}/tasks`}>{text("任务", "Tasks")}</Link></TabsTrigger><TabsTrigger value="settings" asChild><Link to={`${base}/settings`}>{text("设置", "Settings")}</Link></TabsTrigger></TabsList></Tabs><div className="mt-6"><Outlet context={{ endpoint, agentName, agents, setEndpoint } satisfies EndpointContext} /></div></PageContainer>;
 };
 
 export const IntegrationEndpointOverviewPage = () => {

@@ -13,6 +13,7 @@ import type {
   ParameterMapping,
   WebhookDelivery,
   WebhookDeliveryStatus,
+  WebhookReceiver,
   WebhookSubscription
 } from "./integration-types.js";
 
@@ -333,6 +334,24 @@ export class IntegrationStore {
 
   private get db(): Database.Database {
     return this.dependencies.db;
+  }
+
+  getWebhookReceiver(endpointId: number): WebhookReceiver | undefined {
+    const row = this.db.prepare(`
+      SELECT provider, auth_mode AS authMode, enabled, encrypted_secret AS encryptedSecret
+      FROM integration_webhook_receivers WHERE endpoint_id = ?
+    `).get(endpointId) as (Omit<WebhookReceiver, "enabled"> & { enabled: 0 | 1 }) | undefined;
+    return row === undefined ? undefined : { ...row, enabled: row.enabled === 1 };
+  }
+
+  setWebhookReceiver(endpointId: number, receiver: WebhookReceiver): void {
+    this.db.prepare(`
+      INSERT INTO integration_webhook_receivers (endpoint_id, provider, auth_mode, enabled, encrypted_secret)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(endpoint_id) DO UPDATE SET
+        provider = excluded.provider, auth_mode = excluded.auth_mode,
+        enabled = excluded.enabled, encrypted_secret = excluded.encrypted_secret
+    `).run(endpointId, receiver.provider, receiver.authMode, receiver.enabled ? 1 : 0, receiver.encryptedSecret);
   }
 
   listEndpoints(): IntegrationEndpoint[] {

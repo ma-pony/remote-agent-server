@@ -44,6 +44,7 @@ const IntegrationEndpointListPage = lazy(async () => ({ default: (await integrat
 const IntegrationEndpointMappingsPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointMappingsPage }));
 const IntegrationEndpointOverviewPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointOverviewPage }));
 const IntegrationEndpointUsagePage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointUsagePage }));
+const IntegrationEndpointReceiverPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointReceiverPage }));
 const IntegrationEndpointSettingsPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointSettingsPage }));
 const IntegrationEndpointTasksPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointTasksPage }));
 const IntegrationEndpointWebhooksPage = lazy(async () => ({ default: (await integrationPages()).IntegrationEndpointWebhooksPage }));
@@ -128,6 +129,7 @@ const Application = () => {
       <Route path="/integration-endpoints/:id" element={<IntegrationEndpointDetailLayout />}>
         <Route index element={<IntegrationEndpointOverviewPage />} />
         <Route path="usage" element={<IntegrationEndpointUsagePage />} />
+        <Route path="receiver" element={<IntegrationEndpointReceiverPage />} />
         <Route path="mappings" element={<IntegrationEndpointMappingsPage />} />
         <Route path="webhooks" element={<IntegrationEndpointWebhooksPage />} />
         <Route path="conversations" element={<IntegrationConversationPage />} />

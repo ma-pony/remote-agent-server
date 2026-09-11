@@ -48,6 +48,24 @@ export type UpdateIntegrationEndpointInput = Omit<Partial<CreateIntegrationEndpo
 };
 export type ResolvedIntegrationParameters = Record<string, string | null>;
 
+export const webhookProviderIds = ["github", "gitlab"] as const;
+export type WebhookProvider = typeof webhookProviderIds[number];
+export type WebhookAuthMode = "signature" | "token";
+export type WebhookProviderDefinition = {
+  id: WebhookProvider;
+  name: string;
+  authModes: WebhookAuthMode[];
+  secretHint: { zh: string; en: string };
+};
+export type WebhookReceiver = {
+  provider: WebhookProvider;
+  authMode: WebhookAuthMode;
+  enabled: boolean;
+  encryptedSecret: string;
+};
+export type WebhookReceiverDetail = Omit<WebhookReceiver, "encryptedSecret"> & { secretConfigured: true };
+export type WebhookReceiverInput = Omit<WebhookReceiver, "encryptedSecret"> & { secret?: string };
+
 export type IntegrationConversation = {
   id: number;
   endpointId: number;

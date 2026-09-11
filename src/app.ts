@@ -21,6 +21,8 @@ import {
 } from "./integrations/integration-scheduler.js";
 import { IntegrationStore } from "./integrations/integration-store.js";
 import { WebhookDispatcher } from "./integrations/webhook-dispatcher.js";
+import { WebhookIngress } from "./integrations/webhook-ingress.js";
+import { registerWebhookIngressRoutes, registerWebhookReceiverAdminRoutes } from "./integrations/webhook-ingress-routes.js";
 import { SdkMcpChecker, type McpChecker } from "./mcp/mcp-checker.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { registerMcpRoutes } from "./mcp/mcp-routes.js";
@@ -204,6 +206,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     }
   });
 
+  const webhookIngress = new WebhookIngress({ store: integrationStore, secrets, coordinator: integrationCoordinator });
   app.get("/api/health", () => ({ ok: true }));
   app.register((api) => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
@@ -222,6 +225,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
       coordinator: integrationCoordinator
     });
     registerSessionRoutes(api, sessionManager, runRepository);
+    registerWebhookReceiverAdminRoutes(api, webhookIngress);
     registerRunRoutes(api, { runRepository, eventStore, sessionManager, executor, scheduler });
   }, { prefix: "/api" });
   registerIntegrationRoutes(app, {
@@ -232,6 +236,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     executor,
     scheduler: integrationTaskScheduler
   });
+  registerWebhookIngressRoutes(app, webhookIngress);
 
   const webRoot = deps.webRoot ?? resolve(process.cwd(), "dist/web");
   app.register(fastifyStatic, { root: webRoot, wildcard: true, suppressWarning: true });

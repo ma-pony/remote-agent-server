@@ -246,6 +246,45 @@ Sending another message in the same session creates a new run and resumes the AC
 
 The external API is asynchronous. Submission returns `202 Accepted` without waiting for the agent and does not require a permanent SSE connection.
 
+### Native GitHub / GitLab webhooks
+
+Open **Integration endpoints → Receive events** in the console, select GitHub or GitLab and an authentication mode, enter a Webhook Secret, and save. Copy the receiver URL and the same secret into the platform's webhook settings, then select the events to trigger. No custom request headers or payload templates are needed.
+
+```text
+POST /integration/v1/endpoints/:slug/webhook
+```
+
+| Platform | Platform settings | Server validation |
+| --- | --- | --- |
+| GitHub | Payload URL and Secret; JSON and form `payload` are supported | HMAC-SHA256 over the original request body, using `X-Hub-Signature-256` |
+| GitLab | URL and generated Signing token (`whsec_` prefix), or Secret token for older versions; keep native JSON | `webhook-signature` HMAC-SHA256, or legacy `X-Gitlab-Token` |
+
+Each endpoint has one source platform. Separate GitHub and GitLab endpoints can share an Agent. Set the business instructions in the endpoint's fixed prompt, for example, “Review this code change and report your findings.” The event type and native JSON payload become the task message and use the existing Task persistence, queue, and execution flow. Each new delivery creates an independent Task and Session; PRs, MRs, and branches do not automatically share a Conversation.
+
+- Accepted business events return `202` with the existing Task response. GitHub `ping` returns `200` and `{"status":"ignored","reason":"ping"}` without creating a task. GitLab test deliveries do create tasks.
+- The generated `requestId` is `github:<X-GitHub-Delivery>` or `gitlab:<delivery ID>`. GitLab delivery headers are checked in order: `webhook-id`, `Idempotency-Key`, then `X-Gitlab-Webhook-UUID`. Repeating an ID with the same input within one endpoint returns the original Task; different input returns `409 idempotency_conflict`.
+- A parameter mapping's request field is a payload path for this entry point, such as GitLab's `project.id` or `object_attributes.iid`, or GitHub's `repository.full_name`. String, number, and boolean values become strings. Fixed mappings still work. Missing required parameters reject task admission.
+- Missing receiver configuration or invalid credentials returns `401 invalid_webhook_credentials`; a disabled receiver or endpoint returns `403 endpoint_disabled`; missing event type or delivery ID, or an invalid JSON object, returns `400 invalid_webhook_request`. The default request-body limit remains 1 MiB; larger requests return `413`.
+- `authMode` is required: GitHub uses `signature`; GitLab supports `signature` (Signing token) and `token` (Secret token). The configured mode determines authentication. In signature mode, GitLab `whsec_` signing tokens validate the delivery ID, timestamp, and original body using the native signature format. Multiple candidate signatures are supported; timestamps must be within five minutes of server time. This mode requires a valid signature and cannot fall back to a plain token. Token mode accepts arbitrary valid Secret tokens, including values starting with `whsec_`.
+- Secrets are encrypted at rest. Configuration responses expose only `secretConfigured`. Omit `secret` during updates to keep it; changing platform or authentication mode requires a new secret. Receiver secrets, external Task API endpoint tokens, and outgoing webhook signing secrets are managed separately.
+
+The management API uses the server `API_TOKEN`. `GET /api/integration-webhook-providers` exposes the registered platforms, authentication modes, and setup hints used by the console. Receiver configuration: `GET /api/integration-endpoints/:id/webhook-receiver` returns the configuration or `null`; `PUT` on the same path saves:
+
+```json
+{
+  "provider": "github",
+  "authMode": "signature",
+  "enabled": true,
+  "secret": "<same Secret as the platform>"
+}
+```
+
+Open the endpoint's Tasks tab to inspect execution. Outgoing webhooks still deliver task progress and results. Posting comments back to GitHub or GitLab requires separately configured Agent tools and permissions.
+
+Protocol references: [GitHub signature validation](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries), [GitLab webhooks](https://docs.gitlab.com/user/project/integrations/webhooks/).
+
+### General Task API flow
+
 The complete flow is:
 
 1. An administrator creates an integration endpoint and stores its one-time token.

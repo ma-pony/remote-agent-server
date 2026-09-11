@@ -166,6 +166,26 @@ Agent 的 `modelPolicy` 有三种格式：
 
 相同 Conversation 的 Task 严格串行，避免多个 Run 并发修改同一个 Workspace 或 Provider 上下文。
 
+### 6.4 原生 Webhook 入库
+
+`WebhookIngress` 是 GitHub 和 GitLab 共用的接收组件。公开入口 `/integration/v1/endpoints/:slug/webhook` 在独立 Fastify 作用域内保留原始请求体，支持 JSON 和 GitHub 表单 `payload`；其他 API 的 JSON 解析不变。端点的接收器配置保存在 `integration_webhook_receivers`，一端点一条配置，Secret 通过现有 SecretStore 加密，删除端点时级联删除。
+
+接收顺序是：查找端点和来源配置 → 使用原始请求体验证 GitHub HMAC-SHA256 或校验 GitLab 签名 / Token → 检查启用状态 → 校验事件类型、投递 ID 和 JSON 对象 → 将载荷路径映射成已声明参数 → 调用 `IntegrationCoordinator.submit`。GitHub `ping` 只返回确认。正常事件使用带平台前缀的投递 ID 作为 `requestId`，以事件类型和默认载荷作为消息，复用现有事务入库、幂等锁、Session 创建、队列、事件投影及重启恢复。接收层不另建任务队列；返回 `202` 表示 Task 已持久化。
+
+每个新投递对应独立 Task/Session，不推断 PR/MR 会话。重复 ID 携带相同输入复用原 Task，不同输入返回幂等冲突。GitLab 优先使用 `webhook-id`，其次 `Idempotency-Key`，最后 `X-Gitlab-Webhook-UUID`。参数映射只读取载荷自身的点分路径，标量值转换为字符串；必填参数验证继续由现有 Endpoint Manager 负责。
+
+GitLab 配置为 `authMode: signature` 时校验 Signing token（`whsec_` 前缀）：Base64 解码密钥，对 `webhook-id.webhook-timestamp.原始请求体` 计算 HMAC-SHA256，再与 `webhook-signature` 中的候选签名作常量时间比较，并限制时间偏差为 5 分钟。此模式不允许明文 Token 降级；`authMode: token` 明确使用 `X-Gitlab-Token` 校验，Secret 文本不决定认证策略。
+
+管理 API 仅返回来源、验证方式、启用状态和 `secretConfigured`。省略 Secret 的更新保留原密文，切换平台或验证方式需要新 Secret。停用接收器只影响后续入站请求，已入库任务继续由现有调度器负责。原生载荷作为用户输入进入 Task 消息及其既有用户消息事件；鉴权头和接收 Secret 不进入消息或公开事件。
+
+### 6.5 Webhook 扩展边界
+
+- 路由只负责 HTTP 传输、原始字节、管理鉴权、输入校验和错误映射。
+- `webhook-adapters/` 中的 `WebhookAdapter` 负责来源协议：声明支持的验证方式、校验 Secret、验证请求、输出统一的事件类型、投递 ID 和载荷；连接测试可返回忽略原因。适配器不访问数据库、不创建 Session、不启动 Agent。
+- `WebhookIngress` 负责接收配置、已声明参数提取和调用现有 Coordinator。Task 的事务、幂等、Session、并发、取消和恢复由原有组件统一管理。
+
+新增来源时实现适配器、加入静态注册表和来源类型，并添加原生请求测试。管理平台目录从注册表生成，前后端共用接收配置类型；数据库的来源与验证方式列保存字符串，具体支持范围由适配器校验，因此新增来源不需要新增业务表或修改 Task 调度。这里不提供运行时加载插件、自定义脚本或通用工作流引擎。
+
 ## 7. 项目环境与 Workspace
 
 项目环境把 Git 仓库和依赖准备从每次 Agent 执行中移出：
@@ -213,7 +233,7 @@ Provider 的历史会话、日志和缓存不会复制到 Agent Provider Home。
 
 ## 10. 安全边界
 
-管理 API 使用全局 `API_TOKEN`。每个接入端点使用独立 Endpoint Token，服务端只保存哈希。Webhook 使用独立签名密钥和 HMAC-SHA256。
+管理 API 使用全局 `API_TOKEN`。通用 Task API 使用独立 Endpoint Token，服务端只保存哈希。原生 Webhook 入口使用每端点加密保存的独立 Secret，校验 GitHub HMAC-SHA256，或 GitLab 的 `whsec_` 签名 Token / 旧式 `X-Gitlab-Token`。出站 Webhook 订阅另有独立签名密钥和 HMAC-SHA256。
 
 Agent 运行在服务操作系统用户权限下，可以执行命令、修改 Workspace、调用 MCP 和访问该用户能够访问的网络与文件。`approve-all` 是 Provider 交互策略，不是安全沙箱。生产部署必须使用专用无特权用户、可信仓库和 MCP，并把服务放在可信网络或 TLS 反向代理后。
 

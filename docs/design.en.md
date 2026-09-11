@@ -166,6 +166,26 @@ An active run keeps the model and concurrency slot resolved at startup and ignor
 
 Tasks sharing one conversation run serially, protecting the shared workspace and provider context from concurrent modification.
 
+### 6.4 Native webhook admission
+
+`WebhookIngress` is the shared GitHub and GitLab receiver. The public `/integration/v1/endpoints/:slug/webhook` route preserves raw request bytes in an isolated Fastify scope, accepting JSON and GitHub form `payload` bodies without changing JSON parsing elsewhere. `integration_webhook_receivers` stores one configuration per endpoint, encrypts its secret through SecretStore, and cascades deletion when its endpoint is deleted.
+
+Admission proceeds through endpoint/provider lookup, GitHub raw-body HMAC-SHA256 or GitLab signature/token verification, enabled-state checks, event/delivery-ID/JSON-object validation, declared parameter extraction, and `IntegrationCoordinator.submit`. GitHub `ping` is acknowledged without a task. Business events use the provider-prefixed delivery ID as `requestId` and the event type plus native payload as their message. They reuse the existing transactional persistence, idempotency locks, Session creation, queue, event projection, and restart recovery. The receiver adds no separate task queue; `202` means the Task is durable.
+
+Each new delivery creates an independent Task/Session without inferring PR/MR conversations. Repeated IDs with identical input reuse the original Task; different input returns an idempotency conflict. GitLab checks `webhook-id`, `Idempotency-Key`, and `X-Gitlab-Webhook-UUID` in that order. Parameter mappings read only the payload's own properties through dot-separated paths and convert scalar values to strings. The existing Endpoint Manager still validates required parameters.
+
+GitLab `authMode: signature` validates a Signing token with the `whsec_` prefix: decode the Base64 key, calculate HMAC-SHA256 over `webhook-id.webhook-timestamp.rawBody`, compare the candidate signatures in `webhook-signature` in constant time, and enforce a five-minute timestamp tolerance. This mode cannot fall back to plain-token authentication; `authMode: token` explicitly selects `X-Gitlab-Token`. Secret contents never select authentication policy.
+
+Management responses expose only the provider, authentication mode, enabled state, and `secretConfigured`. Updates omitting the secret retain its ciphertext; switching provider or authentication mode requires a new secret. Disabling a receiver affects subsequent incoming requests; accepted tasks remain owned by the existing scheduler. Native payloads become Task user input and follow the existing user-message event contract. Authentication headers and the receiver secret never enter messages or public events.
+
+### 6.5 Webhook extension boundaries
+
+- Routes own HTTP transport, original bytes, management authentication, input validation, and error mapping.
+- `WebhookAdapter` implementations in `webhook-adapters/` own the source protocol: supported authentication modes, secret validation, request authentication, and normalization into event type, delivery ID, and payload. Connection tests may return an ignore reason. Adapters never access the database, create Sessions, or start Agents.
+- `WebhookIngress` owns receiver configuration, declared parameter extraction, and submission to the existing Coordinator. Existing components retain transactional Task admission, idempotency, Sessions, concurrency, cancellation, and recovery.
+
+To add a source, implement an adapter, register it with its source type, and add native-request tests. The management catalog is generated from the static registry, and frontend/backend share receiver configuration types. Provider and authentication columns store strings whose supported values are validated by adapters, so adding a source needs neither another business table nor Task scheduling changes. Runtime plugin loading, user scripts, and a generic workflow engine are outside this boundary.
+
 ## 7. Project environments and workspaces
 
 Project environments move repository checkout and dependency preparation out of individual agent runs:
@@ -213,7 +233,7 @@ Concurrency limits belong to one process. Multiple instances do not share quotas
 
 ## 10. Security boundary
 
-Management routes use one global `API_TOKEN`. Every integration endpoint has a separate token whose hash is stored by the server. Each Webhook subscription has a separate HMAC-SHA256 signing secret.
+Management routes use one global `API_TOKEN`. The general Task API uses a separate endpoint token whose hash is stored by the server. Native webhook receivers use independently encrypted per-endpoint secrets for GitHub HMAC-SHA256 or GitLab Signing token / legacy `X-Gitlab-Token` verification. Outgoing webhook subscriptions each have a separate HMAC-SHA256 signing secret.
 
 Agents run with the operating-system permissions of the service user. They can execute commands, modify their workspace, call MCP tools, and reach files and networks available to that user. `approve-all` is a provider interaction policy and provides no sandbox boundary. Production deployments use a dedicated unprivileged user, trusted repositories and MCP servers, plus a trusted network or TLS reverse proxy.
 

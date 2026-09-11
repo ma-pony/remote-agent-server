@@ -36,7 +36,7 @@ const eventQuerySchema = z.object({
 const sendError = (reply: FastifyReply, statusCode: number, code: string, message: string) =>
   reply.code(statusCode).send({ error: { code, message } });
 
-const handleError = (reply: FastifyReply, error: unknown) => {
+export const handleIntegrationError = (reply: FastifyReply, error: unknown) => {
   if (error instanceof IntegrationCoordinatorError) {
     switch (error.code) {
       case "idempotency_conflict":
@@ -208,7 +208,7 @@ export const registerIntegrationRoutes = (
       const task = await coordinator.submit(request.integrationEndpoint!, parsed.data);
       return reply.code(202).send(coordinator.toExternalTask(task));
     } catch (error) {
-      return handleError(reply, error);
+      return handleIntegrationError(reply, error);
     }
   });
 
@@ -219,7 +219,7 @@ export const registerIntegrationRoutes = (
       try {
         return await coordinator.endConversation(request.integrationEndpoint!.id, request.params.conversationKey);
       } catch (error) {
-        return handleError(reply, error);
+        return handleIntegrationError(reply, error);
       }
     }
   );

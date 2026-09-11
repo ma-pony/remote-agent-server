@@ -73,6 +73,74 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+it("原生 Webhook 页面配置平台 Secret，成功后清空且切换平台需新 Secret", async () => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/receiver`);
+  let saved: Record<string, unknown> | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === "/api/integration-webhook-providers") return jsonResponse([
+      { id: "github", name: "GitHub", authModes: ["signature"], secretHint: { zh: "填写 GitHub Secret", en: "Enter GitHub Secret" } },
+      { id: "gitlab", name: "GitLab", authModes: ["signature", "token"], secretHint: { zh: "选择 GitLab 验证方式", en: "Select GitLab authentication" } }
+    ]);
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-receiver`) {
+      if (init?.method === "PUT") {
+        saved = JSON.parse(String(init.body)) as Record<string, unknown>;
+        return jsonResponse({ provider: saved.provider, authMode: saved.authMode, enabled: saved.enabled, secretConfigured: true });
+      }
+      return jsonResponse(null);
+    }
+    throw new Error(`Unexpected request ${url}`);
+  }));
+  render(<App />);
+  const provider = await screen.findByLabelText("来源平台");
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+  expect(screen.getByLabelText("接收地址")).toHaveValue(
+    `${window.location.origin}/integration/v1/endpoints/example-ticket/webhook`
+  );
+  fireEvent.change(provider, { target: { value: "gitlab" } });
+  fireEvent.change(screen.getByLabelText("验证方式"), { target: { value: "token" } });
+  fireEvent.change(screen.getByLabelText("Webhook Secret"), { target: { value: "native-platform-secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
+  await screen.findByText("接收配置已保存");
+  expect(saved).toEqual({ provider: "gitlab", authMode: "token", enabled: true, secret: "native-platform-secret" });
+  expect(screen.getByLabelText("Webhook Secret")).toHaveValue("");
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeEnabled();
+  fireEvent.change(provider, { target: { value: "github" } });
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+});
+
+it("原生 Webhook 页面加载失败可重试，保存失败保留输入并显示错误", async () => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/receiver`);
+  let failLoad = true;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === "/api/integration-webhook-providers") return jsonResponse([
+      { id: "github", name: "GitHub", authModes: ["signature"], secretHint: { zh: "填写 GitHub Secret", en: "Enter GitHub Secret" } },
+      { id: "gitlab", name: "GitLab", authModes: ["signature", "token"], secretHint: { zh: "选择 GitLab 验证方式", en: "Select GitLab authentication" } }
+    ]);
+    if (url === `/api/integration-endpoints/${endpoint.id}/webhook-receiver`) {
+      if (init?.method === "PUT") return jsonResponse({ error: { code: "invalid_request", message: "配置保存失败" } }, 400);
+      if (failLoad) return jsonResponse({ error: { code: "unavailable", message: "暂时无法加载" } }, 503);
+      return jsonResponse({ provider: "github", authMode: "signature", enabled: true, secretConfigured: true });
+    }
+    throw new Error(`Unexpected request ${url}`);
+  }));
+  render(<App />);
+  await screen.findByText("暂时无法加载");
+  failLoad = false;
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  const secretInput = await screen.findByLabelText("Webhook Secret");
+  fireEvent.change(secretInput, { target: { value: "replacement-secret" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
+  await screen.findByText("配置保存失败");
+  expect(secretInput).toHaveValue("replacement-secret");
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeEnabled();
+});
+
 it("接入端点列表分别展示排队和运行任务数", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();

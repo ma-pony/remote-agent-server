@@ -246,6 +246,45 @@ Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选�
 
 外部接入是异步接口。调用方提交 Task 后立即得到 `202 Accepted`，不需要等待 Agent 完成，也不需要长期保持 SSE 连接。
 
+### GitHub / GitLab 原生 Webhook
+
+在管理台打开 **接入端点 → 接收事件**，选择 GitHub 或 GitLab 和验证方式，填写 Webhook Secret 并保存。把页面提供的接收地址和相同 Secret 填入平台的 Webhook 设置，选择需要触发的事件即可，无需自定义请求头或请求体。
+
+```text
+POST /integration/v1/endpoints/:slug/webhook
+```
+
+| 平台 | 平台侧配置 | 服务端验证 |
+| --- | --- | --- |
+| GitHub | Payload URL、Secret；支持 JSON 和表单 `payload` | 原始请求体的 `X-Hub-Signature-256` HMAC-SHA256 签名 |
+| GitLab | URL、生成的 Signing token（`whsec_` 开头）；旧版可用 Secret token；保留默认 JSON | `webhook-signature` HMAC-SHA256 签名，或旧版 `X-Gitlab-Token` |
+
+每个端点配置一个来源平台；可分别创建 GitHub 和 GitLab 端点并绑定同一 Agent。业务规则写在端点的固定提示中，例如“检查这次代码变更并给出审查结论”。事件类型和原生 JSON 载荷作为任务正文，进入现有 Task 入库、排队和执行流程。每个新投递创建独立 Task 和 Session；不会自动按 PR、MR 或分支续接 Conversation。
+
+- 验证并入库成功返回 `202` 和现有 Task 响应。GitHub `ping` 返回 `200`、`{"status":"ignored","reason":"ping"}`，不创建任务。GitLab 的测试投递会正常创建任务。
+- `requestId` 自动生成为 `github:<X-GitHub-Delivery>` 或 `gitlab:<投递ID>`。GitLab 按 `webhook-id`、`Idempotency-Key`、`X-Gitlab-Webhook-UUID` 的顺序读取投递 ID。同一端点重投相同 ID、相同输入返回原 Task；输入不同返回 `409 idempotency_conflict`。
+- 参数映射的“请求字段”在此入口中表示载荷路径，例如 GitLab 的 `project.id`、`object_attributes.iid`，或 GitHub 的 `repository.full_name`。字符串、数字、布尔值转换成字符串；固定值映射继续适用。缺少必填参数会拒绝入库。
+- 未配置接收器或凭证错误返回 `401 invalid_webhook_credentials`；接收器或端点停用返回 `403 endpoint_disabled`；缺少事件类型、投递 ID 或无效 JSON 对象返回 `400 invalid_webhook_request`。请求体沿用服务默认的 1 MiB 上限，超出返回 `413`。
+- `authMode` 必填：GitHub 使用 `signature`；GitLab 可选择 `signature`（Signing token）或 `token`（Secret token），验证方式由配置决定。签名模式下 GitLab 的 `whsec_` Signing token 按原生标准校验投递 ID、时间戳和原始请求体；接受多个候选签名，时间戳与服务时间相差不得超过 5 分钟。该模式必须带有效签名，不能用明文 Token 代替。Token 模式支持任意合法 Secret token，包括以 `whsec_` 开头的值。
+- Secret 加密保存，读取配置只返回 `secretConfigured`。更新时省略 `secret` 保留原值；切换平台或验证方式必须提供新 Secret。接收 Secret 与外部 Task API 的 Endpoint Token、事件回调签名密钥分别管理。
+
+管理 API 使用服务器 `API_TOKEN`。`GET /api/integration-webhook-providers` 返回已注册平台、验证方式和配置提示，供管理页面使用。接收配置接口：`GET /api/integration-endpoints/:id/webhook-receiver` 返回配置或 `null`；`PUT` 在同一地址保存以下配置：
+
+```json
+{
+  "provider": "github",
+  "authMode": "signature",
+  "enabled": true,
+  "secret": "<与平台设置一致的 Secret>"
+}
+```
+
+接收成功后在端点的“任务”页查看执行情况。事件回调仍用于向外发送任务进度和结果；自动写回 GitHub/GitLab 评论需要另行给 Agent 配置相应工具和权限。
+
+协议参考：[GitHub 验签](https://docs.github.com/en/webhooks/using-webhooks/validating-webhook-deliveries)、[GitLab Webhook](https://docs.gitlab.com/user/project/integrations/webhooks/)。
+
+### 通用 Task API 接入流程
+
 完整流程：
 
 1. 管理员创建接入端点并保存一次性 Token。

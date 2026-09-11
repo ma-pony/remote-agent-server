@@ -600,6 +600,14 @@ export const migrate = (
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS integration_webhook_receivers (
+      endpoint_id INTEGER PRIMARY KEY REFERENCES integration_endpoints(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      auth_mode TEXT NOT NULL,
+      enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+      encrypted_secret TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS integration_conversations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       endpoint_id INTEGER NOT NULL REFERENCES integration_endpoints(id),

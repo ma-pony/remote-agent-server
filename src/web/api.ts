@@ -1,4 +1,9 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
+import type {
+  WebhookReceiverDetail as WebhookReceiver, WebhookReceiverInput, WebhookProviderDefinition
+} from "../integrations/integration-types.js";
+
+export type { WebhookReceiver, WebhookReceiverInput, WebhookProviderDefinition };
 
 export type Provider = "claude_code" | "codex" | "hermes";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -470,6 +475,13 @@ export const errorMessage = (error: unknown): string => {
 };
 
 export const integrationApi = {
+  listWebhookProviders: (signal?: AbortSignal) => api<WebhookProviderDefinition[]>("/integration-webhook-providers", { signal }),
+  getWebhookReceiver: (id: number, signal?: AbortSignal) => api<WebhookReceiver | null>(
+    `/integration-endpoints/${id}/webhook-receiver`, { signal }
+  ),
+  configureWebhookReceiver: (id: number, input: WebhookReceiverInput) => api<WebhookReceiver>(
+    `/integration-endpoints/${id}/webhook-receiver`, { method: "PUT", body: JSON.stringify(input) }
+  ),
   listEndpoints: (signal?: AbortSignal) => api<IntegrationEndpointSummary[]>("/integration-endpoints", { signal }),
   getEndpoint: (id: number, signal?: AbortSignal) => api<IntegrationEndpoint>(`/integration-endpoints/${id}`, { signal }),
   createEndpoint: (input: IntegrationEndpointInput) => api<{ endpoint: IntegrationEndpoint; token: string }>(
