@@ -66,9 +66,64 @@ export type AgentSkill = {
   id: string;
   name: string;
   description: string;
-  source: "codex" | "agents" | "claude" | "plugin" | "upload" | "missing";
+  source: "codex" | "agents" | "claude" | "plugin" | "upload" | "missing" | "git";
   enabled: boolean;
   available: boolean;
+  sourceId?: string;
+  packageName?: string;
+  currentRevision?: string;
+  latestRevision?: string;
+  updateAvailable?: boolean;
+  locallyModified?: boolean;
+};
+
+export type SkillSource = {
+  id: string;
+  name: string;
+  url: string;
+  ref: string | null;
+  path: string;
+  status: "ready" | "syncing" | "failed";
+  lastSyncedAt: string | null;
+  error: string | null;
+  skillCount: number;
+  warnings: string[];
+};
+
+export type SkillRevision = {
+  revision: string;
+  createdAt: string;
+  name: string;
+  description: string;
+  source: AgentSkill["source"];
+  skillPath: string;
+  sourceId?: string;
+  packageName?: string;
+  repositoryUrl?: string;
+  ref?: string | null;
+  commit?: string;
+};
+
+export type SkillRevisionHistory = {
+  currentRevision: string | null;
+  latestRevision: string | null;
+  revisions: SkillRevision[];
+};
+
+export type SkillDiffFile = {
+  path: string;
+  status: "added" | "removed" | "modified";
+  before?: string;
+  after?: string;
+  beforeMode: number | null;
+  afterMode: number | null;
+};
+
+export type SkillDiff = {
+  revision: string;
+  expectedRevision: string;
+  locallyModified: boolean;
+  files: SkillDiffFile[];
 };
 
 export type ProviderExtensionCatalogItem = {

@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
@@ -49,6 +50,49 @@ const harness = (options: { beforeDelete?: () => Promise<void> } = {}) => {
 };
 
 describe("durable Session maintenance", () => {
+  it("Hermes 存储清理只删除目标 Session Home，并清理匹配的旧历史", async () => {
+    const root = mkdtempSync(join(tmpdir(), "hermes-session-cleanup-"));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const home = join(root, "agents", "1", "provider-home", "hermes");
+    const targetHome = join(home, "sessions", "1");
+    const nullIdTargetHome = join(home, "sessions", "3");
+    const otherSessionHome = join(home, "sessions", "2");
+    mkdirSync(join(targetHome, "sessions", "provider-1"), { recursive: true });
+    mkdirSync(nullIdTargetHome, { recursive: true });
+    mkdirSync(otherSessionHome, { recursive: true });
+    mkdirSync(join(home, "sessions", "provider-1"), { recursive: true });
+    mkdirSync(join(home, "sessions", "provider-2"), { recursive: true });
+    writeFileSync(join(targetHome, "sessions", "provider-1", "history.jsonl"), "target");
+    writeFileSync(join(nullIdTargetHome, "pending.txt"), "target without provider id");
+    writeFileSync(join(otherSessionHome, "keep.txt"), "other Session");
+    writeFileSync(join(home, "sessions", "provider-1", "history.jsonl"), "legacy target");
+    writeFileSync(join(home, "sessions", "provider-2", "history.jsonl"), "legacy other");
+    const legacyState = new Database(join(home, "state.db"));
+    legacyState.exec(`
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT);
+      CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT);
+      CREATE TABLE compression_locks (session_id TEXT PRIMARY KEY);
+    `);
+    legacyState.prepare("INSERT INTO sessions (id) VALUES (?)").run("provider-1");
+    legacyState.prepare("INSERT INTO sessions (id) VALUES (?)").run("provider-2");
+    legacyState.prepare("INSERT INTO messages (id, session_id) VALUES (?, ?)").run(1, "provider-1");
+    legacyState.prepare("INSERT INTO messages (id, session_id) VALUES (?, ?)").run(2, "provider-2");
+    legacyState.close();
+    const cleaner = new SystemProviderSessionCleaner(root);
+
+    await cleaner.purge({ agentId: 1, provider: "hermes", sessionId: 1, providerSessionId: "provider-1" });
+    await cleaner.purge({ agentId: 1, provider: "hermes", sessionId: 3, providerSessionId: null });
+
+    expect(existsSync(targetHome)).toBe(false);
+    expect(existsSync(nullIdTargetHome)).toBe(false);
+    expect(existsSync(join(home, "sessions", "provider-1"))).toBe(false);
+    expect(readFileSync(join(otherSessionHome, "keep.txt"), "utf8")).toBe("other Session");
+    expect(readFileSync(join(home, "sessions", "provider-2", "history.jsonl"), "utf8")).toBe("legacy other");
+    const remainingState = new Database(join(home, "state.db"), { readonly: true });
+    expect(remainingState.prepare("SELECT id FROM sessions ORDER BY id").all()).toEqual([{ id: "provider-2" }]);
+    remainingState.close();
+  });
+
   it.each(["cleanup", "delete", "reset"] as const)("%s 的存储操作完成后数据库收尾失败，重启恢复仍完成原操作", async (operation) => {
     const h = harness();
     const { db, session, manager, workspace } = h;

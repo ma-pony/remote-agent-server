@@ -77,7 +77,7 @@ const terminateProcessTree = async (child: ChildProcess): Promise<void> => {
   }
 };
 
-const runProcess = (
+export const runProcess = (
   command: string,
   args: string[],
   options: { cwd?: string; environment: NodeJS.ProcessEnv; signal: AbortSignal; timeoutMs?: number }

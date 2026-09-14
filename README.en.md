@@ -26,7 +26,7 @@ Each provider remains responsible for reasoning, tool use, and its native sessio
 - **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
 - **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
 - **Recorded executions:** persist user messages, agent output, tool activity, statuses, errors, and results in SQLite.
-- **Skill management:** discover host Skills, upload Skill ZIP files, and choose which Skills each agent receives.
+- **Skill management:** discover host Skills, upload ZIPs or add Git/marketplace sources, preview changes, and update or roll back each agent independently.
 - **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
 - **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
 - **Model policies:** discover models advertised by Agent Core over ACP, follow the Core default, pin one model, or select a model for each new run with UTC weekdays and 24-hour windows.
@@ -213,6 +213,16 @@ The console organizes schedules into rule groups. Each group shares one or more 
 A policy change affects only runs that start afterward. An active run does not switch, while a queued run resolves the policy against the UTC time at which it obtains an execution slot. The Session, workspace, and provider conversation remain in place. When the server resolves an explicit model, the Session page shows it and management API run responses expose it as `resolvedModel`. This field is `null` when the policy fully delegates to a Core that does not advertise its default. See [Product and architecture: Model discovery, policy, and audit](docs/design.en.md#62-model-discovery-policy-and-audit) for the API shapes and resolution flow.
 
 Changes to Skills, provider extensions, and MCP apply on the next run. When an existing session detects a configuration change, it refreshes the provider connection. If the provider supports resumption, the original Provider Session and conversation context continue.
+
+Manage shared Git sources from an agent's **Skills** page. Enter a GitHub, GitLab, or other Git HTTPS/SSH URL, with an optional branch, tag, commit SHA, and repository subdirectory. Supported catalogs include ordinary Skill repositories, Claude's `.claude-plugin/marketplace.json`, Codex's `.agents/plugins/marketplace.json`, and Skills declared in `plugin.json`, `.codex-plugin/plugin.json`, or `.claude-plugin/plugin.json`. Local marketplace directories and Git plugin sources resolve to complete package snapshots. Unsupported entries are reported. Importing supplies Skills only; it does not execute plugin hooks, MCP servers, or dependency installation commands.
+
+Refreshing a source only discovers versions. Enabled agents retain their selections until you preview changed files and explicitly apply a revision to the current agent. Historical revisions can be selected for rollback. Uploading a same-name replacement ZIP publishes a version which must also be applied explicitly. Digests cover complete package file contents and executable permissions, including scripts and references. Enabling an already enabled Skill is idempotent, and local edits block overwrites. Removing a Git source preserves installed copies and revision history; agents remain independent.
+
+Each Run uses its Session's projection, preserving the contents of active Runs. The Run management API records the projected digest as `skillsRevision`; pre-upgrade Runs have `null`. Source and version endpoints use the existing management API Token. See [capability projection](docs/design.en.md#8-agent-capability-projection).
+
+The [2026-09-14 acceptance report](docs/superpowers/validation/2026-09-14-skill-source-updates.md) verifies real Git source imports and Codex `gpt-5.5` reads, updates, rollbacks, and session continuity. The GitLab smoke covers repository transport. Real Claude Code and Hermes execution remains unverified because upstream model permissions and channel availability blocked those runs.
+
+Known runtime limitation: some Providers return upstream model errors as ordinary output while reporting completion. Acceptance must inspect the actual reply and expected artifacts, not only Run status. This error-status propagation issue remains unresolved; see [deployment troubleshooting](docs/deployment.md#provider-验收与已知限制).
 
 Provider extensions follow a discover, select, and runtime projection flow. After a plugin or hook is added to the service user's Codex or Claude Code configuration, it appears on the agent's **Provider extensions** page and remains disabled by default. Enabled items are projected only to that agent. Hermes does not currently support this extension-management flow.
 

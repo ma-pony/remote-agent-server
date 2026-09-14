@@ -124,6 +124,7 @@ type LinkedRunRow = {
   result: string | null;
   error: string | null;
   resolved_model: string | null;
+  skills_revision: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -321,6 +322,7 @@ const toRun = (row: LinkedRunRow): Run => ({
   result: row.result,
   error: row.error,
   resolvedModel: row.resolved_model,
+  skillsRevision: row.skills_revision,
   createdAt: row.created_at,
   startedAt: row.started_at,
   finishedAt: row.finished_at,

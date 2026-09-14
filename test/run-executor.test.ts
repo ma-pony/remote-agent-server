@@ -94,6 +94,15 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("persists the projected Skill fingerprint on the executed Run", async () => {
+    const runtime = createFakeRuntime();
+    const result = setup(runtime);
+    try {
+      expect(result.runRepository.get(result.run.id)?.skillsRevision).toBeNull();
+      await result.executor.execute(result.run.id);
+      expect(result.runRepository.get(result.run.id)).toMatchObject({ status: "succeeded", skillsRevision: "skills-v1" });
+    } finally { result.db.close(); }
+  });
   it("使用在线配置的 Run 硬超时终止 Turn、释放 Runtime 并稳定失败", async () => {
     vi.useFakeTimers();
     try {

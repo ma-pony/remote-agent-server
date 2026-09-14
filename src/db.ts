@@ -554,6 +554,7 @@ export const migrate = (
       result TEXT,
       error TEXT,
       resolved_model TEXT,
+      skills_revision TEXT,
       created_at TEXT NOT NULL,
       started_at TEXT,
       finished_at TEXT,
@@ -870,5 +871,8 @@ export const migrate = (
   }
   if (!hasColumn("runs", "resolved_model")) {
     db.exec("ALTER TABLE runs ADD COLUMN resolved_model TEXT");
+  }
+  if (!hasColumn("runs", "skills_revision")) {
+    db.exec("ALTER TABLE runs ADD COLUMN skills_revision TEXT");
   }
 };

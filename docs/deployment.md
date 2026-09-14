@@ -540,7 +540,27 @@ pnpm smoke:integrations
 
 每个 HTTP 请求和响应 Body 读取都有 Abort deadline。失败时命令非零退出并打印已经取得的 Endpoint、Task、Session、Run 和 Delivery ID，不打印 Token 或 signing secret。脚本默认不删除记录，便于在管理界面审计；确认无用后由管理员手动停用 Endpoint。可用 `SMOKE_TASK_TIMEOUT_MS`、`SMOKE_REQUEST_TIMEOUT_MS` 和 `SMOKE_POLL_INTERVAL_MS` 调整等待时间。
 
-## 8. Session 存储清理与中断恢复
+## 8. 升级、Skills 与 Session 存储恢复
+
+### Skills Git 来源与版本升级
+
+Skills 来源复用服务用户的 Git/SSH 凭证。先为该用户配置无交互 Git 访问、SSH 主机信任和只读仓库权限；URL 中不要嵌入 Token 或密码。管理台支持 HTTPS、SSH 和 `git@host:group/repository.git`，不接受本机目录或 `file://` 来源。来源刷新不运行安装命令，Git Hook 被禁用。Git 地址、可选 ref 和路径保存在管理数据中，凭证仍由宿主 Git 管理。
+
+备份和恢复时，除了 SQLite 与 `secret.key`，还应保留 `DATA_DIR/skill-sources/`、`skill-revisions/`、`skill-library/` 和 `agents/` 中的配置及安装内容。版本历史暂不自动回收，需为完整包副本预留磁盘空间。升级会自动添加可空的 `runs.skills_revision`，不会补写旧 Run 的版本。
+
+Hermes 的 Provider Home 改为每个 Session 独立。首次继续旧会话时，服务读取旧 Agent Home 的配置及 `state.db` 并迁移对应会话；已有投影目录不会跳过初始化。升级前应正常停止旧服务并备份 Hermes Home。旧会话状态缺失或结构不兼容时会明确报恢复失败，保留业务 Session、Workspace 和 Run 历史；应核验备份或明确重置 Provider 上下文后重试。
+
+### Provider 验收与已知限制
+
+Git 来源刷新成功只证明目录已发布；应用 Skill 后还需使用实际 Provider 验证读取结果、资源更新和回退。`skillsRevision` 可用于核对投影版本，但不能代替业务输出检查。[2026-09-14 测试记录](superpowers/validation/2026-09-14-skill-source-updates.md)包含已通过的 Codex 三轮验证与其他 Provider 的阻塞证据。
+
+- 模型提示需要更新版本 Codex 时，核对 ACP 适配器实际调用的 CLI 版本。适配器可能使用自带 CLI，仅更新宿主命令不一定生效；选择兼容模型，或单独升级适配器后重新验收。
+- `Authentication required` 或 HTTP 403 `MODEL_ACCESS_DENIED` 时，检查服务进程实际加载的认证环境以及该账号的模型权限。
+- HTTP 503、模型无可用通道时，先恢复上游模型服务，再重试验收；刷新 Skill 无法解决通道故障。
+
+当前部分 Provider 会把这些模型错误作为普通回复返回，同时报告 `completed`，上层 Run 因而可能显示成功。这一错误状态传递问题尚未修复；上线验收必须检查回复或实际产物，不得只依赖状态字段。
+
+### Session 存储清理与恢复
 
 升级时按正常流程停止旧进程、备份数据库和 `secret.key`，再启动新版本。启动迁移会为现有 Session 增加可空的 `pending_operation` 字段；不会改写历史活动时间。服务在调度 Run 前，先重试创建中断的目录删除，并完成持久化标记中的清理、删除或重置。
 

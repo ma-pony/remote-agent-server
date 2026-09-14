@@ -45,6 +45,8 @@ import { AcpxAgentRuntime } from "./runtime/acpx-runtime.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { SkillProjector } from "./runtime/skill-projector.js";
 import { SkillManager } from "./skills/skill-manager.js";
+import { SkillSourceManager } from "./skills/skill-source-manager.js";
+import { registerSkillRoutes } from "./skills/skill-routes.js";
 import { RunExecutor } from "./runs/run-executor.js";
 import { RunRepository } from "./runs/run-repository.js";
 import { registerRunRoutes } from "./runs/run-routes.js";
@@ -70,6 +72,7 @@ export type AppDependencies = {
   eventStore?: EventStore;
   skillProjector?: SkillProjector;
   skillManager?: SkillManager;
+  skillSourceManager?: SkillSourceManager;
   projectEnvironmentStore?: ProjectEnvironmentStore;
   projectEnvironmentCommands?: ProjectEnvironmentCommands;
   projectEnvironmentScheduler?: ProjectEnvironmentCheckScheduler;
@@ -91,7 +94,8 @@ export type AppDependencies = {
 export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const app = Fastify({ forceCloseConnections: true });
   const concurrencySettingsStore = deps.concurrencySettingsStore ?? new ConcurrencySettingsStore(deps.db);
-  const skillManager = deps.skillManager ?? new SkillManager({ dataDir: deps.config.dataDir });
+  const skillSourceManager = deps.skillSourceManager ?? new SkillSourceManager({ dataDir: deps.config.dataDir });
+  const skillManager = deps.skillManager ?? new SkillManager({ dataDir: deps.config.dataDir, sourceCatalog: () => skillSourceManager.catalog() });
   const providerExtensionManager = deps.providerExtensionManager ?? new ProviderExtensionManager({ db: deps.db });
   const secrets = SecretStore.open({ dataDir: deps.config.dataDir });
   const mcpManager = deps.mcpManager ?? new McpManager({
@@ -214,6 +218,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerConcurrencySettingsRoutes(api, concurrencySettingsStore);
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager, skillManager, runRepository, providerExtensionManager);
+    registerSkillRoutes(api, agentManager, skillManager, skillSourceManager);
     registerMcpRoutes(api, { mcpManager, mcpChecker, providerMcpCatalog });
     registerIntegrationAdminRoutes(api, {
       manager: integrationEndpointManager,
@@ -261,6 +266,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     if (stopped) return;
     stopped = true;
     const failures: unknown[] = [];
+    try { await skillSourceManager.close(); } catch (error) { failures.push(error); }
     integrationTaskScheduler.stop();
     try {
       await webhookDispatcher.stop();

@@ -187,6 +187,7 @@ export class RunExecutor {
         throw error;
       }
       const { memory, revision: skillsRevision } = this.skillProjector.prepare(agent, session);
+      this.runRepository.setSkillsRevision(run.id, skillsRevision);
       const extensionsRevision = this.providerExtensionManager.revision(agent.id);
       const resolvedModel = resolveModelPolicy(agent.modelPolicy, new Date()) ?? agent.providerDefaultModel ?? undefined;
       this.runRepository.setResolvedModel(run.id, resolvedModel ?? null);

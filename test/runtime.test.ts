@@ -12,6 +12,7 @@ import type {
   AcpRuntimeTurn,
   AcpRuntimeTurnResult
 } from "acpx/runtime";
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AppConfig } from "../src/config.js";
@@ -208,7 +209,7 @@ describe("SkillProjector", () => {
   it.each([
     ["claude_code", [".claude", "skills"]],
     ["codex", [".agents", "skills"]],
-    ["hermes", ["data", "agents", AGENT_PATH_ID, "provider-home", "hermes", "skills"]]
+    ["hermes", ["data", "agents", AGENT_PATH_ID, "provider-home", "hermes", "sessions", "1", "skills"]]
   ] as const)("为 %s 投影托管 Skills 并保留已有 Skill", (provider, destinationParts) => {
     const root = makeRoot();
     const config = makeConfig(root);
@@ -223,7 +224,7 @@ describe("SkillProjector", () => {
 
     const projection = new SkillProjector(config.dataDir).prepare(
       { id: AGENT_ID, provider },
-      { workspacePath: root }
+      { id: 1, workspacePath: root }
     );
 
     expect(projection).toMatchObject({ memory: "remember this", revision: expect.any(String) });
@@ -237,7 +238,7 @@ describe("SkillProjector", () => {
 
     const projection = new SkillProjector(config.dataDir).prepare(
       { id: AGENT_ID, provider: "codex" },
-      { workspacePath: root }
+      { id: 1, workspacePath: root }
     );
 
     expect(projection).toMatchObject({ memory: "", revision: expect.any(String) });
@@ -251,13 +252,13 @@ describe("SkillProjector", () => {
 
     const first = projector.prepare(
       { id: AGENT_ID, provider: "codex" },
-      { workspacePath: root }
+      { id: 1, workspacePath: root }
     );
     mkdirSync(join(source, "ticket-workflow"), { recursive: true });
     writeFileSync(join(source, "ticket-workflow", "SKILL.md"), "skill");
     const second = projector.prepare(
       { id: AGENT_ID, provider: "codex" },
-      { workspacePath: root }
+      { id: 1, workspacePath: root }
     );
 
     expect(first).toMatchObject({ memory: "", revision: expect.any(String) });
@@ -276,7 +277,7 @@ describe("SkillProjector", () => {
 
     expect(() => new SkillProjector(config.dataDir).prepare(
       { id: AGENT_ID, provider: "codex" },
-      { workspacePath: root }
+      { id: 1, workspacePath: root }
     )).toThrow();
 
     expect(readFileSync(join(managed, "SKILL.md"), "utf8")).toBe("old skill");
@@ -296,7 +297,7 @@ describe("SkillProjector", () => {
 
     expect(() => projector.prepare(
       { id: AGENT_ID, provider: "codex" },
-      { workspacePath: root }
+      { id: 1, workspacePath: root }
     )).toThrow("copy failed");
 
     expect(readFileSync(join(managed, "SKILL.md"), "utf8")).toBe("old skill");
@@ -325,7 +326,9 @@ describe("AcpxAgentRuntime", () => {
     expect(command).toContain("REMOTE_AGENT_BROWSER_PROFILE='" + input.browserProfilePath.replaceAll("'", "'\\''") + "'");
     expect(command).toContain(providerCommand);
     if (provider === "hermes") {
-      expect(command).toContain(`HERMES_HOME='${join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "hermes")}'`);
+      expect(command).toContain(`HERMES_HOME='${join(
+        config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "hermes", "sessions", SESSION_PATH_ID
+      )}'`);
       expect(command).not.toContain("CODEX_HOME=");
       expect(command).not.toContain("CLAUDE_CONFIG_DIR=");
     } else if (provider === "codex") {
@@ -386,7 +389,9 @@ describe("AcpxAgentRuntime", () => {
     options.agentRegistry.resolve(`remote:${provider}:${AGENT_ID}:${SESSION_ID}`);
     const providerName = provider === "claude_code" ? "claude" : provider;
     const providerHome = join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", providerName);
-    const home = provider === "codex" ? join(providerHome, "sessions", SESSION_PATH_ID) : providerHome;
+    const home = provider === "codex" || provider === "hermes"
+      ? join(providerHome, "sessions", SESSION_PATH_ID)
+      : providerHome;
 
     expect(readFileSync(join(home, "auth.json"), "utf8")).toBe("secret auth");
     expect(readFileSync(join(home, "provider-settings.json"), "utf8")).toBe("provider settings");
@@ -397,6 +402,44 @@ describe("AcpxAgentRuntime", () => {
     expect(existsSync(join(home, "logs"))).toBe(false);
     expect(existsSync(join(home, "history.jsonl"))).toBe(false);
     expect(existsSync(join(home, "state.db"))).toBe(false);
+  });
+
+  it("Hermes 为每个 Session 隔离 Home，并在首次恢复时迁移对应旧会话", async () => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const legacyHome = join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "hermes");
+    const hostHome = join(root, "host-hermes");
+    mkdirSync(join(legacyHome, "sessions", "provider-resume"), { recursive: true });
+    mkdirSync(join(legacyHome, "sessions", "99"), { recursive: true });
+    mkdirSync(join(legacyHome, "sessions", "other-provider"), { recursive: true });
+    mkdirSync(hostHome, { recursive: true });
+    writeFileSync(join(legacyHome, "auth.json"), "legacy credentials");
+    const state = new Database(join(legacyHome, "state.db"));
+    state.exec("CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT); CREATE TABLE messages (session_id TEXT); CREATE TABLE compression_locks (session_id TEXT)");
+    state.prepare("INSERT INTO sessions (id) VALUES (?)").run("provider-resume");
+    state.close();
+    writeFileSync(join(legacyHome, "sessions", "provider-resume", "history.jsonl"), "legacy history");
+    writeFileSync(join(legacyHome, "sessions", "other-provider", "history.jsonl"), "other history");
+    writeFileSync(join(legacyHome, "sessions", "99", "private.txt"), "other isolated Session");
+    writeFileSync(join(hostHome, "auth.json"), "host credentials");
+    vi.stubEnv("HERMES_HOME", hostHome);
+    const acp = runtimeStub({ handle: { agentSessionId: "provider-resume" } });
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(config);
+
+    await runtime.ensureSession(sessionInput(root, { provider: "hermes", providerSessionId: "provider-resume" }));
+    await runtime.ensureSession(sessionInput(root, { provider: "hermes", sessionId: 2, providerSessionId: null }));
+
+    const firstHome = join(legacyHome, "sessions", "1");
+    const secondHome = join(legacyHome, "sessions", "2");
+    expect(readFileSync(join(firstHome, "auth.json"), "utf8")).toBe("legacy credentials");
+    expect(readFileSync(join(firstHome, "sessions", "provider-resume", "history.jsonl"), "utf8")).toBe("legacy history");
+    expect(existsSync(join(firstHome, "sessions", "other-provider"))).toBe(false);
+    expect(existsSync(secondHome)).toBe(true);
+    expect(existsSync(join(secondHome, "sessions", "provider-resume"))).toBe(false);
+    expect(readFileSync(join(legacyHome, "sessions", "99", "private.txt"), "utf8")).toBe("other isolated Session");
+    expect(readFileSync(join(legacyHome, "sessions", "provider-resume", "history.jsonl"), "utf8")).toBe("legacy history");
+    expect(acp.ensureSession.mock.calls[0]?.[0]).toMatchObject({ resumeSessionId: "provider-resume" });
   });
 
   it("Codex 保留主机 Provider 和模型配置并覆盖智能体指令", async () => {

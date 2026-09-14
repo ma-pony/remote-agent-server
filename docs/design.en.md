@@ -223,13 +223,37 @@ Each agent has an independent Provider Home. The service discovers reusable capa
 System provider configuration -> discover -> select for agent -> project on next run
 ```
 
-- **Skills:** discover host Skills or upload ZIP archives, then enable them per agent.
+- **Skills:** discover host Skills, upload ZIPs, or refresh Git/marketplace sources, then select content revisions per agent.
 - **Provider extensions:** discover Codex and Claude Code plugins and hooks, then project selected entries.
 - **MCP:** manage HTTP and stdio servers, saved values, session parameters, runtime values, secrets, and tool filters.
 
-Provider history, logs, and caches are excluded from the agent Provider Home. `DATA_DIR/secret.key` encrypts sensitive values, and management APIs do not return plaintext secrets.
+Provider Home initialization excludes host conversation history, logs, and caches. When upgrading a legacy business conversation, Hermes migrates only the target conversation and its parent lineage, as described below. `DATA_DIR/secret.key` encrypts sensitive configuration saved through management APIs, which do not return plaintext secrets; native Provider authentication files retain their own format.
 
 Configuration changes take effect on the next run. Existing sessions refresh their runtime connection and keep the provider session when the provider supports resumption.
+
+Git source identity derives from the configured URL, ref, and subdirectory; Skill identity additionally includes plugin identity and package-relative path. Source operations are serialized in the process and use bounded, cancellable Git commands with process-tree cleanup. Paths, file types, and content size are validated before atomically replacing the catalog. Failed refreshes preserve the last usable versions. The catalog repository and referenced plugin repositories retain actual commits separately; external plugins without a ref follow their own HEAD.
+
+Claude marketplace entries use strict mode by default: plugin-manifest and marketplace-entry Skill declarations are merged with the default `skills/` scan. When an entry targets the marketplace root and explicitly selects subpaths, only those paths are imported. A `strict: false` conflict with the plugin's own Skill declaration produces a warning and preserves that plugin's previous catalog. Codex plugins use explicit paths when declared and default directories otherwise. Ordinary repositories are scanned recursively; unsupported source types produce warnings.
+
+Complete packages are limited to 50 MiB, 10,000 directory entries, and 32 levels of depth; internal symbolic links and special files are not distributed. Source manifests are limited to 1 MiB and marketplaces to 1,000 plugin entries. Text previews are limited to 8 KiB per file and 64 KiB in total; larger content still exposes file change status and permissions.
+
+`DATA_DIR/skill-sources/` stores the source index and immutable complete package snapshots; `skill-revisions/` retains selected content versions. Each agent's `skills/<id>/` is a private package copy containing its revision record and Skill-relative path. Legacy direct directories remain readable. Updates retain the old revision and swap the installation using staging and backup directories; startup recovers interrupted swaps. Digests include file paths, contents, and executable permissions. Text diffs are bounded while binary and large files still expose change status. Applying requires a matching `expectedRevision` and an unmodified installation, preventing stale pages from overwriting newer choices.
+
+Complete packages are copied into Session-owned directories before execution. Managed entries for nested Skills link to their corresponding package projection, preserving relative references to sibling resources. Runtime fingerprints use projected contents and are recorded in `runs.skills_revision`. Codex/Claude use Workspace directories; Hermes uses `agents/<id>/provider-home/hermes/sessions/<sessionId>/skills` so concurrent Sessions cannot overwrite each other. An atomic completion marker makes first-time Hermes initialization retryable. Migration retains the resumed conversation and parent lineage from a consistent backup of the old shared `state.db`; missing state fails resumption explicitly. Cleanup removes only the target Session Home and matching legacy conversation records.
+
+| Management endpoint (prefix `/api`) | Behavior |
+| --- | --- |
+| `GET/POST /skill-sources` | List sources; add and perform initial refresh |
+| `POST /skill-sources/:id/refresh` | Discover versions without changing agents |
+| `DELETE /skill-sources/:id` | Remove discovery while preserving installations and history |
+| `GET /agents/:id/skills/:skillId/revisions` | Current/latest revisions and history |
+| `GET /agents/:id/skills/:skillId/diff?revision=<sha256>` | Compare against installed contents |
+| `POST /agents/:id/skills/:skillId/revision` | Explicitly apply or roll back using `{revision, expectedRevision}` |
+| `POST /agents/:id/skills/:skillId/upload` | Publish a same-name version using the existing ZIP payload without applying it |
+
+Checking and applying are separate operations. Source deletion, failed refreshes, and unchanged content do not alter active projections. This phase does not include automatic updates, repository write-back, package-manager installation, or revision garbage collection.
+
+`skillsRevision` identifies the contents projected for a Run; it does not prove the model read or executed a Skill successfully. Some observed upstream model errors arrive as ordinary output while the Runtime reports `completed`. This error-status propagation issue remains unresolved, so business acceptance must verify the actual reply or artifact. The [acceptance report](superpowers/validation/2026-09-14-skill-source-updates.md) distinguishes passing checks from Provider environment blockers.
 
 ## 9. Reliability and concurrency
 

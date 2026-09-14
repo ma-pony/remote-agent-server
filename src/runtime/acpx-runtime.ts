@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { cp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
@@ -19,6 +19,7 @@ import {
 } from "acpx/runtime";
 
 import type { AppConfig } from "../config.js";
+import Database from "better-sqlite3";
 import type { Provider, TokenUsage, TokenUsageTotals } from "../domain.js";
 import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 import { SkillManager } from "../skills/skill-manager.js";
@@ -57,6 +58,7 @@ type RuntimeTarget = {
   provider: Provider;
   agentId: number;
   sessionId: number;
+  providerSessionId: string | null;
   browserProfilePath: string;
   instructions: string;
 };
@@ -116,7 +118,11 @@ const isRuntimeProviderEntry = (name: string): boolean => {
     || /\.(db|sqlite)(-.+)?$/i.test(normalized);
 };
 
-const copyProviderHome = async (source: string, destination: string): Promise<void> => {
+const copyProviderHome = async (
+  source: string,
+  destination: string,
+  preserveExistingEntries: ReadonlySet<string> = new Set()
+): Promise<void> => {
   await mkdir(destination, { recursive: true });
   let entries: string[];
   try {
@@ -130,15 +136,146 @@ const copyProviderHome = async (source: string, destination: string): Promise<vo
     if (isRuntimeProviderEntry(entry)) return;
     const sourcePath = join(source, entry);
     const destinationPath = join(destination, entry);
-    await rm(destinationPath, { force: true, recursive: true });
+    if (!preserveExistingEntries.has(entry)) {
+      await rm(destinationPath, { force: true, recursive: true });
+    }
     await cp(sourcePath, destinationPath, {
       recursive: true,
       force: true,
       mode: constants.COPYFILE_FICLONE,
-      filter: (path) => path === sourcePath
-        || !relative(sourcePath, path).split(sep).some(isRuntimeProviderEntry)
+      filter: (path) => {
+        if (path === sourcePath) return true;
+        const parts = relative(sourcePath, path).split(sep);
+        return !parts.some(isRuntimeProviderEntry)
+          && !(preserveExistingEntries.has(entry) && parts[0]?.startsWith("_remote-agent-managed-"));
+      }
     });
   }));
+};
+
+const HERMES_HOME_PREPARED_MARKER = ".remote-agent-hermes-home-prepared-v1";
+const HERMES_MANAGED_ENTRIES = new Set(["skills"]);
+
+const providerSessionEntry = (name: string, providerSessionId: string): boolean =>
+  name === providerSessionId || name.startsWith(`${providerSessionId}.`);
+
+const sessionHomeEntry = (name: string): boolean => /^(?:0|[1-9]\d*)$/.test(name);
+
+/**
+ * Copies only one legacy Provider conversation into its Session-owned home.
+ * The legacy `sessions` directory now also contains isolated service Sessions,
+ * so it is deliberately inspected only one level deep.
+ */
+const copyLegacyProviderSession = async (
+  source: string,
+  destination: string,
+  providerSessionId: string
+): Promise<void> => {
+  const copyMatches = async (directory: string, relativeDirectory = ""): Promise<void> => {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      const sourcePath = join(directory, entry.name);
+      const destinationPath = join(destination, relativeDirectory, entry.name);
+      if (relativeDirectory === "" && entry.name === "sessions" && entry.isDirectory()) {
+        const legacySessions = await readdir(sourcePath, { withFileTypes: true }).catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+          throw error;
+        });
+        for (const legacySession of legacySessions) {
+          if (!providerSessionEntry(legacySession.name, providerSessionId) || sessionHomeEntry(legacySession.name)) continue;
+          const legacyPath = join(sourcePath, legacySession.name);
+          const migratedPath = join(destinationPath, legacySession.name);
+          await mkdir(destinationPath, { recursive: true });
+          await rm(migratedPath, { force: true, recursive: true });
+          await cp(legacyPath, migratedPath, { recursive: true, force: true, mode: constants.COPYFILE_FICLONE });
+        }
+        continue;
+      }
+      if (providerSessionEntry(entry.name, providerSessionId)) {
+        await mkdir(join(destination, relativeDirectory), { recursive: true });
+        await rm(destinationPath, { force: true, recursive: true });
+        await cp(sourcePath, destinationPath, { recursive: true, force: true, mode: constants.COPYFILE_FICLONE });
+      } else if (entry.isDirectory()) {
+        await copyMatches(sourcePath, join(relativeDirectory, entry.name));
+      }
+    }
+  };
+  await copyMatches(source);
+};
+
+const fileExists = async (path: string): Promise<boolean> => {
+  try {
+    await access(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+};
+
+const markHermesHomePrepared = async (home: string): Promise<void> => {
+  const marker = join(home, HERMES_HOME_PREPARED_MARKER);
+  const temporary = `${marker}.tmp-${randomUUID()}`;
+  await writeFile(temporary, "ready\n", { mode: 0o600 });
+  try {
+    await rename(temporary, marker);
+  } catch (error) {
+    await rm(temporary, { force: true });
+    throw error;
+  }
+};
+
+const removeStateSnapshot = async (path: string): Promise<void> => {
+  await Promise.all([path, `${path}-wal`, `${path}-shm`].map((candidate) => rm(candidate, { force: true })));
+};
+
+/** Copies a consistent SQLite snapshot, retaining only the resumed session and its lineage. */
+const copyLegacyHermesState = async (source: string, destination: string, providerSessionId: string): Promise<boolean> => {
+  const sourcePath = join(source, "state.db");
+  if (!await fileExists(sourcePath)) return false;
+  const destinationPath = join(destination, "state.db");
+  const temporaryPath = `${destinationPath}.migration-${randomUUID()}`;
+  const sourceDatabase = new Database(sourcePath, { readonly: true, fileMustExist: true });
+  try {
+    const exists = sourceDatabase.prepare("SELECT 1 FROM sessions WHERE id = ? LIMIT 1").get(providerSessionId);
+    if (exists === undefined) return false;
+    await sourceDatabase.backup(temporaryPath);
+  } catch (error) {
+    await removeStateSnapshot(temporaryPath);
+    throw error;
+  } finally {
+    sourceDatabase.close();
+  }
+  try {
+    const migratedDatabase = new Database(temporaryPath);
+    try {
+      const retained = `WITH RECURSIVE retained(id) AS (
+        SELECT id FROM sessions WHERE id = ?
+        UNION
+        SELECT sessions.parent_session_id FROM sessions JOIN retained ON sessions.id = retained.id
+          WHERE sessions.parent_session_id IS NOT NULL
+      )`;
+      migratedDatabase.prepare(`${retained} DELETE FROM messages WHERE session_id NOT IN (SELECT id FROM retained)`)
+        .run(providerSessionId);
+      migratedDatabase.prepare(`${retained} DELETE FROM compression_locks WHERE session_id NOT IN (SELECT id FROM retained)`)
+        .run(providerSessionId);
+      migratedDatabase.prepare(`${retained} DELETE FROM sessions WHERE id NOT IN (SELECT id FROM retained)`)
+        .run(providerSessionId);
+    } finally {
+      migratedDatabase.close();
+    }
+    await rename(temporaryPath, destinationPath);
+    return true;
+  } catch (error) {
+    await removeStateSnapshot(temporaryPath);
+    throw error;
+  }
 };
 
 const codexConfigWithManagedSettings = async (
@@ -205,9 +342,10 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     const providerHome = join(this.dataDir, "agents", String(target.agentId), "provider-home");
     const environment = [`REMOTE_AGENT_BROWSER_PROFILE=${shellQuote(target.browserProfilePath)}`];
     if (target.provider === "hermes") {
-      const home = join(providerHome, "hermes");
+      const legacyHome = join(providerHome, "hermes");
+      const home = join(legacyHome, "sessions", String(target.sessionId));
       const hostHome = process.env.HERMES_HOME ?? join(homedir(), ".hermes");
-      await this.prepareProviderHome(hostHome, home);
+      await this.prepareHermesHome(hostHome, legacyHome, home, target.providerSessionId);
       environment.push(`HERMES_HOME=${shellQuote(home)}`);
     } else if (target.provider === "codex") {
       const agentHome = join(providerHome, "codex");
@@ -260,9 +398,33 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
   }
 
   private async prepareProviderHome(source: string, destination: string): Promise<void> {
+    await this.prepareHome(destination, () => copyProviderHome(source, destination));
+  }
+
+  private async prepareHermesHome(
+    hostHome: string,
+    legacyHome: string,
+    destination: string,
+    providerSessionId: string | null
+  ): Promise<void> {
+    await this.prepareHome(destination, async () => {
+      if (await fileExists(join(destination, HERMES_HOME_PREPARED_MARKER))) return;
+      await copyProviderHome(hostHome, destination, HERMES_MANAGED_ENTRIES);
+      await copyProviderHome(legacyHome, destination, HERMES_MANAGED_ENTRIES);
+      if (providerSessionId !== null) {
+        await copyLegacyProviderSession(legacyHome, destination, providerSessionId);
+        if (!await copyLegacyHermesState(legacyHome, destination, providerSessionId)) {
+          throw new AgentRuntimeError("session_resume_failed", "Legacy Hermes state does not contain the Provider session");
+        }
+      }
+      await markHermesHomePrepared(destination);
+    });
+  }
+
+  private async prepareHome(destination: string, prepare: () => Promise<void>): Promise<void> {
     let preparation = this.providerHomePreparations.get(destination);
     if (preparation === undefined) {
-      preparation = copyProviderHome(source, destination);
+      preparation = prepare();
       this.providerHomePreparations.set(destination, preparation);
       void preparation.catch(() => {
         if (this.providerHomePreparations.get(destination) === preparation) {
@@ -503,6 +665,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       provider: input.provider,
       agentId: input.agentId,
       sessionId: input.sessionId,
+      providerSessionId: input.providerSessionId,
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions
     });
@@ -735,6 +898,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       provider: input.provider,
       agentId: input.agentId,
       sessionId,
+      providerSessionId: null,
       browserProfilePath: join(this.config.dataDir, "agents", String(input.agentId), "model-catalog-browser"),
       instructions: input.instructions
     });
@@ -784,6 +948,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       provider,
       agentId,
       sessionId,
+      providerSessionId: null,
       browserProfilePath: join(this.config.dataDir, "agents", String(agentId), "doctor-browser"),
       instructions: ""
     });

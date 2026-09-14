@@ -6,6 +6,7 @@ import { agentModelPolicySchema } from "./model-policy.js";
 import type { RunRepository } from "../runs/run-repository.js";
 import { SkillManagerError, type SkillManager } from "../skills/skill-manager.js";
 import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
+import { handleSkillError } from "../skills/skill-routes.js";
 
 const createAgentSchema = z.object({
   name: z.string().trim().min(1),
@@ -181,7 +182,8 @@ export const registerAgentRoutes = (
   app.get<{ Params: { id: string } }>("/agents/:id/skills", (request, reply) => {
     const id = parseId(request.params.id);
     if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
-    return skillManager.list(id);
+    try { return skillManager.list(id); }
+    catch (error) { return handleSkillError(reply, error); }
   });
 
   app.get<{ Params: { id: string } }>("/agents/:id/extensions", (request, reply) => {
@@ -209,10 +211,12 @@ export const registerAgentRoutes = (
     if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
     const parsed = updateSkillSchema.safeParse(request.body);
     if (!parsed.success) return badRequest(reply, "Invalid Skill update");
-    const skill = skillManager.setEnabled(id, request.params.skillId, parsed.data.enabled);
-    return skill === undefined
-      ? reply.code(404).send({ error: { code: "skill_not_found", message: "Skill not found" } })
-      : skill;
+    try {
+      const skill = skillManager.setEnabled(id, request.params.skillId, parsed.data.enabled);
+      return skill === undefined
+        ? reply.code(404).send({ error: { code: "skill_not_found", message: "Skill not found" } })
+        : skill;
+    } catch (error) { return handleSkillError(reply, error); }
   });
 
   app.delete<{ Params: { id: string; skillId: string }; Querystring: { scope?: string } }>(

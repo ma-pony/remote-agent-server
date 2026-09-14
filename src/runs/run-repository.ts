@@ -13,6 +13,7 @@ type RunRow = {
   result: string | null;
   error: string | null;
   resolved_model: string | null;
+  skills_revision: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -48,6 +49,7 @@ const toRun = (row: RunRow): Run => ({
   result: row.result,
   error: row.error,
   resolvedModel: row.resolved_model,
+  skillsRevision: row.skills_revision,
   createdAt: row.created_at,
   startedAt: row.started_at,
   finishedAt: row.finished_at,
@@ -168,6 +170,7 @@ export class RunRepository {
           result: null,
           error: null,
           resolvedModel: null,
+          skillsRevision: null,
           createdAt,
           startedAt: null,
           finishedAt: null,
@@ -198,6 +201,13 @@ export class RunRepository {
       .run(model, id);
     if (updated.changes !== 1) throw new RunRepositoryError("invalid_run_state");
     return this.requireRun(id);
+  }
+
+  /** Records the content fingerprint actually projected before starting the Provider. */
+  setSkillsRevision(id: number, revision: string): void {
+    const updated = this.db.prepare("UPDATE runs SET skills_revision = ? WHERE id = ? AND status = 'running'")
+      .run(revision, id);
+    if (updated.changes !== 1) throw new RunRepositoryError("invalid_run_state");
   }
 
   /**

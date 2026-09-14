@@ -123,6 +123,7 @@ export type Run = {
   result: string | null;
   error: string | null;
   resolvedModel: string | null;
+  skillsRevision: string | null;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;

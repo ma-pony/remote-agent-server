@@ -26,7 +26,7 @@ Agent 的推理、工具使用和原生会话仍由对应 Provider 负责。Remo
 - **隔离 Workspace**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot，为每个 Session 快速创建写时复制环境。
 - **多轮 Agent 对话**：同一 Session 可以连续执行多个 Run，并在 Provider 支持时续接 ACP Session。
 - **完整执行记录**：在 SQLite 中保存用户消息、Agent 输出、工具调用、状态、错误和最终结果。
-- **Skills 管理**：发现本机 Skills、上传 Skill ZIP，并控制每个 Agent 启用的 Skills。
+- **Skills 管理**：发现本机 Skills、上传 ZIP 或添加 Git/marketplace 来源，预览版本变化并按 Agent 更新或回退。
 - **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
 - **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
 - **模型策略**：自动读取 Agent Core 通过 ACP 暴露的模型，可跟随 Core 默认模型、固定模型，或按 UTC 星期和 24 小时时间段为新 Run 选择模型。
@@ -213,6 +213,16 @@ Agent 页面还可以配置：
 策略修改只影响之后真正开始的 Run：正在执行的 Run 不切换，仍在队列中的 Run 会在获得执行槽位时按当时 UTC 时间解析。Session、Workspace 和 Provider 对话上下文都会继续复用。服务解析出明确模型时，Session 页面会在 Run 上展示它，管理 API 也会在 `resolvedModel` 字段中返回；完全跟随且 Core 未公开默认模型时，该字段为 `null`。接口配置格式与解析顺序见[产品与架构：模型发现、策略与审计](docs/design.md#62-模型发现策略与审计)。
 
 Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Session 检测到配置变化后会刷新执行器连接；Provider 支持时，会继续原有 Provider Session 和对话上下文。
+
+在 Agent 的 **Skills** 页面管理共享 Git 来源，可填写 GitHub、GitLab 或其他 Git 服务的 HTTPS/SSH 地址，以及可选分支、标签、提交 SHA 和仓库子目录。支持普通 Skills 仓库、Claude 的 `.claude-plugin/marketplace.json`、Codex 的 `.agents/plugins/marketplace.json`，以及 `plugin.json`、`.codex-plugin/plugin.json` 和 `.claude-plugin/plugin.json` 中的 Skills 声明。marketplace 的本地目录和 Git 插件源会解析为完整包快照；不支持的条目会显示提示。导入只提供 Skills，不执行插件 Hook、MCP 或依赖安装命令。
+
+手动刷新来源只发现新版本。已启用的 Agent 保持原版本；在版本预览中检查文件变化，再明确应用到当前 Agent，也可以选择历史版本回退。同名上传 ZIP 可作为原 Skill 的新版本发布，发布后仍需单独应用。版本摘要覆盖整个包的文件内容和可执行权限，修改 scripts、references 也会被识别。重复启用已启用的 Skill 不会更新版本，本地副本有修改时会阻止覆盖。移除 Git 来源保留已启用副本和版本历史；不同 Agent 的选择互不影响。
+
+每次 Run 使用自己的 Session 投影，运行中的任务保留原内容。Run 管理 API 的 `skillsRevision` 记录实际投影的摘要；升级前的历史 Run 为 `null`。来源管理及版本接口使用同一个管理 API Token，详见[能力投影设计](docs/design.md#8-agent-能力投影)。
+
+2026-09-14 的[验收记录](docs/superpowers/validation/2026-09-14-skill-source-updates.md)确认了真实 Git 来源导入和 Codex `gpt-5.5` 的读取、更新、回退及会话连续性。GitLab 实测覆盖仓库拉取；Claude Code 和 Hermes 的真实执行分别被上游模型权限和通道可用性阻塞，尚未完成验收。
+
+已知运行时限制：部分 Provider 会把上游模型错误作为普通回复返回，同时报告运行完成。验收时需要检查实际回复和预期产物，不能只看 Run 状态。此错误状态传递问题尚未修复，排查方法见[部署文档](docs/deployment.md#provider-验收与已知限制)。
 
 执行器扩展遵循“发现 → Agent 选择 → 运行时投影”流程。在服务运行用户的 Codex 或 Claude Code 配置中安装新插件、添加 Hook 后，它们会出现在 Agent 的 **执行器扩展** 页面，默认不启用。启用的项只投影到当前 Agent。Hermes 目前不提供这项扩展管理能力。
 

@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import type { Provider } from "../domain.js";
+import { readInstallation } from "../skills/skill-revisions.js";
+import { skillTreeDigest } from "../skills/skill-content.js";
 
 export type SkillProjectionAgent = {
   id: number;
@@ -10,6 +12,7 @@ export type SkillProjectionAgent = {
 };
 
 export type SkillProjectionSession = {
+  id: number;
   workspacePath: string;
 };
 
@@ -19,6 +22,7 @@ export type SkillProjection = {
 };
 
 const managedPrefix = "_remote-agent-managed-";
+const packagePrefix = ".remote-agent-package-";
 
 export type SkillProjectorFileSystem = {
   exists(path: string): boolean;
@@ -28,6 +32,7 @@ export type SkillProjectorFileSystem = {
   copy(source: string, destination: string): void;
   rename(source: string, destination: string): void;
   remove(path: string): void;
+  link(target: string, path: string): void;
 };
 
 const nodeFileSystem: SkillProjectorFileSystem = {
@@ -37,7 +42,8 @@ const nodeFileSystem: SkillProjectorFileSystem = {
   list: (path) => readdirSync(path).sort(),
   copy: (source, destination) => cpSync(source, destination, { recursive: true }),
   rename: renameSync,
-  remove: (path) => rmSync(path, { force: true, recursive: true })
+  remove: (path) => rmSync(path, { force: true, recursive: true }),
+  link: (target, path) => symlinkSync(target, path, "dir")
 };
 
 /**
@@ -61,6 +67,7 @@ export class SkillProjector {
     const backup = join(skillsRoot, `.remote-agent-skills.backup-${token}`);
     const movedExisting: string[] = [];
     const installed: string[] = [];
+    const fingerprints: [string, string, string][] = [];
     const enabledSkills = this.fileSystem.exists(source)
       ? this.fileSystem.list(source).filter((entry) => !entry.startsWith("."))
       : [];
@@ -70,10 +77,23 @@ export class SkillProjector {
     this.fileSystem.mkdir(backup);
     try {
       for (const name of enabledSkills) {
-        this.fileSystem.copy(join(source, name), join(temporary, `${managedPrefix}${name}`));
+        const sourceDirectory = join(source, name);
+        const record = readInstallation(sourceDirectory);
+        const skillPath = record?.skillPath ?? ".";
+        if (skillPath === ".") {
+          const destination = join(temporary, `${managedPrefix}${name}`);
+          this.fileSystem.copy(realpathSync(sourceDirectory), destination);
+          fingerprints.push([name, skillPath, skillTreeDigest(destination, true)]);
+        } else {
+          const packageName = `${packagePrefix}${name}-${token}`;
+          const destination = join(temporary, packageName);
+          this.fileSystem.copy(realpathSync(sourceDirectory), destination);
+          fingerprints.push([name, skillPath, skillTreeDigest(destination, true)]);
+          this.fileSystem.link(`${packageName}/${skillPath}`, join(temporary, `${managedPrefix}${name}`));
+        }
       }
 
-      const existingManaged = this.fileSystem.list(skillsRoot).filter((name) => name.startsWith(managedPrefix));
+      const existingManaged = this.fileSystem.list(skillsRoot).filter((name) => name.startsWith(managedPrefix) || name.startsWith(packagePrefix));
       for (const name of existingManaged) {
         this.fileSystem.rename(join(skillsRoot, name), join(backup, name));
         movedExisting.push(name);
@@ -84,12 +104,10 @@ export class SkillProjector {
       }
     } catch (error) {
       for (const name of installed) {
-        const path = join(skillsRoot, name);
-        if (this.fileSystem.exists(path)) this.fileSystem.remove(path);
+        this.fileSystem.remove(join(skillsRoot, name));
       }
       for (const name of movedExisting) {
-        const path = join(backup, name);
-        if (this.fileSystem.exists(path)) this.fileSystem.rename(path, join(skillsRoot, name));
+        this.fileSystem.rename(join(backup, name), join(skillsRoot, name));
       }
       throw error;
     } finally {
@@ -99,13 +117,14 @@ export class SkillProjector {
 
     return {
       memory,
-      revision: createHash("sha256").update(JSON.stringify(enabledSkills)).digest("hex")
+      revision: createHash("sha256").update(JSON.stringify(fingerprints)).digest("hex")
     };
   }
 
   private skillsRoot(agent: SkillProjectionAgent, session: SkillProjectionSession): string {
     if (agent.provider === "claude_code") return join(session.workspacePath, ".claude", "skills");
     if (agent.provider === "codex") return join(session.workspacePath, ".agents", "skills");
-    return join(this.dataDir, "agents", String(agent.id), "provider-home", "hermes", "skills");
+    if (!Number.isSafeInteger(session.id) || session.id <= 0) throw new Error("invalid_skill_projection_session");
+    return join(this.dataDir, "agents", String(agent.id), "provider-home", "hermes", "sessions", String(session.id), "skills");
   }
 }

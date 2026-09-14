@@ -223,13 +223,37 @@ Session 使用可空的内部字段 `pending_operation` 持久化 `cleanup`、`d
 系统 Provider 配置 -> 发现 -> Agent 选择 -> 下一次 Run 投影
 ```
 
-- **Skills**：发现本机 Skill 或上传 ZIP，按 Agent 启用。
+- **Skills**：发现本机 Skill、上传 ZIP 或刷新 Git/marketplace 来源，按 Agent 选择内容版本。
 - **执行器扩展**：发现 Codex、Claude Code 插件和 Hook，按 Agent 投影。
 - **MCP**：管理 HTTP 和 stdio Server、固定值、Session 参数、运行时参数、密钥和工具过滤。
 
-Provider 的历史会话、日志和缓存不会复制到 Agent Provider Home。敏感值使用 `DATA_DIR/secret.key` 加密，管理 API 不返回明文。
+初始化 Provider Home 时排除宿主的历史会话、日志和缓存。升级旧业务会话时，Hermes 仅迁移目标会话及其父链，见下文。服务通过管理接口保存的敏感配置使用 `DATA_DIR/secret.key` 加密，管理 API 不返回明文；原生 Provider 的认证文件继续使用其自身格式。
 
 配置变化从下一次 Run 生效。已有 Session 会刷新 Runtime 连接；Provider 支持恢复时继续原有 Provider Session。
+
+Git 来源的稳定身份来自配置的 URL、ref 和子目录；Skill 身份还包含插件标识和包内路径。刷新操作在进程内串行，使用有截止时间、可取消并回收进程树的 Git 命令。发布前验证路径、文件类型和内容大小，来源索引原子替换，失败保留上一可用版本。来源仓库与 marketplace 引用的插件仓库分别记录实际 commit，外部插件未指定 ref 时跟随自身 HEAD。
+
+Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace 条目的 Skills 声明，并包含默认 `skills/`；当条目指向 marketplace 根目录且明确选择子路径时，仅导入所选路径。`strict: false` 与插件自身 Skills 声明冲突时提示并保留该插件的上一可用版本。Codex 插件按显式声明选择目录，没有声明时才使用默认目录。普通仓库递归发现 Skills；不支持的源类型会显示提示。
+
+完整包限制为 50 MiB、10,000 个目录项和 32 层深度；不分发包内符号链接或特殊文件。来源 manifest 限制为 1 MiB，marketplace 最多 1,000 个插件条目。文本差异预览单文件最多 8 KiB、合计最多 64 KiB，超限内容仍返回文件变化和权限信息。
+
+`DATA_DIR/skill-sources/` 保存来源索引和不可变完整包快照；`skill-revisions/` 保存被选用的内容版本。Agent 的 `skills/<id>/` 是私有包副本，内含版本记录及包内 Skill 路径；旧式直接目录继续可读。更新先保留旧版本，再用临时目录与备份交换安装目录；启动恢复中断的交换。内容摘要包含全部文件、路径和可执行权限。版本预览限制文本体积，二进制、大文件仍返回变化状态。应用要求 `expectedRevision` 匹配且没有本地修改，防止旧页面覆盖新配置。
+
+运行前将包复制到 Session 专属目录，嵌套 Skill 的托管入口链接到同一次完整包投影，保留对同包其他资源的相对路径。配置指纹使用实际投影内容，而非仅使用 Skill 名称，并写入 `runs.skills_revision`。Codex/Claude 使用 Workspace 内目录；Hermes 使用 `agents/<id>/provider-home/hermes/sessions/<sessionId>/skills`，避免不同 Session 相互覆盖。Hermes 首次迁移使用完成标记保护可重试初始化，并从旧共享 `state.db` 的一致性快照保留目标会话及父链；状态缺失时明确拒绝恢复。清理只移除目标 Session Home 及旧共享状态中的对应会话记录。
+
+| 管理接口（前缀 `/api`） | 行为 |
+| --- | --- |
+| `GET/POST /skill-sources` | 列出来源；添加并首次刷新 |
+| `POST /skill-sources/:id/refresh` | 手动发现新版本，不改变 Agent 选择 |
+| `DELETE /skill-sources/:id` | 移除发现来源，保留安装副本和历史 |
+| `GET /agents/:id/skills/:skillId/revisions` | 当前、最新版本及历史 |
+| `GET /agents/:id/skills/:skillId/diff?revision=<sha256>` | 与当前安装内容比较 |
+| `POST /agents/:id/skills/:skillId/revision` | 用 `{revision, expectedRevision}` 明确应用或回退 |
+| `POST /agents/:id/skills/:skillId/upload` | 用原 ZIP 请求格式发布同名新版，不自动应用 |
+
+版本检查和应用是不同操作；来源删除、刷新失败、版本不变均不会改动运行中的投影。本期不提供自动更新、仓库写回、包管理器安装或版本垃圾回收。
+
+`skillsRevision` 证明该 Run 使用的投影内容，不证明模型成功读取或执行了 Skill。已观察到部分上游模型错误作为普通输出返回且 Runtime 报告 `completed`；当前服务未修复这一状态传递问题。业务验收须核对实际回复或产物。[实测记录](superpowers/validation/2026-09-14-skill-source-updates.md)分别列出通过项与 Provider 环境阻塞。
 
 ## 9. 可靠性与并发
 
