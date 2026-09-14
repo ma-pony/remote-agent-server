@@ -3,7 +3,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 
 import { App } from "../src/web/app.js";
 
@@ -30,6 +30,14 @@ const sessionPage = (
   overrides: Partial<{ page: number; pageSize: number; total: number; totalPages: number }> = {}
 ) => ({
   items, page: 1, pageSize: 100, total: items.length, totalPages: items.length === 0 ? 0 : 1, ...overrides
+});
+
+// Transform the real lazy routes before starting interaction assertion deadlines.
+beforeAll(async () => {
+  await Promise.all([
+    import("../src/web/pages/agent-pages.js"),
+    import("../src/web/pages/agent-mcp-pages.js")
+  ]);
 });
 
 beforeEach(() => {

@@ -3,7 +3,7 @@
 import "@testing-library/jest-dom/vitest";
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 
 import { App } from "../src/web/app.js";
 
@@ -60,6 +60,9 @@ const deliveryPage = (items: unknown[], overrides: Record<string, unknown> = {})
   ...overrides
 });
 const deliveryListPath = `/api/integration-endpoints/${endpoint.id}/webhook-deliveries`;
+
+// Transform the real lazy route before starting interaction assertion deadlines.
+beforeAll(async () => { await import("../src/web/pages/integration-pages.js"); });
 
 beforeEach(() => {
   sessionStorage.setItem("apiToken", "management-token");

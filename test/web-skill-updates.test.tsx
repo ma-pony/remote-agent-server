@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { App } from "../src/web/app.js";
 
 const agent = { id: 31, name: "更新测试", provider: "codex", enabled: true, instructions: "", projectEnvironmentId: 1, createdAt: "2026-09-14T00:00:00.000Z", updatedAt: "2026-09-14T00:00:00.000Z" };
@@ -13,6 +13,8 @@ const revisions = { currentRevision: current, latestRevision: latest, revisions:
   { revision: older, createdAt: "2026-09-13T00:00:00.000Z", name: "review", description: "old", source: "git", skillPath: "SKILL.md" }
 ] };
 
+// Transform the real lazy route before starting interaction assertion deadlines.
+beforeAll(async () => { await import("../src/web/pages/agent-pages.js"); });
 beforeEach(() => { sessionStorage.setItem("apiToken", "test"); window.history.replaceState({}, "", `/agents/${agent.id}/skills`); });
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 
