@@ -121,6 +121,7 @@ describe("database migration", () => {
       "integration_tasks",
       "integration_webhook_receipts",
       "integration_webhook_receivers",
+      "message_attachments",
       "project_environment_revisions",
       "project_environments",
       "runs",

@@ -1,3 +1,5 @@
+import { AttachmentStore } from "../attachments/attachment-store.js";
+import type { AttachmentInput } from "../attachments/attachment-types.js";
 import type Database from "better-sqlite3";
 
 import { parseStoredModelPolicy, type AgentModelPolicy } from "../agents/model-policy.js";
@@ -60,6 +62,7 @@ const isTerminalStatus = (status: RunStatus): status is "succeeded" | "failed" |
   status === "succeeded" || status === "failed" || status === "cancelled";
 
 export type CreateRunInput = {
+  attachments?: AttachmentInput[];
   sessionId: number;
   input: string;
 };
@@ -125,6 +128,8 @@ export class RunRepositoryError extends Error {
  * Persists Run state transitions together with their owning Session state.
  */
 export class RunRepository {
+  readonly attachments: AttachmentStore;
+  private toRun = (row: RunRow): Run => ({ ...toRun(row), ...this.attachments.projection({ runId: row.id }) });
   private readonly db: Database.Database;
   private readonly projection: RunStateProjection;
   private readonly onPostCommitError: (runId: number, transition: RunPostCommitTransition) => undefined;
@@ -135,6 +140,7 @@ export class RunRepository {
     onPostCommitError = () => undefined
   }: RunRepositoryDependencies) {
     this.db = db;
+    this.attachments = new AttachmentStore(db);
     this.projection = projection;
     this.onPostCommitError = onPostCommitError;
   }
@@ -162,7 +168,9 @@ export class RunRepository {
         const id = insertedId(this.db
           .prepare("INSERT INTO runs (session_id, status, input, created_at) VALUES (?, ?, ?, ?)")
           .run(input.sessionId, "queued", input.input, createdAt));
+        this.attachments.insert(input.sessionId, { runId: id }, input.attachments);
         const run: Run = {
+          ...this.attachments.projection({ runId: id }),
           id,
           sessionId: input.sessionId,
           status: "queued",
@@ -192,7 +200,7 @@ export class RunRepository {
    */
   get(id: number): Run | undefined {
     const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as RunRow | undefined;
-    return row === undefined ? undefined : toRun(row);
+    return row === undefined ? undefined : this.toRun(row);
   }
 
   /** Records the model selected when a queued Run actually starts executing. */
@@ -217,7 +225,7 @@ export class RunRepository {
     const rows = this.db
       .prepare("SELECT * FROM runs WHERE session_id = ? ORDER BY created_at ASC, id ASC")
       .all(sessionId) as RunRow[];
-    return rows.map(toRun);
+    return rows.map(this.toRun);
   }
 
   /** Lists one newest-first cursor page, returned in chronological display order. */
@@ -237,7 +245,7 @@ export class RunRepository {
           ORDER BY created_at DESC, id DESC LIMIT ?
         `).all(sessionId, cursor.created_at, cursor.created_at, cursor.id, limit + 1)) as RunRow[];
     return {
-      items: rows.slice(0, limit).reverse().map(toRun),
+      items: rows.slice(0, limit).reverse().map(this.toRun),
       hasMore: rows.length > limit
     };
   }
@@ -249,7 +257,7 @@ export class RunRepository {
     const rows = this.db
       .prepare("SELECT * FROM runs WHERE status = 'queued' ORDER BY created_at ASC, id ASC")
       .all() as RunRow[];
-    return rows.map(toRun);
+    return rows.map(this.toRun);
   }
 
   /** Returns the Agent policy needed to schedule one Run. */

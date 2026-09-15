@@ -48,6 +48,7 @@ export const finishSessionMaintenance = (
       db.prepare("DELETE FROM runs WHERE session_id = ?").run(id);
       db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
     } else if (operation === "cleanup") {
+      db.prepare("UPDATE message_attachments SET data = NULL WHERE session_id = ?").run(id);
       db.prepare(`
         UPDATE sessions SET status = 'idle', pending_operation = NULL,
           provider_session_id = NULL, storage_cleaned_at = ? WHERE id = ?

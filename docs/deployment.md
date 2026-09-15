@@ -458,6 +458,7 @@ Accept: text/event-stream
 
 ```nginx
 location /integration/v1/ {
+    client_max_body_size 30m;
     proxy_pass http://127.0.0.1:3000;
     proxy_http_version 1.1;
     proxy_buffering off;
@@ -567,3 +568,11 @@ Git 来源刷新成功只证明目录已发布；应用 Skill 后还需使用实
 如果出现 `session_maintenance_recovery_failed sessionId=<id> operation=<operation>`，对应 Session 会保持占用，以免使用已被部分删除的目录。排除磁盘或权限问题后，自动存储清理会在下一轮重试；手动删除和重置可以重试原管理 API，或在下次服务启动时恢复。关闭自动清理只停止新的清理任务，不取消已经开始的清理。
 
 创建失败且目录无法删除时，服务会保留 `workspace_path` 为 `pending:` 的记录，供下次启动重试。不要手动把这些记录改成空闲。修复前已丢失数据库记录的孤立目录，以及已被错误刷新的活动时间，无法由本次迁移自动还原，需要依据备份或历史记录单独核验。
+
+### 图片与普通文件附件
+
+消息提交端点接受最多 20 MiB 的解码附件，base64 会扩大请求体。反向代理需要允许至少 30 MiB 的请求体，覆盖 `/api/sessions/`、`/api/integration-endpoints/` 和 `/integration/v1/endpoints/` 下的消息提交；Nginx 可在对应 `server` 或 `location` 中设置 `client_max_body_size 30m;`。应用仅对 Run、外部 Task 和管理测试 Task 的提交路由放宽到约 28 MiB，其余路由（包括原生 GitHub/GitLab Webhook）维持原限制。
+
+升级自动创建 `message_attachments` 表，无需回填旧消息或引入新依赖。原始附件存储在 SQLite BLOB 中，执行时另在 Session 工作区保留副本，备份与容量规划应覆盖数据库、WAL 及工作区。Session 保留策略清除 BLOB 内容和工作区副本，但 SQLite 文件大小不保证立即缩小；释放的页可供后续写入复用。重置上下文不删除附件，过期清理和 Session 删除沿用既有可恢复维护流程。
+
+文字与参数的 JSON 内容（不含 `attachments`）仍限制为 1 MiB，附件不会扩大纯文本的持久化上限。

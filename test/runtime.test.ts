@@ -306,6 +306,19 @@ describe("SkillProjector", () => {
 });
 
 describe("AcpxAgentRuntime", () => {
+  it("原样转发原生图片内容给 acpx", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+    const attachments = [{ mediaType: "image/png", data: "aW1hZ2U=" }];
+    const turn = runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "look", attachments });
+    expect(acp.startTurn).toHaveBeenCalledWith(expect.objectContaining({ text: "look", attachments }));
+    await turn.closeEvents();
+    await runtime.shutdown();
+  });
+
   it.each([
     ["claude_code", "npx -y @agentclientprotocol/claude-agent-acp@^0.60.0"],
     ["codex", "codex-acp/dist/index.js"],

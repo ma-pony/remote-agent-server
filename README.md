@@ -439,8 +439,37 @@ curl --fail-with-body \
 
 - `requestId`：调用方生成的幂等键。完全相同的输入重试会返回原 Task；相同 `requestId` 携带不同输入会返回 `409 idempotency_conflict`。
 - `conversationKey`：可选业务会话标识。相同 Key 的后续 Task 严格串行，并复用同一个 Session。
-- `message`：本次发送给 Agent 的正文。
+- `message`：本次发送给 Agent 的正文；提供附件时可省略或为空。
+- `attachments`：可选的图片或普通文件数组，格式见下文。
 - `parameters`：只允许提交端点已经声明的动态参数。
+
+#### 图片与文件附件
+
+管理界面的会话输入框和接入端点“发送测试任务”均可选择或拖入文件、粘贴图片，发送前可预览和移除。支持纯附件消息和图文混合消息；失败后保留草稿。历史记录可预览图片或下载原文件。
+
+HTTP 接入 API 在原请求上增加可选的 `attachments`：
+
+```json
+{
+  "requestId": "with-attachments-001",
+  "message": "请分析附件内容。",
+  "attachments": [
+    { "name": "notes.txt", "mediaType": "text/plain", "data": "SGVsbG8=" },
+    { "name": "screenshot.png", "mediaType": "image/png", "data": "<图片文件字节的标准 base64>" }
+  ]
+}
+```
+
+`data` 是标准、带必要填充的 base64 字符串，不含 `data:` 前缀；调用方先读取文件字节再编码。`name` 是不含目录或控制字符的文件名（最多 220 个 UTF-8 字节），`mediaType` 是 MIME 类型；未知文件可用 `application/octet-stream`。不接受远程 URL 或服务器文件路径。
+
+- 每条消息最多 8 个附件；单文件最多 10 MiB，PNG/JPEG/GIF/WebP 图片最多 5 MiB，总计最多 20 MiB（均按解码后的字节计算）。校验失败返回 `400 invalid_request`，超过请求体限制返回 `413`。
+- PNG/JPEG/GIF/WebP 经过文件头校验后，通过 ACP 原生图片内容传给 Provider。所有附件也会写入该 Session 的工作区，并将文件路径提供给 Agent。PDF、Office 文档、代码、SVG 等其他格式作为普通文件处理；解析效果取决于 Agent 的工具、Provider 和所选模型，服务本身不做 OCR 或文档转换。
+- 纯附件消息可以省略 `message`；管理 API `POST /api/sessions/:id/runs` 使用相同的 `attachments`，其文字字段仍为 `input`。正文和附件不能同时为空。
+- 附件的文件名、类型、字节内容和顺序参与幂等校验；同一 `requestId` 换图或换文件返回 `409 idempotency_conflict`。
+- 管理历史的 `attachments` 包含 `id`、`name`、`mediaType`、`size`（字节）和 `available`，不包含 base64。下载使用管理 Token：`GET /api/runs/:id/attachments/:attachmentId`，或 `GET /api/integration-tasks/:id/attachments/:attachmentId`。公共 Task 状态、SSE 和 Webhook 不附带文件字节或服务端附件路径。
+- 附件与 Task/Run 一起持久化，排队和重启不会丢失。Session 存储清理会移除附件字节及工作区文件，保留名称、类型、大小等历史元数据，并将 `available` 设为 `false`；界面显示“文件已清理”，下载返回 `404 attachment_not_found`。删除 Session 则删除附件记录。重置 Provider 上下文保留附件。
+
+文字与参数的 JSON 内容（不含 `attachments`）仍限制为 1 MiB，附件不会扩大纯文本的持久化上限。
 
 ### 3. 查询 Task 直到完成
 

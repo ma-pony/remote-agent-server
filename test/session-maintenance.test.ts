@@ -6,6 +6,8 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
+import { AttachmentStore } from "../src/attachments/attachment-store.js";
+import { prepareAttachments } from "../src/attachments/prepare-attachments.js";
 import { migrate } from "../src/db.js";
 import { RunRepository } from "../src/runs/run-repository.js";
 import { SystemProviderSessionCleaner } from "../src/runtime/provider-session-cleaner.js";
@@ -96,6 +98,16 @@ describe("durable Session maintenance", () => {
   it.each(["cleanup", "delete", "reset"] as const)("%s 的存储操作完成后数据库收尾失败，重启恢复仍完成原操作", async (operation) => {
     const h = harness();
     const { db, session, manager, workspace } = h;
+    const run = db.prepare("SELECT id FROM runs WHERE session_id = ?").get(session.id) as { id: number };
+    const owner = { runId: run.id };
+    const attachments = new AttachmentStore(db);
+    attachments.insert(session.id, owner, [
+      { name: "notes.txt", mediaType: "text/plain", data: Buffer.from("attachment contents").toString("base64") }
+    ]);
+    const metadata = attachments.list(owner);
+    const prepared = await prepareAttachments(attachments, run.id, workspace, "", new AbortController().signal);
+    const attachmentPath = JSON.parse(prepared.text.split("\n").find((line) => line.startsWith("{"))!).path as string;
+    expect(readFileSync(attachmentPath, "utf8")).toBe("attachment contents");
     db.exec(operation === "delete" ? `
       CREATE TRIGGER reject_terminal BEFORE DELETE ON sessions BEGIN SELECT RAISE(ABORT, 'commit failed'); END;
     ` : `
@@ -111,6 +123,9 @@ describe("durable Session maintenance", () => {
       status: "running", pending_operation: operation
     });
     expect(existsSync(workspace)).toBe(operation === "reset");
+    expect(existsSync(attachmentPath)).toBe(operation === "reset");
+    // The failed terminal transaction must roll back clearing or deleting the attachment payload.
+    expect(attachments.read(owner, metadata[0]!.id)?.bytes.toString()).toBe("attachment contents");
     expect(db.prepare("SELECT count(*) AS count FROM runs WHERE session_id = ?").get(session.id)).toEqual({ count: 1 });
     db.exec("DROP TRIGGER reject_terminal");
     const repository = new RunRepository({ db });
@@ -124,6 +139,8 @@ describe("durable Session maintenance", () => {
     if (operation === "delete") {
       expect(manager.get(session.id)).toBeUndefined();
       expect(repository.listBySession(session.id)).toEqual([]);
+      expect(attachments.list(owner)).toEqual([]);
+      expect(existsSync(attachmentPath)).toBe(false);
     } else {
       expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(session.id)).toMatchObject({
         status: "idle", pending_operation: null, provider_session_id: null,
@@ -133,8 +150,14 @@ describe("durable Session maintenance", () => {
       if (operation === "cleanup") {
         expect(manager.get(session.id)?.updatedAt).toBe("2026-08-12T00:00:00.000Z");
         expect(manager.get(session.id)?.storageCleanedAt).not.toBeNull();
+        expect(attachments.list(owner)).toEqual(metadata.map((item) => ({ ...item, available: false })));
+        expect(attachments.read(owner, metadata[0]!.id)).toBeUndefined();
+        expect(existsSync(attachmentPath)).toBe(false);
       } else {
         expect(existsSync(join(workspace, "work.txt"))).toBe(true);
+        expect(attachments.list(owner)).toEqual(metadata);
+        expect(attachments.read(owner, metadata[0]!.id)?.bytes.toString()).toBe("attachment contents");
+        expect(readFileSync(attachmentPath, "utf8")).toBe("attachment contents");
         expect(repository.create({ sessionId: session.id, input: "new context" }).status).toBe("queued");
       }
     }

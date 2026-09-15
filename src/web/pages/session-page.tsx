@@ -13,6 +13,7 @@ import { EmptyState, PageContainer, PageHeader } from "@/components/page-header"
 import { TokenUsageSummaryCard } from "@/components/token-usage";
 import { SessionDeleteDialog } from "./session-pages.js";
 import { useI18n } from "@/i18n";
+import { AttachmentPicker, MessageAttachments, useAttachmentDraft } from "@/components/message-attachments";
 
 type RunView = { run: Run; events: RunEvent[]; historyError: string | null };
 const activeStatuses = new Set<RunStatus>(["queued", "running"]);
@@ -71,6 +72,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   const [agentName, setAgentName] = useState("");
   const [views, setViews] = useState<RunView[]>([]);
   const [input, setInput] = useState("");
+  const attachmentDraft = useAttachmentDraft(sessionId);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
@@ -236,17 +238,18 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   const send = async (event: FormEvent) => {
     event.preventDefault();
     const text = input.trim();
-    if (text === "" || activeRunId !== null || initialLoading || loadError !== "" || session === null
+    if ((text === "" && attachmentDraft.attachments.length === 0) || attachmentDraft.reading || submitting || activeRunId !== null || initialLoading || loadError !== "" || session === null
       || session.storageCleanedAt != null || !mcpParametersValid) return;
     setSubmitting(true);
     setError("");
     try {
       const run = await api<Run>(`/sessions/${sessionId}/runs`, {
         method: "POST",
-        body: JSON.stringify({ input: text })
+        body: JSON.stringify({ input: text, ...(attachmentDraft.attachments.length === 0 ? {} : { attachments: attachmentDraft.attachments }) })
       });
       setViews((current) => [...current, { run, events: [], historyError: null }]);
       setInput("");
+      attachmentDraft.reset();
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
@@ -298,7 +301,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   };
 
   const composerDisabled = initialLoading || loadError !== "" || session === null || session.storageCleanedAt != null
-    || activeRunId !== null || submitting || !mcpParametersValid;
+    || activeRunId !== null || submitting || attachmentDraft.reading || !mcpParametersValid;
 
   return (
     <PageContainer>
@@ -315,11 +318,12 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
         {views.length === 0 && session !== null ? <EmptyState icon={MessageSquare} title={session.storageCleanedAt == null ? text("还没有运行记录", "No runs yet") : text("没有可展示的记录", "No run history available")} description={session.storageCleanedAt == null ? text("在下方输入任务，开始这个会话的第一轮运行。", "Enter a task below to start the first run in this session.") : text("该会话的磁盘内容已清理，历史统计仍会保留。", "The on-disk content was cleaned while historical statistics remain available.")} /> : <div className="surface-list contents">{views.map((view) => <RunBlock key={view.run.id} view={view} />)}</div>}
       </section>
       {session !== null && !mcpParametersValid ? <Alert className="mt-6"><XCircle /><AlertTitle>{text("缺少 MCP 参数", "Missing MCP parameters")}</AlertTitle><AlertDescription>{text("请先在", "Complete these in")} <Link className="underline" to={`/sessions/${session.id}/settings`}>{text("会话设置", "session settings")}</Link>{text(` 中填写：${missingMcpParameters.join("、")}`, `: ${missingMcpParameters.join(", ")}`)}</AlertDescription></Alert> : null}
-      <Card className="sticky bottom-3 z-10 mt-6 border-primary/20 bg-card/95 shadow-xl backdrop-blur"><CardContent className="p-4"><form className="flex flex-col gap-3" onSubmit={send}>
-        <Field data-disabled={composerDisabled || undefined}><FieldLabel htmlFor="run-input">{text("发送给智能体", "Send to agent")}</FieldLabel><Textarea id="run-input" rows={3} value={input} onChange={(event) => setInput(event.target.value)} disabled={composerDisabled} placeholder={session !== null && session.storageCleanedAt != null ? text("会话存储已清理，无法继续发送", "Session storage was cleaned; no further runs are available") : activeRunId === null ? text("描述下一步任务…", "Describe the next task…") : text("当前运行结束后可继续输入", "Continue after the current run finishes")} /></Field>
+      <Card className="sticky bottom-3 z-10 mt-6 border-primary/20 bg-card/95 shadow-xl backdrop-blur"><CardContent className="p-4"><form className="flex flex-col gap-3" onSubmit={send} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDrop={(event) => attachmentDraft.drop(event, composerDisabled)}>
+        <Field data-disabled={composerDisabled || undefined}><FieldLabel htmlFor="run-input">{text("发送给智能体", "Send to agent")}</FieldLabel><Textarea onPaste={(event) => attachmentDraft.paste(event, composerDisabled)} id="run-input" rows={3} value={input} onChange={(event) => setInput(event.target.value)} disabled={composerDisabled} placeholder={session !== null && session.storageCleanedAt != null ? text("会话存储已清理，无法继续发送", "Session storage was cleaned; no further runs are available") : activeRunId === null ? text("描述下一步任务…", "Describe the next task…") : text("当前运行结束后可继续输入", "Continue after the current run finishes")} /></Field>
+        <AttachmentPicker draft={attachmentDraft} disabled={composerDisabled} />
         <div className="flex justify-end gap-2">
           {activeRunId !== null ? <Button type="button" variant="destructive" onClick={() => void cancel()}><Square />{text("取消运行", "Cancel run")}</Button> : null}
-          <Button type="submit" disabled={composerDisabled || input.trim() === ""}><Send />{submitting ? text("发送中…", "Sending…") : text("发送", "Send")}</Button>
+          <Button type="submit" disabled={composerDisabled || (input.trim() === "" && attachmentDraft.attachments.length === 0)}><Send />{submitting ? text("发送中…", "Sending…") : text("发送", "Send")}</Button>
         </div>
       </form></CardContent></Card>
     </PageContainer>
@@ -347,7 +351,7 @@ const RunBlock = ({ view }: { view: RunView }) => {
   }, [view.events, view.run.result]);
 
   return <article className="flex flex-col gap-3">
-    <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-foreground px-4 py-3 text-background"><span className="mb-1 block text-xs font-semibold uppercase tracking-wide opacity-70">{text("你", "You")}</span><p className="whitespace-pre-wrap">{view.run.input}</p></div>
+    <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-foreground px-4 py-3 text-background"><span className="mb-1 block text-xs font-semibold uppercase tracking-wide opacity-70">{text("你", "You")}</span><p className="whitespace-pre-wrap">{view.run.input}</p><MessageAttachments attachments={view.run.attachments} pathPrefix={`/runs/${view.run.id}/attachments`} /></div>
     <Card className="border-l-4 border-l-primary"><CardContent className="p-5">
       <div className="mb-4 flex items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><span className="text-sm font-semibold">{text("智能体", "Agent")}</span>{view.run.resolvedModel === null || view.run.resolvedModel === undefined ? null : <Badge className="max-w-64 truncate font-mono font-normal" variant="outline" title={view.run.resolvedModel}>{view.run.resolvedModel}</Badge>}</div><Badge variant={view.run.status === "failed" ? "destructive" : view.run.status === "succeeded" ? "default" : "secondary"}>{({ queued: text("排队中", "Queued"), running: text("运行中", "Running"), succeeded: text("已完成", "Completed"), failed: text("失败", "Failed"), cancelled: text("已取消", "Cancelled") } satisfies Record<RunStatus, string>)[view.run.status]}</Badge></div>
       {output !== "" ? <p className="whitespace-pre-wrap leading-7">{output}</p> : activeStatuses.has(view.run.status) ? <p className="text-muted-foreground">{text("等待智能体输出…", "Waiting for agent output…")}</p> : null}

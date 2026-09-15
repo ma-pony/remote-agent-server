@@ -671,6 +671,21 @@ export const migrate = (
       UNIQUE(endpoint_id, request_id)
     );
 
+    CREATE TABLE IF NOT EXISTS message_attachments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      run_id INTEGER REFERENCES runs(id) ON DELETE CASCADE,
+      task_id INTEGER REFERENCES integration_tasks(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      media_type TEXT NOT NULL,
+      byte_size INTEGER NOT NULL,
+      data BLOB,
+      CHECK (run_id IS NOT NULL OR task_id IS NOT NULL)
+    );
+    CREATE INDEX IF NOT EXISTS message_attachments_run ON message_attachments(run_id);
+    CREATE INDEX IF NOT EXISTS message_attachments_task ON message_attachments(task_id);
+    CREATE INDEX IF NOT EXISTS message_attachments_session ON message_attachments(session_id);
+
     CREATE TABLE IF NOT EXISTS integration_task_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       task_id INTEGER NOT NULL REFERENCES integration_tasks(id) ON DELETE CASCADE,

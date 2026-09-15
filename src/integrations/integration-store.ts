@@ -1,3 +1,5 @@
+import { AttachmentStore } from "../attachments/attachment-store.js";
+import type { AttachmentInput } from "../attachments/attachment-types.js";
 import { createHash } from "node:crypto";
 
 import type Database from "better-sqlite3";
@@ -168,6 +170,7 @@ export type CreateIntegrationConversationInput = {
 };
 
 export type CreateIntegrationTaskInput = {
+  attachments?: AttachmentInput[];
   endpointId: number;
   conversationId: number | null;
   sessionId: number;
@@ -331,10 +334,14 @@ const toRun = (row: LinkedRunRow): Run => ({
 
 /** Stores integration state; InTransaction methods join a caller-owned SQLite transaction. */
 export class IntegrationStore {
+  readonly attachments: AttachmentStore;
+  private toTask = (row: TaskRow): IntegrationTask => ({ ...toTask(row), ...this.attachments.projection({ taskId: row.id }) });
   private readonly taskListeners = new Map<number, Set<() => unknown>>();
   private readonly deliveryListeners = new Set<() => unknown>();
 
-  constructor(private readonly dependencies: { db: Database.Database }) {}
+  constructor(private readonly dependencies: { db: Database.Database }) {
+    this.attachments = new AttachmentStore(dependencies.db);
+  }
 
   private get db(): Database.Database {
     return this.dependencies.db;
@@ -572,31 +579,31 @@ export class IntegrationStore {
   listTasks(endpointId: number): IntegrationTask[] {
     return (this.db.prepare(`
       SELECT * FROM integration_tasks WHERE endpoint_id = ? ORDER BY created_at ASC, id ASC
-    `).all(endpointId) as TaskRow[]).map(toTask);
+    `).all(endpointId) as TaskRow[]).map(this.toTask);
   }
 
   getTask(id: number): IntegrationTask | undefined {
     const row = this.taskRow(id);
-    return row === undefined ? undefined : toTask(row);
+    return row === undefined ? undefined : this.toTask(row);
   }
 
   getTaskByRequestId(endpointId: number, requestId: string): IntegrationTask | undefined {
     const row = this.db.prepare(`
       SELECT * FROM integration_tasks WHERE endpoint_id = ? AND request_id = ?
     `).get(endpointId, requestId) as TaskRow | undefined;
-    return row === undefined ? undefined : toTask(row);
+    return row === undefined ? undefined : this.toTask(row);
   }
 
   getTaskForEndpoint(id: number, endpointId: number): IntegrationTask | undefined {
     const row = this.db.prepare(`
       SELECT * FROM integration_tasks WHERE id = ? AND endpoint_id = ?
     `).get(id, endpointId) as TaskRow | undefined;
-    return row === undefined ? undefined : toTask(row);
+    return row === undefined ? undefined : this.toTask(row);
   }
 
   getTaskByRun(runId: number): IntegrationTask | undefined {
     const row = this.db.prepare("SELECT * FROM integration_tasks WHERE run_id = ?").get(runId) as TaskRow | undefined;
-    return row === undefined ? undefined : toTask(row);
+    return row === undefined ? undefined : this.toTask(row);
   }
 
   /** Returns only the first unlinked queued Task for each free Conversation, plus every one-off Task. */
@@ -627,7 +634,7 @@ export class IntegrationStore {
         )
       ORDER BY task.created_at ASC, task.id ASC
     `).all() as TaskRow[];
-    return rows.map(toTask);
+    return rows.map(this.toTask);
   }
 
   /** Links an unclaimed queued Task to a newly-inserted Run in the caller's transaction. */
@@ -637,7 +644,8 @@ export class IntegrationStore {
       WHERE id = ? AND status = 'queued' AND run_id IS NULL
     `).run(runId, taskId);
     if (result.changes !== 1) throw new Error("integration_task_not_dispatchable");
-    return toTask(this.taskRow(taskId)!);
+    this.attachments.linkTaskRun(taskId, runId);
+    return this.toTask(this.taskRow(taskId)!);
   }
 
   /** Notifies in-process Task observers after the owning transaction has committed. */
@@ -807,7 +815,8 @@ export class IntegrationStore {
       input.endpointId, input.conversationId, input.sessionId, input.requestId, input.requestFingerprint,
       input.message, input.effectivePrompt, input.encryptedParameters, now
     ));
-    return toTask(this.taskRow(id)!);
+    this.attachments.insert(input.sessionId, { taskId: id }, input.attachments);
+    return this.toTask(this.taskRow(id)!);
   }
 
   conversationHasActiveTasks(conversationId: number): boolean {

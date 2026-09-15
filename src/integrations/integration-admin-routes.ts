@@ -2,6 +2,9 @@ import { randomBytes, randomUUID } from "node:crypto";
 
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { attachmentsSchema, hasMessageContent, validateMessageEnvelope } from "../attachments/attachment-schema.js";
+import { ATTACHMENT_BODY_LIMIT } from "../attachments/attachment-types.js";
+import { sendAttachment } from "../attachments/attachment-response.js";
 
 import type { SecretStore } from "../mcp/secret-store.js";
 import type { RunExecutor } from "../runs/run-executor.js";
@@ -75,9 +78,10 @@ const updateEndpointSchema = z.object({
 const rotateTokenSchema = z.object({}).strict().optional();
 const testTaskSchema = z.object({
   conversationKey: z.string().trim().min(1).optional(),
-  message: z.string().trim().min(1),
+  message: z.string().trim().default(""),
+  attachments: attachmentsSchema.optional(),
   parameters: z.record(z.string(), z.string()).default({})
-}).strict();
+}).strict().refine((value) => hasMessageContent(value.message, value.attachments)).superRefine(validateMessageEnvelope);
 const webhookHeaders = z.record(z.string(), z.string()).superRefine((headers, context) => {
   for (const [name, value] of Object.entries(headers)) {
     if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(name) || /[\r\n]/.test(value)) {
@@ -215,6 +219,7 @@ const publicDelivery = (delivery: WebhookDelivery) => ({
 });
 
 const publicTask = (task: IntegrationTask) => ({
+  ...(task.attachments === undefined ? {} : { attachments: task.attachments }),
   id: task.id,
   endpointId: task.endpointId,
   conversationId: task.conversationId,
@@ -317,7 +322,7 @@ export const registerIntegrationAdminRoutes = (
     return store.listTasks(endpointId).map(publicTask);
   });
 
-  app.post<{ Params: { id: string } }>("/integration-endpoints/:id/test-tasks", async (request, reply) => {
+  app.post<{ Params: { id: string } }>("/integration-endpoints/:id/test-tasks", { bodyLimit: ATTACHMENT_BODY_LIMIT }, async (request, reply) => {
     const endpoint = manager.get(numericId(request.params.id));
     if (endpoint === undefined) return endpointNotFound(reply);
     const parsed = testTaskSchema.safeParse(request.body);
@@ -327,6 +332,7 @@ export const registerIntegrationAdminRoutes = (
         requestId: `test-${randomUUID()}`,
         conversationKey: parsed.data.conversationKey,
         message: parsed.data.message,
+        attachments: parsed.data.attachments,
         parameters: parsed.data.parameters
       });
       return reply.code(202).send(publicTask(task));
@@ -334,6 +340,10 @@ export const registerIntegrationAdminRoutes = (
       return handleTestTaskError(reply, error);
     }
   });
+
+  app.get<{ Params: { id: string; attachmentId: string } }>("/integration-tasks/:id/attachments/:attachmentId", (request, reply) =>
+    sendAttachment(reply, store.attachments.read({ taskId: numericId(request.params.id) }, numericId(request.params.attachmentId)))
+  );
 
   app.get<{ Params: { id: string } }>("/integration-tasks/:id", (request, reply) => {
     const task = store.getTask(numericId(request.params.id));

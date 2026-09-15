@@ -98,6 +98,7 @@ export type IntegrationConversation = {
 };
 
 export type IntegrationTask = {
+  attachments?: import("../attachments/attachment-types.js").Attachment[];
   id: number;
   endpointId: number;
   conversationId: number | null;

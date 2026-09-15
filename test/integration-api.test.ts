@@ -111,6 +111,37 @@ afterEach(async () => {
 });
 
 describe("Native webhook ingress", () => {
+  it("附件消息：接入支持纯文件、幂等重试与内容冲突", async () => {
+    const runtime = createFakeRuntime();
+    const ensureSession = runtime.ensureSession;
+    vi.spyOn(runtime, "ensureSession").mockImplementation(async (input) => {
+      mkdirSync(input.workspacePath, { recursive: true });
+      return ensureSession(input);
+    });
+    const startTurn = vi.spyOn(runtime, "startTurn");
+    const { app, agentId, db } = await createTestApp(runtime);
+    const created = await app.inject({ method: "POST", url: "/api/integration-endpoints", headers: authHeaders(), payload: validEndpointInput(agentId, "attachments") });
+    const { token } = created.json();
+    const payload = { requestId: "files-1", attachments: [{ name: "report.pdf", mediaType: "application/pdf", data: Buffer.from("%PDF-1.7 test").toString("base64") }] };
+    const submit = (body: unknown) => app.inject({ method: "POST", url: "/integration/v1/endpoints/attachments/tasks", headers: endpointHeaders(token), payload: body as Record<string, unknown> });
+    expect((await submit({ ...payload, message: "x".repeat(1024 * 1024) })).statusCode).toBe(400);
+    expect((await submit({ ...payload, parameters: { oversized: "x".repeat(1024 * 1024) } })).statusCode).toBe(400);
+    const response = await submit(payload);
+    expect(response.statusCode).toBe(202);
+    expect((await submit(payload)).json().taskId).toBe(response.json().taskId);
+    expect((await submit({ ...payload, attachments: [{ ...payload.attachments[0], data: Buffer.from("changed").toString("base64") }] })).statusCode).toBe(409);
+    await vi.waitFor(() => expect(startTurn).toHaveBeenCalledOnce());
+    expect(startTurn.mock.calls[0]![0].text).toContain("report.pdf");
+    expect(db.prepare("SELECT count(*) AS n FROM message_attachments").get()).toEqual({ n: 1 });
+    const taskId = response.json().taskId;
+    const history = await app.inject({ method: "GET", url: `/api/integration-tasks/${taskId}`, headers: authHeaders() });
+    expect(history.json().attachments).toHaveLength(1);
+    const downloadUrl = `/api/integration-tasks/${taskId}/attachments/${history.json().attachments[0].id}`;
+    expect((await app.inject({ method: "GET", url: downloadUrl, headers: endpointHeaders(token) })).statusCode).toBe(401);
+    expect((await app.inject({ method: "GET", url: downloadUrl, headers: authHeaders() })).rawPayload.toString()).toBe("%PDF-1.7 test");
+    expect(JSON.stringify(db.prepare("SELECT payload_json FROM integration_task_events").all())).not.toContain(payload.attachments[0]!.data);
+  });
+
   const secret = "native-webhook-test-secret";
   const payload = JSON.stringify({
     ref: "refs/heads/main", before: "a".repeat(40), after: "b".repeat(40),

@@ -290,6 +290,7 @@ export type AgentMcpServerDetail = AgentMcpServerSummary & (
 );
 
 export type Run = {
+  attachments?: import("../attachments/attachment-types.js").Attachment[];
   id: number;
   sessionId: number;
   status: RunStatus;
@@ -346,6 +347,7 @@ export type IntegrationParameterMappingUpdateInput =
   | { parameterKey: string; source: "request"; requestKey: string }
   | { parameterKey: string; source: "fixed"; value?: string };
 export type IntegrationTask = {
+  attachments?: import("../attachments/attachment-types.js").Attachment[];
   id: number;
   endpointId: number;
   conversationId: number | null;
@@ -474,7 +476,7 @@ export async function verifyApiToken(token: string): Promise<boolean> {
 }
 
 /** Sends one authenticated request to the server API. */
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function apiResponse(path: string, init: RequestInit = {}): Promise<Response> {
   const token = sessionStorage.getItem("apiToken");
   const headers = new Headers(init.headers);
   if (init.body != null && !headers.has("content-type")) headers.set("content-type", "application/json");
@@ -485,6 +487,15 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     window.dispatchEvent(new Event(API_TOKEN_INVALID_EVENT));
   }
   if (!response.ok) throw await response.json();
+  return response;
+}
+
+export async function apiBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+  return (await apiResponse(path, init)).blob();
+}
+
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await apiResponse(path, init);
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
@@ -564,6 +575,7 @@ export const integrationApi = {
     `/integration-endpoints/${id}/tasks`, { signal }
   ),
   createTestTask: (id: number, input: {
+    attachments?: import("../attachments/attachment-types.js").AttachmentInput[];
     conversationKey?: string;
     message: string;
     parameters: Record<string, string>;

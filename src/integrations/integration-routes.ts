@@ -1,5 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { attachmentsSchema, hasMessageContent, validateMessageEnvelope } from "../attachments/attachment-schema.js";
+import { ATTACHMENT_BODY_LIMIT } from "../attachments/attachment-types.js";
 
 import type { EventStore } from "../events/event-store.js";
 import { McpManagerError } from "../mcp/mcp-manager.js";
@@ -26,9 +28,10 @@ import {
 const submitTaskSchema = z.object({
   requestId: z.string().refine((value) => value.trim() !== ""),
   conversationKey: z.string().refine((value) => value.trim() !== "").optional(),
-  message: z.string().refine((value) => value.trim() !== ""),
+  message: z.string().default(""),
+  attachments: attachmentsSchema.optional(),
   parameters: z.record(z.string(), z.string()).default({})
-}).strict();
+}).strict().refine((value) => hasMessageContent(value.message, value.attachments)).superRefine(validateMessageEnvelope);
 const eventQuerySchema = z.object({
   afterSeq: z.coerce.number().int().nonnegative().default(0)
 });
@@ -200,6 +203,7 @@ export const registerIntegrationRoutes = (
   app.decorateRequest("integrationEndpoint", null);
 
   app.post<{ Params: { slug: string } }>("/integration/v1/endpoints/:slug/tasks", {
+    bodyLimit: ATTACHMENT_BODY_LIMIT,
     onRequest: requireIntegrationEndpoint(manager)
   }, async (request, reply) => {
     const parsed = submitTaskSchema.safeParse(request.body);

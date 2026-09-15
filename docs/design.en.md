@@ -297,3 +297,15 @@ Remote Agent Server focuses on the single-machine execution gateway. The calling
 - Git-host business rules and deployment orchestration.
 
 This boundary gives external systems a stable API for existing coding agents while preserving their own business model.
+
+## Message attachments
+
+Messages retain their existing text field and may include structured `attachments`. Shared boundary validation limits counts, decoded sizes, canonical base64, filenames, and MIME types, and checks PNG/JPEG/GIF/WebP headers. Only message submission routes receive a larger JSON body limit.
+
+`message_attachments` separates BLOB payloads from history metadata and references the owning Session and Task/Run. Task admission inserts attachments in the same transaction. Dispatch binds attachments while creating the Run and linking the Task, without duplicate payloads on retry. Lists and history query only metadata; execution and authenticated downloads load bytes. Attachment digests participate in request fingerprints; requests without attachments retain their original fingerprint.
+
+After a Run starts, it creates a fresh exclusive random directory in the Session workspace and writes files using attachment IDs plus filenames, without reusing existing paths or overwriting files. The runtime prompt includes JSON file references; supported images also become native acpx image attachments. Original user text does not contain internal paths. Files remain available in later turns until Session cleanup or deletion. Failed or aborted preparation removes its incomplete directory.
+
+Session cleanup clears attachment BLOBs within the existing maintenance transaction while retaining metadata; workspace files use the established cleanup flow. Context reset retains attachments. Session deletion cascades attachment records. Downloads require management authentication and force attachment disposition, no caching, and no MIME sniffing. The frontend previews only supported raster images through Blob URLs. Public event projection does not add attachment bytes or internal paths.
+
+The JSON message envelope excluding `attachments` remains limited to 1 MiB, including text and parameters.

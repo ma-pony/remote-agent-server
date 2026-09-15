@@ -1,5 +1,8 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { attachmentsSchema, hasMessageContent, validateMessageEnvelope } from "../attachments/attachment-schema.js";
+import { ATTACHMENT_BODY_LIMIT } from "../attachments/attachment-types.js";
+import { sendAttachment } from "../attachments/attachment-response.js";
 
 import type { Event } from "../domain.js";
 import type { EventStore } from "../events/event-store.js";
@@ -26,7 +29,8 @@ export interface SseWriter {
   off(event: "drain", listener: () => void): this;
 }
 
-const createRunSchema = z.object({ input: z.string().trim().min(1) }).strict();
+const createRunSchema = z.object({ input: z.string().trim().default(""), attachments: attachmentsSchema.optional() }).strict()
+  .refine((value) => hasMessageContent(value.input, value.attachments)).superRefine(validateMessageEnvelope);
 const eventQuerySchema = z.object({
   afterSeq: z.coerce.number().int().nonnegative().default(0)
 });
@@ -255,7 +259,7 @@ export type RunRouteDependencies = {
  * Registers authenticated Run lifecycle, history, and SSE routes.
  */
 export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependencies): void => {
-  app.post<{ Params: { id: string } }>("/sessions/:id/runs", (request, reply) => {
+  app.post<{ Params: { id: string } }>("/sessions/:id/runs", { bodyLimit: ATTACHMENT_BODY_LIMIT }, (request, reply) => {
     const parsed = createRunSchema.safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Run input");
     const sessionId = parseId(request.params.id);
@@ -264,12 +268,19 @@ export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependenci
     }
 
     try {
-      const run = deps.runRepository.create({ sessionId, input: parsed.data.input });
+      const run = deps.runRepository.create({ sessionId, ...parsed.data });
       deps.scheduler.enqueue(run.id);
       return reply.code(201).send(run);
     } catch (error) {
       return handleRunError(reply, error);
     }
+  });
+
+  app.get<{ Params: { id: string; attachmentId: string } }>("/runs/:id/attachments/:attachmentId", (request, reply) => {
+    const runId = parseId(request.params.id);
+    const attachmentId = parseId(request.params.attachmentId);
+    const attachment = runId === undefined || attachmentId === undefined ? undefined : deps.runRepository.attachments.read({ runId }, attachmentId);
+    return sendAttachment(reply, attachment);
   });
 
   app.get<{ Params: { id: string } }>("/runs/:id", (request, reply) => {

@@ -431,8 +431,37 @@ The response status is `202`:
 
 - `requestId` is the caller-generated idempotency key. Retrying identical input returns the original task. Reusing it with different input returns `409 idempotency_conflict`.
 - `conversationKey` is optional. Later tasks with the same key run serially and reuse the same session.
-- `message` is the instruction sent to the agent for this task.
+- `message` is the instruction sent to the agent; optional when attachments are provided.
+- `attachments` is an optional array of images or ordinary files, described below.
 - `parameters` may contain only request parameters declared by the endpoint mapping.
+
+#### Images and file attachments
+
+Both the Session composer and the endpoint's “Send test task” form accept file selection, drag and drop, and pasted images. Preview or remove attachments before sending. Attachment-only and mixed text/file messages are supported; failed submissions retain the draft. History offers image previews and original-file downloads.
+
+Add optional `attachments` to an HTTP integration request:
+
+```json
+{
+  "requestId": "with-attachments-001",
+  "message": "Analyze the attached files.",
+  "attachments": [
+    { "name": "notes.txt", "mediaType": "text/plain", "data": "SGVsbG8=" },
+    { "name": "screenshot.png", "mediaType": "image/png", "data": "<standard base64 of image bytes>" }
+  ]
+}
+```
+
+`data` contains canonical base64 with required padding, without a `data:` prefix. Read and encode the file bytes on the client. `name` is a filename without directories or control characters (up to 220 UTF-8 bytes); `mediaType` is a MIME type. Use `application/octet-stream` for unknown file types. Remote URLs and server file paths are not accepted.
+
+- Up to 8 attachments per message, 10 MiB per file, 5 MiB per PNG/JPEG/GIF/WebP image, and 20 MiB total, measured after decoding. Validation failures return `400 invalid_request`; oversized request bodies return `413`.
+- PNG/JPEG/GIF/WebP headers are checked before sending native ACP image blocks to the Provider. All attachments are also written to the Session workspace and referenced by file path in the runtime prompt. PDF, Office documents, source code, SVG, and other formats are ordinary files; interpretation depends on the Agent's tools, Provider, and selected model. The service does not perform OCR or document conversion.
+- `message` may be omitted for attachment-only requests. Management `POST /api/sessions/:id/runs` accepts the same `attachments`; its text field remains `input`. Text and attachments cannot both be empty.
+- Attachment names, MIME types, bytes, and order participate in idempotency checks. Changing an attachment under the same `requestId` returns `409 idempotency_conflict`.
+- Management history exposes `attachments` with `id`, `name`, `mediaType`, `size` (bytes), and `available`, without base64. Downloads require the management token: `GET /api/runs/:id/attachments/:attachmentId` or `GET /api/integration-tasks/:id/attachments/:attachmentId`. Public Task status, SSE, and Webhooks do not attach file bytes or server attachment paths.
+- Attachments persist with their Task/Run across queues and restarts. Session storage cleanup removes payload bytes and workspace files while preserving filename/type/size metadata and setting `available` to `false`; the UI shows “File cleaned” and downloads return `404 attachment_not_found`. Session deletion also removes attachment records. Resetting Provider context preserves attachments.
+
+The JSON message envelope excluding `attachments` remains limited to 1 MiB, including text and parameters.
 
 ### 3. Query the task until completion
 

@@ -375,6 +375,30 @@ it("详情页分区管理，并用确认对话框删除有历史的端点", asyn
   expect(await screen.findByText("已有业务对话或任务，请停用")).toBeVisible();
 });
 
+it("调用说明可发送纯文件测试任务，失败后保留附件", async () => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/usage`);
+  const requests: unknown[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse({ ...endpoint, parameterMappings: [] });
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === `/api/agents/${agent.id}/session-parameters`) return jsonResponse([]);
+    if (url.endsWith("/test-tasks") && init?.method === "POST") {
+      requests.push(JSON.parse(String(init.body)));
+      return jsonResponse({ error: { message: "test upload rejected" } }, 400);
+    }
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(<App />);
+  const picker = await screen.findByLabelText("添加图片或文件");
+  fireEvent.change(picker, { target: { files: [new File(["hello"], "notes.txt", { type: "text/plain" })] } });
+  await waitFor(() => expect(screen.getByRole("button", { name: "发送测试任务" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "发送测试任务" }));
+  await screen.findByText("test upload rejected");
+  expect(requests).toEqual([{ message: "", parameters: {}, attachments: [{ name: "notes.txt", mediaType: "text/plain", data: "aGVsbG8=" }] }]);
+  expect(screen.getByRole("button", { name: "移除 notes.txt" })).toBeEnabled();
+});
+
 it("调用说明展示动态参数和安全示例，并可发送真实测试任务", async () => {
   const documentedEndpoint = {
     ...endpoint,

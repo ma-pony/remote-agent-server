@@ -17,7 +17,7 @@ export type RuntimeSessionInput = {
 };
 
 export type RuntimeSession = { providerSessionId: string | null };
-export type RuntimeTurnInput = { sessionId: number; requestId: number; text: string };
+export type RuntimeTurnInput = { sessionId: number; requestId: number; text: string; attachments?: Array<{ mediaType: string; data: string }> };
 export type RuntimeEvent =
   | { type: "message"; stream: "output" | "thought"; text: string }
   | { type: "tool"; content: Record<string, unknown> }

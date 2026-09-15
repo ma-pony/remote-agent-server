@@ -764,6 +764,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const turn = session.runtime.startTurn({
       handle: session.handle,
       text: input.text,
+      ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
       mode: "prompt",
       requestId: String(input.requestId)
     });

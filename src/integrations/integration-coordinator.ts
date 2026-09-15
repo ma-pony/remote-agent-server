@@ -1,3 +1,4 @@
+import type { AttachmentInput } from "../attachments/attachment-types.js";
 import { createHash } from "node:crypto";
 
 import type Database from "better-sqlite3";
@@ -14,6 +15,7 @@ import type {
 } from "./integration-types.js";
 
 export type SubmitIntegrationTaskInput = {
+  attachments?: AttachmentInput[];
   requestId: string;
   conversationKey?: string;
   message: string;
@@ -38,6 +40,7 @@ export const integrationRequestFingerprint = (input: SubmitIntegrationTaskInput)
   createHash("sha256").update(JSON.stringify({
     conversationKey: input.conversationKey ?? null,
     message: input.message,
+    ...(input.attachments?.length ? { attachments: input.attachments.map(({ name, mediaType, data }) => ({ name, mediaType, sha256: createHash("sha256").update(data, "base64").digest("hex") })) } : {}),
     parameters: Object.fromEntries(
       Object.entries(input.parameters).sort(([left], [right]) => left.localeCompare(right))
     )
@@ -116,7 +119,8 @@ export class IntegrationCoordinator {
             requestFingerprint: fingerprint,
             message: input.message,
             effectivePrompt,
-            encryptedParameters
+            encryptedParameters,
+            attachments: input.attachments
           });
           this.dependencies.store.appendTaskEventInTransaction({
             taskId: createdTask.id,

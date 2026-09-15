@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -89,6 +89,54 @@ afterEach(async () => {
 });
 
 describe("RunRepository", () => {
+  it("附件消息：拒绝非法输入但允许超过默认 1 MiB 的有效文件", async () => {
+    const { app, db, root } = await createApiTestApp();
+    seedSession(db, root, 9002);
+    const file = { name: "notes.txt", mediaType: "text/plain", data: "aGVsbG8=" };
+    for (const payload of [{}, { input: " " }, { attachments: [] }, { input: "x".repeat(1024 * 1024), attachments: [file] }, { attachments: [{ ...file, name: "../escape.txt" }] }, { attachments: [{ ...file, data: "@@" }] }]) {
+      expect((await app.inject({ method: "POST", url: "/api/sessions/9002/runs", headers: authHeaders(), payload })).statusCode).toBe(400);
+    }
+    expect(db.prepare("SELECT count(*) AS n FROM runs WHERE session_id = 9002").get()).toEqual({ n: 0 });
+    const response = await app.inject({ method: "POST", url: "/api/sessions/9002/runs", headers: authHeaders(), payload: {
+      input: "Read this file", attachments: [{ ...file, data: Buffer.alloc(1024 * 1024).toString("base64") }]
+    } });
+    expect(response.statusCode).toBe(201);
+    expect(response.json().attachments[0].size).toBe(1024 * 1024);
+    expect((await app.inject({ method: "POST", url: "/api/sessions/9002/runs", headers: authHeaders(), payload: { input: "x".repeat(29 * 1024 * 1024) } })).statusCode).toBe(413);
+  });
+
+  it("附件消息：纯附件请求持久化并传到运行时，历史仅返回元数据", async () => {
+    const runtime = createFakeRuntime();
+    const startTurn = vi.spyOn(runtime, "startTurn");
+    const { app, db, root } = await createApiTestApp({ runtime });
+    seedSession(db, root, 9001);
+    const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+    const attachments = [
+      { name: "截图.png", mediaType: "image/png", data: png },
+      { name: "notes.txt", mediaType: "text/plain", data: Buffer.from("attachment contents").toString("base64") }
+    ];
+    const response = await app.inject({ method: "POST", url: "/api/sessions/9001/runs", headers: authHeaders(), payload: { attachments } });
+    expect(response.statusCode).toBe(201);
+    const run = response.json();
+    expect(run.input).toBe("");
+    expect(run.attachments).toHaveLength(2);
+    expect(response.body).not.toContain(png);
+    await vi.waitFor(() => expect(startTurn).toHaveBeenCalledOnce());
+    const turn = startTurn.mock.calls[0]![0];
+    expect(turn.attachments).toEqual([{ mediaType: "image/png", data: png }]);
+    const reference = turn.text.split("\n").find((line) => line.includes("notes.txt"))!;
+    const path = JSON.parse(reference).path as string;
+    expect(path.startsWith(join(root, "sessions", "9001", "workspace"))).toBe(true);
+    expect(readFileSync(path, "utf8")).toBe("attachment contents");
+    const url = `/api/runs/${run.id}/attachments/${run.attachments[0].id}`;
+    expect((await app.inject({ method: "GET", url })).statusCode).toBe(401);
+    const download = await app.inject({ method: "GET", url, headers: authHeaders() });
+    expect(download.statusCode).toBe(200);
+    expect(download.rawPayload).toEqual(Buffer.from(png, "base64"));
+    expect(download.headers["content-disposition"]).toContain("attachment;");
+    expect((await app.inject({ method: "GET", url: `/api/runs/999999/attachments/${run.attachments[0].id}`, headers: authHeaders() })).statusCode).toBe(404);
+  });
+
   it("创建 queued Run 时同步将 Session 标为 running", () => {
     const { db, seed } = createTestDatabase();
     const session = seed.session();

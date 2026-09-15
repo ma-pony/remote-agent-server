@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
+import { AttachmentStore } from "../src/attachments/attachment-store.js";
+import { prepareAttachments } from "../src/attachments/prepare-attachments.js";
 import { RunRepository } from "../src/runs/run-repository.js";
 import { SessionCleanupScheduler } from "../src/sessions/session-cleanup-scheduler.js";
 import { SessionManager } from "../src/sessions/session-manager.js";
@@ -179,6 +181,24 @@ describe("SessionCleanupScheduler", () => {
       INSERT INTO events (run_id, seq, type, content_json, created_at)
       VALUES (?, 1, 'message', '{"text":"world"}', '2026-08-01T00:00:00.000Z')
     `).run(runId);
+    const attachments = new AttachmentStore(db);
+    const files = [
+      { name: "notes.txt", mediaType: "text/plain", data: Buffer.from("attachment contents").toString("base64") },
+      { name: "pixel.png", mediaType: "image/png", data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/RZkAAAAASUVORK5CYII=" }
+    ];
+    const sessionAttachments = [];
+    for (const sessionId of [101, 102, 103]) {
+      const attachmentRunId = sessionId === 101 ? runId : Number(db.prepare(`
+        INSERT INTO runs (session_id, status, input, created_at) VALUES (?, ?, '', '2026-08-01T00:00:00.000Z')
+      `).run(sessionId, sessionId === 103 ? "running" : "succeeded").lastInsertRowid);
+      const owner = { runId: attachmentRunId };
+      attachments.insert(sessionId, owner, files);
+      const prepared = await prepareAttachments(attachments, attachmentRunId, join(root, "sessions", String(sessionId), "workspace"), "", new AbortController().signal);
+      const paths = prepared.text.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line).path as string);
+      expect(paths).toHaveLength(2);
+      for (const path of paths) expect(existsSync(path)).toBe(true);
+      sessionAttachments.push({ sessionId, owner, paths, metadata: attachments.list(owner) });
+    }
     const providerSessionPath = join(root, "agents", String(1), "provider-home", "codex", "sessions", "101");
     mkdirSync(providerSessionPath, { recursive: true });
     const acpxSessionPath = join(root, "acpx", "sessions", "remote-agent%3A101.json");
@@ -214,6 +234,14 @@ describe("SessionCleanupScheduler", () => {
     expect(existsSync(acpxEventRolloverPath)).toBe(false);
     expect(existsSync(join(root, "sessions", "102"))).toBe(true);
     expect(existsSync(join(root, "sessions", "103"))).toBe(true);
+    for (const { sessionId, owner, paths, metadata } of sessionAttachments) {
+      const available = sessionId !== 101;
+      expect(attachments.list(owner)).toEqual(metadata.map((item) => ({ ...item, available })));
+      for (const path of paths) expect(existsSync(path)).toBe(available);
+      for (const [index, item] of metadata.entries()) {
+        expect(attachments.read(owner, item.id)?.bytes.toString("base64")).toBe(available ? files[index]!.data : undefined);
+      }
+    }
     expect(db.prepare("SELECT COUNT(*) AS count FROM runs WHERE session_id = 101").get()).toEqual({ count: 1 });
     expect(db.prepare("SELECT COUNT(*) AS count FROM events WHERE run_id = ?").get(runId)).toEqual({ count: 1 });
     expect(manager.listExpiredIds("2026-08-24T00:00:00.000Z")).not.toContain(101);
@@ -283,6 +311,18 @@ describe("SessionCleanupScheduler", () => {
         (endpoint_id, conversation_key, session_id, status, created_at, ended_at)
       VALUES (?, 'ticket-1', 101, 'ended', ?, ?)
     `).run(endpointId, "2026-08-01T00:00:00.000Z", "2026-08-01T01:00:00.000Z");
+    // A Task cancelled before dispatch still owns uploaded bytes, without a Run or workspace copy.
+    const taskId = Number(db.prepare(`
+      INSERT INTO integration_tasks
+        (endpoint_id, session_id, request_id, request_fingerprint, message, effective_prompt, status, created_at)
+      VALUES (?, 101, 'cancelled-upload', 'fingerprint', '', '', 'cancelled', '2026-08-01T00:00:00.000Z')
+    `).run(endpointId).lastInsertRowid);
+    const attachments = new AttachmentStore(db);
+    attachments.insert(101, { taskId }, [
+      { name: "notes.txt", mediaType: "text/plain", data: Buffer.from("cancelled contents").toString("base64") }
+    ]);
+    const metadata = attachments.list({ taskId });
+    expect(attachments.read({ taskId }, metadata[0]!.id)?.bytes.toString()).toBe("cancelled contents");
     const scheduler = new SessionCleanupScheduler({
       sessionManager: manager,
       retentionMs: 7 * 24 * 60 * 60 * 1000,
@@ -296,6 +336,10 @@ describe("SessionCleanupScheduler", () => {
     expect(existsSync(join(root, "sessions", "101"))).toBe(false);
     expect(db.prepare("SELECT session_id FROM integration_conversations WHERE conversation_key = 'ticket-1'").get())
       .toEqual({ session_id: 101 });
+    expect(attachments.list({ taskId })).toEqual(metadata.map((item) => ({ ...item, available: false })));
+    expect(attachments.read({ taskId }, metadata[0]!.id)).toBeUndefined();
+    expect(db.prepare("SELECT status, run_id FROM integration_tasks WHERE id = ?").get(taskId))
+      .toEqual({ status: "cancelled", run_id: null });
     db.close();
   });
 });

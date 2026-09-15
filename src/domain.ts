@@ -116,6 +116,7 @@ export type Page<T> = {
 };
 
 export type Run = {
+  attachments?: import("./attachments/attachment-types.js").Attachment[];
   id: number;
   sessionId: number;
   status: RunStatus;

@@ -1,3 +1,4 @@
+import { prepareAttachments } from "../attachments/prepare-attachments.js";
 import { dirname, join } from "node:path";
 
 import { resolveModelPolicy } from "../agents/model-policy.js";
@@ -222,7 +223,9 @@ export class RunExecutor {
       if (this.cancellationIntents.has(run.id)) {
         return this.finishRun(run.id, { status: "cancelled" }, usage);
       }
-      const turn = this.runtime.startTurn({ sessionId: session.id, requestId: run.id, text: run.input });
+      const prompt = await withinRunTimeout(prepareAttachments(this.runRepository.attachments, run.id, session.workspacePath, run.input, runAbortController.signal));
+      if (this.cancellationIntents.has(run.id)) return this.finishRun(run.id, { status: "cancelled" }, usage);
+      const turn = this.runtime.startTurn({ sessionId: session.id, requestId: run.id, ...prompt });
       liveTurn = turn;
       let output = "";
       const iterator = turn.events[Symbol.asyncIterator]();
