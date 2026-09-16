@@ -198,7 +198,8 @@ it("筛选编辑器校验条件、预览草稿并保存，接收记录解释忽�
         provider: "gitlab", eventType: "Merge Request Hook", payload: { object_kind: "merge_request" },
         filter: { all: [{ field: "eventType", op: "eq", value: "Merge Request Hook" },
           { field: "payload.object_attributes.author_id", op: "neq", value: 900 },
-          { field: "payload.labels.*.title", op: "contains", value: "CodeReview" }] }
+          { field: "payload.labels.*.title", op: "contains", value: "CodeReview" },
+          { field: "payload.labels.*.title", op: "not_contains", value: "Done-Pass" }] }
       });
       return failPreview ? jsonResponse({ error: { message: "预览暂不可用" } }, 503)
         : jsonResponse({ matched: false, reason: "filter_not_matched", checks: [
@@ -216,7 +217,7 @@ it("筛选编辑器校验条件、预览草稿并保存，接收记录解释忽�
     }
     throw new Error(`Unexpected request ${url}`);
   }));
-  render(<App />);
+  const view = render(<App />);
   fireEvent.click(await screen.findByRole("button", { name: "应用 MR / PR 审核事件" }));
   fireEvent.click(screen.getByRole("button", { name: "添加条件" }));
   const fields = screen.getAllByLabelText("字段路径");
@@ -231,6 +232,13 @@ it("筛选编辑器校验条件、预览草稿并保存，接收记录解释忽�
   fireEvent.change(screen.getAllByLabelText("字段路径")[2]!, { target: { value: "payload.labels.*.title" } });
   fireEvent.change(screen.getAllByLabelText("比较方式")[2]!, { target: { value: "contains" } });
   fireEvent.change(screen.getAllByLabelText("比较值（JSON）")[2]!, { target: { value: '"CodeReview"' } });
+  fireEvent.click(screen.getByRole("button", { name: "添加条件" }));
+  fireEvent.change(screen.getAllByLabelText("字段路径")[3]!, { target: { value: "payload.labels.*.title" } });
+  fireEvent.change(screen.getAllByLabelText("比较方式")[3]!, { target: { value: "not_contains" } });
+  expect(screen.getAllByLabelText("比较方式")[3]!).toHaveValue("not_contains");
+  fireEvent.change(screen.getAllByLabelText("比较值（JSON）")[3]!, { target: { value: '["Done-Pass"]' } });
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+  fireEvent.change(screen.getAllByLabelText("比较值（JSON）")[3]!, { target: { value: '"Done-Pass"' } });
   fireEvent.change(screen.getByLabelText("预览事件类型"), { target: { value: "Merge Request Hook" } });
   fireEvent.change(screen.getByLabelText("示例事件载荷（JSON）"), { target: { value: '{"object_kind":"merge_request"}' } });
   fireEvent.click(screen.getByRole("button", { name: "预览筛选" }));
@@ -244,10 +252,16 @@ it("筛选编辑器校验条件、预览草稿并保存，接收记录解释忽�
   await screen.findByText("接收配置已保存");
   expect(saved).toMatchObject({ filter: { all: [{ field: "eventType", op: "eq", value: "Merge Request Hook" },
     { field: "payload.object_attributes.author_id", op: "neq", value: 900 },
-          { field: "payload.labels.*.title", op: "contains", value: "CodeReview" }] } });
+    { field: "payload.labels.*.title", op: "contains", value: "CodeReview" },
+    { field: "payload.labels.*.title", op: "not_contains", value: "Done-Pass" }] } });
   fireEvent.click(screen.getByRole("button", { name: "刷新接收记录" }));
   expect(await screen.findByText("event-bot")).toBeVisible();
   expect(screen.getByText("未命中筛选规则")).toBeVisible();
+  view.unmount();
+  render(<App />);
+  await screen.findByDisplayValue('"Done-Pass"');
+  expect(screen.getAllByLabelText("比较方式")[3]!).toHaveValue("not_contains");
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeEnabled();
 });
 
 it("接入端点列表分别展示排队和运行任务数", async () => {

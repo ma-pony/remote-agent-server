@@ -312,6 +312,56 @@ describe("Native webhook ingress", () => {
     expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 2 });
   });
 
+  it.each(["gitlab", "github"] as const)("%s 仅接收包含 CodeReview 且不含 Done-Pass 的事件", async (provider) => {
+    const { app, configUrl, url, db } = await setup(provider);
+    const eventType = provider === "gitlab" ? "Merge Request Hook" : "pull_request";
+    const field = provider === "gitlab" ? "payload.labels.*.title" : "payload.pull_request.labels.*.name";
+    const filter = { all: [
+      { field: "eventType", op: "eq", value: eventType },
+      { field, op: "contains", value: "CodeReview" },
+      { field, op: "not_contains", value: "Done-Pass" }
+    ] };
+    const saved = await app.inject({ method: "PUT", url: configUrl, headers: authHeaders(), payload: {
+      provider, authMode: provider === "gitlab" ? "token" : "signature", enabled: true, filter
+    } });
+    expect(saved.statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: configUrl, headers: authHeaders() })).json()).toMatchObject({ filter });
+    let sequence = 0;
+    for (const [labels, matched] of [
+      [["CodeReview"], true],
+      [["other", "CodeReview"], true],
+      [["CodeReview", "Done-Pass"], false],
+      [["Done-Pass", "CodeReview"], false],
+      [["Done-Pass"], false],
+      [[], false],
+      [undefined, false],
+      [["CodeReview", null], false]
+    ] as const) {
+      const payload = provider === "gitlab"
+        ? { object_kind: "merge_request", labels: labels?.map((title) => ({ title })) }
+        : { action: "opened", pull_request: { labels: labels?.map((name) => ({ name })) } };
+      const preview = await app.inject({ method: "POST", url: `${configUrl}/preview`, headers: authHeaders(),
+        payload: { provider, eventType, payload, filter } });
+      expect(preview.statusCode).toBe(200);
+      expect(preview.json()).toMatchObject({ matched });
+      const body = JSON.stringify(payload);
+      const deliveryId = `exclude-done-${++sequence}`;
+      const headers = provider === "gitlab"
+        ? { "x-gitlab-token": secret, "x-gitlab-event": eventType, "idempotency-key": deliveryId }
+        : { "x-github-event": eventType, "x-github-delivery": deliveryId, "x-hub-signature-256": signature(body) };
+      const request = { method: "POST" as const, url, headers: { "content-type": "application/json", ...headers }, payload: body };
+      const received = await app.inject(request);
+      expect(received.statusCode).toBe(matched ? 202 : 200);
+      if (!matched) expect(received.json()).toEqual({ status: "ignored", reason: "filter_not_matched" });
+      const retried = await app.inject(request);
+      expect(retried.statusCode).toBe(matched ? 202 : 200);
+      if (matched) expect(retried.json()).toMatchObject({ taskId: received.json().taskId, sessionId: received.json().sessionId });
+      else expect(retried.json()).toEqual(received.json());
+    }
+    expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 2 });
+    expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 2 });
+  });
+
   it("拒绝非法规则并保留原配置，省略规则保留而 null 清除", async () => {
     const { app, configUrl } = await setup("gitlab");
     const save = (filter: unknown) => app.inject({ method: "PUT", url: configUrl, headers: authHeaders(),

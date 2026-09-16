@@ -43,11 +43,47 @@ describe("Webhook filter semantics", () => {
     expect(evaluateWebhookFilter(filter, { eventType: "test", payload }).matched).toBe(matched);
   });
 
+  it.each([
+    [{ labels: [{ title: "CodeReview" }] }, true, "matched"],
+    [{ labels: [{ title: "CodeReview" }, { title: "Done-Pass" }] }, false, "value_mismatch"],
+    [{ labels: [{ title: "Done-Pass" }, { title: "CodeReview" }] }, false, "value_mismatch"],
+    [{ labels: [{ title: "done-pass" }] }, true, "matched"],
+    [{ labels: [] }, true, "matched"],
+    [{}, false, "missing_field"],
+    [{ labels: "Done-Pass" }, false, "missing_field"],
+    [{ labels: [{ title: "CodeReview" }, {}] }, false, "missing_field"],
+    [{ labels: [{ title: "CodeReview" }, { title: 42 }] }, false, "type_mismatch"],
+    [{ labels: [{ title: null }] }, false, "type_mismatch"],
+    [{ labels: [{ title: ["Done-Pass"] }] }, false, "type_mismatch"]
+  ])("not_contains fails closed for malformed label projections: %j", (payload, matched, reason) => {
+    const filter = webhookFilterSchema.parse({ field: "payload.labels.*.title", op: "not_contains", value: "Done-Pass" });
+    expect(evaluateWebhookFilter(filter, { eventType: "Merge Request Hook", payload })).toMatchObject({
+      matched, checks: [{ reason }]
+    });
+  });
+
+  it.each([
+    [[101, 102], 900, true, "matched"],
+    [[101, 900], 900, false, "value_mismatch"],
+    [["900"], 900, false, "type_mismatch"],
+    [[false], true, true, "matched"],
+    [[null], null, false, "value_mismatch"],
+    ["CodeReview", "Done-Pass", false, "type_mismatch"],
+    [null, "Done-Pass", false, "type_mismatch"]
+  ])("not_contains compares scalar array values without coercion: %j", (values, value, matched, reason) => {
+    const filter = webhookFilterSchema.parse({ field: "payload.values", op: "not_contains", value });
+    expect(evaluateWebhookFilter(filter, { eventType: "test", payload: { values } })).toMatchObject({
+      matched, checks: [{ reason }]
+    });
+  });
+
   it("rejects nested array scans and array/object containment values", () => {
     for (const rule of [
       { field: "payload.groups.*.labels.*.title", op: "contains", value: "CodeReview" },
       { field: "payload.labels", op: "contains", value: ["CodeReview"] },
-      { field: "payload.labels", op: "contains", value: { title: "CodeReview" } }
+      { field: "payload.labels", op: "contains", value: { title: "CodeReview" } },
+      { field: "payload.labels", op: "not_contains", value: ["Done-Pass"] },
+      { field: "payload.labels", op: "not_contains", value: { title: "Done-Pass" } }
     ]) expect(webhookFilterSchema.safeParse(rule).success).toBe(false);
   });
 

@@ -74,7 +74,8 @@ const RuleEditor = ({ draft, onChange, onRemove, fieldsId, depth = 0 }: {
       <FieldLabel htmlFor={`${id}-op`}>{text("比较方式", "Operator")}</FieldLabel>
       <NativeSelect id={`${id}-op`} value={draft.op} onChange={(event) => onChange({ ...draft, op: event.target.value })}>
         {[["eq", "等于", "Equals"], ["neq", "不等于", "Does not equal"], ["in", "属于列表", "In list"],
-          ["not_in", "不属于列表", "Not in list"], ["contains", "列表包含", "List contains"], ["exists", "字段存在", "Field exists"]].map(([value, zh, en]) =>
+          ["not_in", "不属于列表", "Not in list"], ["contains", "列表包含", "List contains"],
+          ["not_contains", "列表不包含", "List does not contain"], ["exists", "字段存在", "Field exists"]].map(([value, zh, en]) =>
           <NativeSelectOption key={value} value={value}>{text(zh!, en!)}</NativeSelectOption>)}
       </NativeSelect>
     </Field>
@@ -83,6 +84,7 @@ const RuleEditor = ({ draft, onChange, onRemove, fieldsId, depth = 0 }: {
       <Textarea id={`${id}-value`} rows={1} aria-invalid={!valid} value={draft.valueText} onChange={(event) => onChange({ ...draft, valueText: event.target.value })} />
       <FieldDescription>{draft.op === "exists" ? text("true 表示必须存在；false 表示必须缺失。通配路径按是否至少有一个元素存在该字段判断。", "true requires presence; false requires absence. Wildcard paths require at least one element with the selected field to count as present.")
         : draft.op === "contains" ? text('填写单个值，如 "CodeReview"。字段可用 labels.*.title 提取所有标签名。', 'Enter a single value, such as "CodeReview". Use labels.*.title to select every label title.')
+        : draft.op === "not_contains" ? text('填写要排除的单个值，如 "Done-Pass"。字段必须为数组，所有元素须完整且与比较值同类型；空数组符合此条件。', 'Enter one value to exclude, such as "Done-Pass". The field must be an array with every element present and of the same type as the value; an empty array matches.')
         : text('例如：42、"main"、false 或 [101,102]。列表中的值须为同一类型。', 'Examples: 42, "main", false, or [101,102]. List values must have the same type.')}</FieldDescription>
     </Field>
     {onRemove === undefined ? null : <Button type="button" variant="ghost" size="sm" className="self-start" onClick={onRemove}><Trash2 data-icon="inline-start" />{text("删除条件", "Remove condition")}</Button>}

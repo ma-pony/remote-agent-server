@@ -2,7 +2,7 @@ import { z } from "zod";
 
 export type WebhookScalar = string | number | boolean | null;
 export type WebhookCondition =
-  | { field: string; op: "eq" | "neq" | "contains"; value: WebhookScalar }
+  | { field: string; op: "eq" | "neq" | "contains" | "not_contains"; value: WebhookScalar }
   | { field: string; op: "in" | "not_in"; value: WebhookScalar[] }
   | { field: string; op: "exists"; value: boolean };
 export type WebhookFilter = WebhookCondition | { all: WebhookFilter[] } | { any: WebhookFilter[] };
@@ -17,7 +17,7 @@ const fieldSchema = z.string().max(256).regex(/^(eventType|payload(?:\.(?:[A-Za-
   .refine((path) => path.split("*").length <= 2)
   .refine((path) => !path.split(".").some((part) => ["__proto__", "prototype", "constructor"].includes(part)));
 const conditionSchema = z.union([
-  z.object({ field: fieldSchema, op: z.enum(["eq", "neq", "contains"]), value: scalarSchema }).strict(),
+  z.object({ field: fieldSchema, op: z.enum(["eq", "neq", "contains", "not_contains"]), value: scalarSchema }).strict(),
   z.object({ field: fieldSchema, op: z.enum(["in", "not_in"]), value: z.array(scalarSchema).min(1).max(100)
     .refine((values) => values.every((value) => scalarType(value) === scalarType(values[0]))) }).strict(),
   z.object({ field: fieldSchema, op: z.literal("exists"), value: z.boolean() }).strict()
@@ -85,9 +85,14 @@ export const evaluateWebhookFilter = (filter: WebhookFilter | null, event: Webho
       matched = exists === rule.value;
     } else if (actual === undefined) {
       reason = "missing_field";
-    } else if (rule.op === "contains") {
+    } else if (rule.op === "contains" || rule.op === "not_contains") {
       if (!Array.isArray(actual)) reason = "type_mismatch";
-      else matched = actual.some((value) => value === rule.value);
+      else if (rule.op === "not_contains" && actual.some((value) => value === undefined)) reason = "missing_field";
+      else if (rule.op === "not_contains" && actual.some((value) => scalarType(value) !== scalarType(rule.value))) reason = "type_mismatch";
+      else {
+        const included = actual.some((value) => value === rule.value);
+        matched = rule.op === "not_contains" ? !included : included;
+      }
     } else {
       const values = Array.isArray(rule.value) ? rule.value : [rule.value];
       if (scalarType(actual) !== scalarType(values[0]) || (actual !== null && typeof actual === "object")) {

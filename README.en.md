@@ -295,13 +295,14 @@ The management API uses the server `API_TOKEN`. `GET /api/integration-webhook-pr
 
 In **Receive events**, apply the **MR / PR review events** preset, then add project, author, or label conditions. “Match all” means AND; “Match any” means OR. Groups can be nested. The preset selects open, non-draft requests on creation, reopening, new commits, or becoming ready for review. Ordinary GitLab title, label, or approval updates do not trigger this preset; unknown draft status is also rejected. Adding a label alone does not trigger a review; adjust the action conditions if that behavior is required. The preset does not classify authors; add account rules separately.
 
-For example, a GitLab MR whose labels contain `CodeReview` and whose author is not account ID `900`:
+For example, a GitLab MR whose labels contain `CodeReview` but not `Done-Pass`, and whose author is not account ID `900`:
 
 ```json
 {
   "all": [
     { "field": "eventType", "op": "eq", "value": "Merge Request Hook" },
     { "field": "payload.labels.*.title", "op": "contains", "value": "CodeReview" },
+    { "field": "payload.labels.*.title", "op": "not_contains", "value": "Done-Pass" },
     { "field": "payload.object_attributes.author_id", "op": "neq", "value": 900 }
   ]
 }
@@ -310,8 +311,8 @@ For example, a GitLab MR whose labels contain `CodeReview` and whose author is n
 Save this object as the receiver's `filter` field. GitHub labels use `payload.pull_request.labels.*.name`, and the author login is `payload.pull_request.user.login`. Native GitLab MR events identify the author through `payload.object_attributes.author_id`; `payload.user.id` is the event actor and must not substitute for the author. GitHub's `payload.sender.id` is also the actor. To review only developer MRs, prefer an author ID allowlist with `in: [101,102]`, or maintain a complete agent ID denylist with `not_in`. Replace example IDs with actual account IDs.
 
 - Fields must be `eventType` or dot-separated paths beginning with `payload.`. A path may contain one `*` to project array elements, such as `labels.*.title`. Filters cannot read headers or execute scripts.
-- `eq` / `neq` compare a scalar; `in` / `not_in` check a scalar against a configured list; `contains` checks whether an event array contains a configured scalar, useful for labels; `exists` takes a boolean requiring presence or absence. A wildcard field is present when at least one element has the selected field; empty arrays or only missing fields count as absent. Strings are exact and case-sensitive.
-- No coercion: numeric `101` differs from string `"101"`. Missing fields and type mismatches fail comparisons, including negative comparisons. `null` is present; empty arrays never match `contains`.
+- `eq` / `neq` compare a scalar; `in` / `not_in` check a scalar against a configured list; `contains` / `not_contains` check whether an event array contains / excludes a configured scalar, useful for labels. In the UI, select **List does not contain** and enter one JSON value, such as `"Done-Pass"`, rather than an array. `not_in` cannot substitute for array exclusion. `exists` takes a boolean requiring presence or absence. A wildcard field is present when at least one element has the selected field; empty arrays or only missing fields count as absent. Strings are exact and case-sensitive.
+- No coercion: numeric `101` differs from string `"101"`. Missing fields and type mismatches fail comparisons, including negative comparisons. `null` is present. Empty arrays never match `contains` but match `not_contains`; combining it with a required `CodeReview` label still rejects empty arrays. `not_contains` requires every array element to be present and of the same type as the comparison value; a missing projected field in any element also fails the condition.
 - Limits: 50 rule nodes, 6 nesting levels, non-empty groups, 100 same-type scalars per list, 256-character field paths, and 1024-character comparison strings. Invalid rules return `400 invalid_request` and preserve the previous configuration.
 - Omitting `filter` on a same-provider update preserves it; `null` clears it. Switching provider while omitting `filter` clears the rules. The management UI clears the current filter draft on a platform switch; configure rules for the new platform before saving. Configuration reads include `filter` and `filterVersion`; rule or provider changes increment the version. Existing receivers default to no filtering.
 - Non-matches return `200 {"status":"ignored","reason":"filter_not_matched"}`, without a Task, Session, Run, or model call. Failed authentication creates no receipt.

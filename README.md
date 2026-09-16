@@ -295,13 +295,14 @@ POST /integration/v1/endpoints/:slug/webhook
 
 在“接收事件”中应用 **MR / PR 审核事件** 预设，再添加项目、作者、标签等条件。选择“满足全部条件”表示 AND，“满足任一条件”表示 OR；条件组可以嵌套。预设选择非草稿且仍开启的请求：新建、重新开启、新提交或转为可审核。GitLab 的普通标题、标签、审批等更新不会触发该预设；未知草稿状态也不放行。添加标签不会单独触发审核；若需要该行为，调整动作条件。预设不判断作者身份，需要自行添加账号规则。
 
-例如，GitLab MR 的 labels 中包含 `CodeReview`，并且作者不是 ID `900` 的账号：
+例如，GitLab MR 的 labels 中包含 `CodeReview`、不包含 `Done-Pass`，并且作者不是 ID `900` 的账号：
 
 ```json
 {
   "all": [
     { "field": "eventType", "op": "eq", "value": "Merge Request Hook" },
     { "field": "payload.labels.*.title", "op": "contains", "value": "CodeReview" },
+    { "field": "payload.labels.*.title", "op": "not_contains", "value": "Done-Pass" },
     { "field": "payload.object_attributes.author_id", "op": "neq", "value": 900 }
   ]
 }
@@ -310,8 +311,8 @@ POST /integration/v1/endpoints/:slug/webhook
 以上对象作为接收配置的 `filter` 字段保存。GitHub 标签路径为 `payload.pull_request.labels.*.name`；作者账号可用 `payload.pull_request.user.login`。GitLab 原生 MR 事件使用 `payload.object_attributes.author_id`；`payload.user.id` 是事件操作者，不能替代作者。GitHub 的 `payload.sender.id` 同样是操作者。只审核开发人员 MR 时，建议为作者 ID 配置 `in: [101,102]` 白名单；也可用 `not_in` 维护完整的 Agent ID 黑名单。示例 ID 需替换为实际账号 ID。
 
 - 字段只允许 `eventType` 或 `payload.` 开头的点分路径；一个路径最多允许一个 `*`，用于提取数组元素，如 `labels.*.title`。不读取请求头或执行脚本。
-- `eq` / `neq` 比较单个标量；`in` / `not_in` 判断标量是否属于配置列表；`contains` 判断事件数组是否包含配置标量，适合标签；`exists` 的布尔值指定字段必须存在或缺失，通配路径以至少一个元素存在目标字段为准，空数组或所有元素均缺失该字段时视为不存在。字符串精确匹配、区分大小写。
-- 不做类型转换：数字 `101` 不等于字符串 `"101"`。字段缺失或类型不符时比较不匹配，负向比较也不放行。`null` 是已存在的值，空数组不能命中 `contains`。
+- `eq` / `neq` 比较单个标量；`in` / `not_in` 判断标量是否属于配置列表；`contains` / `not_contains` 判断事件数组是否包含 / 不包含配置标量，适合标签。界面中选择“列表不包含”，比较值填写单个 JSON 值，例如 `"Done-Pass"`，不能填数组。`not_in` 不能代替数组排除条件。`exists` 的布尔值指定字段必须存在或缺失，通配路径以至少一个元素存在目标字段为准，空数组或所有元素均缺失该字段时视为不存在。字符串精确匹配、区分大小写。
+- 不做类型转换：数字 `101` 不等于字符串 `"101"`。字段缺失或类型不符时比较不匹配，负向比较也不放行。`null` 是已存在的值。空数组不能命中 `contains`，但能命中 `not_contains`；若同时要求包含 `CodeReview`，空数组仍不通过组合规则。`not_contains` 要求数组所有元素均存在且与比较值同类型，通配路径中任一元素缺少目标字段也不会放行。
 - 规则最多 50 个节点、6 层嵌套，组不能为空；列表最多 100 个同类型标量；字段路径最多 256 字符，比较字符串最多 1024 字符。无效规则返回 `400 invalid_request`，保留原配置。
 - 同平台更新省略 `filter` 保留规则，传 `null` 清除规则；切换平台且省略 `filter` 时清除规则。管理界面切换平台会清除当前筛选草稿，保存前应为新平台重新设置规则。读取配置返回 `filter` 和 `filterVersion`，规则或平台变化时版本递增。旧配置默认不筛选。
 - 未命中返回 `200 {"status":"ignored","reason":"filter_not_matched"}`，不创建 Task、Session 或 Run，也不调用模型。认证失败不写接收记录。
