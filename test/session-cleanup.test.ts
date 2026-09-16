@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agents/agent-manager.js";
 import { AttachmentStore } from "../src/attachments/attachment-store.js";
 import { prepareAttachments } from "../src/attachments/prepare-attachments.js";
+import { IntegrationStore } from "../src/integrations/integration-store.js";
 import { RunRepository } from "../src/runs/run-repository.js";
 import { SessionCleanupScheduler } from "../src/sessions/session-cleanup-scheduler.js";
 import { SessionManager } from "../src/sessions/session-manager.js";
@@ -297,7 +298,7 @@ describe("SessionCleanupScheduler", () => {
     }
   });
 
-  it("清理被外部接入审计记录引用的会话存储但保留关联记录", async () => {
+  it("清理会话存储时删除关联投递，保留外部接入审计和其他会话的投递", async () => {
     const { db, manager, root, insertSession } = createHarness();
     insertSession(101, "idle", "2026-08-01T00:00:00.000Z");
     const agent = db.prepare("SELECT id FROM agents ORDER BY id LIMIT 1").get() as { id: number };
@@ -317,6 +318,29 @@ describe("SessionCleanupScheduler", () => {
         (endpoint_id, session_id, request_id, request_fingerprint, message, effective_prompt, status, created_at)
       VALUES (?, 101, 'cancelled-upload', 'fingerprint', '', '', 'cancelled', '2026-08-01T00:00:00.000Z')
     `).run(endpointId).lastInsertRowid);
+    insertSession(102, "idle", "2026-08-23T00:00:00.000Z");
+    const otherTaskId = Number(db.prepare(`
+      INSERT INTO integration_tasks
+        (endpoint_id, session_id, request_id, request_fingerprint, message, effective_prompt, status, created_at)
+      VALUES (?, 102, 'other-session', 'other-fingerprint', '', '', 'succeeded', '2026-08-23T00:00:00.000Z')
+    `).run(endpointId).lastInsertRowid);
+    const store = new IntegrationStore({ db });
+    const subscription = store.createSubscription({
+      endpointId, name: "Retention", url: "https://receiver.test/retention", enabled: false,
+      eventsJson: "[]", encryptedHeaders: null, encryptedSigningSecret: "test-secret", timeoutSeconds: 10
+    });
+    const deliveryIds: number[] = [];
+    for (const ownerTaskId of [taskId, otherTaskId, null]) {
+      for (const status of ["pending", "delivering", "succeeded", "failed"]) {
+        const eventId = `${ownerTaskId ?? "test"}-${status}`;
+        const delivery = store.createDelivery({
+          subscriptionId: subscription.id, taskId: ownerTaskId, eventId, eventKey: eventId,
+          sequence: 1, eventType: "task.cancelled", payloadJson: "{}", nextAttemptAt: "2026-08-01T00:00:00.000Z"
+        });
+        db.prepare("UPDATE webhook_deliveries SET status = ? WHERE id = ?").run(status, delivery.id);
+        if (ownerTaskId === taskId) deliveryIds.push(delivery.id);
+      }
+    }
     const attachments = new AttachmentStore(db);
     attachments.insert(101, { taskId }, [
       { name: "notes.txt", mediaType: "text/plain", data: Buffer.from("cancelled contents").toString("base64") }
@@ -331,6 +355,7 @@ describe("SessionCleanupScheduler", () => {
     });
 
     await scheduler.runCleanup();
+    await scheduler.runCleanup();
 
     expect(manager.get(101)).toMatchObject({ storageCleanedAt: "2026-08-24T00:00:00.000Z" });
     expect(existsSync(join(root, "sessions", "101"))).toBe(false);
@@ -340,6 +365,15 @@ describe("SessionCleanupScheduler", () => {
     expect(attachments.read({ taskId }, metadata[0]!.id)).toBeUndefined();
     expect(db.prepare("SELECT status, run_id FROM integration_tasks WHERE id = ?").get(taskId))
       .toEqual({ status: "cancelled", run_id: null });
+    expect(store.listDeliveries(subscription.id).map(({ taskId }) => taskId))
+      .toEqual([otherTaskId, otherTaskId, otherTaskId, otherTaskId, null, null, null, null]);
+    // Late HTTP completion and manual retry cannot recreate records removed by retention.
+    for (const id of deliveryIds) {
+      expect(store.markDeliverySucceeded(id, { statusCode: 204, durationMs: 1 })).toBeUndefined();
+      expect(store.releaseDelivery(id)).toBeUndefined();
+      expect(store.retryDelivery(id)).toBeUndefined();
+    }
+    expect(store.getSubscription(subscription.id)).toBeDefined();
     db.close();
   });
 });

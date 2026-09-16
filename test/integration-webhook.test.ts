@@ -1282,7 +1282,7 @@ describe("Webhook management API", () => {
       total: 1,
       totalPages: 1,
       items: [{ id: auditDelivery.id, eventId: auditEventId }],
-      latest: expect.any(Array)
+      latest: [{ id: auditDelivery.id, eventId: auditEventId }]
     });
 
     db.prepare("UPDATE webhook_deliveries SET status = 'failed', attempt_count = 6 WHERE id = ?").run(delivery.id);

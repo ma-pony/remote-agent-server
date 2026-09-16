@@ -543,6 +543,8 @@ pnpm smoke:integrations
 
 ## 8. 升级、Skills 与 Session 存储恢复
 
+Webhook 投递历史查询的升级会在启动迁移时自动创建 `webhook_deliveries_subscription_recent` 索引，无需手动执行 SQL。首次创建需要读取现有投递记录；完成迁移并启动后，检查健康接口及管理台“事件回调”的投递记录，确认历史数据、筛选和最近投递摘要正常。
+
 ### Skills Git 来源与版本升级
 
 Skills 来源复用服务用户的 Git/SSH 凭证。先为该用户配置无交互 Git 访问、SSH 主机信任和只读仓库权限；URL 中不要嵌入 Token 或密码。管理台支持 HTTPS、SSH 和 `git@host:group/repository.git`，不接受本机目录或 `file://` 来源。来源刷新不运行安装命令，Git Hook 被禁用。Git 地址、可选 ref 和路径保存在管理数据中，凭证仍由宿主 Git 管理。
@@ -562,6 +564,8 @@ Git 来源刷新成功只证明目录已发布；应用 Skill 后还需使用实
 当前部分 Provider 会把这些模型错误作为普通回复返回，同时报告 `completed`，上层 Run 因而可能显示成功。这一错误状态传递问题尚未修复；上线验收必须检查回复或实际产物，不得只依赖状态字段。
 
 ### Session 存储清理与恢复
+
+Session 存储清理成功时，也会删除通过 Task 关联的全部 Webhook 投递记录并停止后续重试；Task、Conversation、事件和 Token 统计仍保留。投递删除和清理完成标记在同一事务内提交，清理失败后按原流程恢复。此行为适用于升级后完成的清理；升级前已清理 Session 的历史投递不会在启动迁移中批量删除。
 
 升级时按正常流程停止旧进程、备份数据库和 `secret.key`，再启动新版本。启动迁移会为现有 Session 增加可空的 `pending_operation` 字段；不会改写历史活动时间。服务在调度 Run 前，先重试创建中断的目录删除，并完成持久化标记中的清理、删除或重置。
 

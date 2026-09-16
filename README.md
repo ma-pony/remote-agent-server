@@ -240,7 +240,7 @@ Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选�
 
 设置保存在数据库中。Run 超时作用于新启动的 Run；存储保留期在下一次清理时生效；并发修改立即作用于后续调度。提高上限会继续派发排队工作，降低上限不会取消正在运行的工作。系统始终保证同一 Session 的 Run 串行、同一外部 Conversation 复用同一 Session 且串行、同一 Webhook 订阅按顺序投递，并合并同一项目环境的重复同步请求。
 
-服务启动时会立即执行一次存储清理，之后每 10 分钟检查一次。保留期按 Session 的最后活动时间计算，服务重启不会重新计算已空闲 Session 的保留期。达到保留期的空闲 Session 只删除 Workspace、浏览器数据和 Provider 原生会话；Session、Run、事件、外部接入记录和 Token 统计继续保留。
+服务启动时会立即执行一次存储清理，之后每 10 分钟检查一次。保留期按 Session 的最后活动时间计算，服务重启不会重新计算已空闲 Session 的保留期。达到保留期的空闲 Session 会删除 Workspace、浏览器数据、Provider 原生会话，以及该 Session 下所有 Task 的 Webhook 投递记录（含等待、投递中和已结束记录）；清理后不再重试这些投递。Session、Run、事件、Task/Conversation 关联和 Token 统计继续保留。不关联 Task 的测试投递不受 Session 清理影响，重置 Provider 上下文也不删除投递记录。
 
 删除前会再次检查 Session 是否仍然到期。清理或删除失败时，Session 保持占用，防止使用已被部分删除的 Workspace；自动清理会在后续轮次重试，手动删除可以重新调用删除接口。关闭自动清理会停止接收新的清理任务，已经开始的清理仍会完成。服务重启会先恢复未完成的清理、删除或重置，再调度 Run。
 
@@ -620,6 +620,8 @@ const valid = actual.length === expected.length
 ```
 
 服务会重试网络错误和非 2xx 响应，接收方必须按 `eventId` 幂等。Webhook 投递失败不会改变 Task 结果。
+
+管理台的投递记录支持筛选和分页；订阅卡片的“最近投递”始终取该订阅创建时间最新的一条记录，同一时间按 ID 倒序，不受记录列表的筛选和分页影响。
 
 可订阅事件：
 

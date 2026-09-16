@@ -166,6 +166,8 @@ Agent 的 `modelPolicy` 有三种格式：
 
 相同 Conversation 的 Task 严格串行，避免多个 Run 并发修改同一个 Workspace 或 Provider 上下文。
 
+Webhook 投递列表的 `latest` 摘要从当前端点的订阅出发，利用 `webhook_deliveries(subscription_id, created_at DESC, id DESC)` 覆盖索引为每个订阅定位一条记录，再按主键读取详情。无投递的订阅不返回摘要，列表筛选和分页不影响摘要。避免从历史投递逐行执行相关子查询和排序，防止同步 SQLite 查询长时间占用事件循环。启动迁移为新库和旧库幂等创建此索引。
+
 ### 6.4 原生 Webhook 入库
 
 `WebhookIngress` 是 GitHub 和 GitLab 共用的接收组件。公开入口 `/integration/v1/endpoints/:slug/webhook` 在独立 Fastify 作用域内保留原始请求体，支持 JSON 和 GitHub 表单 `payload`；其他 API 的 JSON 解析不变。端点的接收器配置保存在 `integration_webhook_receivers`，一端点一条配置，Secret 通过现有 SecretStore 加密，删除端点时级联删除。
@@ -207,7 +209,7 @@ Session 创建不重复 clone、`git clean` 或依赖安装。Workspace 是可�
 
 Python `uv` 项目使用可迁移虚拟环境。服务器要求 uv `>= 0.10.8`，在项目包含 `uv.lock` 时准备 relocatable `.venv`。
 
-Session 保留策略只清理占用空间较大的 Workspace、浏览器数据和 Provider 原生会话。Session、Run、Event、外部接入关联和 Token 统计继续保留。
+Session 保留策略清理占用空间较大的 Workspace、浏览器数据、Provider 原生会话，以及通过 Task 关联的全部 Webhook 投递记录。投递删除与 `storage_cleaned_at` 写入在同一个收尾事务中完成，失败回滚，重启后可幂等恢复。已清理的投递停止重试；晚到的投递结果不会重建记录，显式投影修复跳过已清理 Session。启动恢复仍可补齐 Task 状态和公开事件，但不会为已清理 Session 新建投递。Session、Run、Event、Task/Conversation 关联、公开事件和 Token 统计继续保留；无 Task 的测试投递不受影响，重置上下文保留投递记录。
 
 清理资格依据空闲 Session 的 `updated_at`，并排除仍有 queued/running Run 的 Session。清理器取出候选列表后，在取得占用的同一事务中再次检查截止时间，防止等待其他目录删除期间发生的新活动被忽略。重启恢复只为被中断的 running Run 更新所属 Session 的活动时间；已空闲或已清理的 Session 不因重启延长保留期。Run 终态、错误事件和 Session 恢复在同一事务内写入，重复恢复不会再次刷新活动时间。
 

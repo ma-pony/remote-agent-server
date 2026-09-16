@@ -9,6 +9,7 @@ import { AgentManager } from "../src/agents/agent-manager.js";
 import { AttachmentStore } from "../src/attachments/attachment-store.js";
 import { prepareAttachments } from "../src/attachments/prepare-attachments.js";
 import { migrate } from "../src/db.js";
+import { IntegrationStore } from "../src/integrations/integration-store.js";
 import { RunRepository } from "../src/runs/run-repository.js";
 import { SystemProviderSessionCleaner } from "../src/runtime/provider-session-cleaner.js";
 import { recoverSessionMaintenance, type SessionMaintenanceOperation } from "../src/sessions/session-maintenance.js";
@@ -99,6 +100,23 @@ describe("durable Session maintenance", () => {
     const h = harness();
     const { db, session, manager, workspace } = h;
     const run = db.prepare("SELECT id FROM runs WHERE session_id = ?").get(session.id) as { id: number };
+    const store = new IntegrationStore({ db });
+    const endpointId = Number(db.prepare(`
+      INSERT INTO integration_endpoints (name, slug, agent_id, enabled, token_hash, created_at, updated_at)
+      VALUES ('Maintenance', 'maintenance', ?, 0, 'maintenance-token', '2026-08-12', '2026-08-12')
+    `).run(h.seed.agent.id).lastInsertRowid);
+    const task = store.createTask({
+      endpointId, conversationId: null, sessionId: session.id, requestId: "maintenance",
+      requestFingerprint: "maintenance", message: "test", effectivePrompt: "test", encryptedParameters: null
+    });
+    const subscription = store.createSubscription({
+      endpointId, name: "Maintenance", url: "https://receiver.test/maintenance", enabled: false,
+      eventsJson: "[]", encryptedHeaders: null, encryptedSigningSecret: "test-secret", timeoutSeconds: 10
+    });
+    const delivery = store.createDelivery({
+      subscriptionId: subscription.id, taskId: task.id, eventId: "maintenance", eventKey: "maintenance",
+      sequence: 1, eventType: "task.succeeded", payloadJson: "{}", nextAttemptAt: "2026-08-12"
+    });
     const owner = { runId: run.id };
     const attachments = new AttachmentStore(db);
     attachments.insert(session.id, owner, [
@@ -126,6 +144,7 @@ describe("durable Session maintenance", () => {
     expect(existsSync(attachmentPath)).toBe(operation === "reset");
     // The failed terminal transaction must roll back clearing or deleting the attachment payload.
     expect(attachments.read(owner, metadata[0]!.id)?.bytes.toString()).toBe("attachment contents");
+    expect(store.getDelivery(delivery.id)).toBeDefined();
     expect(db.prepare("SELECT count(*) AS count FROM runs WHERE session_id = ?").get(session.id)).toEqual({ count: 1 });
     db.exec("DROP TRIGGER reject_terminal");
     const repository = new RunRepository({ db });
@@ -135,6 +154,8 @@ describe("durable Session maintenance", () => {
 
     await recoverSessionMaintenance(h);
     await recoverSessionMaintenance(h);
+
+    expect(store.getDelivery(delivery.id) !== undefined).toBe(operation === "reset");
 
     if (operation === "delete") {
       expect(manager.get(session.id)).toBeUndefined();

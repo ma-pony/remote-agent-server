@@ -48,6 +48,59 @@ afterEach(() => {
 });
 
 describe("Integration endpoint domain", () => {
+  it("投递摘要按创建时间和 ID 取每个订阅的最新记录，不受列表筛选和分页影响", () => {
+    const { db, seed, manager, store } = createHarness();
+    const endpoint = manager.create(validEndpointInput(seed.agent.id)).endpoint;
+    const other = manager.create({ ...validEndpointInput(seed.agent.id), slug: "other-history" }).endpoint;
+    const subscription = (endpointId: number, name: string) => store.createSubscription({
+      endpointId, name, url: "https://receiver.test/history", enabled: false,
+      eventsJson: "[]", encryptedHeaders: null, encryptedSigningSecret: "test-secret", timeoutSeconds: 10
+    });
+    const first = subscription(endpoint.id, "First");
+    const second = subscription(endpoint.id, "Second");
+    subscription(endpoint.id, "Empty");
+    const foreign = subscription(other.id, "Foreign");
+    const addDelivery = (subscriptionId: number, eventId: string, createdAt: string, status = "succeeded") => {
+      const delivery = store.createDelivery({
+        subscriptionId, eventId, eventKey: eventId, sequence: 1, taskId: null,
+        eventType: "webhook.test", payloadJson: "{}", nextAttemptAt: createdAt
+      });
+      db.prepare("UPDATE webhook_deliveries SET created_at = ?, status = ? WHERE id = ?")
+        .run(createdAt, status, delivery.id);
+      return delivery.id;
+    };
+    try {
+      const older = addDelivery(first.id, "needle", "2026-09-01T00:00:00.000Z", "failed");
+      addDelivery(first.id, "same-time", "2026-09-02T00:00:00.000Z");
+      const firstLatest = addDelivery(first.id, "tie-winner", "2026-09-02T00:00:00.000Z");
+      // A larger ID with an older timestamp must not replace the latest delivery.
+      addDelivery(first.id, "backfill", "2026-08-01T00:00:00.000Z");
+      const secondLatest = addDelivery(second.id, "second", "2026-09-02T00:00:00.000Z", "pending");
+      addDelivery(foreign.id, "foreign", "2026-09-03T00:00:00.000Z");
+      // Retrying an older delivery changes updated_at, not its position in history.
+      db.prepare("UPDATE webhook_deliveries SET updated_at = ? WHERE id = ?")
+        .run("2026-09-04T00:00:00.000Z", older);
+
+      const page = store.listDeliveriesForEndpoint(endpoint.id, { page: 2, pageSize: 1 });
+      expect(page).toMatchObject({ total: 5, totalPages: 5, page: 2, pageSize: 1 });
+      expect(page.items.map(({ id }) => id)).toEqual([firstLatest]);
+      expect(page.latest.map(({ id }) => id)).toEqual([secondLatest, firstLatest]);
+
+      const filtered = store.listDeliveriesForEndpoint(endpoint.id, {
+        page: 1, pageSize: 1, subscriptionId: first.id, status: "failed", query: "needle"
+      });
+      expect(filtered.total).toBe(1);
+      expect(filtered.items.map(({ id }) => id)).toEqual([older]);
+      expect(filtered.latest.map(({ id }) => id)).toEqual([secondLatest, firstLatest]);
+
+      const empty = store.listDeliveriesForEndpoint(endpoint.id, { page: 1, pageSize: 20, query: "no-match" });
+      expect(empty).toMatchObject({ items: [], total: 0, totalPages: 0 });
+      expect(empty.latest.map(({ id }) => id)).toEqual([secondLatest, firstLatest]);
+    } finally {
+      db.close();
+    }
+  });
+
   it("只在创建和轮换时返回端点 Token", () => {
     const { db, seed, manager } = createHarness();
     const created = manager.create(validEndpointInput(seed.agent.id));

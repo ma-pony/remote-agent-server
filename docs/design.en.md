@@ -166,6 +166,8 @@ An active run keeps the model and concurrency slot resolved at startup and ignor
 
 Tasks sharing one conversation run serially, protecting the shared workspace and provider context from concurrent modification.
 
+The Webhook delivery list builds its `latest` summary from the current endpoint's subscriptions. A covering index on `webhook_deliveries(subscription_id, created_at DESC, id DESC)` locates one delivery per subscription before a primary-key lookup loads its details. Subscriptions without deliveries are omitted; history filters and pagination do not affect the summary. This avoids a correlated lookup and sort for every historical delivery, which can block the event loop through synchronous SQLite execution. Startup migration creates the index idempotently for both new and existing databases.
+
 ### 6.4 Native webhook admission
 
 `WebhookIngress` is the shared GitHub and GitLab receiver. The public `/integration/v1/endpoints/:slug/webhook` route preserves raw request bytes in an isolated Fastify scope, accepting JSON and GitHub form `payload` bodies without changing JSON parsing elsewhere. `integration_webhook_receivers` stores one configuration per endpoint, encrypts its secret through SecretStore, and cascades deletion when its endpoint is deleted.
@@ -207,7 +209,7 @@ Session creation does not repeat cloning, `git clean`, or dependency installatio
 
 Python projects using `uv` receive a relocatable virtual environment. The server requires uv `>= 0.10.8` and prepares a relocatable `.venv` when the project contains `uv.lock`.
 
-Session retention removes large workspace, browser, and native provider-session data. Session, Run, Event, integration links, and token statistics remain available.
+Session retention removes large workspace, browser, and native provider-session data, plus all Webhook delivery records linked through its Tasks. Delivery deletion and the `storage_cleaned_at` update share the terminal transaction, rolling back on failure and recovering idempotently after restart. Removed deliveries stop retrying; late delivery results do not recreate them, and explicit projection repair skips cleaned Sessions. Startup recovery can still reconcile Task state and public events without creating deliveries for cleaned Sessions. Session, Run, Event, Task/Conversation links, public events, and token statistics remain available. Test deliveries without a Task are unaffected, and context reset preserves delivery records.
 
 Cleanup eligibility uses an idle Session's `updated_at` and excludes Sessions with queued or running Runs. After listing candidates, the cleanup claim rechecks the cutoff in the same transaction so activity while earlier directories are being removed is respected. Restart recovery updates activity timestamps only for Sessions with interrupted running Runs. Restarting does not extend retention for already idle or cleaned Sessions. Run terminal states, error events, and Session recovery are committed in one transaction; repeating recovery does not refresh activity timestamps again.
 

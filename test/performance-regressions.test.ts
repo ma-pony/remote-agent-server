@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { migrate } from "../src/db.js";
 import { EventStore } from "../src/events/event-store.js";
 import { IntegrationProjection } from "../src/integrations/integration-projection.js";
 import { IntegrationStore } from "../src/integrations/integration-store.js";
 import { RunRepository } from "../src/runs/run-repository.js";
+import { finishSessionMaintenance } from "../src/sessions/session-maintenance.js";
 import { createTestDatabase } from "./helpers.js";
 
 const now = "2026-08-21T00:00:00.000Z";
@@ -38,6 +40,93 @@ const createHarness = () => {
 };
 
 describe("performance regressions", () => {
+  it.each(["projected", "interrupted"])("projection recovery and repair preserve cleaned deliveries (%s Task)", (taskState) => {
+    const { db, store, task, run, runRepository, projection } = createHarness();
+    const subscription = store.createSubscription({
+      endpointId: task.endpointId, name: "Retention", url: "https://receiver.test/retention", enabled: true,
+      eventsJson: '["task.succeeded"]', encryptedHeaders: null, encryptedSigningSecret: "test-secret", timeoutSeconds: 10
+    });
+    try {
+      runRepository.markRunning(run.id);
+      runRepository.finish(run.id, { status: "succeeded", result: "done" });
+      expect(store.listDeliveries(subscription.id)).toHaveLength(1);
+      if (taskState === "interrupted") {
+        // Recovery supports old persisted states where the terminal Task projection is missing.
+        db.prepare("UPDATE integration_tasks SET status = 'running', finished_at = NULL WHERE id = ?").run(task.id);
+      }
+      db.prepare("UPDATE sessions SET status = 'running', pending_operation = 'cleanup' WHERE id = ?")
+        .run(task.sessionId);
+      finishSessionMaintenance(db, task.sessionId, "cleanup");
+      expect(store.listDeliveries(subscription.id)).toEqual([]);
+      projection.recover();
+      projection.repairAll();
+      expect(store.listDeliveries(subscription.id)).toEqual([]);
+      expect(store.getTask(task.id)).toMatchObject({ status: "succeeded" });
+    } finally {
+      db.close();
+    }
+  });
+
+  it.each(["fresh", "upgraded"])("latest Webhook deliveries use one indexed lookup per subscription (%s database)", (schema) => {
+    const { db, store, task } = createHarness();
+    const subscription = store.createSubscription({
+      endpointId: task.endpointId,
+      name: "History",
+      url: "https://receiver.test/history",
+      enabled: false,
+      eventsJson: "[]",
+      encryptedHeaders: null,
+      encryptedSigningSecret: "test-secret",
+      timeoutSeconds: 10
+    });
+    db.transaction(() => {
+      for (let index = 0; index < 100; index += 1) {
+        store.createDeliveryInTransaction({
+          eventId: `history-${index}`,
+          eventKey: `history-${index}`,
+          sequence: index + 1,
+          dispatchOrder: index + 1,
+          subscriptionId: subscription.id,
+          taskId: task.id,
+          eventType: "task.succeeded",
+          payloadJson: "{}",
+          nextAttemptAt: now
+        });
+      }
+    })();
+    if (schema === "upgraded") {
+      db.exec("DROP INDEX IF EXISTS webhook_deliveries_subscription_recent");
+      migrate(db);
+      migrate(db);
+    }
+
+    // Inspect the SQL actually executed by the store, so changing that query is covered.
+    const prepare = vi.spyOn(db, "prepare");
+    let latestSql: string | undefined;
+    try {
+      const page = store.listDeliveriesForEndpoint(task.endpointId, { page: 1, pageSize: 20 });
+      expect(page.total).toBe(100);
+      expect(page.items).toHaveLength(20);
+      expect(page.latest).toHaveLength(1);
+      expect(page.latest[0]?.id).toBe(page.items[0]?.id);
+      latestSql = prepare.mock.calls.find(([sql]) => sql.includes("SELECT recent.id"))?.[0];
+    } finally {
+      prepare.mockRestore();
+    }
+
+    try {
+      expect(latestSql).toBeDefined();
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${latestSql}`).all(task.endpointId) as Array<{ detail: string }>;
+      const details = plan.map(({ detail }) => detail).join("\n");
+      expect(details).toContain("SEARCH delivery USING INTEGER PRIMARY KEY");
+      expect(details).toContain("SEARCH recent USING COVERING INDEX webhook_deliveries_subscription_recent");
+      // Only the final, one-row-per-subscription result may need sorting.
+      expect(plan.filter(({ detail }) => detail.includes("USE TEMP B-TREE"))).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+  });
+
   it("startup recovery ignores already projected historical Runs", () => {
     const harness = createHarness();
     harness.runRepository.markRunning(harness.run.id);

@@ -43,7 +43,7 @@ Use this file for executable repository rules. Use `README.md`, `README.en.md`, 
 - Configuration changes to Skills, Provider extensions, MCP, or model policy take effect on a later Run. Do not interrupt an active Run to apply them.
 - Model schedules are evaluated in UTC when a queued Run actually starts. Persist the resolved model on the Run when the Core exposes one.
 - Runtime shutdown must terminate the complete ACP, MCP, checker, browser, and wrapper process trees on success, failure, cancellation, timeout, reset, idle eviction, and server shutdown. A child process surviving its owner is a correctness bug.
-- Session storage cleanup removes large runtime artifacts only after the Session is idle. It must preserve Session/Run metadata, events, integration records, and token statistics.
+- Session storage cleanup removes large runtime artifacts and Task-linked Webhook deliveries only after the Session is idle. It must preserve Session/Run metadata, events, Task/Conversation records, and token statistics.
 - Internal events may contain privileged data. Public integration events must stay an explicit allowlisted projection; never forward raw tool input/output, thoughts, secrets, or Provider-private fields.
 - Persisted state transitions that span multiple records must be transactional or idempotently recoverable after a process restart.
 

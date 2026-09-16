@@ -39,8 +39,10 @@ export const finishSessionMaintenance = (
 ): void => {
   db.transaction(() => {
     requireClaim(db, id, operation);
-    if (operation === "delete") {
+    if (operation === "delete" || operation === "cleanup") {
       db.prepare("DELETE FROM webhook_deliveries WHERE task_id IN (SELECT id FROM integration_tasks WHERE session_id = ?)").run(id);
+    }
+    if (operation === "delete") {
       db.prepare("DELETE FROM integration_task_events WHERE task_id IN (SELECT id FROM integration_tasks WHERE session_id = ?)").run(id);
       db.prepare("DELETE FROM integration_tasks WHERE session_id = ?").run(id);
       db.prepare("DELETE FROM integration_conversations WHERE session_id = ?").run(id);

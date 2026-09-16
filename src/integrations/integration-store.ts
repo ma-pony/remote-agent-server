@@ -789,12 +789,14 @@ export class IntegrationStore {
     return rows.map(toRun);
   }
 
-  /** Lists every linked Run so deterministic Webhook projections can be reconciled after restart. */
+  /** Lists retained Runs for explicit projection repair; cleaned deliveries must stay removed. */
   listLinkedRuns(): Run[] {
     const rows = this.db.prepare(`
       SELECT run.*
       FROM runs run
       JOIN integration_tasks task ON task.run_id = run.id
+      JOIN sessions session ON session.id = task.session_id
+      WHERE session.storage_cleaned_at IS NULL
       ORDER BY run.created_at ASC, run.id ASC
     `).all() as LinkedRunRow[];
     return rows.map(toRun);
@@ -941,17 +943,17 @@ export class IntegrationStore {
       ORDER BY delivery.created_at DESC, delivery.id DESC
       LIMIT ? OFFSET ?
     `).all(...parameters, input.pageSize, (input.page - 1) * input.pageSize) as DeliveryRow[]).map(toDelivery);
+    // Look up one indexed head per subscription, not once per historical delivery.
     const latest = (this.db.prepare(`
       SELECT delivery.*
-      FROM webhook_deliveries delivery
-      JOIN webhook_subscriptions subscription ON subscription.id = delivery.subscription_id
+      FROM webhook_subscriptions subscription
+      JOIN webhook_deliveries delivery ON delivery.id = (
+        SELECT recent.id FROM webhook_deliveries recent
+        WHERE recent.subscription_id = subscription.id
+        ORDER BY recent.created_at DESC, recent.id DESC
+        LIMIT 1
+      )
       WHERE subscription.endpoint_id = ?
-        AND delivery.id = (
-          SELECT recent.id FROM webhook_deliveries recent
-          WHERE recent.subscription_id = delivery.subscription_id
-          ORDER BY recent.created_at DESC, recent.id DESC
-          LIMIT 1
-        )
       ORDER BY delivery.created_at DESC, delivery.id DESC
     `).all(endpointId) as DeliveryRow[]).map(toDelivery);
     return {
@@ -1041,11 +1043,14 @@ export class IntegrationStore {
       taskEvent = this.db.prepare("SELECT * FROM integration_task_events WHERE id = ?").get(id) as TaskEventRow;
     }
 
+    // Recovery may still repair public Task history after retention removed its deliveries.
     const subscriptions = this.db.prepare(`
-      SELECT * FROM webhook_subscriptions
-      WHERE endpoint_id = ? AND enabled = 1
-      ORDER BY created_at ASC, id ASC
-    `).all(task.endpoint_id) as SubscriptionRow[];
+      SELECT subscription.* FROM webhook_subscriptions subscription
+      JOIN sessions session ON session.id = ?
+      WHERE subscription.endpoint_id = ? AND subscription.enabled = 1
+        AND session.storage_cleaned_at IS NULL
+      ORDER BY subscription.created_at ASC, subscription.id ASC
+    `).all(task.session_id, task.endpoint_id) as SubscriptionRow[];
     const deliveries = subscriptions.flatMap((row) => {
       const events = JSON.parse(row.events_json) as string[];
       if (!events.includes(input.eventType)) return [];
