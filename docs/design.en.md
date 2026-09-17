@@ -282,6 +282,10 @@ Agents run with the operating-system permissions of the service user. They can e
 
 ## 11. Deployment boundary
 
+`pnpm run init` generates a private `0600` `.env`, defaults to a loopback listener, and expands one storage root into database, environment, and Session paths. It reuses WorkspaceManager to verify native creation, cloning/snapshotting, independent writes, and cleanup before exclusively creating the configuration file. Existing files and tokens are preserved. `pnpm run doctor` reuses those checks without writing configuration, creating business records, or invoking a Provider. Both commands may create missing base directories and remove their temporary probe directories afterward.
+
+The server entrypoint reads `.env` from its working directory, with the process environment taking precedence. Node's dotenv parser treats the file as data without shell execution or variable expansion. A configuration snapshot retains the management token for authentication; the live environment removes management and Smoke credentials before loading the login-shell PATH or starting work processes. Vite uses the same loading rules only to resolve its development proxy port and does not expose service configuration to the browser.
+
 The current release targets a self-hosted, single-machine, single-process deployment:
 
 - macOS uses a logged-in user, APFS, and LaunchAgent;

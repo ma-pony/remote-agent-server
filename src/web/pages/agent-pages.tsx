@@ -153,7 +153,7 @@ const ModelWeekdayPicker = ({ value, onChange }: {
 export const AgentListPage = () => {
   const { text } = useI18n();
   const [agents, setAgents] = useState<Agent[] | null>(null);
-  const [environments, setEnvironments] = useState<ProjectEnvironment[]>([]);
+  const [environments, setEnvironments] = useState<ProjectEnvironment[] | null>(null);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
 
@@ -171,12 +171,32 @@ export const AgentListPage = () => {
     return () => controller.abort();
   }, []);
 
-  const environmentNames = useMemo(() => new Map(environments.map((item) => [item.id, item.name])), [environments]);
+  const environmentNames = useMemo(() => new Map((environments ?? []).map((item) => [item.id, item.name])), [environments]);
   const visible = (agents ?? []).filter((agent) => agent.name.toLowerCase().includes(query.trim().toLowerCase()));
+  const readyEnvironments = (environments ?? []).filter((item) => item.currentRevisionId !== null);
+  const noAgents = agents !== null && agents.length === 0;
+  const hasPreparingEnvironment = (environments ?? []).some((item) => item.latestRevision?.status === "preparing");
+  const hasFailedEnvironment = (environments ?? []).some((item) => item.latestRevision?.status === "failed");
+  const environmentAction = environments !== null && environments.length === 0
+    ? <Button asChild><Link to="/project-environments/new"><Plus />{text("新建项目环境", "New environment")}</Link></Button>
+    : <Button asChild><Link to="/project-environments">{text("查看项目环境", "View environments")}</Link></Button>;
+  const createAgentAction = <Button asChild><Link to="/agents/new"><Plus />{text("新建智能体", "New agent")}</Link></Button>;
+  const primaryAction = noAgents && readyEnvironments.length === 0 ? environmentAction : createAgentAction;
+  const firstUseDescription = environments === null
+    ? text("正在检查项目环境。完成顺序是：项目环境 → 智能体 → 会话。", "Checking project environments. The setup order is: environment → agent → session.")
+    : readyEnvironments.length > 0
+      ? text("完成顺序是：项目环境 → 智能体 → 会话。已有可用环境，现在创建智能体。", "The setup order is: environment → agent → session. A ready environment is available, so create an agent now.")
+      : environments.length === 0
+        ? text("完成顺序是：项目环境 → 智能体 → 会话。先创建项目环境并添加 Git 项目，准备完成后再创建智能体。", "The setup order is: environment → agent → session. Create an environment and add a Git project before creating an agent.")
+        : hasPreparingEnvironment
+          ? text("完成顺序是：项目环境 → 智能体 → 会话。项目环境正在准备，完成后即可创建智能体。", "The setup order is: environment → agent → session. An environment is preparing; create an agent after it is ready.")
+          : hasFailedEnvironment
+            ? text("完成顺序是：项目环境 → 智能体 → 会话。项目环境准备失败，请先检查并重新准备。", "The setup order is: environment → agent → session. Environment preparation failed; inspect it and prepare it again first.")
+            : text("完成顺序是：项目环境 → 智能体 → 会话。现有项目环境尚未准备完成，请先处理它。", "The setup order is: environment → agent → session. An existing environment is not ready yet; prepare it first.");
 
   return <PageContainer width="wide">
     <PageHeader eyebrow={text("执行配置", "EXECUTION PROFILES")} title={text("智能体", "Agents")} description={text("选择一个智能体查看运行状态、管理技能或修改配置。", "Select an agent to inspect its status, manage skills, or update configuration.")}
-      action={<Button asChild><Link to="/agents/new"><Plus />{text("新建智能体", "New agent")}</Link></Button>} />
+      action={agents === null || noAgents ? undefined : createAgentAction} />
     <ErrorAlert message={error} />
     <div className="mb-5 flex max-w-md items-center gap-2 rounded-xl border bg-card px-3 shadow-sm">
       <Search className="size-4 text-muted-foreground" aria-hidden="true" />
@@ -184,7 +204,7 @@ export const AgentListPage = () => {
       {agents === null ? null : <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground" aria-live="polite">{visible.length}</span>}
     </div>
     {agents === null ? <div className="resource-grid">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-44" />)}</div>
-      : visible.length === 0 ? <EmptyState icon={Bot} title={agents.length === 0 ? text("还没有智能体", "No agents yet") : text("没有匹配结果", "No matching results")} description={agents.length === 0 ? text("创建智能体并绑定项目环境，开始运行独立任务。", "Create an agent, assign a project environment, and start isolated work.") : text("调整搜索词，或清除搜索查看全部智能体。", "Change the search term or clear it to see every agent.")} action={agents.length === 0 ? <Button asChild><Link to="/agents/new"><Plus />{text("新建智能体", "New agent")}</Link></Button> : <Button variant="outline" onClick={() => setQuery("")}>{text("清除搜索", "Clear search")}</Button>} />
+      : visible.length === 0 ? <EmptyState icon={Bot} title={agents.length === 0 ? text("还没有智能体", "No agents yet") : text("没有匹配结果", "No matching results")} description={agents.length === 0 ? firstUseDescription : text("调整搜索词，或清除搜索查看全部智能体。", "Change the search term or clear it to see every agent.")} action={agents.length === 0 ? primaryAction : <Button variant="outline" onClick={() => setQuery("")}>{text("清除搜索", "Clear search")}</Button>} />
       : <div className="resource-grid">{visible.map((agent) => <Card key={agent.id} className="h-full transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40">
         <CardHeader>
           <div className="flex items-start justify-between gap-4">
@@ -200,27 +220,47 @@ export const AgentListPage = () => {
 export const AgentCreatePage = () => {
   const { text } = useI18n();
   const navigate = useNavigate();
-  const [environments, setEnvironments] = useState<ProjectEnvironment[]>([]);
+  const [environments, setEnvironments] = useState<ProjectEnvironment[] | null>(null);
   const [name, setName] = useState("");
   const [provider, setProvider] = useState<Provider>("codex");
   const [instructions, setInstructions] = useState("");
   const [projectEnvironmentId, setProjectEnvironmentId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [environmentError, setEnvironmentError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
     void api<ProjectEnvironment[]>("/project-environments", { signal: controller.signal }).then((items) => {
       const ready = items.filter((item) => item.currentRevisionId !== null);
-      setEnvironments(ready);
+      setEnvironments(items);
       setProjectEnvironmentId(ready[0] === undefined ? "" : String(ready[0].id));
-    }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    }).catch((reason: unknown) => { if (!controller.signal.aborted) setEnvironmentError(errorMessage(reason)); });
     return () => controller.abort();
   }, []);
 
+  const readyEnvironments = (environments ?? []).filter((item) => item.currentRevisionId !== null);
+  const environmentLoading = environments === null && environmentError === "";
+  const environmentUnavailable = environmentLoading || environmentError !== "" || readyEnvironments.length === 0;
+  const hasPreparingEnvironment = (environments ?? []).some((item) => item.latestRevision?.status === "preparing");
+  const hasFailedEnvironment = (environments ?? []).some((item) => item.latestRevision?.status === "failed");
+  const environmentDescription = environmentLoading
+    ? text("正在加载项目环境。", "Loading project environments.")
+    : environmentError !== ""
+      ? text("无法加载项目环境，请检查服务后重试。", "Unable to load project environments. Check the server and try again.")
+      : readyEnvironments.length > 0
+        ? text("选择一个已准备完成的项目环境。", "Select a prepared project environment.")
+        : environments?.length === 0
+          ? <>{text("还没有项目环境。", "No project environments yet. ")}<Link className="font-medium hover:underline" to="/project-environments/new">{text("新建项目环境", "Create an environment")}</Link></>
+          : hasPreparingEnvironment
+            ? <>{text("现有项目环境尚未准备完成，准备结束后即可选择。", "Existing project environments are still preparing. Choose one when preparation finishes. ")}<Link className="font-medium hover:underline" to="/project-environments">{text("查看项目环境", "View environments")}</Link></>
+            : hasFailedEnvironment
+              ? <>{text("项目环境准备失败，请先检查并重新准备。", "Project environment preparation failed. Inspect it and prepare it again first. ")}<Link className="font-medium hover:underline" to="/project-environments">{text("查看项目环境", "View environments")}</Link></>
+              : <>{text("现有项目环境尚未准备完成。", "Existing project environments are not ready yet. ")}<Link className="font-medium hover:underline" to="/project-environments">{text("查看项目环境", "View environments")}</Link></>;
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (name.trim() === "" || projectEnvironmentId === "") return;
+    if (name.trim() === "" || projectEnvironmentId === "" || environmentUnavailable) return;
     setBusy(true); setError("");
     try {
       const created = await api<Agent>("/agents", { method: "POST", body: JSON.stringify({
@@ -234,7 +274,7 @@ export const AgentCreatePage = () => {
   return <PageContainer width="form" className="max-w-3xl">
     <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />{text("返回智能体", "Back to agents")}</Link></Button>
     <PageHeader eyebrow={text("新建执行配置", "NEW EXECUTION PROFILE")} title={text("新建智能体", "New agent")} description={text("执行器创建后不可修改；名称、项目环境、智能体指令和技能可随时调整。", "The provider cannot be changed after creation. Name, environment, instructions, and skills remain editable.")} />
-    <ErrorAlert message={error} />
+    <ErrorAlert message={environmentError || error} />
     <Card><CardHeader><CardTitle>{text("基础配置", "Basic configuration")}</CardTitle><CardDescription>{text("绑定一个已准备完成的项目环境。", "Assign a prepared project environment.")}</CardDescription></CardHeader>
       <CardContent><form className="flex flex-col gap-6" onSubmit={submit}><FieldGroup>
         <Field><FieldLabel htmlFor="agent-name">{text("智能体名称", "Agent name")}</FieldLabel><Input id="agent-name" name="agent-name" value={name} onChange={(event) => setName(event.target.value)} /></Field>
@@ -246,8 +286,8 @@ export const AgentCreatePage = () => {
         <Field data-disabled={provider === "hermes" || undefined}><FieldLabel htmlFor="agent-instructions">{text("智能体指令", "Agent instructions")}</FieldLabel><Textarea id="agent-instructions" name="agent-instructions" rows={6} value={instructions} disabled={provider === "hermes"} placeholder={text("说明这个智能体长期遵循的角色、边界和工作方式", "Describe the agent's persistent role, boundaries, and working style")} onChange={(event) => setInstructions(event.target.value)} />
           <FieldDescription>{provider === "hermes" ? text("Hermes 当前不支持智能体指令", "Hermes does not currently support agent instructions") : text("创建会话时保存快照；之后修改只影响新会话。", "Instructions are snapshotted when a session is created; later edits affect new sessions only.")}</FieldDescription>
         </Field>
-        <Field><FieldLabel htmlFor="agent-environment">{text("项目环境", "Project environment")}</FieldLabel><NativeSelect id="agent-environment" name="agent-environment" className="w-full" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}><NativeSelectOption value="" disabled>{text("请选择可用环境", "Select a ready environment")}</NativeSelectOption>{environments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect>{environments.length === 0 ? <FieldDescription>{text("暂无已准备完成的项目环境。", "No prepared project environments.")}</FieldDescription> : null}</Field>
-        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" asChild><Link to="/agents">{text("取消", "Cancel")}</Link></Button><Button type="submit" disabled={busy || projectEnvironmentId === ""}>{busy ? text("创建中…", "Creating…") : text("创建智能体", "Create agent")}</Button></div>
+        <Field data-disabled={environmentUnavailable || undefined}><FieldLabel htmlFor="agent-environment">{text("项目环境", "Project environment")}</FieldLabel><NativeSelect id="agent-environment" name="agent-environment" className="w-full" value={projectEnvironmentId} disabled={environmentUnavailable} onChange={(event) => setProjectEnvironmentId(event.target.value)}><NativeSelectOption value="" disabled>{text("请选择可用环境", "Select a ready environment")}</NativeSelectOption>{readyEnvironments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect><FieldDescription>{environmentDescription}</FieldDescription></Field>
+        <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" asChild><Link to="/agents">{text("取消", "Cancel")}</Link></Button><Button type="submit" disabled={busy || name.trim() === "" || environmentUnavailable || projectEnvironmentId === ""}>{busy ? text("创建中…", "Creating…") : text("创建智能体", "Create agent")}</Button></div>
       </FieldGroup></form></CardContent>
     </Card>
   </PageContainer>;

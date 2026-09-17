@@ -4,10 +4,12 @@ import { fileURLToPath } from "node:url";
 
 import type Database from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
+import { ZodError } from "zod";
 
 import { buildApp } from "./app.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { migrate, openDatabase } from "./db.js";
+import { readEnvironmentFile } from "./environment-file.js";
 import { EventStore } from "./events/event-store.js";
 import { IntegrationProjection } from "./integrations/integration-projection.js";
 import { IntegrationStore } from "./integrations/integration-store.js";
@@ -197,14 +199,19 @@ const isEntrypoint = process.argv[1] !== undefined
   && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isEntrypoint) {
-  applyServicePath();
   void (async () => {
+    const environment = readEnvironmentFile(resolve(".env"), process.env);
+    Object.assign(process.env, environment);
+    removeServiceSecretsFromEnvironment(process.env);
+    applyServicePath();
     if (process.env.NODE_ENV !== "development") {
       assertWebBuildAvailable(resolve(process.cwd(), "dist/web"));
     }
-    await startServer();
+    await startServer({ env: environment });
   })().catch((error: unknown) => {
-    console.error(error);
+    console.error(error instanceof ZodError
+      ? `Invalid configuration: ${error.issues.map((issue) => issue.path.join(".")).join(", ")}. Run pnpm run init for a new installation, or check .env and the service environment.`
+      : error);
     process.exitCode = 1;
   });
 }

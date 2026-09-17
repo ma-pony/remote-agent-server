@@ -14,6 +14,8 @@
     "node": ">=22.13.0 <23"
   },
   "scripts": {
+    "init": "node --import tsx src/setup.ts",
+    "doctor": "node --import tsx src/setup.ts --check",
     "dev": "concurrently --kill-others --names api,web \"pnpm dev:server\" \"pnpm dev:web\"",
     "dev:server": "NODE_ENV=development tsx watch src/main.ts",
     "dev:web": "vite --host 127.0.0.1",

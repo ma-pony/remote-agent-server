@@ -10,76 +10,39 @@ macOS 部署应使用实际登录桌面的普通用户，不使用 root，也不
 
 以下示例假设项目位于 `~/Projects/remote-agent-server`，运行数据位于 `~/Library/Application Support/remote-agent-server`。
 
-### 1. 准备 APFS 项目环境和运行目录
-
-```bash
-REMOTE_AGENT_ROOT="$HOME/Library/Application Support/remote-agent-server"
-mkdir -p "$REMOTE_AGENT_ROOT/data"
-mkdir -p "$REMOTE_AGENT_ROOT/environments"
-mkdir -p "$REMOTE_AGENT_ROOT/sessions"
-
-ENVIRONMENTS_DEVICE="$(df "$REMOTE_AGENT_ROOT/environments" | awk 'NR == 2 { print $1 }')"
-SESSIONS_DEVICE="$(df "$REMOTE_AGENT_ROOT/sessions" | awk 'NR == 2 { print $1 }')"
-test "$ENVIRONMENTS_DEVICE" = "$SESSIONS_DEVICE"
-diskutil info "$ENVIRONMENTS_DEVICE" | grep 'File System Personality:.*APFS'
-```
-
-`environments/` 和 `sessions/` 必须位于同一个 APFS Volume。服务启动时会再次检查文件系统类型和 Volume；不符合时直接拒绝启动。
-
-项目和依赖由页面中的“项目环境”维护：添加 Git 地址和可选准备命令后，系统自动构建不可变环境版本；每三小时检查远程默认分支，也可点击“立即检查”。新 Session 通过 `cp -cR` 从 Agent 当前环境版本创建独立 APFS Clone，不会重新 clone 或安装依赖。
-
-### 2. 安装、构建并配置环境
+### 1. 安装并初始化
 
 ```bash
 cd "$HOME/Projects/remote-agent-server"
+nvm install
 corepack enable
 pnpm install --frozen-lockfile
-pnpm build
-cp .env.example .env
-chmod 0600 .env
-openssl rand -hex 32
+pnpm run init
 ```
 
-将随机值填入 `.env` 的 `API_TOKEN`，并把路径改成当前用户的绝对路径。路径含空格，必须保留双引号：
-
-```dotenv
-HOST=127.0.0.1
-PORT=3000
-API_TOKEN=替换为刚生成的随机值
-DATA_DIR="/Users/当前用户/Library/Application Support/remote-agent-server/data"
-DATABASE_PATH="/Users/当前用户/Library/Application Support/remote-agent-server/data/remote-agent.sqlite3"
-PROJECT_ENVIRONMENTS_ROOT="/Users/当前用户/Library/Application Support/remote-agent-server/environments"
-SESSIONS_ROOT="/Users/当前用户/Library/Application Support/remote-agent-server/sessions"
-MAX_CONCURRENT_RUNS=4
-```
-
-`DATA_DIR/secret.key` 是 MCP 固定敏感值和 Session 敏感参数的 AES-256-GCM 主密钥。服务首次启动会自动创建，权限为 `0600`。该文件必须与 SQLite 数据库一起持久化和备份；丢失后，数据库中已有密文无法恢复。不要把该密钥写入镜像、日志或源码仓库。
-
-使用同一个 macOS 用户完成 Provider 登录并确认命令可执行。安装方式见 [Claude Code](https://code.claude.com/docs/en/getting-started)、[Codex CLI](https://developers.openai.com/codex/cli) 和 [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/) 官方文档：
+初始化自动使用 `~/Library/Application Support/remote-agent-server`，创建所需目录、随机管理 Token 和权限为 `0600` 的 `.env`，并验证 APFS 克隆、独立写入和临时目录清理。无需手工执行 `mkdir`、生成 Token 或分别填写存储路径。自定义位置可在首次运行时指定：
 
 ```bash
-claude auth login
-codex login
-claude --version && codex --version && hermes --version
+pnpm run init --root "/Volumes/AgentData/remote-agent-server"
 ```
 
-### 3. 首次前台启动
+项目环境和 Session 必须位于同一 APFS Volume。检查失败时不会写入新配置，修复后重试。重复执行初始化会保留原 `.env` 和 Token；更改已有安装的路径需要按数据迁移流程处理，不能靠再次传入 `--root` 搬迁数据。
+
+### 2. 登录一个 Provider
+
+以运行服务的同一个 macOS 用户安装并登录实际使用的 Provider。例如，选择 Codex 后执行 `codex login`；选择 Claude Code 后执行 `claude auth login`。不要求安装全部 Provider。安装入口见 [Claude Code](https://code.claude.com/docs/en/getting-started)、[Codex CLI](https://developers.openai.com/codex/cli) 和 [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/)。
+
+### 3. 启动并打开管理台
 
 ```bash
-cd "$HOME/Projects/remote-agent-server"
-set -a
-source ./.env
-set +a
 pnpm start
 ```
 
-另一个终端验证：
+`pnpm start` 先构建服务端和管理台，再启动服务。程序自动读取工作目录的 `.env`，无需 `source`；已有进程环境变量优先。打开 `http://127.0.0.1:3000`，从 `.env` 复制 `API_TOKEN` 的值到登录页，按“项目环境 → 智能体 → 会话”完成首次任务。新配置仅监听本机。
 
-```bash
-curl --fail http://127.0.0.1:3000/api/health
-```
+以后排查安装环境可以执行 `pnpm run doctor`：它检查配置、Git、Provider 命令路径和工作区操作，可能创建缺少的基础目录，并在完成后清理探测目录；不修改 `.env`、创建业务记录或调用模型。检查通过不代表 Provider 已登录。
 
-预期返回 `{"ok":true}`。
+`DATA_DIR/secret.key` 是敏感值加密的主密钥，首次服务启动时生成。它必须与 SQLite 数据库一起持久化和备份；丢失后已有密文无法恢复。
 
 ### 4. 使用 LaunchAgent 随登录启动
 
@@ -107,7 +70,7 @@ mkdir -p "$HOME/Library/Logs/remote-agent-server"
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd "$HOME/Projects/remote-agent-server" &amp;&amp; set -a &amp;&amp; source ./.env &amp;&amp; set +a &amp;&amp; exec pnpm start</string>
+    <string>cd "$HOME/Projects/remote-agent-server" &amp;&amp; exec pnpm start</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -142,33 +105,18 @@ launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.remote-agent-
 
 以下示例使用发布目录 `/opt/remote-agent-server` 和 Btrfs 挂载点 `/srv/remote-agent`。请按实际发行版本替换项目路径，但不要让项目环境和 Session 根目录跨越不同的 Btrfs 文件系统。
 
-## 1. 创建专用用户和 Btrfs 目录
+## 1. 准备服务用户和一个 Btrfs 根目录
 
-先安装 `btrfs-progs`（Debian/Ubuntu 可执行 `sudo apt install btrfs-progs`，其他发行版使用对应包管理器），再由管理员确认 `/srv/remote-agent` 位于一个已挂载的 Btrfs 文件系统，并创建不能拥有 sudo 权限的服务用户：
+安装 `btrfs-progs`（Debian/Ubuntu 可使用 `sudo apt install btrfs-progs`），并由管理员确认 `/srv/remote-agent` 位于已挂载的 Btrfs 文件系统。尚无 Btrfs 的主机需要先准备专用 Btrfs 存储；初始化工具不负责格式化或挂载磁盘。
 
 ```bash
 sudo useradd --create-home --shell /bin/bash remote-agent
 sudo install -d -o remote-agent -g remote-agent -m 0750 /srv/remote-agent
-sudo mkdir -p /srv/remote-agent/environments /srv/remote-agent/sessions /srv/remote-agent/data
-sudo chown -R remote-agent:remote-agent /srv/remote-agent
-sudo -u remote-agent btrfs filesystem show /srv/remote-agent/environments
-sudo -u remote-agent btrfs filesystem show /srv/remote-agent/sessions
 ```
 
-服务进程会直接调用 `btrfs subvolume create` 和 `btrfs subvolume snapshot`。因此必须在部署前用同一个用户验证创建和快照也可行：
+已有 `remote-agent` 用户时跳过 `useradd`。只需准备根目录，后续 `pnpm run init` 会创建 `data`、`environments` 和 `sessions`，并以服务用户身份实际验证 `btrfs subvolume create/snapshot/delete`。如果使用其他 Btrfs 挂载点，把初始化命令的 `--root` 改成对应路径。
 
-```bash
-sudo -u remote-agent btrfs subvolume create \
-  /srv/remote-agent/environments/permission-source
-sudo -u remote-agent btrfs subvolume snapshot \
-  /srv/remote-agent/environments/permission-source /srv/remote-agent/sessions/permission-check
-sudo -u remote-agent btrfs subvolume delete /srv/remote-agent/sessions/permission-check
-sudo -u remote-agent btrfs subvolume delete /srv/remote-agent/environments/permission-source
-```
-
-推荐做法是让 `remote-agent` 对这个专用 Btrfs 挂载点及以上两个目录拥有写权限，如上所示。不要为服务配置 `NOPASSWD: btrfs`、不要以 root 运行 Node，也不要向整个 Node 进程授予 `CAP_SYS_ADMIN`；该 capability 过宽。若当前内核/挂载策略仍拒绝上述 `sudo -u remote-agent` 检查，此版本不能在该挂载配置安全部署：先调整为同一服务用户可创建快照的专用 Btrfs 挂载，或在后续版本引入只允许固定快照参数的独立受限 helper。
-
-每个项目环境版本和 Session Workspace 都是 Btrfs subvolume，内部不得嵌套其他 subvolume。`environments/` 和 `sessions/` 必须在同一 Btrfs 文件系统上；`data/` 也应归 `remote-agent` 所有。
+服务用户必须能够创建和删除快照，无需 sudo 权限。不要用 root 运行 Node、向整个 Node 进程授予 `CAP_SYS_ADMIN` 或配置 `NOPASSWD: btrfs`。若原生检查失败，应修正挂载点权限或换用服务用户可操作的 Btrfs 存储。项目环境和 Session 必须处于同一文件系统，内部不能嵌套额外的 subvolume。
 
 ## 2. 安装发布目录
 
@@ -176,24 +124,23 @@ sudo -u remote-agent btrfs subvolume delete /srv/remote-agent/environments/permi
 
 ```bash
 sudo install -d -o remote-agent -g remote-agent -m 0750 /opt/remote-agent-server
-sudo rsync -a --delete --chown=remote-agent:remote-agent ./ /opt/remote-agent-server/
+sudo rsync -a --delete --exclude=.env --chown=remote-agent:remote-agent ./ /opt/remote-agent-server/
 sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && corepack enable && pnpm install --frozen-lockfile'
 ```
 
 服务启动后，在“项目环境”页面创建环境、添加一个或多个 Git 项目，并为需要安装依赖的项目填写一次准备命令。系统在环境版本中 clone/update 和安装依赖，全部成功后才发布；失败不会替换当前版本。已有 Session 不会自动升级。
+
+发布命令排除了 `.env`，更新代码时会保留服务器已有配置，也不会复制开发机的凭证。
 
 ## 3. 配置服务环境
 
 创建生产环境文件，只有 `remote-agent` 可读取：
 
 ```bash
-sudo -u remote-agent cp /opt/remote-agent-server/.env.example /opt/remote-agent-server/.env
-sudo -u remote-agent chmod 0600 /opt/remote-agent-server/.env
-sudo -u remote-agent openssl rand -hex 32
-sudo -u remote-agent editor /opt/remote-agent-server/.env
+sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && pnpm run init --root /srv/remote-agent'
 ```
 
-将生成的长随机值填入 `API_TOKEN`。不要提交 `.env`，不要在仓库或 systemd unit 中硬编码 Provider 凭证。Claude/Codex 的原生登录状态由该系统用户保存；Hermes 的原生状态使用后文每个 Agent 的 `HERMES_HOME`。服务建议只监听内网；若需要跨网络访问，放在 TLS 反向代理后，并仅把 Bearer Token 分发给可信调用方。
+命令自动生成 `.env`、随机 Token 和全部存储路径；已有配置不会被覆盖。只有需要改变端口、监听地址或显示环境时才手动编辑 `.env`，无需再次生成 Token。程序自动读取该文件，进程环境优先；使用绝对路径，不写 `$HOME`、`~` 或 Shell 表达式。不要提交 `.env`，不要在仓库或 systemd unit 中硬编码 Provider 凭证。Claude/Codex 的原生登录状态由该系统用户保存；Hermes 的原生状态使用后文每个 Agent 的 `HERMES_HOME`。服务建议只监听内网；若需要跨网络访问，放在 TLS 反向代理后，并仅把 Bearer Token 分发给可信调用方。
 
 如果项目环境使用 `uv sync`，需要安装 uv `>= 0.10.8`，并确认 `uv venv --help` 包含 `--relocatable`。服务检测到 `uv.lock` 后，会在项目准备命令前执行 `uv venv --relocatable .venv`，使后续 `uv sync` 安装的标准命令入口可以随 APFS Clone/Btrfs Snapshot 迁移。升级 uv 后需要在管理界面重新同步项目环境，已有 `.venv` 不会自动转换。
 
@@ -207,86 +154,33 @@ sudo -u remote-agent -H env DISPLAY=:0 XAUTHORITY=/home/remote-agent/.Xauthority
 
 ## 4. 使用同一服务用户登录 Provider
 
-所有登录和检查都必须在 `remote-agent` 身份下进行，这样 systemd 进程能看到同一份 CLI 原生状态和 PATH。先确认 Node、pnpm、`acpx` 所需的 `npx`、以及各 CLI 都可执行；下一节会把这些命令所在目录显式写入 systemd 的 `PATH`。
+所有登录和检查都在 `remote-agent` 身份下进行，这样 systemd 进程能看到同一份 CLI 原生状态和 PATH。先确认 Node、pnpm 和 `acpx` 所需的 `npx` 可执行，再安装并登录一个实际使用的 Provider。以下以 Codex 为例；下一节会把登录 PATH 写入 systemd 配置。
 
 ```bash
-sudo -u remote-agent -H bash -lc 'node --version && pnpm --version && claude --version && codex --version && hermes --version'
-sudo -u remote-agent -H bash -lc 'claude auth login'
+sudo -u remote-agent -H bash -lc 'node --version && pnpm --version && npx --version'
 sudo -u remote-agent -H bash -lc 'codex login'
 ```
 
-Hermes 的模型配置必须写入服务为具体 Agent 创建的 home，不能使用管理员自己的 home。该 Agent 会在服务启动后创建；具体命令见第 6 节。不要把模型 token 写入 `.env.example` 或提交的文件。
+选择 Claude Code 时，把最后一条命令换为 `claude auth login`。选择 Hermes 时，以服务用户执行 `hermes model`，按官方快速开始完成模型配置；服务随后会把静态配置复制到 Agent 的独立 Provider Home。不要使用管理员自己的 home，也不要把模型 token 写入 `.env.example` 或提交的文件。
 
-## 5. 构建、Btrfs 启动检查与 systemd
+## 5. 构建并交给 systemd 管理
 
-构建前先检查服务用户的 Btrfs 访问；服务启动时会重复同一项检查：
-
-```bash
-sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && pnpm build'
-sudo -u remote-agent btrfs filesystem show /srv/remote-agent/environments
-sudo -u remote-agent btrfs filesystem show /srv/remote-agent/sessions
-```
-
-服务入口也会尝试读取 `remote-agent` 用户的登录 Shell PATH，作为 launchd/systemd 最小环境的兜底。
-生产 systemd 仍应在安装时固化并验证 PATH，避免服务用户的 Shell 配置变动后改变 Provider 命令版本。
-先在**同一个服务用户**下记录 login shell 首次命中的实际绝对路径；任何一个命令找不到都先修复安装，不要写 unit：
+先以服务用户检查并构建：
 
 ```bash
-REMOTE_AGENT_LOGIN_PATH="$(sudo -u remote-agent -H bash -lc 'printf %s "$PATH"')"
-NODE_BIN="$(sudo -u remote-agent -H bash -lc 'command -v node')"
-PNPM_BIN="$(sudo -u remote-agent -H bash -lc 'command -v pnpm')"
-NPX_BIN="$(sudo -u remote-agent -H bash -lc 'command -v npx')"
-CLAUDE_BIN="$(sudo -u remote-agent -H bash -lc 'command -v claude')"
-CODEX_BIN="$(sudo -u remote-agent -H bash -lc 'command -v codex')"
-HERMES_BIN="$(sudo -u remote-agent -H bash -lc 'command -v hermes')"
-
-for bin in "$NODE_BIN" "$PNPM_BIN" "$NPX_BIN" "$CLAUDE_BIN" "$CODEX_BIN" "$HERMES_BIN"; do
-  test -n "$bin" && test -x "$bin" || { echo "Provider command is missing" >&2; exit 1; }
-done
-
-# 先保留 login PATH 的目录顺序，再按 node/pnpm/npx/claude/codex/hermes 的原命中顺序补目录。
-# awk 只删除后续重复项，绝不 sort，因此不会改变 command -v 的优先级。
-REMOTE_AGENT_PATH="$({
-  printf '%s\n' "$REMOTE_AGENT_LOGIN_PATH" | tr ':' '\n'
-  dirname "$NODE_BIN"
-  dirname "$PNPM_BIN"
-  dirname "$NPX_BIN"
-  dirname "$CLAUDE_BIN"
-  dirname "$CODEX_BIN"
-  dirname "$HERMES_BIN"
-} | awk 'NF && !seen[$0]++ { printf "%s%s", separator, $0; separator=":" }')"
-test -n "$REMOTE_AGENT_PATH" || { echo "Generated PATH is empty" >&2; exit 1; }
-
-verify_systemd_path_command() {
-  command_name="$1"
-  expected_bin="$2"
-  actual_bin="$(sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
-    /bin/bash -c 'command -v "$1"' bash "$command_name")"
-  test "$actual_bin" = "$expected_bin" || {
-    echo "PATH changes $command_name: expected $expected_bin, got $actual_bin" >&2
-    exit 1
-  }
-}
-
-verify_systemd_path_command node "$NODE_BIN"
-verify_systemd_path_command pnpm "$PNPM_BIN"
-verify_systemd_path_command npx "$NPX_BIN"
-verify_systemd_path_command claude "$CLAUDE_BIN"
-verify_systemd_path_command codex "$CODEX_BIN"
-verify_systemd_path_command hermes "$HERMES_BIN"
-
-# 按 systemd 的绝对 ExecStart 与精确 PATH 验证 pnpm 和实际启动的 Node。
-sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" "$PNPM_BIN" --version
-sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" "$NODE_BIN" --version
-PNPM_NODE_BIN="$(sudo -u remote-agent -H env PATH="$REMOTE_AGENT_PATH" \
-  "$PNPM_BIN" exec node -p 'process.execPath')"
-test "$PNPM_NODE_BIN" = "$NODE_BIN" || {
-  echo "pnpm would start $PNPM_NODE_BIN, expected $NODE_BIN" >&2
-  exit 1
-}
+sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && pnpm run doctor && pnpm build'
 ```
 
-将刚验证的**精确** PATH 和绝对 pnpm 路径写入 `/etc/systemd/system/remote-agent.service`；不要使用 `/usr/bin/env pnpm`、不受控 wrapper 或 root：
+构建和运行都使用 Node.js 22。查出该用户的 Node 绝对路径和登录 PATH：
+
+```bash
+REMOTE_AGENT_NODE="$(sudo -u remote-agent -H bash -lc 'command -v node')"
+REMOTE_AGENT_PATH="$(sudo -u remote-agent -H bash -lc 'printf %s "$PATH"')"
+test -n "$REMOTE_AGENT_NODE" && test -x "$REMOTE_AGENT_NODE"
+sudo -u remote-agent -H "$REMOTE_AGENT_NODE" --version
+```
+
+把这两个值写入服务配置。直接运行已构建的 Node 入口，重启时不会重新安装或编译，也不再依赖 systemd 查找 pnpm。服务会自动读取工作目录的 `.env` 并补齐登录 Shell PATH；只需要安装实际使用的 Provider。
 
 ```bash
 sudo tee /etc/systemd/system/remote-agent.service >/dev/null <<EOF
@@ -300,10 +194,10 @@ Type=simple
 User=remote-agent
 Group=remote-agent
 WorkingDirectory=/opt/remote-agent-server
-EnvironmentFile=/opt/remote-agent-server/.env
 Environment=HOME=/home/remote-agent
+Environment=NODE_ENV=production
 Environment="PATH=$REMOTE_AGENT_PATH"
-ExecStart=$PNPM_BIN start
+ExecStart=$REMOTE_AGENT_NODE /opt/remote-agent-server/dist/server/main.js
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=45
@@ -313,24 +207,19 @@ PrivateTmp=true
 [Install]
 WantedBy=multi-user.target
 EOF
-```
 
-这里 `Environment="PATH=..."` 是 systemd 的 Environment 赋值格式；不要手动改写为排序后的 PATH，也不要留下尖括号占位符。`pnpm start` 在此项目固定执行 `node dist/server/main.js`，因此 `WorkingDirectory` 必须是已执行 `pnpm build` 的发布目录。不要使用 `DynamicUser=yes`：Provider CLI 原生登录状态、Btrfs 权限和 Hermes home 都需要稳定的 `remote-agent` UID/HOME。
-
-启用服务并确认健康接口：
-
-```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now remote-agent
 curl --fail http://127.0.0.1:3000/api/health
-sudo journalctl -u remote-agent -n 100 --no-pager
 ```
 
-服务能启动只证明 Btrfs doctor 通过，不代表 systemd 的 PATH 或三个 Provider 都可用。第 6 节的完整 smoke 会经**应用 HTTP doctor**验证三种 Provider；任一个失败都先修复 unit 的 PATH、CLI 或登录状态，而不是跳过。
+健康检查失败时使用 `sudo journalctl -u remote-agent -n 100 --no-pager` 查看原因。若默认本机监听需要从另一台电脑访问，可通过 `ssh -L 3000:127.0.0.1:3000 <服务用户>@<服务器>` 转发后打开本机管理台；直接对外提供服务时再配置 TLS 反向代理和监听地址。
 
-## 6. 创建项目环境并执行真实三 Provider smoke
+升级时先停止服务、备份数据，再安装依赖和执行 `pnpm build`，最后重新启动。变更 Node 安装路径后同步更新 unit。不要使用 `DynamicUser=yes`：Provider 登录状态、Btrfs 权限和 Provider Home 都依赖稳定的 UID/HOME。已有 unit 的 `EnvironmentFile` 可以继续使用，其变量优先于程序读取的 `.env`。
 
-先打开管理页面的“项目环境”：
+## 6. 完成首次任务与可选 Provider 验收
+
+首次启用只需选择一个实际使用的 Provider，完成一条真实任务并核对结果。先打开管理页面的“项目环境”：
 
 1. 创建一个项目环境。
 2. 添加至少一个服务用户能够访问的 Git 项目；一个环境可以包含多个项目。
@@ -339,7 +228,7 @@ sudo journalctl -u remote-agent -n 100 --no-pager
 
 只有存在 ready 项目环境时，smoke 才会创建 Agent。脚本按名称和 ID 稳定选择第一个 ready 环境，并让三种 Provider 共用它。
 
-先在运行服务的系统用户下完成 Hermes 模型配置和 ACP 检查。服务启动 Provider 时会把这些静态配置复制到 Agent 的独立 Provider Home：
+以下三 Provider smoke 是需要同时支持三种执行器时的扩展验收，不是首次启用的前置条件；它会调用真实模型。执行前，先在运行服务的系统用户下完成 Hermes 模型配置和 ACP 检查。服务启动 Provider 时会把这些静态配置复制到 Agent 的独立 Provider Home：
 
 ```bash
 sudo -u remote-agent -H hermes model
@@ -348,10 +237,11 @@ sudo -u remote-agent -H hermes acp --check
 
 然后用 `--prepare` 创建或复用三个固定名称的 Agent。该模式只确保并打印 Agent ID，**不会**创建 Session/Run，也不会调用 doctor。匹配 0 条时创建、1 条时复用或重新启用；同名同 Provider 多于 1 条时会以非零退出并打印所有冲突 ID，必须人工清理后再继续，不能任选一条。
 
+两个 smoke 脚本都会自动读取当前目录的 `.env`，进程环境优先，无需在 Shell 中加载配置。若服务端口不同，显式设置 `SMOKE_BASE_URL`。
+
 ```bash
 sudo -u remote-agent -H bash -lc '
   cd /opt/remote-agent-server
-  set -a; . ./.env; set +a
   pnpm --silent smoke:providers --prepare
 '
 ```
@@ -363,7 +253,6 @@ sudo -u remote-agent -H bash -lc '
 ```bash
 sudo -u remote-agent -H bash -lc '
   cd /opt/remote-agent-server
-  set -a; . ./.env; set +a
   pnpm smoke:providers
 '
 ```
@@ -524,9 +413,8 @@ curl --fail-with-body \
 
 ```bash
 cd /opt/remote-agent-server
-set -a; . ./.env; set +a
 export SMOKE_BASE_URL=http://127.0.0.1:3000
-export SMOKE_API_TOKEN="$API_TOKEN"
+export SMOKE_API_TOKEN='<目标服务器 .env 中的 API_TOKEN>'
 export SMOKE_AGENT_ID='<待验收 Agent ID>'
 pnpm smoke:integrations
 ```

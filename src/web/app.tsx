@@ -183,7 +183,7 @@ const TokenGate = ({ onSave }: { onSave(token: string): void }) => {
           <CardHeader className="p-0">
             <div className="flex items-center justify-between gap-4"><p className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground md:hidden">REMOTE AGENT SERVER</p><Button type="button" size="sm" variant="ghost" className="ml-auto" aria-label={text("切换为 English", "Switch to 简体中文")} onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}>{locale === "zh-CN" ? "English" : "简体中文"}</Button></div>
             <CardTitle id="token-title" role="heading" aria-level={1} className="mt-5 text-2xl sm:text-3xl">{text("连接智能体服务", "Connect to Remote Agent")}</CardTitle>
-            <CardDescription className="mt-2 leading-6">{text("输入服务器 API 令牌。凭证仅保留在当前浏览器会话中。", "Enter the server API token. It is kept only for this browser session.")}</CardDescription>
+            <CardDescription className="mt-2 leading-6">{text("运行 pnpm run init 后，服务器 .env 中的 API_TOKEN 就是这里需要的令牌。凭证仅保留在当前浏览器会话中。", "After running pnpm run init, use the API_TOKEN from the server .env file here. It is kept only for this browser session.")}</CardDescription>
           </CardHeader>
           <CardContent className="p-0 pt-7"><form className="flex flex-col gap-4" onSubmit={submit} aria-labelledby="token-title"><FieldGroup>
             <Field><FieldLabel htmlFor="api-token">{text("API 令牌", "API token")}</FieldLabel><Input id="api-token" name="api-token" type="password" autoComplete="off" value={value} aria-invalid={error === null ? undefined : true} aria-describedby={error === null ? undefined : "api-token-error"} onChange={(event) => setValue(event.target.value)} /></Field>

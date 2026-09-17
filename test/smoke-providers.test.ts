@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import * as environmentFile from "../src/environment-file.js";
+
 import {
   assertEventHistory,
   createSmokeApi,
@@ -12,7 +14,10 @@ import {
 
 const config = readSmokeConfig({ API_TOKEN: "test-token", SMOKE_RUN_TIMEOUT_MS: "20" });
 
-afterEach(() => vi.useRealTimers());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("provider smoke configuration", () => {
   it("requires an API token before it can contact the server", () => {
@@ -91,6 +96,17 @@ describe("provider smoke configuration", () => {
     expect(api.request).toHaveBeenCalledTimes(4);
     expect(api.request.mock.calls[0]?.[0]).toBe("/project-environments");
     expect(api.request.mock.calls.slice(1).every(([path]) => path === "/agents")).toBe(true);
+  });
+
+  it("loads the local configuration for CLI use without shell sourcing", async () => {
+    const readEnvironment = vi.spyOn(environmentFile, "readEnvironmentFile")
+      .mockReturnValue({ API_TOKEN: "literal-$HOME-token" });
+    const api = { request: vi.fn(async () => []) };
+
+    await expect(main(undefined, { args: ["--prepare"], api })).rejects.toThrow("ready project environment");
+
+    expect(readEnvironment).toHaveBeenCalledWith(expect.stringMatching(/\/\.env$/), process.env);
+    expect(api.request).toHaveBeenCalledOnce();
   });
 
   it("fails immediately when a Run endpoint returns an unknown status", async () => {

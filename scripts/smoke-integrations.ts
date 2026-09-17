@@ -1,5 +1,8 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
+import { resolve } from "node:path";
+
+import { readEnvironmentFile } from "../src/environment-file.js";
 
 type HttpMethod = "GET" | "POST" | "PATCH" | "DELETE";
 type TaskStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -591,6 +594,8 @@ Required environment:
   SMOKE_API_TOKEN=<management API token>
   SMOKE_AGENT_ID=<enabled, ready Agent ID>
 
+Reads .env automatically; process environment values take precedence.
+
 Optional deadlines:
   SMOKE_POLL_INTERVAL_MS=1000
   SMOKE_TASK_TIMEOUT_MS=300000
@@ -599,7 +604,7 @@ Optional deadlines:
 Run this command on the same host as Remote Agent Server. It creates durable audit records and a local temporary Webhook receiver; it does not delete the records by default.`);
 };
 
-export const main = async (env: Record<string, string | undefined> = process.env): Promise<void> => {
+export const main = async (env: Record<string, string | undefined> = readEnvironmentFile(resolve(".env"), process.env)): Promise<void> => {
   if (process.argv.includes("--help") || process.argv.includes("-h")) return usage();
   if (process.argv.slice(2).length > 0) throw new Error(`Unknown argument: ${process.argv.slice(2)[0]}`);
   await runIntegrationSmoke(loadSmokeConfig(env));

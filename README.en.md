@@ -87,42 +87,31 @@ Project environments and session workspaces use APFS clones or Btrfs snapshots. 
 git clone https://github.com/ma-pony/remote-agent-server.git
 cd remote-agent-server
 
-nvm use
+nvm install
 corepack enable
 pnpm install --frozen-lockfile
-
-cp .env.example .env
-chmod 0600 .env
-openssl rand -hex 32
-```
-
-Put the generated value in `.env` as `API_TOKEN`, then replace the storage paths with absolute paths for the host. The application does not load `.env` itself, so source it before starting:
-
-```bash
-set -a
-source ./.env
-set +a
-```
-
-On Linux, prepare Btrfs with the [deployment guide](docs/deployment.md#linuxbtrfs-原生部署) first. After the roots exist, run the same preflight checks used by the service:
-
-```bash
-command -v btrfs
-btrfs filesystem show "$PROJECT_ENVIRONMENTS_ROOT"
-btrfs filesystem show "$SESSIONS_ROOT"
-test "$(stat -c %d "$PROJECT_ENVIRONMENTS_ROOT")" = \
-     "$(stat -c %d "$SESSIONS_ROOT")"
-```
-
-Do not start after a failed preflight. A non-Btrfs host must be prepared first; the service does not fall back to ordinary directory copies. `WorkspaceCheckError` normally means the `btrfs` command is missing, a root is not on accessible Btrfs storage, or the two roots are on different filesystems.
-
-Start the service:
-
-```bash
+pnpm run init
 pnpm start
 ```
 
-`pnpm start` builds both the server and web console before starting in production mode. If the compiled Node entrypoint is invoked directly with an incomplete web build, the process exits with a clear error instead of starting an API-only service whose UI can only render blank.
+`pnpm run init` generates a random `API_TOKEN` and a private `0600` `.env`, creates storage directories, and verifies workspace creation, cloning/snapshotting, independent writes, and cleanup. An `API_TOKEN` already supplied by the process environment is reused. Existing `.env` files and tokens are preserved. Provider detection checks executable availability without logging in or calling a model.
+
+- **macOS:** storage defaults to `~/Library/Application Support/remote-agent-server`; the commands above normally work directly.
+- **Linux:** storage defaults to `/srv/remote-agent`. First prepare a writable Btrfs directory using the [deployment guide](docs/deployment.md#linuxbtrfs-原生部署). For another location, use `pnpm run init --root /your-btrfs-directory/remote-agent` on the first run instead of configuring four separate storage paths.
+
+Failed checks explain the problem and do not save a new `.env`. Correct permissions or filesystem configuration and retry. Initialization never formats disks, changes mounts, or falls back to directory copies. `--root` only applies when creating a new configuration; existing installations retain their configured paths.
+
+The server automatically reads `.env` from its working directory, with inherited process environment variables taking precedence. No `source` command is needed. Files are parsed as dotenv data: shell commands, `$HOME`, `~`, and variable references are not expanded. Use absolute paths when editing the file.
+
+To check an installation later:
+
+```bash
+pnpm run doctor
+```
+
+`doctor` checks existing configuration and workspace operations, removes its probe files, and never creates or modifies `.env` or starts a real Agent. Environment-only deployments are supported. Passing the workspace check does not establish Provider authentication or model availability.
+
+`pnpm start` builds both the server and web console before starting in production mode. A directly invoked compiled Node entrypoint exits with a clear error when the web build is missing.
 
 Check the server:
 
@@ -130,17 +119,19 @@ Check the server:
 curl --fail http://127.0.0.1:3000/api/health
 ```
 
-Open `http://127.0.0.1:3000` and enter `API_TOKEN`. The web interface keeps it only in the current browser session.
+Open `http://127.0.0.1:3000` and copy the value of `API_TOKEN` from `.env` into the login screen. Setup and startup logs never print the token; the web interface keeps it only in the current browser session. Generated configurations listen on `127.0.0.1` by default. For remote access, use SSH forwarding or configure the listening address and a TLS reverse proxy as described in the deployment guide.
+
+Follow the first-use path: **project environment → Agent → session**. When no environment is ready, the console links directly to creating or inspecting one. Start with one Provider; add Skills, MCP, and integrations after the first task works.
 
 ### Local development
 
-After loading `.env`, run:
+After initialization, run directly:
 
 ```bash
 pnpm dev
 ```
 
-This starts the watched API server and Vite development server together. The API uses `PORT` from `.env`; Vite defaults to `http://127.0.0.1:5173` and proxies `/api` and `/integration` to that API port. Frontend edits use hot module replacement without rebuilding or restarting the API.
+This starts the watched API server and Vite development server together. Both read `PORT` from the project `.env`, with an inherited `PORT` taking precedence. Vite defaults to `http://127.0.0.1:5173` and proxies `/api` and `/integration` to that API port. Frontend edits use hot module replacement without rebuilding or restarting the API.
 
 ## Complete one agent run
 

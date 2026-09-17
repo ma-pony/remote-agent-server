@@ -4,11 +4,13 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
+import { readEnvironmentFile } from "./src/environment-file.js";
 
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export default defineConfig(() => {
-  const apiTarget = `http://127.0.0.1:${process.env.PORT?.trim() || "3000"}`;
+  const environment = readEnvironmentFile(resolve(projectRoot, ".env"), process.env);
+  const apiTarget = `http://127.0.0.1:${environment.PORT?.trim() || "3000"}`;
   return {
     root: resolve(projectRoot, "src/web"),
     envDir: projectRoot,

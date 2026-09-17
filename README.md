@@ -87,42 +87,31 @@ Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
 git clone https://github.com/ma-pony/remote-agent-server.git
 cd remote-agent-server
 
-nvm use
+nvm install
 corepack enable
 pnpm install --frozen-lockfile
-
-cp .env.example .env
-chmod 0600 .env
-openssl rand -hex 32
-```
-
-把随机值写入 `.env` 的 `API_TOKEN`，并把存储目录改成当前机器上的绝对路径。程序不会自动读取 `.env`，启动前需要加载：
-
-```bash
-set -a
-source ./.env
-set +a
-```
-
-Linux 用户必须先按[部署文档](docs/deployment.md#linuxbtrfs-原生部署)准备 Btrfs，并在目录创建完成后执行与服务启动检查一致的预检：
-
-```bash
-command -v btrfs
-btrfs filesystem show "$PROJECT_ENVIRONMENTS_ROOT"
-btrfs filesystem show "$SESSIONS_ROOT"
-test "$(stat -c %d "$PROJECT_ENVIRONMENTS_ROOT")" = \
-     "$(stat -c %d "$SESSIONS_ROOT")"
-```
-
-如果预检失败，不要继续启动：非 Btrfs 主机必须先完成文件系统准备，服务不会回退到普通目录复制。`WorkspaceCheckError` 通常表示 `btrfs` 命令未安装、根目录不在可访问的 Btrfs 上，或两个根目录不在同一文件系统。
-
-启动服务：
-
-```bash
+pnpm run init
 pnpm start
 ```
 
-`pnpm start` 会先构建服务端和 Web 管理台，再以生产模式启动。若直接执行构建后的 Node 入口但 Web 构建不完整，服务会明确报错退出，不会启动一个只有 API、页面必然白屏的进程。
+`pnpm run init` 自动生成随机 `API_TOKEN` 和权限为 `0600` 的 `.env`，创建数据目录，并实际验证工作区创建、克隆／快照、独立写入和清理。若进程环境已提供 `API_TOKEN`，则沿用该值。已有 `.env` 不会被覆盖，Token 不会被重新生成。命令只检查 Provider 可执行文件是否存在，不会登录或调用模型。
+
+- **macOS**：默认使用 `~/Library/Application Support/remote-agent-server`，通常可直接执行以上命令。
+- **Linux**：默认使用 `/srv/remote-agent`。先按[部署文档](docs/deployment.md#linuxbtrfs-原生部署)准备服务用户可写的 Btrfs 目录；也可在首次初始化时用 `pnpm run init --root /你的Btrfs目录/remote-agent` 指定一个根目录，无需分别填写四个存储路径。
+
+检查失败时会提示原因，新安装不会写入 `.env`。修复目录权限或文件系统后重试即可；初始化不会格式化磁盘、修改挂载或使用普通目录复制回退。`--root` 只用于首次生成配置，已有安装继续使用原 `.env` 的路径。
+
+服务自动读取当前工作目录的 `.env`，不再需要 `source`；已经设置的进程环境变量优先。文件按 dotenv 数据解析，不执行 Shell 命令，也不展开 `$HOME`、`~` 或变量引用，手工填写存储路径时使用绝对路径。
+
+以后检查安装状态：
+
+```bash
+pnpm run doctor
+```
+
+`doctor` 检查现有配置和工作区操作，清理探测文件，不创建或修改 `.env`，不运行真实 Agent。它也支持完全由进程环境提供配置的部署；目录检查通过不代表 Provider 已登录或模型可用。
+
+`pnpm start` 会先构建服务端和 Web 管理台，再以生产模式启动。若直接执行构建后的 Node 入口但 Web 构建不完整，服务会明确报错退出。
 
 检查服务：
 
@@ -130,17 +119,19 @@ pnpm start
 curl --fail http://127.0.0.1:3000/api/health
 ```
 
-打开 `http://127.0.0.1:3000`，输入 `API_TOKEN`。Web 界面只在当前浏览器会话中保存 Token。
+打开 `http://127.0.0.1:3000`，从 `.env` 复制 `API_TOKEN` 的值到登录页。初始化命令和启动日志不会打印 Token，Web 界面只在当前浏览器会话中保存它。新生成的配置默认只监听 `127.0.0.1`；跨机器访问可通过 SSH 端口转发，或按部署文档配置监听地址和 TLS 反向代理。
+
+首次进入后按页面提示完成 **项目环境 → 智能体 → 会话**。尚无可用环境时，页面会直接引导创建或查看环境；环境准备好后再创建 Agent。只需先配置一个 Provider，Skills、MCP 和外部接入可在首个任务跑通后按需添加。
 
 ### 本地开发
 
-加载 `.env` 后运行：
+初始化后直接运行：
 
 ```bash
 pnpm dev
 ```
 
-该命令会同时启动后端监听和 Vite 前端开发服务器。后端使用 `.env` 中的 `PORT`，Vite 默认位于 `http://127.0.0.1:5173`，并把 `/api` 和 `/integration` 自动代理到该后端端口；前端修改可热更新，无需重复构建或重启后端。
+该命令会同时启动后端监听和 Vite 前端开发服务器。两者自动读取项目 `.env` 中的 `PORT`，进程环境中的 `PORT` 优先。Vite 默认位于 `http://127.0.0.1:5173`，并把 `/api` 和 `/integration` 自动代理到该后端端口；前端修改可热更新，无需重复构建或重启后端。
 
 ## 从零完成一次 Agent 执行
 

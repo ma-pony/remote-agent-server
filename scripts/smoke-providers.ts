@@ -1,3 +1,7 @@
+import { resolve } from "node:path";
+
+import { readEnvironmentFile } from "../src/environment-file.js";
+
 type Provider = "claude_code" | "codex" | "hermes";
 type HttpMethod = "GET" | "POST" | "PATCH";
 
@@ -278,7 +282,9 @@ export const prepareProviders = async (api: SmokeApi): Promise<void> => {
 };
 
 const usage = (): void => {
-  console.log(`Usage: API_TOKEN=... pnpm smoke:providers [--prepare]
+  console.log(`Usage: pnpm smoke:providers [--prepare]
+
+Reads API_TOKEN from .env or the process environment (which takes precedence).
 
   --prepare ensures and prints exactly one smoke Agent ID per Provider. It creates no Session/Run and does not call doctor.
 
@@ -291,7 +297,7 @@ This command performs real HTTP requests. Without --prepare it also performs rea
 };
 
 export const main = async (
-  env: Record<string, string | undefined> = process.env,
+  env: Record<string, string | undefined> = readEnvironmentFile(resolve(".env"), process.env),
   dependencies: MainDependencies = {}
 ): Promise<void> => {
   const args = dependencies.args ?? process.argv.slice(2);
