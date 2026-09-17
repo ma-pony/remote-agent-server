@@ -1,73 +1,29 @@
 # Remote Agent Server
 
-[简体中文](README.md)
+[简体中文](README.md) · [MIT License](LICENSE) · Node.js 22 · macOS / Linux
 
-Remote Agent Server is a self-hosted ACP agent execution gateway for business applications. Callers submit asynchronous tasks over HTTP. The server runs command-line agents such as Claude Code and Codex in isolated workspaces, then returns progress and results through status queries, events, SSE, or signed Webhooks.
+**Connect Claude Code, Codex, and Hermes to your tickets, CI, and business applications.**
 
-It turns existing agent CLIs into a durable backend for ticketing systems, CI/CD, internal platforms, and automation services. Operators use the web console to configure agents, project environments, Skills, provider extensions, MCP, model policies, concurrency, and integration endpoints. External callers need only an endpoint token and the stable Task API.
+Deploy on your own machine. Run tasks from the web console, or call familiar command-line agents through an HTTP API or GitHub / GitLab webhooks. Remote Agent Server manages queues, workspaces, sessions, and execution records. Your application receives progress and results through polling, SSE, or signed webhooks.
 
-The execution layer uses [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol). The current provider adapters support Claude Code, Codex, and Hermes.
+Prepare repositories and dependencies once, then give each session an independent copy-on-write workspace. Continue the conversation in the same session; submitted tasks keep running when the caller disconnects.
 
-Each provider remains responsible for reasoning, tool use, and its native session. Remote Agent Server owns the execution lifecycle, workspace isolation, configuration projection, durable events, and external delivery. Business approvals, ticket state machines, and deployment rules stay in the calling system.
+Under the hood, it is a self-hosted execution gateway built on [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol), with Skills, MCP, provider extensions, and model policies. A single Fastify process uses SQLite WAL, with no separate database server or message broker to deploy.
+
+[Install and start](#install-and-start) · [Run your first task](#complete-one-agent-run) · [HTTP / webhook integration](#integrating-another-system) · [Features](#features) · [Execution model](#execution-model) · [Configuration](#configuration) · [Deployment guide](docs/deployment.md)
 
 ## Use cases
 
-- Ticketing, issue, or operations platforms that dispatch work to an agent and consume the result asynchronously.
-- CI/CD and internal automation that need queryable, cancellable, auditable long-running tasks.
-- Teams that want to reuse existing Claude Code or Codex authentication while managing project environments, MCP, and Skills centrally.
-- Self-hosted deployments that need control over source code, credentials, execution records, and workspaces.
-
-## Features
-
-- **Asynchronous Task API:** submit work over HTTP, prevent duplicate execution with idempotency keys, query or cancel tasks, and continue multi-turn conversations.
-- **Reliable event delivery:** consume incremental event history, resumable SSE, or signed Webhooks without tying task execution to a live connection.
-- **Agent management:** configure providers, instructions, project environments, Skills, and MCP in one place.
-- **Reusable project environments:** prepare one or more Git repositories and their dependencies before sessions start.
-- **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
-- **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
-- **Recorded executions:** persist user messages, agent output, tool activity, statuses, errors, and results in SQLite.
-- **Skill management:** discover host Skills, upload ZIPs or add Git/marketplace sources, preview changes, and update or roll back each agent independently.
-- **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
-- **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
-- **Model policies:** discover models advertised by Agent Core over ACP, follow the Core default, pin one model, or select a model for each new run with UTC weekdays and 24-hour windows.
-- **Runtime, storage, and concurrency control:** adjust run timeout, large idle-session storage retention, and three service concurrency limits from the console, with an optional run limit per agent.
-- **Headed browser support:** run agents in a real desktop session without requiring containers.
-
-## Execution model
-
-The external integration API is the primary service interface:
-
-```text
-External system
-   |
-   v
-Integration endpoint (auth / parameter mapping / idempotency)
-   |
-   v
-Task -> Conversation -> Session -> isolated Workspace -> acpx/ACP -> Provider
-   |                         |
-   |                         +-> Skills / provider extensions / MCP / model policy
-   |
-   +-> status / event history / SSE / signed Webhook
-```
-
-Operators can also create Sessions and Runs directly from the web console:
-
-```text
-Project environment -> Agent -> Session -> Run -> acpx/ACP -> Provider
-                               |
-                               +-> messages, tool activity, status, result
-```
-
-| Object | Purpose |
+| What you want to do | How to use it |
 | --- | --- |
-| Project environment | A versioned, prepared set of one or more Git repositories. |
-| Agent | A provider, project environment, instructions, Skills, provider extensions, MCP, model policy, and concurrency policy. |
-| Session | An isolated workspace and a continuing agent conversation. |
-| Run | One input and its recorded execution inside a session. |
-| Integration endpoint | An authenticated external entry point bound to one agent. |
-| Conversation | A multi-turn external conversation that reuses one session. |
-| Task | One asynchronous external request that eventually maps to a run. |
+| Run and continue agent tasks in a browser | Prepare a project environment, create an agent and session, and inspect messages, tool activity, and results in the console. |
+| Send PR / MR events to a review agent | Configure GitHub / GitLab webhooks and event filters. Query results or receive callbacks; posting comments requires additional tools and permissions. |
+| Dispatch code investigation from a ticketing or operations platform | Submit logs, instructions, or attachments through the Task API, then add context using the same business conversation key. |
+| Call agents from existing shell scripts, CI/CD, or internal tools | Use curl or any HTTP client to submit asynchronous work, store the task ID, and poll for results or receive callbacks. |
+
+Built for developers and teams already using agent CLIs who want to connect them to ongoing business workflows. Start with one task in the console, then integrate your existing systems. Keep using your scripts, CI, approval rules, and release process.
+
+Providers still own reasoning, tool use, and native sessions; callers own business approvals, ticket state machines, and deployment rules. You manage the code and execution records, while model calls follow your provider's authentication, billing, and data-transfer behavior. The current deployment model is one machine used by trusted users. Workspaces isolate file copies; **they are not containers or security sandboxes**. See the [security boundary](#security-boundary).
 
 ## Requirements
 
@@ -123,6 +79,26 @@ Open `http://127.0.0.1:3000` and copy the value of `API_TOKEN` from `.env` into 
 
 Follow the first-use path: **project environment → Agent → session**. When no environment is ready, the console links directly to creating or inspecting one. Start with one Provider; add Skills, MCP, and integrations after the first task works.
 
+### Manual configuration and direct startup
+
+You can also manage configuration manually. For a new installation without an existing `.env`:
+
+```bash
+cp -n .env.example .env
+chmod 0600 .env
+openssl rand -hex 32
+```
+
+Put the generated random value in `.env` as `API_TOKEN` and set absolute storage paths writable by the service user. Use APFS on macOS or Btrfs on Linux, with environment and session roots on the same filesystem. Then check, build, and run directly:
+
+```bash
+pnpm run doctor
+pnpm build
+NODE_ENV=production node dist/server/main.js
+```
+
+The server loads `.env` automatically; no `source` command is needed. You can instead supply all configuration through shell environment variables or a systemd `EnvironmentFile`; inherited process values take precedence. See the [deployment guide](docs/deployment.md) for LaunchAgent / systemd examples and [configuration](#configuration) for every variable.
+
 ### Local development
 
 After initialization, run directly:
@@ -142,6 +118,8 @@ Install and authenticate the provider CLI as the same operating-system user that
 - [Claude Code](https://code.claude.com/docs/en/getting-started)
 - [Codex CLI](https://developers.openai.com/codex/cli)
 - [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/)
+
+Command reference: run only the commands for the provider you selected.
 
 ```bash
 claude auth login
@@ -179,6 +157,77 @@ Open **Agents → New agent**:
 3. Enter the agent role, coding rules, and delivery requirements.
 4. Save it and run **Doctor** to verify the provider and project environment.
 
+### 4. Create a session and send a message
+
+Open **Sessions → New session**, select the agent, and enter required MCP session parameters. The server creates an isolated workspace from the current project-environment revision.
+
+Sending a message creates and queues a run. The page shows agent output, tool activity, status changes, errors, and the final result.
+
+Sending another message in the same session creates a new run and resumes the ACP session where supported. Each run keeps its own input, events, and result.
+
+Start with a task whose result you can easily check:
+
+```text
+Read this project and explain its directory structure, startup steps, and test commands. Do not modify files yet.
+```
+
+## Features
+
+- **Asynchronous Task API:** submit work over HTTP, prevent duplicate execution with idempotency keys, query or cancel tasks, and continue multi-turn conversations.
+- **Reliable event delivery:** consume incremental event history, resumable SSE, or signed Webhooks without tying task execution to a live connection.
+- **Agent management:** configure providers, instructions, project environments, Skills, and MCP in one place.
+- **Reusable project environments:** prepare one or more Git repositories and their dependencies before sessions start.
+- **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
+- **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
+- **Recorded executions:** persist user messages, agent output, tool activity, statuses, errors, and results in SQLite.
+- **Skill management:** discover host Skills, upload ZIPs or add Git/marketplace sources, preview changes, and update or roll back each agent independently.
+- **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
+- **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
+- **Model policies:** discover models advertised by Agent Core over ACP, follow the Core default, pin one model, or select a model for each new run with UTC weekdays and 24-hour windows.
+- **Runtime, storage, and concurrency control:** adjust run timeout, large idle-session storage retention, and three service concurrency limits from the console, with an optional run limit per agent.
+- **Headed browser support:** run agents in a real desktop session without requiring containers.
+- **GitHub / GitLab event ingress:** native webhook verification, filters, filter previews, and receipt history, using the same execution flow as the Task API.
+- **Image and file tasks:** upload, drop, or paste attachments in the console, or submit mixed and attachment-only messages through the API. Interpretation depends on the provider, model, and tools.
+- **Setup and diagnostics:** `pnpm run init` generates configuration, `pnpm run doctor` verifies native workspace operations, and the console guides first use.
+
+## Execution model
+
+The external integration API is the primary service interface:
+
+```text
+External system
+   |
+   v
+Integration endpoint (auth / parameter mapping / idempotency)
+   |
+   v
+Task -> Conversation -> Session -> isolated Workspace -> acpx/ACP -> Provider
+   |                         |
+   |                         +-> Skills / provider extensions / MCP / model policy
+   |
+   +-> status / event history / SSE / signed Webhook
+```
+
+Operators can also create Sessions and Runs directly from the web console:
+
+```text
+Project environment -> Agent -> Session -> Run -> acpx/ACP -> Provider
+                               |
+                               +-> messages, tool activity, status, result
+```
+
+| Object | Purpose |
+| --- | --- |
+| Project environment | A versioned, prepared set of one or more Git repositories. |
+| Agent | A provider, project environment, instructions, Skills, provider extensions, MCP, model policy, and concurrency policy. |
+| Session | An isolated workspace and a continuing agent conversation. |
+| Run | One input and its recorded execution inside a session. |
+| Integration endpoint | An authenticated external entry point bound to one agent. |
+| Conversation | A multi-turn external conversation that reuses one session. |
+| Task | One asynchronous external request that eventually maps to a run. |
+
+## Agent configuration and runtime policies
+
 The agent page also provides:
 
 - **Skills:** discover host Skills, upload a ZIP archive, and enable only the Skills this agent should receive.
@@ -189,7 +238,7 @@ The agent page also provides:
 
 The model policy is resolved when a run leaves the queue and actually starts, so queue delay cannot select a model too early. A switch reuses the same Session and provider conversation and updates only the ACP `model` option. It never interrupts an active run; the next run receives the new model. Fixed and scheduled policies record the resolved model on every run for auditability.
 
-#### Model policy quick reference
+### Model policy quick reference
 
 Open **Agents → target agent → Settings → Model policy**:
 
@@ -236,14 +285,6 @@ The service runs storage cleanup once at startup and then every ten minutes. Ret
 Cleanup rechecks expiry when claiming a Session. A failed cleanup or deletion keeps the Session busy to prevent reuse of partially removed storage. Later cleanup passes retry automatic cleanup; callers can retry a manual deletion through the delete API. Disabling automatic cleanup stops new cleanup claims while allowing operations already started to finish. Restart recovery handles unfinished cleanup, deletion, and reset operations before scheduling Runs.
 
 These limits control the current Remote Agent Server process. The project is designed for single-process deployment and does not provide distributed concurrency quotas across multiple service instances.
-
-### 4. Create a session and send a message
-
-Open **Sessions → New session**, select the agent, and enter required MCP session parameters. The server creates an isolated workspace from the current project-environment revision.
-
-Sending a message creates and queues a run. The page shows agent output, tool activity, status changes, errors, and the final result.
-
-Sending another message in the same session creates a new run and resumes the ACP session where supported. Each run keeps its own input, events, and result.
 
 ## Integrating another system
 
@@ -341,7 +382,7 @@ Management operations use the server `API_TOKEN`:
 ```bash
 export REMOTE_AGENT_URL=http://127.0.0.1:3000
 export API_TOKEN='<API_TOKEN from the server .env>'
-export AGENT_ID='<ID of an agent that passes Doctor>'
+export AGENT_ID='<positive integer ID of an agent that passes Doctor>'
 
 curl --fail-with-body \
   -X POST "$REMOTE_AGENT_URL/api/integration-endpoints" \
@@ -350,7 +391,7 @@ curl --fail-with-body \
   --data "{
     \"name\": \"Ticket processing\",
     \"slug\": \"ticket-agent\",
-    \"agentId\": \"$AGENT_ID\",
+    \"agentId\": $AGENT_ID,
     \"enabled\": true,
     \"promptPrefix\": \"Follow the project rules when handling this request.\",
     \"parameterMappings\": []
@@ -362,10 +403,10 @@ The response contains the endpoint and a token shown only once:
 ```json
 {
   "endpoint": {
-    "id": "6c80c07b-...",
+    "id": 1,
     "name": "Ticket processing",
     "slug": "ticket-agent",
-    "agentId": "0abc8611-...",
+    "agentId": 1,
     "enabled": true,
     "promptPrefix": "Follow the project rules when handling this request.",
     "parameterMappings": []
@@ -410,10 +451,10 @@ The response status is `202`:
 
 ```json
 {
-  "taskId": "77d45cc5-...",
+  "taskId": 101,
   "requestId": "ticket-1332-event-1",
   "conversationKey": "ticket-1332",
-  "sessionId": "83b0df95-...",
+  "sessionId": 21,
   "runId": null,
   "status": "queued"
 }
@@ -469,11 +510,11 @@ Possible statuses are `queued`, `running`, `succeeded`, `failed`, and `cancelled
 
 ```json
 {
-  "taskId": "77d45cc5-...",
+  "taskId": 101,
   "requestId": "ticket-1332-event-1",
   "conversationKey": "ticket-1332",
-  "sessionId": "83b0df95-...",
-  "runId": "aa526e5b-...",
+  "sessionId": 21,
+  "runId": 42,
   "status": "succeeded"
 }
 ```
@@ -492,8 +533,8 @@ Example message event:
 
 ```json
 {
-  "id": "7f444964-...",
-  "runId": "aa526e5b-...",
+  "id": 103,
+  "runId": 42,
   "seq": 3,
   "type": "message",
   "contentJson": "{\"stream\":\"output\",\"text\":\"The issue is fixed.\"}",
@@ -564,13 +605,13 @@ The `signingSecret` in the creation response is also shown only once. A `message
   "eventType": "message.agent.reply",
   "sequence": 5,
   "occurredAt": "2026-08-18T10:20:30.000Z",
-  "endpoint": { "id": "6c80c07b-...", "slug": "ticket-agent" },
+  "endpoint": { "id": 1, "slug": "ticket-agent" },
   "task": {
-    "id": "77d45cc5-...",
+    "id": 101,
     "requestId": "ticket-1332-event-1",
     "conversationKey": "ticket-1332",
-    "sessionId": "83b0df95-...",
-    "runId": "aa526e5b-...",
+    "sessionId": 21,
+    "runId": 42,
     "status": "succeeded"
   },
   "message": {
@@ -648,6 +689,8 @@ curl --fail-with-body \
 
 ## Configuration
 
+The table lists application defaults when values are not supplied. `pnpm run init` explicitly writes `HOST=127.0.0.1` and paths under the selected storage root. Its macOS default location differs from the Linux paths below.
+
 | Variable | Required | Default | Description |
 | --- | --- | --- | --- |
 | `API_TOKEN` | Yes | None | Bearer token for the management UI and `/api` routes. |
@@ -703,6 +746,10 @@ The [deployment guide](docs/deployment.md) covers macOS APFS/LaunchAgent, Linux 
 - [Product and architecture](docs/design.en.md): positioning, system boundaries, core objects, execution paths, and reliability design.
 - [Agent Core and model runtime routing proposal](docs/agent-core-routing.en.md): the proposed multi-Core, model, concurrency, Session-resume, and handoff architecture; not implemented yet.
 - [Deployment and acceptance](docs/deployment.md): production deployment, provider authentication, filesystems, reverse proxies, and real smoke tests.
+
+## Feedback and contributing
+
+Share an integration use case, report a problem in [Issues](https://github.com/ma-pony/remote-agent-server/issues), or open a pull request. For deployment reports, include the operating system, Node / provider versions, reproduction steps, and sanitized `pnpm run doctor` output.
 
 ## License
 

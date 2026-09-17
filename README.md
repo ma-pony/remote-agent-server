@@ -1,73 +1,29 @@
 # Remote Agent Server
 
-[English](README.en.md)
+[English](README.en.md) · [MIT License](LICENSE) · Node.js 22 · macOS / Linux
 
-Remote Agent Server 是一个面向业务系统的自托管 ACP Agent 执行网关。调用方通过 HTTP 提交异步任务，服务在隔离 Workspace 中运行 Claude Code、Codex 等命令行 Agent，并通过状态查询、Event、SSE 或签名 Webhook 返回执行过程和结果。
+**把 Claude Code、Codex 和 Hermes 接入你的工单、CI 和业务系统。**
 
-它把现有 Agent CLI 变成可嵌入工单系统、CI/CD、内部平台和自动化服务的持久化后端。Web 管理台负责配置 Agent、项目环境、Skills、执行器扩展、MCP、模型策略、并发和接入端点；外部调用方只需要 Endpoint Token 和稳定的 Task API。
+在自己的机器上部署，通过 Web 管理台直接发起任务，或用 HTTP API、GitHub / GitLab Webhook 调用熟悉的命令行 Agent。Remote Agent Server 负责排队、工作区、会话和执行记录；你的系统通过查询、SSE 或签名 Webhook 取得进度与结果。
 
-执行层基于 [acpx](https://github.com/openclaw/acpx) 和 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol)。目前支持 Claude Code、Codex 和 Hermes Provider。
+项目环境提前准备仓库和依赖，每个 Session 使用独立的写时复制 Workspace。同一会话可以继续追问，调用方断开连接也不影响已提交任务的执行。
 
-Agent 的推理、工具使用和原生会话仍由对应 Provider 负责。Remote Agent Server 管理执行生命周期、Workspace 隔离、配置投影、持久化事件和外部回调。业务审批、工单状态机与部署规则由调用方维护。
+底层是基于 [acpx](https://github.com/openclaw/acpx) 和 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol) 的自托管执行网关，支持 Skills、MCP、执行器扩展与模型策略。单个 Fastify 进程配合 SQLite WAL，无需额外部署数据库或消息队列。
+
+[安装并启动](#安装并启动) · [完成第一条任务](#从零完成一次-agent-执行) · [HTTP / Webhook 接入](#其他系统如何接入) · [主要功能](#主要功能) · [执行模型](#执行模型) · [配置](#配置) · [部署文档](docs/deployment.md)
 
 ## 适用场景
 
-- 工单、Issue 或运维平台把任务派发给 Agent，并异步接收执行结果。
-- CI/CD 或内部自动化服务需要可查询、可取消、可审计的长任务。
-- 团队希望复用现有 Claude Code、Codex 登录状态，同时集中管理项目环境、MCP 和 Skills。
-- 自托管环境需要保留代码、凭证、执行记录和 Workspace 的控制权。
-
-## 主要功能
-
-- **异步 Task API**：外部系统通过 HTTP 提交任务，使用幂等键避免重复执行，并可查询、取消或继续多轮 Conversation。
-- **可靠事件出口**：支持增量 Event 查询、可续读 SSE 和签名 Webhook；断线不影响正在执行的 Task。
-- **统一管理 Agent**：集中配置 Provider、Agent 指令、项目环境、Skills 和 MCP。
-- **可复用项目环境**：提前准备一个或多个 Git 仓库及依赖，Session 创建时无需重新安装。
-- **隔离 Workspace**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot，为每个 Session 快速创建写时复制环境。
-- **多轮 Agent 对话**：同一 Session 可以连续执行多个 Run，并在 Provider 支持时续接 ACP Session。
-- **完整执行记录**：在 SQLite 中保存用户消息、Agent 输出、工具调用、状态、错误和最终结果。
-- **Skills 管理**：发现本机 Skills、上传 ZIP 或添加 Git/marketplace 来源，预览版本变化并按 Agent 更新或回退。
-- **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
-- **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
-- **模型策略**：自动读取 Agent Core 通过 ACP 暴露的模型，可跟随 Core 默认模型、固定模型，或按 UTC 星期和 24 小时时间段为新 Run 选择模型。
-- **运行、存储与并发控制**：在管理台调整 Run 超时、空闲 Session 大文件保留期和三类服务并发，并可为单个 Agent 设置 Run 上限。
-- **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
-
-## 执行模型
-
-外部系统接入是项目的主要服务接口：
-
-```text
-外部系统
-   |
-   v
-接入端点（鉴权 / 参数映射 / 幂等）
-   |
-   v
-Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
-   |                         |
-   |                         +-> Skills / 执行器扩展 / MCP / 模型策略
-   |
-   +-> 状态查询 / Event 查询 / SSE / 签名 Webhook
-```
-
-管理人员也可以从 Web 界面直接创建 Session 和 Run：
-
-```text
-项目环境 -> Agent -> Session -> Run -> acpx/ACP -> Provider
-                         |
-                         +-> 消息、工具调用、状态和结果
-```
-
-| 对象 | 作用 |
+| 你想做什么 | 如何使用 |
 | --- | --- |
-| 项目环境 | 保存一个或多个 Git 项目及准备完成的依赖，按版本发布。 |
-| Agent | 绑定 Provider、项目环境、Agent 指令、Skills、执行器扩展、MCP、模型策略和并发策略。 |
-| Session | 一个隔离的 Workspace，也是一段可继续的 Agent 对话。 |
-| Run | Session 中的一次输入和完整执行记录。 |
-| 接入端点 | 其他系统调用服务的认证入口，绑定一个 Agent。 |
-| Conversation | 外部系统的多轮业务会话，内部复用同一个 Session。 |
-| Task | 外部系统提交的一次异步请求，最终对应一个 Run。 |
+| 在浏览器里运行和继续 Agent 任务 | 用管理台准备项目环境、创建 Agent 和 Session，查看消息、工具调用与结果。 |
+| 将 PR / MR 事件交给审核 Agent | 配置 GitHub / GitLab Webhook 和事件筛选；结果可查询或回调，写回评论需另配工具与权限。 |
+| 让工单或运维平台派发代码排查任务 | 通过 Task API 提交日志、说明或附件，用业务会话标识继续补充信息。 |
+| 在现有 Shell 脚本、CI/CD 或内部平台中调用 Agent | 用 curl 或任意 HTTP 客户端提交异步任务，保存 Task ID，轮询结果或接收回调。 |
+
+适合已经在使用 Agent CLI，希望把它接入长期运行的业务流程的开发者和团队。首次可以只在管理台跑通一个任务，再接入现有系统；原有的脚本、CI、审批和发布流程可以继续使用。
+
+Provider 继续负责推理、工具使用和原生会话，业务审批、工单状态机与部署规则由调用方维护。代码和运行记录由你管理，调用模型时仍遵循所选 Provider 的认证、计费与数据传输方式。当前面向可信用户的单机部署；Workspace 提供文件副本隔离，**不是容器或安全沙箱**。详见[安全边界](#安全边界)。
 
 ## 运行要求
 
@@ -123,6 +79,26 @@ curl --fail http://127.0.0.1:3000/api/health
 
 首次进入后按页面提示完成 **项目环境 → 智能体 → 会话**。尚无可用环境时，页面会直接引导创建或查看环境；环境准备好后再创建 Agent。只需先配置一个 Provider，Skills、MCP 和外部接入可在首个任务跑通后按需添加。
 
+### 手动配置与直接启动
+
+也可以手动管理配置。在尚无 `.env` 的新安装中执行：
+
+```bash
+cp -n .env.example .env
+chmod 0600 .env
+openssl rand -hex 32
+```
+
+把生成的随机值填入 `.env` 的 `API_TOKEN`，并设置当前用户可写的绝对存储路径；macOS 使用 APFS，Linux 使用 Btrfs，项目环境与 Session 根目录必须位于同一文件系统。然后检查、构建并直接运行：
+
+```bash
+pnpm run doctor
+pnpm build
+NODE_ENV=production node dist/server/main.js
+```
+
+服务会自动读取 `.env`，无需执行 `source`。也可以完全通过 Shell 环境变量或 systemd `EnvironmentFile` 提供配置；已有进程变量优先。常驻服务的 LaunchAgent / systemd 示例见[部署文档](docs/deployment.md)，全部变量见[配置](#配置)。
+
 ### 本地开发
 
 初始化后直接运行：
@@ -142,6 +118,8 @@ Provider CLI 必须由运行服务的同一个操作系统用户安装并登录�
 - [Claude Code](https://code.claude.com/docs/en/getting-started)
 - [Codex CLI](https://developers.openai.com/codex/cli)
 - [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/)
+
+下面是命令参考，只执行所选 Provider 对应的命令：
 
 ```bash
 claude auth login
@@ -179,6 +157,77 @@ hermes --version
 3. 填写 Agent 的职责、代码规范和交付要求。
 4. 保存后运行 **运行检查**，确认 Provider 和项目环境可用。
 
+### 4. 创建 Session 并发送消息
+
+进入 **Session → 新建 Session**，选择 Agent，并填写当前 Session 需要的 MCP 参数。系统从项目环境当前版本创建独立 Workspace。
+
+进入 Session 后发送消息。系统创建 Run 并排队执行，页面会展示 Agent 输出、工具调用、执行状态、错误和最终结果。
+
+在同一 Session 中继续发送消息会创建新的 Run，并在 Provider 支持时续接同一个 ACP Session。每个 Run 仍保留独立的输入、事件和结果。
+
+第一次可以用一个容易核对结果的任务：
+
+```text
+阅读当前项目，说明目录结构、启动方式和测试命令。先不要修改文件。
+```
+
+## 主要功能
+
+- **异步 Task API**：外部系统通过 HTTP 提交任务，使用幂等键避免重复执行，并可查询、取消或继续多轮 Conversation。
+- **可靠事件出口**：支持增量 Event 查询、可续读 SSE 和签名 Webhook；断线不影响正在执行的 Task。
+- **统一管理 Agent**：集中配置 Provider、Agent 指令、项目环境、Skills 和 MCP。
+- **可复用项目环境**：提前准备一个或多个 Git 仓库及依赖，Session 创建时无需重新安装。
+- **隔离 Workspace**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot，为每个 Session 快速创建写时复制环境。
+- **多轮 Agent 对话**：同一 Session 可以连续执行多个 Run，并在 Provider 支持时续接 ACP Session。
+- **完整执行记录**：在 SQLite 中保存用户消息、Agent 输出、工具调用、状态、错误和最终结果。
+- **Skills 管理**：发现本机 Skills、上传 ZIP 或添加 Git/marketplace 来源，预览版本变化并按 Agent 更新或回退。
+- **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
+- **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
+- **模型策略**：自动读取 Agent Core 通过 ACP 暴露的模型，可跟随 Core 默认模型、固定模型，或按 UTC 星期和 24 小时时间段为新 Run 选择模型。
+- **运行、存储与并发控制**：在管理台调整 Run 超时、空闲 Session 大文件保留期和三类服务并发，并可为单个 Agent 设置 Run 上限。
+- **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
+- **GitHub / GitLab 事件接入**：原生 Webhook 验证、事件筛选、筛选预览和接收记录；与通用 Task API 共用执行流程。
+- **图片与文件任务**：在管理台上传、拖入或粘贴附件，也可通过 API 提交图文或纯附件消息；内容理解取决于 Provider、模型和工具。
+- **部署初始化与诊断**：`pnpm run init` 生成配置，`pnpm run doctor` 验证原生 Workspace 操作，首次使用由页面引导。
+
+## 执行模型
+
+外部系统接入是项目的主要服务接口：
+
+```text
+外部系统
+   |
+   v
+接入端点（鉴权 / 参数映射 / 幂等）
+   |
+   v
+Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
+   |                         |
+   |                         +-> Skills / 执行器扩展 / MCP / 模型策略
+   |
+   +-> 状态查询 / Event 查询 / SSE / 签名 Webhook
+```
+
+管理人员也可以从 Web 界面直接创建 Session 和 Run：
+
+```text
+项目环境 -> Agent -> Session -> Run -> acpx/ACP -> Provider
+                         |
+                         +-> 消息、工具调用、状态和结果
+```
+
+| 对象 | 作用 |
+| --- | --- |
+| 项目环境 | 保存一个或多个 Git 项目及准备完成的依赖，按版本发布。 |
+| Agent | 绑定 Provider、项目环境、Agent 指令、Skills、执行器扩展、MCP、模型策略和并发策略。 |
+| Session | 一个隔离的 Workspace，也是一段可继续的 Agent 对话。 |
+| Run | Session 中的一次输入和完整执行记录。 |
+| 接入端点 | 其他系统调用服务的认证入口，绑定一个 Agent。 |
+| Conversation | 外部系统的多轮业务会话，内部复用同一个 Session。 |
+| Task | 外部系统提交的一次异步请求，最终对应一个 Run。 |
+
+## Agent 配置与运行策略
+
 Agent 页面还可以配置：
 
 - **Skills**：发现本机 Skill、上传 ZIP，并明确启用需要的 Skill。
@@ -189,7 +238,7 @@ Agent 页面还可以配置：
 
 模型策略在 Run 离开队列、真正开始执行时解析，因此排队时间不会导致提前选错模型。切换复用同一个 Session 和 Provider 对话上下文，只更新 ACP `model` 配置；不会中断正在执行的 Run，下一次 Run 才使用新模型。固定或定时策略会在每个 Run 上记录实际解析出的模型，便于审计。
 
-#### 模型策略速查
+### 模型策略速查
 
 进入 **Agent → 目标 Agent → 设置 → 模型策略** 配置：
 
@@ -236,14 +285,6 @@ Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选�
 删除前会再次检查 Session 是否仍然到期。清理或删除失败时，Session 保持占用，防止使用已被部分删除的 Workspace；自动清理会在后续轮次重试，手动删除可以重新调用删除接口。关闭自动清理会停止接收新的清理任务，已经开始的清理仍会完成。服务重启会先恢复未完成的清理、删除或重置，再调度 Run。
 
 这些上限控制当前 Remote Agent Server 进程。项目当前按单进程部署设计，不提供跨多个服务实例的分布式并发配额。
-
-### 4. 创建 Session 并发送消息
-
-进入 **Session → 新建 Session**，选择 Agent，并填写当前 Session 需要的 MCP 参数。系统从项目环境当前版本创建独立 Workspace。
-
-进入 Session 后发送消息。系统创建 Run 并排队执行，页面会展示 Agent 输出、工具调用、执行状态、错误和最终结果。
-
-在同一 Session 中继续发送消息会创建新的 Run，并在 Provider 支持时续接同一个 ACP Session。每个 Run 仍保留独立的输入、事件和结果。
 
 ## 其他系统如何接入
 
@@ -341,7 +382,7 @@ POST /integration/v1/endpoints/:slug/webhook
 ```bash
 export REMOTE_AGENT_URL=http://127.0.0.1:3000
 export API_TOKEN='<服务器 .env 中的 API_TOKEN>'
-export AGENT_ID='<已经通过运行检查的 Agent ID>'
+export AGENT_ID='<已经通过运行检查的 Agent ID，正整数>'
 
 curl --fail-with-body \
   -X POST "$REMOTE_AGENT_URL/api/integration-endpoints" \
@@ -350,7 +391,7 @@ curl --fail-with-body \
   --data "{
     \"name\": \"工单处理入口\",
     \"slug\": \"ticket-agent\",
-    \"agentId\": \"$AGENT_ID\",
+    \"agentId\": $AGENT_ID,
     \"enabled\": true,
     \"promptPrefix\": \"请按项目规范处理以下请求。\",
     \"parameterMappings\": []
@@ -362,10 +403,10 @@ curl --fail-with-body \
 ```json
 {
   "endpoint": {
-    "id": "6c80c07b-...",
+    "id": 1,
     "name": "工单处理入口",
     "slug": "ticket-agent",
-    "agentId": "0abc8611-...",
+    "agentId": 1,
     "enabled": true,
     "promptPrefix": "请按项目规范处理以下请求。",
     "parameterMappings": []
@@ -418,10 +459,10 @@ curl --fail-with-body \
 
 ```json
 {
-  "taskId": "77d45cc5-...",
+  "taskId": 101,
   "requestId": "ticket-1332-event-1",
   "conversationKey": "ticket-1332",
-  "sessionId": "83b0df95-...",
+  "sessionId": 21,
   "runId": null,
   "status": "queued"
 }
@@ -477,11 +518,11 @@ curl --fail-with-body \
 
 ```json
 {
-  "taskId": "77d45cc5-...",
+  "taskId": 101,
   "requestId": "ticket-1332-event-1",
   "conversationKey": "ticket-1332",
-  "sessionId": "83b0df95-...",
-  "runId": "aa526e5b-...",
+  "sessionId": 21,
+  "runId": 42,
   "status": "succeeded"
 }
 ```
@@ -500,8 +541,8 @@ curl --fail-with-body \
 
 ```json
 {
-  "id": "7f444964-...",
-  "runId": "aa526e5b-...",
+  "id": 103,
+  "runId": 42,
   "seq": 3,
   "type": "message",
   "contentJson": "{\"stream\":\"output\",\"text\":\"问题已经修复。\"}",
@@ -572,13 +613,13 @@ curl --fail-with-body \
   "eventType": "message.agent.reply",
   "sequence": 5,
   "occurredAt": "2026-08-18T10:20:30.000Z",
-  "endpoint": { "id": "6c80c07b-...", "slug": "ticket-agent" },
+  "endpoint": { "id": 1, "slug": "ticket-agent" },
   "task": {
-    "id": "77d45cc5-...",
+    "id": 101,
     "requestId": "ticket-1332-event-1",
     "conversationKey": "ticket-1332",
-    "sessionId": "83b0df95-...",
-    "runId": "aa526e5b-...",
+    "sessionId": 21,
+    "runId": 42,
     "status": "succeeded"
   },
   "message": {
@@ -656,6 +697,8 @@ curl --fail-with-body \
 
 ## 配置
 
+下表是未提供配置时的程序默认值。`pnpm run init` 会显式写入 `HOST=127.0.0.1` 和所选存储根目录下的路径；macOS 的初始化默认目录与表中的 Linux 路径不同。
+
 | 变量 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
 | `API_TOKEN` | 是 | 无 | 管理界面和 `/api` 管理接口的 Bearer Token。 |
@@ -711,6 +754,10 @@ pnpm smoke:integrations
 - [产品与架构](docs/design.md)：定位、系统边界、核心对象、执行链路和可靠性设计。
 - [Agent Core 与模型运行路由设计提案](docs/agent-core-routing.md)：记录多 Core、模型、并发、Session 续接和 Handoff 的目标方案；尚未实现。
 - [部署与验收](docs/deployment.md)：生产部署、Provider 登录、文件系统、反向代理和真实 Smoke Test。
+
+## 反馈与参与
+
+欢迎通过 [Issue](https://github.com/ma-pony/remote-agent-server/issues) 分享接入场景、报告问题，或提交 Pull Request。报告部署问题时，请附操作系统、Node / Provider 版本、复现步骤和脱敏后的 `pnpm run doctor` 输出。
 
 ## 许可证
 

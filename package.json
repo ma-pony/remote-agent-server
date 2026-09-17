@@ -1,6 +1,6 @@
 {
   "name": "remote-agent-server",
-  "description": "Self-hosted ACP execution gateway for running coding agents through HTTP, SSE, and signed webhooks.",
+  "description": "Self-hosted Claude Code, Codex and Hermes for your workflows: web console, async task API, isolated workspaces, MCP, SSE and signed webhooks. Powered by ACP.",
   "private": true,
   "license": "MIT",
   "repository": {
