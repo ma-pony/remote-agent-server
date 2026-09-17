@@ -16,7 +16,7 @@ patchedDependencies:
     hash: c4c78f722ca740d531c386170df36c85e58dcc41481199d3540d6abb08c9e20d
     path: patches/@agentclientprotocol__codex-acp@1.1.14.patch
   acpx@0.16.0:
-    hash: 76301c3c41c7024136c5c7515797f54b888681e5fd36728dae26381ff7a63a8e
+    hash: ba56fe3f2bdfa845196169c05b29054a5b20f65a16104539027360a74fe43dca
     path: patches/acpx@0.16.0.patch
 
 importers:
@@ -46,7 +46,7 @@ importers:
         version: 4.3.3(vite@8.2.1(@types/node@22.20.1)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.12)(yaml@2.9.0))
       acpx:
         specifier: 0.16.0
-        version: 0.16.0(patch_hash=76301c3c41c7024136c5c7515797f54b888681e5fd36728dae26381ff7a63a8e)
+        version: 0.16.0(patch_hash=ba56fe3f2bdfa845196169c05b29054a5b20f65a16104539027360a74fe43dca)
       better-sqlite3:
         specifier: ^12.11.1
         version: 12.11.1
@@ -5388,7 +5388,7 @@ snapshots:
       mime-types: 3.0.2
       negotiator: 1.0.0
 
-  acpx@0.16.0(patch_hash=76301c3c41c7024136c5c7515797f54b888681e5fd36728dae26381ff7a63a8e):
+  acpx@0.16.0(patch_hash=ba56fe3f2bdfa845196169c05b29054a5b20f65a16104539027360a74fe43dca):
     dependencies:
       '@agentclientprotocol/sdk': 1.4.0(zod@4.6.5)
       '@openclaw/fs-safe': 0.10.0

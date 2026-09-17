@@ -1,8 +1,43 @@
 diff --git a/dist/live-checkpoint-BEfxBKCh.js b/dist/live-checkpoint-BEfxBKCh.js
-index 6e14d1a7d7c8fc8e221a0d5a4ad3e84b799ee019..ec71134a6ee264c9d7342bf78ce8cd1cb7abbaf7 100644
+index 6e14d1a7d7c8fc8e221a0d5a4ad3e84b799ee019..669190f254c6e1eb457c48a2950b6a1255be024e 100644
 --- a/dist/live-checkpoint-BEfxBKCh.js
 +++ b/dist/live-checkpoint-BEfxBKCh.js
-@@ -3906,13 +3906,13 @@ var AcpClient = class {
+@@ -3027,9 +3027,25 @@ var ProcessDescendants = class {
+ 	identities = /* @__PURE__ */ new Map();
+ 	pending;
+ 	retired = false;
++	samplingTimers = /* @__PURE__ */ new Set();
+ 	constructor(child) {
+ 		this.child = child;
+ 	}
++	async trackDuring(operation) {
++		if (this.retired || process.platform === "win32") return await operation();
++		// Witness descendants before an in-flight setup request loses its bridge.
++		void this.capture();
++		const timer = setInterval(() => { void this.capture(); }, 100);
++		timer.unref();
++		this.samplingTimers.add(timer);
++		try {
++			return await operation();
++		} finally {
++			clearInterval(timer);
++			this.samplingTimers.delete(timer);
++			await this.capture();
++		}
++	}
+ 	capture(timeoutMs = PROCESS_HELPER_TIMEOUT_MS) {
+ 		if (this.retired || process.platform === "win32") return Promise.resolve(true);
+ 		this.pending ??= this.readSnapshot(timeoutMs).finally(() => {
+@@ -3074,6 +3090,8 @@ var ProcessDescendants = class {
+ 	}
+ 	retire() {
+ 		this.retired = true;
++		for (const timer of this.samplingTimers) clearInterval(timer);
++		this.samplingTimers.clear();
+ 		this.identities.clear();
+ 	}
+ };
+@@ -3906,13 +3924,13 @@ var AcpClient = class {
  		connection.signal.addEventListener("abort", () => {
  			this.recordAgentExit(child, "connection_close", child.exitCode ?? null, child.signalCode ?? null);
  		}, { once: true });
@@ -18,21 +53,28 @@ index 6e14d1a7d7c8fc8e221a0d5a4ad3e84b799ee019..ec71134a6ee264c9d7342bf78ce8cd1c
  	}
  	async resolveAgentLaunchPlan() {
  		const configuredCommand = resolveAgentCommandParts(this.options.agentCommand, this.options.agentArgv);
-@@ -4092,11 +4092,11 @@ var AcpClient = class {
+@@ -4092,12 +4110,14 @@ var AcpClient = class {
  		const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
  		let result;
  		try {
 -			const createPromise = this.runConnectionRequest(() => connection.agent.request(methods.agent.session.new, {
-+			const createPromise = this.trackAgentDescendantsDuring(this.agent, () => this.runConnectionRequest(() => connection.agent.request(methods.agent.session.new, {
- 				cwd: sessionCwd,
- 				mcpServers: this.options.mcpServers ?? [],
- 				_meta: buildClaudeCodeOptionsMeta(this.options.sessionOptions, claudeAcp)
+-				cwd: sessionCwd,
+-				mcpServers: this.options.mcpServers ?? [],
+-				_meta: buildClaudeCodeOptionsMeta(this.options.sessionOptions, claudeAcp)
 -			}));
-+			})));
- 			result = claudeAcp ? await withTimeout(createPromise, resolveClaudeAcpSessionCreateTimeoutMs()) : await createPromise;
+-			result = claudeAcp ? await withTimeout(createPromise, resolveClaudeAcpSessionCreateTimeoutMs()) : await createPromise;
++			result = await this.trackAgentDescendantsDuring(this.agent, async () => {
++				const createPromise = this.runConnectionRequest(() => connection.agent.request(methods.agent.session.new, {
++					cwd: sessionCwd,
++					mcpServers: this.options.mcpServers ?? [],
++					_meta: buildClaudeCodeOptionsMeta(this.options.sessionOptions, claudeAcp)
++				}));
++				return claudeAcp ? await withTimeout(createPromise, resolveClaudeAcpSessionCreateTimeoutMs()) : await createPromise;
++			});
  		} catch (error) {
  			if (claudeAcp && error instanceof TimeoutError) throw new ClaudeAcpSessionCreateTimeoutError(buildClaudeAcpSessionCreateTimeoutMessage(), {
-@@ -4132,11 +4132,11 @@ var AcpClient = class {
+ 				cause: error,
+@@ -4132,11 +4152,11 @@ var AcpClient = class {
  		const previousSuppression = this.applySessionUpdateSuppression(Boolean(options.suppressReplayUpdates));
  		let response;
  		try {
@@ -46,7 +88,7 @@ index 6e14d1a7d7c8fc8e221a0d5a4ad3e84b799ee019..ec71134a6ee264c9d7342bf78ce8cd1c
  			await this.waitForSessionUpdateDrain(options.replayIdleMs ?? REPLAY_IDLE_MS, options.replayDrainTimeoutMs ?? REPLAY_DRAIN_TIMEOUT_MS);
  		} finally {
  			this.restoreSessionUpdateSuppression(previousSuppression);
-@@ -4150,11 +4150,11 @@ var AcpClient = class {
+@@ -4150,11 +4170,11 @@ var AcpClient = class {
  	async resumeSession(sessionId, cwd = this.options.cwd) {
  		const connection = this.getConnection();
  		const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
@@ -60,23 +102,13 @@ index 6e14d1a7d7c8fc8e221a0d5a4ad3e84b799ee019..ec71134a6ee264c9d7342bf78ce8cd1c
  		this.loadedSessionId = sessionId;
  		const result = toReconnectedSessionResult(response);
  		this.updateRememberedSessionModels(sessionId, result);
-@@ -4442,6 +4442,20 @@ var AcpClient = class {
+@@ -4442,6 +4462,10 @@ var AcpClient = class {
  	closeConnection() {
  		this.connection?.close();
  	}
 +	async trackAgentDescendantsDuring(child, operation) {
 +		const descendants = child && this.agentDescendants.get(child);
-+		if (!descendants || process.platform === "win32") return await operation();
-+		// Witness descendants before an in-flight setup request loses its bridge.
-+		void descendants.capture();
-+		const timer = setInterval(() => { void descendants.capture(); }, 100);
-+		timer.unref();
-+		try {
-+			return await operation();
-+		} finally {
-+			clearInterval(timer);
-+			await descendants.capture();
-+		}
++		return descendants ? await descendants.trackDuring(operation) : await operation();
 +	}
  	async captureAgentDescendants(child) {
  		const descendants = child && this.agentDescendants.get(child);

@@ -30,6 +30,15 @@ process.stdin.on("data", async (chunk) => {
     const request = JSON.parse(line);
     if (["session/new", "session/load", "session/resume"].includes(request.method)) {
       await startDescendant();
+      if (mode === "timeout-session") continue;
+      if (mode === "reject-session") {
+        process.stdout.write(`${JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: { code: -32000, message: "fixture session rejected" }
+        })}\n`);
+        continue;
+      }
       if (mode?.startsWith("crash-during-")) {
         setTimeout(() => process.exit(1), 250);
         continue;
@@ -61,4 +70,13 @@ process.stdin.on("data", async (chunk) => {
     })}\n`);
   }
 });
-process.stdin.on("end", () => process.exit(0));
+process.stdin.on("end", async () => {
+  if (mode === "timeout-session") {
+    await writeFile(pidFile, JSON.stringify({
+      agent: process.pid, descendant: descendant.pid, stdinEnded: true
+    }));
+    setTimeout(() => process.exit(0), 1_000);
+    return;
+  }
+  process.exit(0);
+});

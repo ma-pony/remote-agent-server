@@ -91,7 +91,7 @@ Web 控制台复用同一套 Session、Run 和 Event 模型。控制台创建的
 
 业务模块通过 Runtime 接口使用 acpx，Provider 或 ACP 适配变化集中在 `src/runtime/` 内。
 
-acpx 0.16.0 负责 ACP 后代进程的身份校验、退出信号和有界清理。项目只保留一个补充补丁：在初始化、创建、加载和恢复 Session 的请求尚未结束时，每 100 ms 采集后代进程，避免桥接进程先崩溃后丢失父子关系；请求结束即停止采样。补丁复用上游 `ProcessDescendants`，不改变进程组或信号继承方式。维护及移除条件见 [acpx 补丁说明](../patches/README.md)。
+acpx 0.16.0 负责 ACP 后代进程的身份校验、退出信号和有界清理。项目只保留一个补充补丁：在初始化、创建、加载和恢复 Session 的请求尚未结束时，每 100 ms 采集后代进程，降低桥接进程先崩溃后丢失父子关系的风险。采样生命周期由上游 `ProcessDescendants` 的本地扩展管理，请求结束或进程清理完成即停止；`AcpClient` 只提供操作边界，不改变进程组或信号继承方式。维护及移除条件见 [acpx 补丁说明](../patches/README.md)。
 
 ## 6. Agent 运行流程
 

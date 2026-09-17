@@ -6,7 +6,7 @@ import { createAcpRuntime, createAgentRegistry, createRuntimeStore } from "acpx/
 import { expect, it, vi } from "vitest";
 
 type FixtureMode = "fail-initialize" | "crash-during-session" | "crash-during-load"
-  | "crash-during-resume" | "crash-after-session";
+  | "crash-during-resume" | "crash-after-session" | "reject-session" | "timeout-session";
 
 const processExists = (pid: number): boolean => {
   try {
@@ -24,7 +24,10 @@ const createFixture = async (mode?: FixtureMode) => {
     cwd: root,
     sessionStore: createRuntimeStore({ stateDir: join(root, "acpx") }),
     agentRegistry: createAgentRegistry({ overrides: {
-      fixture: [process.execPath, join(import.meta.dirname, "fixtures/acp-orphan-agent.mjs")]
+      fixture: [
+        process.execPath, join(import.meta.dirname, "fixtures/acp-orphan-agent.mjs"),
+        ...(mode === "timeout-session" ? ["claude-agent-acp"] : [])
+      ]
     } }),
     agentProcessEnv: {
       ACP_TEST_PID_FILE: pidFile,
@@ -33,10 +36,13 @@ const createFixture = async (mode?: FixtureMode) => {
     permissionMode: "approve-all",
     nonInteractivePermissions: "fail"
   });
-  const pids = async (): Promise<{ agent: number; descendant: number }> =>
+  const pids = async (): Promise<{ agent: number; descendant: number; stdinEnded?: boolean }> =>
     JSON.parse(await readFile(pidFile, "utf8"));
   return {
     runtime,
+    waitForStdinEnd: () => vi.waitFor(async () => {
+      expect((await pids()).stdinEnded).toBe(true);
+    }, { timeout: 4_000, interval: 10 }),
     ensure: () => runtime.ensureSession({
       sessionKey: "cleanup-test",
       agent: "fixture",
@@ -67,6 +73,52 @@ const createFixture = async (mode?: FixtureMode) => {
 };
 
 const processTest = it.runIf(process.env.REMOTE_AGENT_ACPX_PROCESS_TEST === "1");
+
+processTest.each([undefined, "reject-session", "timeout-session"] as const)(
+  "Session 建立结束后停止后台采样（模式：%s）",
+  async (mode) => {
+    const fixture = await createFixture(mode);
+    // Observe real timer ownership without changing scheduling or process inspection.
+    const startInterval = globalThis.setInterval;
+    const stopInterval = globalThis.clearInterval;
+    const active = new Set<ReturnType<typeof setInterval>>();
+    let started = 0;
+    const startSpy = vi.spyOn(globalThis, "setInterval").mockImplementation((...args) => {
+      const timer = startInterval(...args);
+      active.add(timer);
+      started += 1;
+      return timer;
+    });
+    const stopSpy = vi.spyOn(globalThis, "clearInterval").mockImplementation((timer) => {
+      active.delete(timer as ReturnType<typeof setInterval>);
+      stopInterval(timer);
+    });
+    try {
+      if (mode === "timeout-session") {
+        vi.stubEnv("ACPX_CLAUDE_ACP_SESSION_CREATE_TIMEOUT_MS", "100");
+        // The RPC stays pending while timeout recovery closes the bridge.
+        const rejection = expect(fixture.ensure()).rejects.toThrow("session creation timed out");
+        await fixture.waitForStdinEnd();
+        const activeAfterTimeout = active.size;
+        await rejection;
+        expect(activeAfterTimeout).toBe(0);
+      } else if (mode === "reject-session") {
+        await expect(fixture.ensure()).rejects.toThrow("fixture session rejected");
+      } else {
+        await fixture.ensure();
+      }
+      expect(started).toBeGreaterThan(0);
+      expect(active.size).toBe(0);
+    } finally {
+      await fixture.cleanup();
+      for (const timer of active) stopInterval(timer);
+      startSpy.mockRestore();
+      stopSpy.mockRestore();
+      vi.unstubAllEnvs();
+    }
+  },
+  15_000
+);
 
 processTest.each(["close", "shutdown"] as const)(
   "%s 回收 ACP Runtime 及已经脱离父进程组的后代进程",
