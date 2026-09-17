@@ -91,6 +91,8 @@ The main source boundaries are:
 
 Business modules use acpx through the Runtime interface, keeping provider and ACP adapter changes inside `src/runtime/`.
 
+acpx 0.16.0 owns ACP descendant identity checks, exit signals, and bounded cleanup. A small local patch captures descendants every 100 ms while initialization, session creation, loading, or resumption is pending, before a bridge crash can erase parent-child relationships; sampling stops when the request settles. It reuses upstream `ProcessDescendants` without changing process groups or signal inheritance. See the [acpx patch notes](../patches/README.md) for maintenance and removal criteria.
+
 ## 6. Agent execution
 
 ### 6.1 Direct runs from the console

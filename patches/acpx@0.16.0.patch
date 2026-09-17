@@ -1,0 +1,83 @@
+diff --git a/dist/live-checkpoint-BEfxBKCh.js b/dist/live-checkpoint-BEfxBKCh.js
+index 6e14d1a7d7c8fc8e221a0d5a4ad3e84b799ee019..ec71134a6ee264c9d7342bf78ce8cd1cb7abbaf7 100644
+--- a/dist/live-checkpoint-BEfxBKCh.js
++++ b/dist/live-checkpoint-BEfxBKCh.js
+@@ -3906,13 +3906,13 @@ var AcpClient = class {
+ 		connection.signal.addEventListener("abort", () => {
+ 			this.recordAgentExit(child, "connection_close", child.exitCode ?? null, child.signalCode ?? null);
+ 		}, { once: true });
+-		await this.initializeAgentConnection({
++		await this.trackAgentDescendantsDuring(child, () => this.initializeAgentConnection({
+ 			child,
+ 			connection,
+ 			startupFailure,
+ 			startupStderr,
+ 			launch
+-		});
++		}));
+ 	}
+ 	async resolveAgentLaunchPlan() {
+ 		const configuredCommand = resolveAgentCommandParts(this.options.agentCommand, this.options.agentArgv);
+@@ -4092,11 +4092,11 @@ var AcpClient = class {
+ 		const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
+ 		let result;
+ 		try {
+-			const createPromise = this.runConnectionRequest(() => connection.agent.request(methods.agent.session.new, {
++			const createPromise = this.trackAgentDescendantsDuring(this.agent, () => this.runConnectionRequest(() => connection.agent.request(methods.agent.session.new, {
+ 				cwd: sessionCwd,
+ 				mcpServers: this.options.mcpServers ?? [],
+ 				_meta: buildClaudeCodeOptionsMeta(this.options.sessionOptions, claudeAcp)
+-			}));
++			})));
+ 			result = claudeAcp ? await withTimeout(createPromise, resolveClaudeAcpSessionCreateTimeoutMs()) : await createPromise;
+ 		} catch (error) {
+ 			if (claudeAcp && error instanceof TimeoutError) throw new ClaudeAcpSessionCreateTimeoutError(buildClaudeAcpSessionCreateTimeoutMessage(), {
+@@ -4132,11 +4132,11 @@ var AcpClient = class {
+ 		const previousSuppression = this.applySessionUpdateSuppression(Boolean(options.suppressReplayUpdates));
+ 		let response;
+ 		try {
+-			response = await this.runConnectionRequest(() => connection.agent.request(methods.agent.session.load, {
++			response = await this.trackAgentDescendantsDuring(this.agent, () => this.runConnectionRequest(() => connection.agent.request(methods.agent.session.load, {
+ 				sessionId,
+ 				cwd: sessionCwd,
+ 				mcpServers: this.options.mcpServers ?? []
+-			}));
++			})));
+ 			await this.waitForSessionUpdateDrain(options.replayIdleMs ?? REPLAY_IDLE_MS, options.replayDrainTimeoutMs ?? REPLAY_DRAIN_TIMEOUT_MS);
+ 		} finally {
+ 			this.restoreSessionUpdateSuppression(previousSuppression);
+@@ -4150,11 +4150,11 @@ var AcpClient = class {
+ 	async resumeSession(sessionId, cwd = this.options.cwd) {
+ 		const connection = this.getConnection();
+ 		const sessionCwd = await resolveAgentSessionCwd(cwd, this.options.agentCommand);
+-		const response = await this.runConnectionRequest(() => connection.agent.request(methods.agent.session.resume, {
++		const response = await this.trackAgentDescendantsDuring(this.agent, () => this.runConnectionRequest(() => connection.agent.request(methods.agent.session.resume, {
+ 			sessionId,
+ 			cwd: sessionCwd,
+ 			mcpServers: this.options.mcpServers ?? []
+-		}));
++		})));
+ 		this.loadedSessionId = sessionId;
+ 		const result = toReconnectedSessionResult(response);
+ 		this.updateRememberedSessionModels(sessionId, result);
+@@ -4442,6 +4442,20 @@ var AcpClient = class {
+ 	closeConnection() {
+ 		this.connection?.close();
+ 	}
++	async trackAgentDescendantsDuring(child, operation) {
++		const descendants = child && this.agentDescendants.get(child);
++		if (!descendants || process.platform === "win32") return await operation();
++		// Witness descendants before an in-flight setup request loses its bridge.
++		void descendants.capture();
++		const timer = setInterval(() => { void descendants.capture(); }, 100);
++		timer.unref();
++		try {
++			return await operation();
++		} finally {
++			clearInterval(timer);
++			await descendants.capture();
++		}
++	}
+ 	async captureAgentDescendants(child) {
+ 		const descendants = child && this.agentDescendants.get(child);
+ 		if (descendants && !await descendants.capture()) this.log("could not verify agent descendants; skipping unverified process cleanup");

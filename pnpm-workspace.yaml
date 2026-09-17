@@ -11,4 +11,4 @@ overrides:
 
 patchedDependencies:
   "@agentclientprotocol/codex-acp@1.1.14": patches/@agentclientprotocol__codex-acp@1.1.14.patch
-  acpx@0.13.2: patches/acpx@0.13.2.patch
+  acpx@0.16.0: patches/acpx@0.16.0.patch

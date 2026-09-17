@@ -1,24 +1,12 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 
+import { createAcpRuntime, createAgentRegistry, createRuntimeStore } from "acpx/runtime";
 import { expect, it, vi } from "vitest";
 
-type AcpClientLike = {
-  start(): Promise<void>;
-  close(): Promise<void>;
-  createSession(cwd?: string): Promise<unknown>;
-};
-
-type AcpClientConstructor = new (options: {
-  agentCommand: string;
-  cwd: string;
-  mcpServers: never[];
-  permissionMode: "approve-all";
-  nonInteractivePermissions: "fail";
-  sessionOptions: { env: Record<string, string> };
-}) => AcpClientLike;
+type FixtureMode = "fail-initialize" | "crash-during-session" | "crash-during-load"
+  | "crash-during-resume" | "crash-after-session";
 
 const processExists = (pid: number): boolean => {
   try {
@@ -29,125 +17,98 @@ const processExists = (pid: number): boolean => {
   }
 };
 
-const waitForProcessExit = async (pid: number, timeoutMs = 4_000): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  while (processExists(pid) && Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-};
-
-const createClient = (
-  AcpClient: AcpClientConstructor,
-  root: string,
-  pidFile: string,
-  mode?: "fail-initialize" | "crash-after-session"
-): AcpClientLike => {
-  const fixture = join(process.cwd(), "test/fixtures/acp-orphan-agent.mjs");
-  return new AcpClient({
-    agentCommand: `${process.execPath} ${fixture}`,
+const createFixture = async (mode?: FixtureMode) => {
+  const root = await mkdtemp(join(tmpdir(), "remote-agent-acpx-tree-"));
+  const pidFile = join(root, "pids.json");
+  const runtime = createAcpRuntime({
     cwd: root,
-    mcpServers: [],
-    permissionMode: "approve-all",
-    nonInteractivePermissions: "fail",
-    sessionOptions: { env: {
+    sessionStore: createRuntimeStore({ stateDir: join(root, "acpx") }),
+    agentRegistry: createAgentRegistry({ overrides: {
+      fixture: [process.execPath, join(import.meta.dirname, "fixtures/acp-orphan-agent.mjs")]
+    } }),
+    agentProcessEnv: {
       ACP_TEST_PID_FILE: pidFile,
       ...(mode === undefined ? {} : { ACP_TEST_MODE: mode })
-    } }
+    },
+    permissionMode: "approve-all",
+    nonInteractivePermissions: "fail"
   });
+  const pids = async (): Promise<{ agent: number; descendant: number }> =>
+    JSON.parse(await readFile(pidFile, "utf8"));
+  return {
+    runtime,
+    ensure: () => runtime.ensureSession({
+      sessionKey: "cleanup-test",
+      agent: "fixture",
+      mode: "persistent",
+      cwd: root,
+      ...(mode === "crash-during-load" || mode === "crash-during-resume"
+        ? { resumeSessionId: "test-session" }
+        : {})
+    }),
+    assertStopped: async () => {
+      const { agent, descendant } = await pids();
+      await vi.waitFor(() => {
+        expect(processExists(agent)).toBe(false);
+        expect(processExists(descendant)).toBe(false);
+      }, { timeout: 4_000, interval: 25 });
+    },
+    cleanup: async () => {
+      await runtime.shutdown().catch(() => undefined);
+      const remaining = await pids().catch(() => undefined);
+      for (const pid of remaining === undefined ? [] : [remaining.agent, remaining.descendant]) {
+        if (processExists(pid)) {
+          try { process.kill(pid, "SIGKILL"); } catch {}
+        }
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  };
 };
 
-const loadAcpClient = async (): Promise<AcpClientConstructor> => {
-  const bundle = join(
-    process.cwd(),
-    "node_modules/acpx/dist/live-checkpoint-Gw2oGjhe.js"
-  );
-  const module = await import(pathToFileURL(bundle).href) as { D: AcpClientConstructor };
-  return module.D;
-};
+const processTest = it.runIf(process.env.REMOTE_AGENT_ACPX_PROCESS_TEST === "1");
 
-it.runIf(process.env.REMOTE_AGENT_ACPX_PROCESS_TEST === "1")(
-  "关闭 ACP 客户端时回收已经脱离父进程组的后代进程",
-  async () => {
-    const root = await mkdtemp(join(tmpdir(), "remote-agent-acpx-tree-"));
-    const pidFile = join(root, "pids.json");
-    const AcpClient = await loadAcpClient();
-    const client = createClient(AcpClient, root, pidFile);
-    let descendantPid: number | undefined;
-
+processTest.each(["close", "shutdown"] as const)(
+  "%s 回收 ACP Runtime 及已经脱离父进程组的后代进程",
+  async (operation) => {
+    const fixture = await createFixture();
     try {
-      await client.start();
-      await vi.waitFor(async () => {
-        const pids = JSON.parse(await readFile(pidFile, "utf8")) as { descendant: number };
-        descendantPid = pids.descendant;
-        expect(processExists(descendantPid)).toBe(true);
-      });
-
-      await client.close();
-      await waitForProcessExit(descendantPid!);
-
-      expect(processExists(descendantPid!)).toBe(false);
+      const handle = await fixture.ensure();
+      if (operation === "close") await fixture.runtime.close({ handle, reason: "test" });
+      else await fixture.runtime.shutdown();
+      await fixture.assertStopped();
     } finally {
-      await client.close().catch(() => undefined);
-      if (descendantPid !== undefined && processExists(descendantPid)) {
-        try { process.kill(descendantPid, "SIGKILL"); } catch {}
-      }
-      await rm(root, { recursive: true, force: true });
+      await fixture.cleanup();
     }
   },
   15_000
 );
 
-it.runIf(process.env.REMOTE_AGENT_ACPX_PROCESS_TEST === "1")(
-  "ACP 初始化失败时回收已经脱离父进程组的后代进程",
-  async () => {
-    const root = await mkdtemp(join(tmpdir(), "remote-agent-acpx-init-fail-"));
-    const pidFile = join(root, "pids.json");
-    const AcpClient = await loadAcpClient();
-    const client = createClient(AcpClient, root, pidFile, "fail-initialize");
-    let descendantPid: number | undefined;
-
+processTest.each([
+  ["初始化", "fail-initialize"],
+  ["创建 Session", "crash-during-session"],
+  ["加载 Session", "crash-during-load"],
+  ["恢复 Session", "crash-during-resume"]
+] as const)(
+  "%s 完成前桥接进程崩溃时回收后代进程",
+  async (_phase, mode) => {
+    const fixture = await createFixture(mode);
     try {
-      await expect(client.start()).rejects.toThrow();
-      const pids = JSON.parse(await readFile(pidFile, "utf8")) as { descendant: number };
-      descendantPid = pids.descendant;
-      await waitForProcessExit(descendantPid);
-
-      expect(processExists(descendantPid)).toBe(false);
+      await expect(fixture.ensure()).rejects.toThrow();
+      await fixture.assertStopped();
     } finally {
-      await client.close().catch(() => undefined);
-      if (descendantPid !== undefined && processExists(descendantPid)) {
-        try { process.kill(descendantPid, "SIGKILL"); } catch {}
-      }
-      await rm(root, { recursive: true, force: true });
+      await fixture.cleanup();
     }
   },
   15_000
 );
 
-it.runIf(process.env.REMOTE_AGENT_ACPX_PROCESS_TEST === "1")(
-  "ACP 运行中异常退出时立即回收已经脱离父进程组的后代进程",
-  async () => {
-    const root = await mkdtemp(join(tmpdir(), "remote-agent-acpx-runtime-fail-"));
-    const pidFile = join(root, "pids.json");
-    const AcpClient = await loadAcpClient();
-    const client = createClient(AcpClient, root, pidFile, "crash-after-session");
-    let descendantPid: number | undefined;
-
-    try {
-      await client.start();
-      await client.createSession(root);
-      const pids = JSON.parse(await readFile(pidFile, "utf8")) as { descendant: number };
-      descendantPid = pids.descendant;
-      await waitForProcessExit(descendantPid);
-
-      expect(processExists(descendantPid)).toBe(false);
-    } finally {
-      await client.close().catch(() => undefined);
-      if (descendantPid !== undefined && processExists(descendantPid)) {
-        try { process.kill(descendantPid, "SIGKILL"); } catch {}
-      }
-      await rm(root, { recursive: true, force: true });
-    }
-  },
-  15_000
-);
+processTest("ACP 运行中异常退出时立即回收后代进程", async () => {
+  const fixture = await createFixture("crash-after-session");
+  try {
+    await fixture.ensure();
+    await fixture.assertStopped();
+  } finally {
+    await fixture.cleanup();
+  }
+}, 15_000);

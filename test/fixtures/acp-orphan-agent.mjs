@@ -15,7 +15,7 @@ const startDescendant = async () => {
   descendant.unref();
   await writeFile(pidFile, JSON.stringify({ agent: process.pid, descendant: descendant.pid }));
 };
-if (mode !== "crash-after-session") await startDescendant();
+if (mode === undefined || mode === "fail-initialize") await startDescendant();
 
 let buffer = "";
 process.stdin.setEncoding("utf8");
@@ -28,14 +28,18 @@ process.stdin.on("data", async (chunk) => {
     buffer = buffer.slice(newline + 1);
     if (line.length === 0) continue;
     const request = JSON.parse(line);
-    if (request.method === "session/new") {
+    if (["session/new", "session/load", "session/resume"].includes(request.method)) {
       await startDescendant();
+      if (mode?.startsWith("crash-during-")) {
+        setTimeout(() => process.exit(1), 250);
+        continue;
+      }
       process.stdout.write(`${JSON.stringify({
         jsonrpc: "2.0",
         id: request.id,
         result: { sessionId: "test-session" }
       })}\n`);
-      setTimeout(() => process.exit(1), 250);
+      if (mode === "crash-after-session") setTimeout(() => process.exit(1), 250);
       continue;
     }
     if (request.method !== "initialize") continue;
@@ -48,7 +52,10 @@ process.stdin.on("data", async (chunk) => {
       id: request.id,
       result: {
         protocolVersion: request.params.protocolVersion,
-        agentCapabilities: {},
+        agentCapabilities: {
+          loadSession: true,
+          ...(mode === "crash-during-resume" ? { sessionCapabilities: { resume: {} } } : {})
+        },
         authMethods: []
       }
     })}\n`);
