@@ -50,6 +50,61 @@
 
 Provider 继续负责推理、工具使用和原生会话，业务审批、工单状态机与部署规则由调用方维护。代码和运行记录由你管理，调用模型时仍遵循所选 Provider 的认证、计费与数据传输方式。当前面向可信用户的单机部署；Workspace 提供文件副本隔离，**不是容器或安全沙箱**。详见[安全边界](#安全边界)。
 
+## 主要功能
+
+- **异步 Task API**：外部系统通过 HTTP 提交任务，使用幂等键避免重复执行，并可查询、取消或继续多轮 Conversation。
+- **可靠事件出口**：支持增量 Event 查询、可续读 SSE 和签名 Webhook；断线不影响正在执行的 Task。
+- **统一管理 Agent**：集中配置 Provider、Agent 指令、项目环境、Skills 和 MCP。
+- **可复用项目环境**：提前准备一个或多个 Git 仓库及依赖，Session 创建时无需重新安装。
+- **隔离 Workspace**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot，为每个 Session 快速创建写时复制环境。
+- **多轮 Agent 对话**：同一 Session 可以连续执行多个 Run，并在 Provider 支持时续接 ACP Session。
+- **完整执行记录**：在 SQLite 中保存用户消息、Agent 输出、工具调用、状态、错误和最终结果。
+- **Skills 管理**：发现本机 Skills、上传 ZIP 或添加 Git/marketplace 来源，预览版本变化并按 Agent 更新或回退。
+- **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
+- **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
+- **模型策略**：自动读取 Agent Core 通过 ACP 暴露的模型，可跟随 Core 默认模型、固定模型，或按 UTC 星期和 24 小时时间段为新 Run 选择模型。
+- **运行、存储与并发控制**：在管理台调整 Run 超时、空闲 Session 大文件保留期和三类服务并发，并可为单个 Agent 设置 Run 上限。
+- **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
+- **GitHub / GitLab 事件接入**：原生 Webhook 验证、事件筛选、筛选预览和接收记录；与通用 Task API 共用执行流程。
+- **图片与文件任务**：在管理台上传、拖入或粘贴附件，也可通过 API 提交图文或纯附件消息；内容理解取决于 Provider、模型和工具。
+- **部署初始化与诊断**：`pnpm run init` 生成配置，`pnpm run doctor` 验证原生 Workspace 操作，首次使用由页面引导。
+
+## 执行模型
+
+外部系统接入是项目的主要服务接口：
+
+```text
+外部系统
+   |
+   v
+接入端点（鉴权 / 参数映射 / 幂等）
+   |
+   v
+Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
+   |                         |
+   |                         +-> Skills / 执行器扩展 / MCP / 模型策略
+   |
+   +-> 状态查询 / Event 查询 / SSE / 签名 Webhook
+```
+
+管理人员也可以从 Web 界面直接创建 Session 和 Run：
+
+```text
+项目环境 -> Agent -> Session -> Run -> acpx/ACP -> Provider
+                         |
+                         +-> 消息、工具调用、状态和结果
+```
+
+| 对象 | 作用 |
+| --- | --- |
+| 项目环境 | 保存一个或多个 Git 项目及准备完成的依赖，按版本发布。 |
+| Agent | 绑定 Provider、项目环境、Agent 指令、Skills、执行器扩展、MCP、模型策略和并发策略。 |
+| Session | 一个隔离的 Workspace，也是一段可继续的 Agent 对话。 |
+| Run | Session 中的一次输入和完整执行记录。 |
+| 接入端点 | 其他系统调用服务的认证入口，绑定一个 Agent。 |
+| Conversation | 外部系统的多轮业务会话，内部复用同一个 Session。 |
+| Task | 外部系统提交的一次异步请求，最终对应一个 Run。 |
+
 ## 运行要求
 
 - Node.js 22（`.nvmrc` 是项目已验证版本）
@@ -195,61 +250,6 @@ hermes --version
 ```text
 阅读当前项目，说明目录结构、启动方式和测试命令。先不要修改文件。
 ```
-
-## 主要功能
-
-- **异步 Task API**：外部系统通过 HTTP 提交任务，使用幂等键避免重复执行，并可查询、取消或继续多轮 Conversation。
-- **可靠事件出口**：支持增量 Event 查询、可续读 SSE 和签名 Webhook；断线不影响正在执行的 Task。
-- **统一管理 Agent**：集中配置 Provider、Agent 指令、项目环境、Skills 和 MCP。
-- **可复用项目环境**：提前准备一个或多个 Git 仓库及依赖，Session 创建时无需重新安装。
-- **隔离 Workspace**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot，为每个 Session 快速创建写时复制环境。
-- **多轮 Agent 对话**：同一 Session 可以连续执行多个 Run，并在 Provider 支持时续接 ACP Session。
-- **完整执行记录**：在 SQLite 中保存用户消息、Agent 输出、工具调用、状态、错误和最终结果。
-- **Skills 管理**：发现本机 Skills、上传 ZIP 或添加 Git/marketplace 来源，预览版本变化并按 Agent 更新或回退。
-- **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
-- **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
-- **模型策略**：自动读取 Agent Core 通过 ACP 暴露的模型，可跟随 Core 默认模型、固定模型，或按 UTC 星期和 24 小时时间段为新 Run 选择模型。
-- **运行、存储与并发控制**：在管理台调整 Run 超时、空闲 Session 大文件保留期和三类服务并发，并可为单个 Agent 设置 Run 上限。
-- **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
-- **GitHub / GitLab 事件接入**：原生 Webhook 验证、事件筛选、筛选预览和接收记录；与通用 Task API 共用执行流程。
-- **图片与文件任务**：在管理台上传、拖入或粘贴附件，也可通过 API 提交图文或纯附件消息；内容理解取决于 Provider、模型和工具。
-- **部署初始化与诊断**：`pnpm run init` 生成配置，`pnpm run doctor` 验证原生 Workspace 操作，首次使用由页面引导。
-
-## 执行模型
-
-外部系统接入是项目的主要服务接口：
-
-```text
-外部系统
-   |
-   v
-接入端点（鉴权 / 参数映射 / 幂等）
-   |
-   v
-Task -> Conversation -> Session -> 隔离 Workspace -> acpx/ACP -> Provider
-   |                         |
-   |                         +-> Skills / 执行器扩展 / MCP / 模型策略
-   |
-   +-> 状态查询 / Event 查询 / SSE / 签名 Webhook
-```
-
-管理人员也可以从 Web 界面直接创建 Session 和 Run：
-
-```text
-项目环境 -> Agent -> Session -> Run -> acpx/ACP -> Provider
-                         |
-                         +-> 消息、工具调用、状态和结果
-```
-
-| 对象 | 作用 |
-| --- | --- |
-| 项目环境 | 保存一个或多个 Git 项目及准备完成的依赖，按版本发布。 |
-| Agent | 绑定 Provider、项目环境、Agent 指令、Skills、执行器扩展、MCP、模型策略和并发策略。 |
-| Session | 一个隔离的 Workspace，也是一段可继续的 Agent 对话。 |
-| Run | Session 中的一次输入和完整执行记录。 |
-| 接入端点 | 其他系统调用服务的认证入口，绑定一个 Agent。 |
-| Conversation | 外部系统的多轮业务会话，内部复用同一个 Session。 |
-| Task | 外部系统提交的一次异步请求，最终对应一个 Run。 |
 
 ## Agent 配置与运行策略
 

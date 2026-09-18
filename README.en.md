@@ -50,6 +50,61 @@ Built for developers and teams already using agent CLIs who want to connect them
 
 Providers still own reasoning, tool use, and native sessions; callers own business approvals, ticket state machines, and deployment rules. You manage the code and execution records, while model calls follow your provider's authentication, billing, and data-transfer behavior. The current deployment model is one machine used by trusted users. Workspaces isolate file copies; **they are not containers or security sandboxes**. See the [security boundary](#security-boundary).
 
+## Features
+
+- **Asynchronous Task API:** submit work over HTTP, prevent duplicate execution with idempotency keys, query or cancel tasks, and continue multi-turn conversations.
+- **Reliable event delivery:** consume incremental event history, resumable SSE, or signed Webhooks without tying task execution to a live connection.
+- **Agent management:** configure providers, instructions, project environments, Skills, and MCP in one place.
+- **Reusable project environments:** prepare one or more Git repositories and their dependencies before sessions start.
+- **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
+- **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
+- **Recorded executions:** persist user messages, agent output, tool activity, statuses, errors, and results in SQLite.
+- **Skill management:** discover host Skills, upload ZIPs or add Git/marketplace sources, preview changes, and update or roll back each agent independently.
+- **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
+- **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
+- **Model policies:** discover models advertised by Agent Core over ACP, follow the Core default, pin one model, or select a model for each new run with UTC weekdays and 24-hour windows.
+- **Runtime, storage, and concurrency control:** adjust run timeout, large idle-session storage retention, and three service concurrency limits from the console, with an optional run limit per agent.
+- **Headed browser support:** run agents in a real desktop session without requiring containers.
+- **GitHub / GitLab event ingress:** native webhook verification, filters, filter previews, and receipt history, using the same execution flow as the Task API.
+- **Image and file tasks:** upload, drop, or paste attachments in the console, or submit mixed and attachment-only messages through the API. Interpretation depends on the provider, model, and tools.
+- **Setup and diagnostics:** `pnpm run init` generates configuration, `pnpm run doctor` verifies native workspace operations, and the console guides first use.
+
+## Execution model
+
+The external integration API is the primary service interface:
+
+```text
+External system
+   |
+   v
+Integration endpoint (auth / parameter mapping / idempotency)
+   |
+   v
+Task -> Conversation -> Session -> isolated Workspace -> acpx/ACP -> Provider
+   |                         |
+   |                         +-> Skills / provider extensions / MCP / model policy
+   |
+   +-> status / event history / SSE / signed Webhook
+```
+
+Operators can also create Sessions and Runs directly from the web console:
+
+```text
+Project environment -> Agent -> Session -> Run -> acpx/ACP -> Provider
+                               |
+                               +-> messages, tool activity, status, result
+```
+
+| Object | Purpose |
+| --- | --- |
+| Project environment | A versioned, prepared set of one or more Git repositories. |
+| Agent | A provider, project environment, instructions, Skills, provider extensions, MCP, model policy, and concurrency policy. |
+| Session | An isolated workspace and a continuing agent conversation. |
+| Run | One input and its recorded execution inside a session. |
+| Integration endpoint | An authenticated external entry point bound to one agent. |
+| Conversation | A multi-turn external conversation that reuses one session. |
+| Task | One asynchronous external request that eventually maps to a run. |
+
 ## Requirements
 
 - Node.js 22 (the tested version is pinned in `.nvmrc`)
@@ -195,61 +250,6 @@ Start with a task whose result you can easily check:
 ```text
 Read this project and explain its directory structure, startup steps, and test commands. Do not modify files yet.
 ```
-
-## Features
-
-- **Asynchronous Task API:** submit work over HTTP, prevent duplicate execution with idempotency keys, query or cancel tasks, and continue multi-turn conversations.
-- **Reliable event delivery:** consume incremental event history, resumable SSE, or signed Webhooks without tying task execution to a live connection.
-- **Agent management:** configure providers, instructions, project environments, Skills, and MCP in one place.
-- **Reusable project environments:** prepare one or more Git repositories and their dependencies before sessions start.
-- **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
-- **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
-- **Recorded executions:** persist user messages, agent output, tool activity, statuses, errors, and results in SQLite.
-- **Skill management:** discover host Skills, upload ZIPs or add Git/marketplace sources, preview changes, and update or roll back each agent independently.
-- **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
-- **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
-- **Model policies:** discover models advertised by Agent Core over ACP, follow the Core default, pin one model, or select a model for each new run with UTC weekdays and 24-hour windows.
-- **Runtime, storage, and concurrency control:** adjust run timeout, large idle-session storage retention, and three service concurrency limits from the console, with an optional run limit per agent.
-- **Headed browser support:** run agents in a real desktop session without requiring containers.
-- **GitHub / GitLab event ingress:** native webhook verification, filters, filter previews, and receipt history, using the same execution flow as the Task API.
-- **Image and file tasks:** upload, drop, or paste attachments in the console, or submit mixed and attachment-only messages through the API. Interpretation depends on the provider, model, and tools.
-- **Setup and diagnostics:** `pnpm run init` generates configuration, `pnpm run doctor` verifies native workspace operations, and the console guides first use.
-
-## Execution model
-
-The external integration API is the primary service interface:
-
-```text
-External system
-   |
-   v
-Integration endpoint (auth / parameter mapping / idempotency)
-   |
-   v
-Task -> Conversation -> Session -> isolated Workspace -> acpx/ACP -> Provider
-   |                         |
-   |                         +-> Skills / provider extensions / MCP / model policy
-   |
-   +-> status / event history / SSE / signed Webhook
-```
-
-Operators can also create Sessions and Runs directly from the web console:
-
-```text
-Project environment -> Agent -> Session -> Run -> acpx/ACP -> Provider
-                               |
-                               +-> messages, tool activity, status, result
-```
-
-| Object | Purpose |
-| --- | --- |
-| Project environment | A versioned, prepared set of one or more Git repositories. |
-| Agent | A provider, project environment, instructions, Skills, provider extensions, MCP, model policy, and concurrency policy. |
-| Session | An isolated workspace and a continuing agent conversation. |
-| Run | One input and its recorded execution inside a session. |
-| Integration endpoint | An authenticated external entry point bound to one agent. |
-| Conversation | A multi-turn external conversation that reuses one session. |
-| Task | One asynchronous external request that eventually maps to a run. |
 
 ## Agent configuration and runtime policies
 
