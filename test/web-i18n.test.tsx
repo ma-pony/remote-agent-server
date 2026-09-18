@@ -119,8 +119,8 @@ it("README 默认中文并链接独立英文版", () => {
   const chinese = readFileSync(join(root, "README.md"), "utf8");
   const english = readFileSync(join(root, "README.en.md"), "utf8");
 
-  expect(chinese).toContain("Remote Agent Server 是一个");
+  expect(chinese).toContain("## 安装并启动");
   expect(chinese).toContain("[English](README.en.md)");
-  expect(english).toContain("Remote Agent Server is a self-hosted");
+  expect(english).toContain("## Install and start");
   expect(english).toContain("[简体中文](README.md)");
 });

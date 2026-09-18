@@ -96,8 +96,9 @@ export class WebhookIngress {
       throw new WebhookIngressError("invalid_webhook_request");
     }
     const fingerprint = createHash("sha256").update(message).digest("hex");
-    const requestId = `${receiver.provider}:${event.deliveryId}`;
-    let receipt = this.dependencies.store.getWebhookReceipt(endpoint.id, receiver.provider, event.deliveryId);
+    const deliveryId = event.deliveryId ?? `sha256:${fingerprint}`;
+    const requestId = `${receiver.provider}:${deliveryId}`;
+    let receipt = this.dependencies.store.getWebhookReceipt(endpoint.id, receiver.provider, deliveryId);
     const existing = this.dependencies.store.getTaskByRequestId(endpoint.id, requestId);
     if ((receipt !== undefined && receipt.fingerprint !== fingerprint) || (existing !== undefined && existing.message !== message)) {
       throw new IntegrationCoordinatorError("idempotency_conflict");
@@ -108,7 +109,7 @@ export class WebhookIngress {
       const reason = existing !== undefined ? "filter_matched" : event.ignoreReason === "ping" ? "ping"
         : matched ? "filter_matched" : "filter_not_matched";
       receipt = this.dependencies.store.createWebhookReceipt(endpoint.id, {
-        provider: receiver.provider, deliveryId: event.deliveryId, eventType: event.eventType,
+        provider: receiver.provider, deliveryId, eventType: event.eventType,
         fingerprint, filterVersion: receiver.filterVersion,
         decision: reason === "filter_matched" ? "accepted" : "ignored", reason
       });

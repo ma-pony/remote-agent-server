@@ -210,22 +210,26 @@ describe("Native webhook ingress", () => {
     expect(db.prepare("SELECT count(*) AS count FROM integration_tasks WHERE endpoint_id = ?").get(endpointId)).toEqual({ count: 1 });
   });
 
-  it("任务入库失败后重启仍沿用原筛选决定，成功任务重启重投不重复执行", async () => {
+  it.each([true, false])("任务入库失败后重启仍沿用原筛选决定，成功任务重启重投不重复执行（投递 ID 头：%s）", async (hasDeliveryId) => {
     const context = await setup("gitlab");
     let app = context.app;
     const request = { method: "POST" as const, url: context.url, payload: { object_kind: "merge_request" },
-      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook", "idempotency-key": "recover-admission" } };
+      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook",
+        ...(hasDeliveryId ? { "idempotency-key": "recover-admission" } : {}) } };
     const failingWrite = vi.spyOn(context.integrationStore, "createTaskInTransaction").mockImplementationOnce(() => { throw new Error("injected transaction failure"); });
     const failed = await app.inject(request);
     expect(failed.statusCode).toBe(500);
     failingWrite.mockRestore();
     expect(context.db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 0 });
-    const ignored = await app.inject({ ...request, headers: { ...request.headers, "idempotency-key": "ignore-before-restart" },
-      payload: { object_kind: "merge_request" } });
+    const ignored = await app.inject({ ...request, headers: { ...request.headers,
+      ...(hasDeliveryId ? { "idempotency-key": "ignore-before-restart" } : {}) },
+      payload: { object_kind: "merge_request", object_attributes: { iid: 8 } } });
     expect(ignored.statusCode).toBe(202);
     await app.inject({ method: "PUT", url: context.configUrl, headers: authHeaders(),
       payload: { provider: "gitlab", authMode: "token", enabled: true, filter: { field: "eventType", op: "eq", value: "Push Hook" } } });
-    const excluded = { ...request, headers: { ...request.headers, "idempotency-key": "excluded" } };
+    const excluded = { ...request, headers: { ...request.headers,
+      ...(hasDeliveryId ? { "idempotency-key": "excluded" } : {}) },
+      payload: { object_kind: "merge_request", object_attributes: { iid: 9 } } };
     expect((await app.inject(excluded)).statusCode).toBe(200);
     app = await context.restart();
     const recovered = await app.inject(request);
@@ -421,17 +425,103 @@ describe("Native webhook ingress", () => {
     expect(response.statusCode).toBe(202);
   });
 
-  it.each(["idempotency-key", "x-gitlab-webhook-uuid"])("原生 GitLab Token 和 %s 支持入库去重", async (idHeader) => {
+  it.each(["webhook-id", "idempotency-key", "x-gitlab-webhook-uuid"])("原生 GitLab Token 和 %s 支持入库去重", async (idHeader) => {
     const { app, url, db } = await setup("gitlab");
+    const lowerPriorityHeaders = {
+      ...(idHeader === "webhook-id" ? { "idempotency-key": "secondary-id" } : {}),
+      ...(idHeader !== "x-gitlab-webhook-uuid" ? { "x-gitlab-webhook-uuid": "legacy-id" } : {})
+    };
     const request = { method: "POST" as const, url,
-      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook", [idHeader]: "gitlab-delivery-1" },
+      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook", ...lowerPriorityHeaders, [idHeader]: "gitlab-delivery-1" },
       payload: { object_kind: "merge_request", project: { id: 42, web_url: "https://gitlab.example.com/example/project" },
         object_attributes: { iid: 7, action: "open", title: "检查合并请求" } } };
     const first = await app.inject(request);
     const retry = await app.inject(request);
     expect(first.statusCode).toBe(202);
+    expect(first.json().requestId).toBe("gitlab:gitlab-delivery-1");
     expect(retry.json().taskId).toBe(first.json().taskId);
+    const conflict = await app.inject({ ...request, payload: { ...request.payload,
+      object_attributes: { ...request.payload.object_attributes, action: "update" } } });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error.code).toBe("idempotency_conflict");
     expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 1 });
+  });
+
+  it("旧版 GitLab 无投递 ID 时按事件内容去重，载荷或事件类型改变可创建新任务", async () => {
+    const { app, url, configUrl, db } = await setup("gitlab");
+    const event = { object_kind: "merge_request", project: { id: 42 }, labels: [{ title: "CodeReview" }],
+      object_attributes: { iid: 7, state: "opened", action: "open", author_id: 101 } };
+    const request = { method: "POST" as const, url, payload: JSON.stringify(event),
+      headers: { "content-type": "application/json", "user-agent": "GitLab/13.12.12-ee",
+        "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook" } };
+    const responses = await Promise.all([app.inject(request), app.inject({ ...request, payload: JSON.stringify(event, null, 2) })]);
+    expect(responses.map((response) => response.statusCode)).toEqual([202, 202]);
+    const first = responses[0]!.json();
+    expect(first.requestId).toMatch(/^gitlab:sha256:[a-f0-9]{64}$/);
+    expect(responses[1]!.json().taskId).toBe(first.taskId);
+    await vi.waitFor(() => expect(db.prepare("SELECT status FROM integration_tasks WHERE id = ?").get(first.taskId))
+      .toEqual({ status: "succeeded" }));
+    for (const table of ["integration_tasks", "sessions", "runs", "integration_webhook_receipts"]) {
+      expect(db.prepare(`SELECT count(*) AS count FROM ${table}`).get()).toEqual({ count: 1 });
+    }
+    const history = await app.inject({ method: "GET", url: `${configUrl}/receipts`, headers: authHeaders() });
+    expect(history.json()).toMatchObject([{ deliveryId: first.requestId.slice("gitlab:".length), decision: "accepted", taskId: first.taskId }]);
+    const updated = await app.inject({ ...request, payload: JSON.stringify({ ...event,
+      object_attributes: { ...event.object_attributes, action: "update" } }) });
+    const otherType = await app.inject({ ...request, headers: { ...request.headers, "x-gitlab-event": "Push Hook" } });
+    expect([updated.statusCode, otherType.statusCode]).toEqual([202, 202]);
+    expect(new Set([first.taskId, updated.json().taskId, otherType.json().taskId]).size).toBe(3);
+  });
+
+  it("旧版 GitLab 的标签过滤在改规则和重启后保留决定，标签变化后重新判断", async () => {
+    const context = await setup("gitlab");
+    let app = context.app;
+    const filter = { all: [
+      { field: "payload.labels.*.title", op: "contains", value: "CodeReview" },
+      { field: "payload.labels.*.title", op: "not_contains", value: "Done-Pass" }
+    ] };
+    const configure = (value: unknown) => app.inject({ method: "PUT", url: context.configUrl, headers: authHeaders(),
+      payload: { provider: "gitlab", authMode: "token", enabled: true, filter: value } });
+    expect((await configure(filter)).statusCode).toBe(200);
+    const event = { object_kind: "merge_request", object_attributes: { iid: 7, state: "opened" },
+      labels: [{ title: "CodeReview" }, { title: "Done-Pass" }] };
+    const request = { method: "POST" as const, url: context.url, payload: event,
+      headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook" } };
+    const ignored = await app.inject(request);
+    expect(ignored.statusCode).toBe(200);
+    expect(ignored.json()).toEqual({ status: "ignored", reason: "filter_not_matched" });
+    expect((await configure(null)).statusCode).toBe(200);
+    app = await context.restart();
+    expect((await app.inject(request)).json()).toEqual(ignored.json());
+    expect(context.db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+    expect((await configure(filter)).statusCode).toBe(200);
+    const accepted = await app.inject({ ...request, payload: { ...event, labels: [{ title: "CodeReview" }] } });
+    expect(accepted.statusCode).toBe(202);
+    expect(context.db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 1 });
+    const history = await app.inject({ method: "GET", url: `${context.configUrl}/receipts`, headers: authHeaders() });
+    expect(history.json()).toMatchObject([
+      { decision: "accepted", filterVersion: 4 }, { decision: "ignored", filterVersion: 2 }
+    ]);
+  });
+
+  it("GitLab 无投递 ID 的兼容不放过无效凭证、事件、载荷或显式无效 ID", async () => {
+    const { app, url, db } = await setup("gitlab");
+    const headers = { "content-type": "application/json", "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook" };
+    const send = (overrides: Record<string, string>, body = "{}") => app.inject({ method: "POST", url, payload: body,
+      headers: { ...headers, ...overrides } });
+    expect((await send({ "x-gitlab-token": "wrong-token" })).statusCode).toBe(401);
+    expect((await send({ "x-gitlab-event": "" })).statusCode).toBe(400);
+    for (const body of ["null", "[]", '"text"', "{invalid"]) {
+      expect((await send({}, body)).statusCode).toBe(400);
+    }
+    for (const idHeader of ["webhook-id", "idempotency-key", "x-gitlab-webhook-uuid"]) {
+      for (const value of ["", " ", "a".repeat(513)]) {
+        expect((await send({ [idHeader]: value })).statusCode).toBe(400);
+      }
+    }
+    for (const table of ["integration_tasks", "sessions", "integration_webhook_receipts"]) {
+      expect(db.prepare(`SELECT count(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+    }
   });
 
   it("无效凭证、被篡改请求和错误平台不能创建 Session 或 Task", async () => {
@@ -475,6 +565,8 @@ describe("Native webhook ingress", () => {
     expect((await app.inject({ method: "POST", url, payload: `${payload} `, headers })).statusCode).toBe(401);
     expect((await app.inject({ method: "POST", url, payload,
       headers: { ...headers, "webhook-id": "tampered-id" } })).statusCode).toBe(401);
+    const { "webhook-id": _id, ...withoutId } = headers;
+    expect((await app.inject({ method: "POST", url, payload, headers: withoutId })).statusCode).toBe(401);
     expect((await app.inject({ method: "POST", url, payload,
       headers: { "content-type": "application/json", "x-gitlab-event": "Push Hook",
         "idempotency-key": "downgrade", "x-gitlab-token": signingToken } })).statusCode).toBe(401);
@@ -530,6 +622,8 @@ describe("Native webhook ingress", () => {
       expect((await request(body)).statusCode).toBe(400);
     }
     expect((await request(payload, "push", "")).statusCode).toBe(400);
+    expect((await app.inject({ method: "POST", url, payload,
+      headers: { "content-type": "application/json", "x-github-event": "push", "x-hub-signature-256": signature(payload) } })).statusCode).toBe(400);
     expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 0 });
   });
 

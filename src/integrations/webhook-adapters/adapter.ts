@@ -14,7 +14,8 @@ export class WebhookIngressError extends Error {
 export type WebhookRequest = { headers: IncomingHttpHeaders; body: Buffer };
 export type NormalizedWebhook = {
   eventType: string;
-  deliveryId: string;
+  // Undefined only when the provider protocol permits missing IDs; ingress derives one from content.
+  deliveryId: string | undefined;
   payload: Record<string, unknown>;
   ignoreReason?: string;
 };

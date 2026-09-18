@@ -332,8 +332,9 @@ POST /integration/v1/endpoints/:slug/webhook
 
 - 验证并入库成功返回 `202` 和现有 Task 响应。GitHub `ping` 返回 `200`、`{"status":"ignored","reason":"ping"}`，不创建任务。GitLab 的测试投递也经过筛选，命中时创建任务。
 - `requestId` 自动生成为 `github:<X-GitHub-Delivery>` 或 `gitlab:<投递ID>`。GitLab 按 `webhook-id`、`Idempotency-Key`、`X-Gitlab-Webhook-UUID` 的顺序读取投递 ID。同一端点重投相同 ID、相同输入返回原 Task；输入不同返回 `409 idempotency_conflict`。
+- 旧版 GitLab 的 Token 模式在上述三个 ID 头全部缺失时，自动以平台、事件类型和解析后重新序列化的完整载荷计算 SHA-256，生成 `sha256:<摘要>` 投递 ID，无需自定义请求头。JSON 缩进不影响去重；事件类型或载荷变化会产生新 ID。同一端点内容完全相同的独立事件也会被视为重投，沿用首次筛选决定或返回原 Task。
 - 参数映射的“请求字段”在此入口中表示载荷路径，例如 GitLab 的 `project.id`、`object_attributes.iid`，或 GitHub 的 `repository.full_name`。字符串、数字、布尔值转换成字符串；固定值映射继续适用。缺少必填参数会拒绝入库。
-- 未配置接收器或凭证错误返回 `401 invalid_webhook_credentials`；接收器或端点停用返回 `403 endpoint_disabled`；缺少事件类型、投递 ID 或无效 JSON 对象返回 `400 invalid_webhook_request`。请求体沿用服务默认的 1 MiB 上限，超出返回 `413`。
+- 未配置接收器或凭证错误返回 `401 invalid_webhook_credentials`；接收器或端点停用返回 `403 endpoint_disabled`；缺少事件类型或 GitHub 投递 ID、载荷不是有效 JSON 对象，或 GitLab 已提供的 ID 头均无有效值时，返回 `400 invalid_webhook_request`。GitLab 签名模式仍要求有效的 `webhook-id`，缺失时验证失败返回 `401`。请求体沿用服务默认的 1 MiB 上限，超出返回 `413`。
 - `authMode` 必填：GitHub 使用 `signature`；GitLab 可选择 `signature`（Signing token）或 `token`（Secret token），验证方式由配置决定。签名模式下 GitLab 的 `whsec_` Signing token 按原生标准校验投递 ID、时间戳和原始请求体；接受多个候选签名，时间戳与服务时间相差不得超过 5 分钟。该模式必须带有效签名，不能用明文 Token 代替。Token 模式支持任意合法 Secret token，包括以 `whsec_` 开头的值。
 - Secret 加密保存，读取配置只返回 `secretConfigured`。更新时省略 `secret` 保留原值；切换平台或验证方式必须提供新 Secret。接收 Secret 与外部 Task API 的 Endpoint Token、事件回调签名密钥分别管理。
 
@@ -373,7 +374,7 @@ POST /integration/v1/endpoints/:slug/webhook
 - 规则最多 50 个节点、6 层嵌套，组不能为空；列表最多 100 个同类型标量；字段路径最多 256 字符，比较字符串最多 1024 字符。无效规则返回 `400 invalid_request`，保留原配置。
 - 同平台更新省略 `filter` 保留规则，传 `null` 清除规则；切换平台且省略 `filter` 时清除规则。管理界面切换平台会清除当前筛选草稿，保存前应为新平台重新设置规则。读取配置返回 `filter` 和 `filterVersion`，规则或平台变化时版本递增。旧配置默认不筛选。
 - 未命中返回 `200 {"status":"ignored","reason":"filter_not_matched"}`，不创建 Task、Session 或 Run，也不调用模型。认证失败不写接收记录。
-- 每个已认证且有效的投递保存一次筛选决定。相同平台、端点、投递 ID 的重试沿用首次决定；修改规则不会重新放行已忽略事件。事件内容变化返回 `409 idempotency_conflict`，已接收事件重试返回原任务。认证及启用状态仍在每次请求时检查。
+- 每个已认证且有效的投递保存一次筛选决定。相同平台、端点、投递 ID 的重试沿用首次决定；修改规则不会重新放行已忽略事件。沿用相同 ID 却改变事件内容返回 `409 idempotency_conflict`，已接收事件重试返回原任务。旧版 GitLab 自动生成的 ID 随内容变化，因此标签等载荷字段变化后会重新评估筛选。认证及启用状态仍在每次请求时检查。
 
 **预览筛选**使用当前尚未保存的规则，展示是否命中及逐条条件原因，不验证平台签名、不创建任务、不保存示例载荷。**最近接收记录**按需刷新最近 30 条，展示平台、事件类型、投递 ID、规则版本、筛选决定、时间和关联 Task。筛选通过但入库失败时显示等待平台重试；记录不包含原始载荷或认证信息。已保存的决定保留到端点删除，不随 Session 存储清理删除。
 

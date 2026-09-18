@@ -206,9 +206,12 @@ export const gitlabWebhookAdapter: WebhookAdapter = {
     return signatures.split(/\s+/).some((signature) => constantTimeTokenEqual(expected, signature));
   },
   normalize(request) {
+    const deliveryHeaders = ["webhook-id", "idempotency-key", "x-gitlab-webhook-uuid"];
     return {
       eventType: requiredWebhookHeader(request.headers, "x-gitlab-event"),
-      deliveryId: requiredWebhookHeader(request.headers, "webhook-id", "idempotency-key", "x-gitlab-webhook-uuid"),
+      // Legacy Token-authenticated hooks send none of these headers. Supplied headers must contain a valid ID.
+      deliveryId: deliveryHeaders.some((name) => request.headers[name] !== undefined)
+        ? requiredWebhookHeader(request.headers, ...deliveryHeaders) : undefined,
       payload: webhookPayload(request)
     };
   }

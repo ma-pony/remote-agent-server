@@ -176,7 +176,9 @@ Webhook 投递列表的 `latest` 摘要从当前端点的订阅出发，利用 `
 
 接收顺序是：查找端点和来源配置 → 使用原始请求体验证 GitHub HMAC-SHA256 或校验 GitLab 签名 / Token → 检查启用状态 → 校验事件类型、投递 ID 和 JSON 对象 → 查重 / 评估并保存筛选决定 → 命中时将载荷路径映射成已声明参数 → 调用 `IntegrationCoordinator.submit`。GitHub `ping` 只返回确认。正常事件使用带平台前缀的投递 ID 作为 `requestId`，以事件类型和默认载荷作为消息，复用现有事务入库、幂等锁、Session 创建、队列、事件投影及重启恢复。接收层不另建任务队列；返回 `202` 表示 Task 已持久化。
 
-每个命中规则的新投递对应独立 Task/Session，不推断 PR/MR 会话。重复 ID 携带相同输入复用原 Task，不同输入返回幂等冲突。GitLab 优先使用 `webhook-id`，其次 `Idempotency-Key`，最后 `X-Gitlab-Webhook-UUID`。参数映射只读取载荷自身的点分路径，标量值转换为字符串；必填参数验证继续由现有 Endpoint Manager 负责。
+每个命中规则的新投递对应独立 Task/Session，不推断 PR/MR 会话。重复 ID 携带相同输入复用原 Task，不同输入返回幂等冲突。GitLab 优先使用 `webhook-id`，其次 `Idempotency-Key`，最后 `X-Gitlab-Webhook-UUID`。旧版 GitLab Token 请求在三个头全部缺失时，适配器允许缺省投递 ID；接收层复用已有消息指纹，生成 `sha256:<指纹>`，统一用于接收记录和带平台前缀的 `requestId`。指纹是平台、事件类型和 `JSON.stringify` 完整载荷组成的消息的 SHA-256；忽略 JSON 缩进，但不排序对象字段或数组元素。提供了 ID 头却没有任何有效值时仍拒绝请求，GitHub 和 GitLab 签名模式仍强制要求各自的 ID 头。
+
+生成 ID 的事件重投、并发投递和重启恢复沿用现有持久化筛选决定及 Task 幂等流程。内容变化产生新 ID 并重新筛选；同一端点内容完全相同的独立事件无法与重投区分，会复用原决定或 Task。参数映射只读取载荷自身的点分路径，标量值转换为字符串；必填参数验证继续由现有 Endpoint Manager 负责。
 
 GitLab 配置为 `authMode: signature` 时校验 Signing token（`whsec_` 前缀）：Base64 解码密钥，对 `webhook-id.webhook-timestamp.原始请求体` 计算 HMAC-SHA256，再与 `webhook-signature` 中的候选签名作常量时间比较，并限制时间偏差为 5 分钟。此模式不允许明文 Token 降级；`authMode: token` 明确使用 `X-Gitlab-Token` 校验，Secret 文本不决定认证策略。
 
@@ -191,7 +193,7 @@ GitLab 配置为 `authMode: signature` 时校验 Signing token（`whsec_` 前缀
 ### 6.5 Webhook 扩展边界
 
 - 路由只负责 HTTP 传输、原始字节、管理鉴权、输入校验和错误映射。
-- `webhook-adapters/` 中的 `WebhookAdapter` 负责来源协议：声明支持的验证方式、校验 Secret、验证请求、输出统一的事件类型、投递 ID 和载荷；连接测试可返回忽略原因。适配器不访问数据库、不创建 Session、不启动 Agent。
+- `webhook-adapters/` 中的 `WebhookAdapter` 负责来源协议：声明支持的验证方式、校验 Secret、验证请求、输出统一的事件类型、投递 ID 和载荷；仅来源协议允许时可缺省 ID，由接收层根据内容生成。连接测试可返回忽略原因。适配器不访问数据库、不创建 Session、不启动 Agent。
 - `webhook-filter.ts` 定义受限规则契约和纯函数求值器，前后端共用验证；`all/any` 组合标量比较、存在判断及数组包含 / 不包含判断，缺失和类型错误不会通过负向比较。`not_contains` 要求数组每个元素存在且与比较值同类型，空数组匹配；通配提取中任一元素字段缺失或类型不符时不放行。字段路径只读事件与载荷自有属性，允许一次数组通配。预览与入站使用同一求值器。
 - 适配器目录同时声明字段提示与审核预设，UI 不硬编码平台规则。
 - `WebhookIngress` 负责接收配置、筛选决定、已声明参数提取和调用现有 Coordinator。Task 的事务、幂等、Session、并发、取消和恢复由原有组件统一管理。
