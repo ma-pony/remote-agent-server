@@ -1,7 +1,8 @@
 import { createHmac } from "node:crypto";
 
 import { constantTimeTokenEqual } from "../../auth.js";
-import { requiredWebhookHeader, webhookHeader, webhookPayload, type WebhookAdapter } from "./adapter.js";
+import { requiredWebhookHeader, reviewCoalescingKey, webhookHeader, webhookPayload, webhookRecord, type WebhookAdapter } from "./adapter.js";
+import { githubReviewPresets } from "./review-presets.js";
 
 export const githubWebhookAdapter: WebhookAdapter = {
   definition: {
@@ -66,44 +67,7 @@ export const githubWebhookAdapter: WebhookAdapter = {
         }
       }
     ],
-    filterPresets: [
-      {
-        "id": "code-review",
-        "name": {
-          "zh": "MR / PR 审核事件",
-          "en": "MR / PR review events"
-        },
-        "filter": {
-          "all": [
-            {
-              "field": "eventType",
-              "op": "eq",
-              "value": "pull_request"
-            },
-            {
-              "field": "payload.pull_request.state",
-              "op": "eq",
-              "value": "open"
-            },
-            {
-              "field": "payload.pull_request.draft",
-              "op": "eq",
-              "value": false
-            },
-            {
-              "field": "payload.action",
-              "op": "in",
-              "value": [
-                "opened",
-                "reopened",
-                "synchronize",
-                "ready_for_review"
-              ]
-            }
-          ]
-        }
-      }
-    ],
+    filterPresets: githubReviewPresets,
     secretHint: {
       zh: "在 GitHub Webhook 的 Secret 栏填写相同值；支持 JSON 和表单格式。",
       en: "Enter the same value in GitHub's webhook Secret field. JSON and form payloads are supported."
@@ -117,10 +81,14 @@ export const githubWebhookAdapter: WebhookAdapter = {
   },
   normalize(request) {
     const eventType = requiredWebhookHeader(request.headers, "x-github-event");
+    const payload = webhookPayload(request, true);
+    const repository = webhookRecord(payload.repository);
     return {
       eventType,
       deliveryId: requiredWebhookHeader(request.headers, "x-github-delivery"),
-      payload: webhookPayload(request, true),
+      payload,
+      coalescingKey: eventType === "pull_request"
+        ? reviewCoalescingKey(repository.id, payload.number, repository.html_url) : undefined,
       ...(eventType === "ping" ? { ignoreReason: "ping" } : {})
     };
   }

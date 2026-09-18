@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { migrate } from "../src/db.js";
 import { IntegrationStore } from "../src/integrations/integration-store.js";
+import type { WebhookProviderDefinition } from "../src/integrations/integration-types.js";
 import type { AgentRuntime, RuntimeTurnResult } from "../src/runtime/agent-runtime.js";
 import type { WorkspaceManager } from "../src/workspaces/workspace-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
@@ -108,6 +109,7 @@ const createTestApp = async (
 
 afterEach(async () => {
   await Promise.all(apps.splice(0).map(({ close }) => close()));
+  vi.useRealTimers();
 });
 
 describe("Native webhook ingress", () => {
@@ -166,6 +168,236 @@ describe("Native webhook ingress", () => {
     }
     return { ...context, endpointId: endpoint.id, token, configUrl, url: "/integration/v1/endpoints/native-events/webhook" };
   };
+
+  it.each(["gitlab", "github"] as const)("%s 将标签与新提交合并，静默一分钟后只审核最后载荷且重启不丢失", async (provider) => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(new Date("2026-09-18T00:00:00Z"));
+    const context = await setup(provider);
+    let app = context.app;
+    const configured = await app.inject({ method: "GET", url: context.configUrl, headers: authHeaders() });
+    expect(configured.statusCode).toBe(200);
+    expect(configured.json().debounceSeconds).toBe(60);
+    const event = (revision: string) => provider === "gitlab" ? {
+      object_kind: "merge_request", project: { id: 42, web_url: "https://git.example.com/team/project" },
+      object_attributes: { iid: 7, action: "update", state: "opened", last_commit: { id: revision } },
+      labels: [{ title: "CodeReview" }]
+    } : {
+      action: "synchronize", number: 7, repository: { id: 42, html_url: "https://github.com/team/project" },
+      pull_request: { state: "open", head: { sha: revision }, labels: [{ name: "CodeReview" }] }
+    };
+    const send = (id: string, body: unknown) => {
+      const serialized = JSON.stringify(body);
+      return app.inject({ method: "POST", url: context.url, payload: serialized,
+        headers: { "content-type": "application/json", ...(provider === "gitlab"
+          ? { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook", "idempotency-key": id }
+          : { "x-github-event": "pull_request", "x-github-delivery": id, "x-hub-signature-256": signature(serialized) }) } });
+    };
+    const firstPayload = provider === "gitlab" ? { ...event("a".repeat(40)), changes: { labels: {
+      previous: [], current: [{ title: "CodeReview" }]
+    } } } : { ...event("a".repeat(40)), action: "labeled", label: { name: "CodeReview" } };
+    const first = await send("label", firstPayload);
+    expect(first.statusCode).toBe(202);
+    expect(first.json()).toMatchObject({ status: "pending", scheduledAt: "2026-09-18T00:01:00.000Z" });
+    await vi.advanceTimersByTimeAsync(20_000);
+    const next = await send("commit", event("b".repeat(40)));
+    expect(next.json()).toMatchObject({ status: "pending", batchId: first.json().batchId, scheduledAt: "2026-09-18T00:01:20.000Z" });
+    app = await context.restart();
+    await vi.advanceTimersByTimeAsync(39_000);
+    const replay = await send("label", firstPayload);
+    expect(replay.json().scheduledAt).toBe("2026-09-18T00:01:20.000Z");
+    expect(context.db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+    await vi.advanceTimersByTimeAsync(21_000);
+    await vi.waitFor(() => expect(context.db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 1 }));
+    const task = context.db.prepare("SELECT id, message FROM integration_tasks").get() as { id: number; message: string };
+    expect(task.message).toContain("b".repeat(40));
+    expect(task.message).not.toContain("a".repeat(40));
+    expect((await send("label", firstPayload)).json().taskId).toBe(task.id);
+    expect((await send("commit", event("c".repeat(40)))).statusCode).toBe(409);
+    const receipts = (await app.inject({ url: `${context.configUrl}/receipts`, headers: authHeaders() })).json();
+    expect(receipts).toHaveLength(2);
+    expect(receipts.map((item: { taskId: number }) => item.taskId)).toEqual([task.id, task.id]);
+    expect(context.db.prepare("SELECT encrypted_input FROM integration_webhook_batches").get()).toEqual({ encrypted_input: null });
+    await vi.waitFor(() => expect(context.db.prepare("SELECT count(*) AS count FROM integration_tasks WHERE status = 'succeeded'").get()).toEqual({ count: 1 }));
+    const later = await send("later-commit", event("c".repeat(40)));
+    expect(later.json().batchId).not.toBe(first.json().batchId);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.waitFor(() => expect(context.db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: 2 }));
+    await vi.waitFor(() => expect(context.db.prepare("SELECT count(*) AS count FROM integration_tasks WHERE status = 'succeeded'").get()).toEqual({ count: 2 }));
+  });
+
+  describe("持久化事件合并", () => {
+    const prepare = async () => {
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      vi.setSystemTime(new Date("2026-09-18T00:00:00Z"));
+      const context = await setup("gitlab");
+      let app = context.app;
+      const configure = (patch: Record<string, unknown> = {}) => app.inject({ method: "PUT", url: context.configUrl,
+        headers: authHeaders(), payload: { provider: "gitlab", authMode: "token", enabled: true, ...patch } });
+      expect((await configure({ debounceSeconds: 60 })).statusCode).toBe(200);
+      const event = { object_kind: "merge_request", project: { id: 42, web_url: "https://git.example.com/team/project" },
+        object_attributes: { iid: 7, action: "update", state: "opened" }, text: "private event payload" };
+      const send = (id?: string, body: unknown = event) => app.inject({ method: "POST", url: context.url, payload: body as Record<string, unknown>,
+        headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook", ...(id ? { "idempotency-key": id } : {}) } });
+      return { ...context, event, send, configure, currentApp: () => app, restart: async () => { app = await context.restart(); },
+        receipts: () => app.inject({ url: `${context.configUrl}/receipts`, headers: authHeaders() }),
+        taskCount: () => (context.db.prepare("SELECT count(*) AS count FROM integration_tasks").get() as { count: number }).count };
+    };
+
+    it("并发事件只保留一个批次，项目、MR、GitLab 实例和端点之间互不合并", async () => {
+      const c = await prepare();
+      const same = await Promise.all([c.send("one"), c.send("two", { ...c.event, text: "second" }), c.send("one")]);
+      expect(same.map((response) => response.json().batchId)).toEqual([same[0]!.json().batchId, same[0]!.json().batchId, same[0]!.json().batchId]);
+      const others = [
+        { ...c.event, object_attributes: { ...c.event.object_attributes, iid: 8 } },
+        { ...c.event, project: { ...c.event.project, id: 43 } },
+        { ...c.event, project: { ...c.event.project, web_url: "https://other.example.com/team/project" } }
+      ];
+      for (const [index, body] of others.entries()) expect((await c.send(`other-${index}`, body)).json().batchId).not.toBe(same[0]!.json().batchId);
+      const otherEndpoint = (await c.currentApp().inject({ method: "POST", url: "/api/integration-endpoints", headers: authHeaders(),
+        payload: validEndpointInput(c.agentId, "other-receiver") })).json().endpoint;
+      await c.currentApp().inject({ method: "PUT", url: `/api/integration-endpoints/${otherEndpoint.id}/webhook-receiver`, headers: authHeaders(),
+        payload: { provider: "gitlab", authMode: "token", enabled: true, secret, debounceSeconds: 60 } });
+      await c.currentApp().inject({ method: "POST", url: "/integration/v1/endpoints/other-receiver/webhook", payload: c.event,
+        headers: { "x-gitlab-token": secret, "x-gitlab-event": "Merge Request Hook", "idempotency-key": "one" } });
+      expect(c.db.prepare("SELECT count(*) AS count FROM integration_webhook_batches").get()).toEqual({ count: 5 });
+      expect(c.taskCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => expect(c.taskCount()).toBe(5));
+    });
+
+    it("未命中事件不覆盖载荷或延后期限，旧版无投递 ID 重试也不延后", async () => {
+      const c = await prepare();
+      await c.configure({ filter: { field: "payload.object_attributes.action", op: "eq", value: "update" } });
+      const first = await c.send();
+      await vi.advanceTimersByTimeAsync(50_000);
+      expect((await c.send()).json().scheduledAt).toBe(first.json().scheduledAt);
+      const ignored = await c.send("metadata", { ...c.event, object_attributes: { ...c.event.object_attributes, action: "close" } });
+      expect(ignored.json()).toEqual({ status: "ignored", reason: "filter_not_matched" });
+      await vi.advanceTimersByTimeAsync(10_000);
+      await vi.waitFor(() => expect(c.taskCount()).toBe(1));
+      const history = await c.receipts();
+      expect(history.json()).toHaveLength(2);
+      expect(history.body).not.toContain(c.event.text);
+      expect(history.body).not.toContain(secret);
+    });
+
+    it("连续新事件最多等待五分钟，不能无限延后审核", async () => {
+      const c = await prepare();
+      const first = await c.send("initial");
+      for (let index = 1; index <= 5; index++) {
+        await vi.advanceTimersByTimeAsync(50_000);
+        const response = await c.send(`update-${index}`, { ...c.event, text: `revision-${index}` });
+        expect(response.json().batchId).toBe(first.json().batchId);
+      }
+      expect(c.taskCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(49_000);
+      expect(c.taskCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(c.taskCount()).toBe(1));
+      expect((c.db.prepare("SELECT message FROM integration_tasks").get() as { message: string }).message).toContain("revision-5");
+    });
+
+    it("任务入库失败自动重试，重启后保留冻结载荷且后续事件另开批次", async () => {
+      const c = await prepare();
+      const first = await c.send("first");
+      expect((c.db.prepare("SELECT encrypted_input AS value FROM integration_webhook_batches").get() as { value: string }).value)
+        .not.toContain(c.event.text);
+      const failure = vi.spyOn(c.integrationStore, "createTaskInTransaction").mockImplementationOnce(() => { throw new Error("private database failure"); });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(async () => expect((await c.receipts()).json()[0]).toMatchObject({ batchStatus: "dispatching", dispatchError: "webhook_dispatch_failed" }));
+      failure.mockRestore();
+      expect(c.taskCount()).toBe(0);
+      const next = await c.send("next", { ...c.event, text: "later event" });
+      expect(next.json().batchId).not.toBe(first.json().batchId);
+      await c.restart();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => expect(c.taskCount()).toBe(1));
+      expect((c.db.prepare("SELECT message FROM integration_tasks").get() as { message: string }).message).toContain(c.event.text);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => expect(c.taskCount()).toBe(2));
+      expect(c.db.prepare("SELECT count(*) AS count FROM integration_webhook_batches WHERE encrypted_input IS NOT NULL").get()).toEqual({ count: 0 });
+    });
+
+    it("任务已提交但批次完成标记失败，恢复后不会再次创建任务或 Session", async () => {
+      const c = await prepare();
+      await c.send("first");
+      const failure = vi.spyOn(c.integrationStore, "completeWebhookBatch").mockImplementationOnce(() => { throw new Error("injected completion failure"); });
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(async () => expect((await c.receipts()).json()[0].dispatchError).toBe("webhook_dispatch_failed"));
+      failure.mockRestore();
+      expect(c.taskCount()).toBe(1);
+      await c.restart();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(async () => expect((await c.receipts()).json()[0].batchStatus).toBe("completed"));
+      expect(c.taskCount()).toBe(1);
+      expect(c.db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 1 });
+    });
+
+    it.each(["receiver", "endpoint"])("停用 %s 后暂停派发，重新启用会继续处理持久化批次", async (target) => {
+      const c = await prepare();
+      const enable = (enabled: boolean) => target === "receiver" ? c.configure({ enabled })
+        : c.currentApp().inject({ method: "PATCH", url: `/api/integration-endpoints/${c.endpointId}`, headers: authHeaders(), payload: { enabled } });
+      await c.send("first");
+      expect((await enable(false)).statusCode).toBe(200);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(c.taskCount()).toBe(0);
+      await c.restart();
+      expect(c.taskCount()).toBe(0);
+      expect((await enable(true)).statusCode).toBe(200);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(c.taskCount()).toBe(1));
+    });
+
+    it("接收记录写入失败时批次变更回滚，删除端点清理等待载荷与记录", async () => {
+      const c = await prepare();
+      const failure = vi.spyOn(c.integrationStore, "createWebhookReceipt").mockImplementationOnce(() => { throw new Error("receipt write failed"); });
+      expect((await c.send("first")).statusCode).toBe(500);
+      expect(c.db.prepare("SELECT count(*) AS count FROM integration_webhook_batches").get()).toEqual({ count: 0 });
+      failure.mockRestore();
+      const first = await c.send("first");
+      const before = c.db.prepare("SELECT encrypted_input, due_at FROM integration_webhook_batches").get();
+      await vi.advanceTimersByTimeAsync(10_000);
+      const updateFailure = vi.spyOn(c.integrationStore, "createWebhookReceipt").mockImplementationOnce(() => { throw new Error("receipt update failed"); });
+      expect((await c.send("second", { ...c.event, text: "new payload" })).statusCode).toBe(500);
+      updateFailure.mockRestore();
+      expect(c.db.prepare("SELECT encrypted_input, due_at FROM integration_webhook_batches").get()).toEqual(before);
+      expect((await c.send("first")).json().batchId).toBe(first.json().batchId);
+      const removed = await c.currentApp().inject({ method: "DELETE", url: `/api/integration-endpoints/${c.endpointId}`, headers: authHeaders() });
+      expect(removed.statusCode).toBe(204);
+      expect(c.db.prepare("SELECT count(*) AS count FROM integration_webhook_batches").get()).toEqual({ count: 0 });
+      expect(c.db.prepare("SELECT count(*) AS count FROM integration_webhook_receipts").get()).toEqual({ count: 0 });
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(c.taskCount()).toBe(0);
+    });
+
+    it("配置校验、遗漏字段保留设置，非 MR 与缺少身份字段的事件直接入库", async () => {
+      const c = await prepare();
+      for (const value of [-1, 301, 1.5, "60", null]) expect((await c.configure({ debounceSeconds: value })).statusCode).toBe(400);
+      expect((await c.configure()).json().debounceSeconds).toBe(60);
+      const nonMr = await c.send("issue", { ...c.event, object_kind: "issue" });
+      expect(nonMr.json().taskId).toEqual(expect.any(Number));
+      const incomplete = await c.send("incomplete", { ...c.event, project: { id: 42 } });
+      expect(incomplete.json().taskId).toEqual(expect.any(Number));
+      await c.configure({ debounceSeconds: 0 });
+      const direct = await c.send("disabled");
+      expect(direct.json().taskId).toEqual(expect.any(Number));
+      expect(c.taskCount()).toBe(3);
+    });
+
+    it("显式关闭和自定义时间不会被省略字段的更新或重复迁移覆盖，切换平台恢复默认一分钟", async () => {
+      const c = await prepare();
+      for (const debounceSeconds of [0, 120]) {
+        expect((await c.configure({ debounceSeconds })).json().debounceSeconds).toBe(debounceSeconds);
+        expect((await c.configure()).json().debounceSeconds).toBe(debounceSeconds);
+        migrate(c.db);
+        expect((await c.currentApp().inject({ url: c.configUrl, headers: authHeaders() })).json().debounceSeconds).toBe(debounceSeconds);
+      }
+      const switched = await c.currentApp().inject({ method: "PUT", url: c.configUrl, headers: authHeaders(),
+        payload: { provider: "github", authMode: "signature", enabled: true, secret } });
+      expect(switched.statusCode).toBe(200);
+      expect(switched.json().debounceSeconds).toBe(60);
+    });
+  });
 
   it("按 MR 作者筛选，忽略结果持久化且改规则后重投不创建任务", async () => {
     const { app, url, configUrl, db, endpointId } = await setup("gitlab");
@@ -366,6 +598,55 @@ describe("Native webhook ingress", () => {
     expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: 2 });
   });
 
+  it.each(["gitlab", "github"] as const)("%s 标签审核预设只为相关事件创建任务，预览与实际接收一致", async (provider) => {
+    const { app, configUrl, url, db } = await setup(provider);
+    const providers = (await app.inject({ url: "/api/integration-webhook-providers", headers: authHeaders() })).json<WebhookProviderDefinition[]>();
+    const filter = providers.find((item) => item.id === provider)!.filterPresets.find((item) => item.id === "label-code-review")!.filter;
+    if (!("all" in filter)) throw new Error("expected all group");
+    filter.all.push({ field: provider === "gitlab" ? "payload.object_attributes.author_id" : "payload.pull_request.user.id", op: "neq", value: 900 });
+    expect((await app.inject({ method: "PUT", url: configUrl, headers: authHeaders(), payload: {
+      provider, authMode: provider === "gitlab" ? "token" : "signature", enabled: true, filter
+    } })).statusCode).toBe(200);
+    const eventType = provider === "gitlab" ? "Merge Request Hook" : "pull_request";
+    const cases = [
+      { name: "description", labels: ["CodeReview"], previous: undefined, action: "edited", matched: false },
+      { name: "assignment", labels: ["CodeReview"], previous: undefined, action: "assigned", matched: false },
+      { name: "unrelated-label", labels: ["CodeReview", "other"], previous: ["CodeReview"], action: "labeled", label: "other", matched: false },
+      { name: "add-review", labels: ["CodeReview"], previous: [], action: "labeled", label: "CodeReview", matched: true },
+      { name: "remove-done", labels: ["CodeReview"], previous: ["CodeReview", "Done-Pass"], action: "unlabeled", label: "Done-Pass", matched: true },
+      { name: "new-code", labels: ["CodeReview"], previous: undefined, action: "synchronize", matched: true },
+      { name: "agent-author", labels: ["CodeReview"], previous: [], action: "labeled", label: "CodeReview", author: 900, matched: false },
+      { name: "blocked-code", labels: ["CodeReview", "Done-Pass"], previous: undefined, action: "synchronize", matched: false }
+    ];
+    let accepted = 0;
+    for (const item of cases) {
+      const titles = (values: string[]) => values.map((title) => ({ title }));
+      const payload = provider === "gitlab" ? { object_kind: "merge_request", labels: titles(item.labels), user: { id: 900 },
+        object_attributes: { state: "opened", work_in_progress: false, action: "update", author_id: item.author ?? 101,
+          ...(item.action === "synchronize" ? { oldrev: "a".repeat(40) } : {}) },
+        changes: item.previous !== undefined ? { labels: { previous: titles(item.previous), current: titles(item.labels) } }
+          : item.name === "assignment" ? { assignees: { previous: [], current: [{ id: 1 }] } }
+            : item.name === "description" ? { description: { previous: "[ ]", current: "[x]" } } : {}
+      } : { action: item.action, label: { name: item.label }, sender: { id: 900 },
+        pull_request: { state: "open", draft: false, user: { id: item.author ?? 101 }, labels: item.labels.map((name) => ({ name })) } };
+      const preview = await app.inject({ method: "POST", url: `${configUrl}/preview`, headers: authHeaders(), payload: { provider, eventType, payload, filter } });
+      expect(preview.json().matched, item.name).toBe(item.matched);
+      const body = JSON.stringify(payload);
+      const deliveryId = `review-preset-${item.name}`;
+      const headers = provider === "gitlab" ? { "x-gitlab-token": secret, "x-gitlab-event": eventType, "idempotency-key": deliveryId }
+        : { "x-github-event": eventType, "x-github-delivery": deliveryId, "x-hub-signature-256": signature(body) };
+      const received = await app.inject({ method: "POST", url, headers: { "content-type": "application/json", ...headers }, payload: body });
+      expect(received.statusCode, item.name).toBe(item.matched ? 202 : 200);
+      if (item.matched) accepted++;
+      else expect(received.json()).toEqual({ status: "ignored", reason: "filter_not_matched" });
+      expect(db.prepare("SELECT count(*) AS count FROM integration_tasks").get()).toEqual({ count: accepted });
+      expect(db.prepare("SELECT count(*) AS count FROM sessions").get()).toEqual({ count: accepted });
+    }
+    const receipts = (await app.inject({ url: `${configUrl}/receipts`, headers: authHeaders() })).json();
+    expect(receipts).toHaveLength(cases.length);
+    expect(receipts.filter((item: { decision: string }) => item.decision === "ignored")).toHaveLength(cases.length - accepted);
+  });
+
   it("拒绝非法规则并保留原配置，省略规则保留而 null 清除", async () => {
     const { app, configUrl } = await setup("gitlab");
     const save = (filter: unknown) => app.inject({ method: "PUT", url: configUrl, headers: authHeaders(),
@@ -425,8 +706,10 @@ describe("Native webhook ingress", () => {
     expect(response.statusCode).toBe(202);
   });
 
-  it.each(["webhook-id", "idempotency-key", "x-gitlab-webhook-uuid"])("原生 GitLab Token 和 %s 支持入库去重", async (idHeader) => {
-    const { app, url, db } = await setup("gitlab");
+  it.each(["webhook-id", "idempotency-key", "x-gitlab-webhook-uuid"])("关闭合并时，原生 GitLab Token 和 %s 支持立即入库去重", async (idHeader) => {
+    const { app, url, configUrl, db } = await setup("gitlab");
+    expect((await app.inject({ method: "PUT", url: configUrl, headers: authHeaders(),
+      payload: { provider: "gitlab", authMode: "token", enabled: true, debounceSeconds: 0 } })).statusCode).toBe(200);
     const lowerPriorityHeaders = {
       ...(idHeader === "webhook-id" ? { "idempotency-key": "secondary-id" } : {}),
       ...(idHeader !== "x-gitlab-webhook-uuid" ? { "x-gitlab-webhook-uuid": "legacy-id" } : {})
@@ -600,11 +883,13 @@ describe("Native webhook ingress", () => {
     const ciphertext = db.prepare("SELECT encrypted_secret FROM integration_webhook_receivers WHERE endpoint_id = ?").get(endpointId);
     db.exec("ALTER TABLE integration_webhook_receivers DROP COLUMN filter_json");
     db.exec("ALTER TABLE integration_webhook_receivers DROP COLUMN filter_version");
+    db.exec("ALTER TABLE integration_webhook_receivers DROP COLUMN debounce_seconds");
+    db.exec("ALTER TABLE integration_webhook_receipts DROP COLUMN batch_id");
     migrate(db);
     migrate(db);
     expect(db.prepare("SELECT encrypted_secret FROM integration_webhook_receivers WHERE endpoint_id = ?").get(endpointId)).toEqual(ciphertext);
     expect((await app.inject({ method: "GET", url: configUrl, headers: authHeaders() })).json())
-      .toEqual({ provider: "gitlab", authMode: "token", enabled: true, secretConfigured: true, filter: null, filterVersion: 1 });
+      .toEqual({ provider: "gitlab", authMode: "token", enabled: true, secretConfigured: true, filter: null, filterVersion: 1, debounceSeconds: 60 });
     expect((await app.inject({ method: "DELETE", url: `/api/integration-endpoints/${endpointId}`, headers: authHeaders() })).statusCode)
       .toBe(204);
     expect(db.prepare("SELECT count(*) AS count FROM integration_webhook_receivers").get()).toEqual({ count: 0 });

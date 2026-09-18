@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 
 import { App } from "../src/web/app.js";
+import { listWebhookProviders } from "../src/integrations/webhook-adapters/index.js";
 
 const now = "2026-08-13T10:00:00.000Z";
 const agent = {
@@ -98,6 +99,7 @@ it("原生 Webhook 页面配置平台 Secret，成功后清空且切换平台需
   }));
   render(<App />);
   const provider = await screen.findByLabelText("来源平台");
+  expect(screen.getByLabelText("MR / PR 事件合并等待（秒）")).toHaveValue(60);
   expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
   expect(screen.getByLabelText("接收地址")).toHaveValue(
     `${window.location.origin}/integration/v1/endpoints/example-ticket/webhook`
@@ -107,11 +109,52 @@ it("原生 Webhook 页面配置平台 Secret，成功后清空且切换平台需
   fireEvent.change(screen.getByLabelText("Webhook Secret"), { target: { value: "native-platform-secret" } });
   fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
   await screen.findByText("接收配置已保存");
-  expect(saved).toEqual({ provider: "gitlab", authMode: "token", enabled: true, secret: "native-platform-secret", filter: null });
+  expect(saved).toEqual({ provider: "gitlab", authMode: "token", enabled: true, secret: "native-platform-secret", filter: null, debounceSeconds: 60 });
   expect(screen.getByLabelText("Webhook Secret")).toHaveValue("");
   expect(screen.getByRole("button", { name: "保存接收配置" })).toBeEnabled();
   fireEvent.change(provider, { target: { value: "github" } });
   expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+});
+
+it("配置一分钟事件合并，校验等待时间并展示等待与重试状态", async () => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/receiver`);
+  let saved: Record<string, unknown> | undefined;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === "/api/integration-webhook-providers") return jsonResponse(listWebhookProviders());
+    if (url.endsWith("/webhook-receiver/receipts")) return jsonResponse([
+      { id: 1, deliveryId: "label", provider: "gitlab", eventType: "Merge Request Hook", decision: "accepted",
+        reason: "filter_matched", filterVersion: 1, batchId: 1, batchStatus: "pending", scheduledAt: now, taskId: null, createdAt: now },
+      { id: 2, deliveryId: "commit", provider: "gitlab", eventType: "Merge Request Hook", decision: "accepted",
+        reason: "filter_matched", filterVersion: 1, batchId: 2, batchStatus: "dispatching", dispatchError: "webhook_dispatch_failed",
+        scheduledAt: now, taskId: null, createdAt: now }
+    ]);
+    if (url.endsWith("/webhook-receiver")) {
+      if (init?.method === "PUT") saved = JSON.parse(String(init.body));
+      return jsonResponse({ provider: "gitlab", authMode: "token", enabled: true, secretConfigured: true,
+        filter: null, filterVersion: 1, debounceSeconds: 0, ...saved });
+    }
+    throw new Error(`Unexpected request ${url}`);
+  }));
+  render(<App />);
+  const windowInput = await screen.findByLabelText("MR / PR 事件合并等待（秒）");
+  expect(windowInput).toHaveValue(0);
+  fireEvent.change(windowInput, { target: { value: "301" } });
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+  expect(windowInput).toHaveAttribute("aria-invalid", "true");
+  fireEvent.change(windowInput, { target: { value: "" } });
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+  fireEvent.change(windowInput, { target: { value: "60" } });
+  fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
+  await screen.findByText("接收配置已保存");
+  expect(saved).toMatchObject({ debounceSeconds: 60 });
+  expect(windowInput).toHaveValue(60);
+  fireEvent.click(screen.getByRole("button", { name: "刷新接收记录" }));
+  expect(await screen.findByText(/等待合并/)).toBeVisible();
+  expect(screen.getByText(/入库失败，自动重试/)).toBeVisible();
+  expect(screen.queryByText("尚未入队，等待平台重试")).not.toBeInTheDocument();
 });
 
 it.each([
@@ -177,6 +220,34 @@ it("原生 Webhook 页面加载失败可重试，保存失败保留输入并显�
   await screen.findByText("配置保存失败");
   expect(secretInput).toHaveValue("replacement-secret");
   expect(screen.getByRole("button", { name: "保存接收配置" })).toBeEnabled();
+});
+
+it.each(["gitlab", "github"] as const)("%s 按标签审核预设可通过现有编辑器完整保存", async (provider) => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/receiver`);
+  const providers = listWebhookProviders();
+  const preset = providers.find((item) => item.id === provider)!.filterPresets.find((item) => item.id === "label-code-review")!;
+  let saved: Record<string, unknown> | null = null;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === "/api/integration-webhook-providers") return jsonResponse(providers);
+    if (url.endsWith("/webhook-receiver")) {
+      if (init?.method === "PUT") saved = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return jsonResponse({ provider, authMode: provider === "gitlab" ? "token" : "signature", enabled: true, secretConfigured: true,
+        filter: saved?.filter ?? null, filterVersion: saved === null ? 1 : 2 });
+    }
+    throw new Error(`Unexpected request ${url}`);
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "应用 按标签审核 MR / PR" }));
+  expect(screen.getByDisplayValue('"CodeReview"')).toBeInTheDocument();
+  expect(screen.getByDisplayValue('"Done-Pass"')).toBeInTheDocument();
+  expect(saved).toBeNull();
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
+  await screen.findByText("接收配置已保存");
+  expect(saved).toMatchObject({ provider, filter: preset.filter });
 });
 
 it("筛选编辑器校验条件、预览草稿并保存，接收记录解释忽略原因", async () => {

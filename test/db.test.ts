@@ -79,6 +79,7 @@ describe("database migration", () => {
       "integration_endpoints",
       "integration_conversations",
       "integration_tasks",
+      "integration_webhook_batches",
       "webhook_subscriptions",
       "webhook_deliveries"
     ];
@@ -119,6 +120,7 @@ describe("database migration", () => {
       "integration_endpoints",
       "integration_task_events",
       "integration_tasks",
+      "integration_webhook_batches",
       "integration_webhook_receipts",
       "integration_webhook_receivers",
       "message_attachments",

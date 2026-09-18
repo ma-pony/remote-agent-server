@@ -68,11 +68,13 @@ export type WebhookReceiver = {
   encryptedSecret: string;
   filter: WebhookFilter | null;
   filterVersion: number;
+  debounceSeconds: number;
 };
 export type WebhookReceiverDetail = Omit<WebhookReceiver, "encryptedSecret"> & { secretConfigured: true };
-export type WebhookReceiverInput = Omit<WebhookReceiver, "encryptedSecret" | "filter" | "filterVersion"> & {
+export type WebhookReceiverInput = Omit<WebhookReceiver, "encryptedSecret" | "filter" | "filterVersion" | "debounceSeconds"> & {
   secret?: string;
   filter?: WebhookFilter | null;
+  debounceSeconds?: number;
 };
 export type WebhookReceipt = {
   id: number;
@@ -84,8 +86,29 @@ export type WebhookReceipt = {
   decision: "accepted" | "ignored";
   reason: "filter_matched" | "filter_not_matched" | "ping";
   createdAt: string;
+  batchId: number | null;
 };
-export type WebhookReceiptDetail = Omit<WebhookReceipt, "fingerprint"> & { taskId: number | null };
+export type WebhookReceiptDetail = Omit<WebhookReceipt, "fingerprint"> & {
+  taskId: number | null;
+  batchStatus: WebhookBatch["status"] | null;
+  scheduledAt: string | null;
+  dispatchError: string | null;
+};
+
+export type WebhookBatch = {
+  id: number;
+  endpointId: number;
+  provider: WebhookProvider;
+  groupKey: string;
+  requestId: string;
+  status: "pending" | "dispatching" | "completed";
+  encryptedInput: string | null;
+  firstReceivedAt: number;
+  dueAt: number;
+  lastError: string | null;
+};
+
+export type PendingWebhookResponse = { status: "pending"; batchId: number; scheduledAt: string };
 
 export type IntegrationConversation = {
   id: number;

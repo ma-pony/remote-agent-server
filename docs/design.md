@@ -174,21 +174,31 @@ Webhook 投递列表的 `latest` 摘要从当前端点的订阅出发，利用 `
 
 `WebhookIngress` 是 GitHub 和 GitLab 共用的接收组件。公开入口 `/integration/v1/endpoints/:slug/webhook` 在独立 Fastify 作用域内保留原始请求体，支持 JSON 和 GitHub 表单 `payload`；其他 API 的 JSON 解析不变。端点的接收器配置保存在 `integration_webhook_receivers`，一端点一条配置，Secret 通过现有 SecretStore 加密，删除端点时级联删除。
 
-接收顺序是：查找端点和来源配置 → 使用原始请求体验证 GitHub HMAC-SHA256 或校验 GitLab 签名 / Token → 检查启用状态 → 校验事件类型、投递 ID 和 JSON 对象 → 查重 / 评估并保存筛选决定 → 命中时将载荷路径映射成已声明参数 → 调用 `IntegrationCoordinator.submit`。GitHub `ping` 只返回确认。正常事件使用带平台前缀的投递 ID 作为 `requestId`，以事件类型和默认载荷作为消息，复用现有事务入库、幂等锁、Session 创建、队列、事件投影及重启恢复。接收层不另建任务队列；返回 `202` 表示 Task 已持久化。
+接收顺序是：查找端点和来源配置 → 使用原始请求体验证 GitHub HMAC-SHA256 或校验 GitLab 签名 / Token → 检查启用状态 → 校验事件类型、投递 ID 和 JSON 对象 → 查重 / 评估并保存筛选决定 → 命中时将载荷路径映射成已声明参数 → 调用 `IntegrationCoordinator.submit`。GitHub `ping` 只返回确认。正常事件使用带平台前缀的投递 ID 作为 `requestId`，以事件类型和默认载荷作为消息，复用现有事务入库、幂等锁、Session 创建、队列、事件投影及重启恢复。可合并的 MR / PR 默认先持久化待派发批次，其他事件或关闭合并时直接创建 Task。`202` 的 `status: pending` 表示事件已保存、尚未创建 Task，其余响应沿用 Task 契约。
 
-每个命中规则的新投递对应独立 Task/Session，不推断 PR/MR 会话。重复 ID 携带相同输入复用原 Task，不同输入返回幂等冲突。GitLab 优先使用 `webhook-id`，其次 `Idempotency-Key`，最后 `X-Gitlab-Webhook-UUID`。旧版 GitLab Token 请求在三个头全部缺失时，适配器允许缺省投递 ID；接收层复用已有消息指纹，生成 `sha256:<指纹>`，统一用于接收记录和带平台前缀的 `requestId`。指纹是平台、事件类型和 `JSON.stringify` 完整载荷组成的消息的 SHA-256；忽略 JSON 缩进，但不排序对象字段或数组元素。提供了 ID 头却没有任何有效值时仍拒绝请求，GitHub 和 GitLab 签名模式仍强制要求各自的 ID 头。
+MR / PR 默认合并，每批对应一个 Task/Session；关闭合并或其他事件类型逐次创建，不推断 PR/MR 会话。重复 ID 携带相同输入复用原 Task，不同输入返回幂等冲突。GitLab 优先使用 `webhook-id`，其次 `Idempotency-Key`，最后 `X-Gitlab-Webhook-UUID`。旧版 GitLab Token 请求在三个头全部缺失时，适配器允许缺省投递 ID；接收层复用已有消息指纹，生成 `sha256:<指纹>`，统一用于接收记录和带平台前缀的 `requestId`。指纹是平台、事件类型和 `JSON.stringify` 完整载荷组成的消息的 SHA-256；忽略 JSON 缩进，但不排序对象字段或数组元素。提供了 ID 头却没有任何有效值时仍拒绝请求，GitHub 和 GitLab 签名模式仍强制要求各自的 ID 头。
 
 生成 ID 的事件重投、并发投递和重启恢复沿用现有持久化筛选决定及 Task 幂等流程。内容变化产生新 ID 并重新筛选；同一端点内容完全相同的独立事件无法与重投区分，会复用原决定或 Task。参数映射只读取载荷自身的点分路径，标量值转换为字符串；必填参数验证继续由现有 Endpoint Manager 负责。
 
 GitLab 配置为 `authMode: signature` 时校验 Signing token（`whsec_` 前缀）：Base64 解码密钥，对 `webhook-id.webhook-timestamp.原始请求体` 计算 HMAC-SHA256，再与 `webhook-signature` 中的候选签名作常量时间比较，并限制时间偏差为 5 分钟。此模式不允许明文 Token 降级；`authMode: token` 明确使用 `X-Gitlab-Token` 校验，Secret 文本不决定认证策略。
 
-管理 API 返回来源、验证方式、启用状态、`secretConfigured`、`filter` 和 `filterVersion`。省略 Secret 的更新保留原密文，切换平台或验证方式需要新 Secret。停用接收器只影响后续入站请求，已入库任务继续由现有调度器负责。原生载荷作为用户输入进入 Task 消息及其既有用户消息事件；鉴权头和接收 Secret 不进入消息或公开事件。
+管理 API 返回来源、验证方式、启用状态、`secretConfigured`、`filter`、`filterVersion` 和 `debounceSeconds`。省略 Secret 的更新保留原密文，切换平台或验证方式需要新 Secret。停用接收器会拒绝后续入站请求并暂停待派发批次，已入库任务继续由现有调度器负责。原生载荷作为用户输入进入 Task 消息及其既有用户消息事件；鉴权头和接收 Secret 不进入消息或公开事件。
 
 筛选配置存于接收器的 `filter_json` / `filter_version`，旧库启动迁移默认不筛选。每个有效投递在 `integration_webhook_receipts` 中以 `(endpoint_id, provider, delivery_id)` 唯一保存首次决定、事件类型、消息 SHA-256、规则版本和时间；不另存原始载荷或秘密。认证、启用检查、解析失败不创建记录。同一 ID 的内容指纹冲突返回 409；忽略结果返回 200，已入库结果返回 202。版本只在平台或规则改变时递增，新的规则只影响新的投递。
 
-决定写入发生在 Session I/O 前，忽略事件至此结束。放行事件通过现有 Coordinator 入库；同进程的重复投递共享正在进行的入队 Promise。两阶段通过现有确定性 `requestId` 恢复：进程在创建 Task 前退出，平台重试沿用已保存决定再次尝试；Task 已提交时退出，重试直接返回该 Task，不重新解析参数或触发运行。接收记录通过该键关联 Task，无需额外回填事务。入库失败保留放行决定，管理页显示尚未入队并等待平台重试；不增加后台入站重试队列。升级前已存在的原生 Task 优先保留其放行事实。
+决定写入发生在 Session I/O 前，忽略事件至此结束。未合并事件通过现有 Coordinator 入库；同进程的重复投递共享正在进行的入队 Promise。两阶段通过现有确定性 `requestId` 恢复：进程在创建 Task 前退出，平台重试沿用已保存决定再次尝试；Task 已提交时退出，重试直接返回该 Task，不重新解析参数或触发运行。接收记录通过该键关联 Task，无需额外回填事务。入库失败保留放行决定，管理页显示尚未入队并等待平台重试。启用合并的批次则由后台自动重试。升级前已存在的原生 Task 优先保留其放行事实。
 
 决定元数据跟随端点删除级联清理，不跟随 Session 存储清理；查询最近 30 条，不返回指纹、原始载荷、规则比较值或认证信息。预览是受管理鉴权保护的纯操作，可检查未保存规则并返回条件路径、匹配状态及缺失 / 类型 / 值不符原因。接收 ID 去重不等于 MR 版本或评论去重，后者属于具体审核流程。
+
+#### MR / PR 静默合并
+
+接收器的 `debounce_seconds` 默认 60，管理接口允许 0–300 秒，设为 0 可关闭。旧库首次增加该列时默认开启 60 秒；重复迁移和同平台省略字段的更新保留已保存值（包括 0），新建或切换平台时省略字段使用 60。适配器为有效 MR / PR 输出可选的 `coalescingKey`：仓库 URL 的 origin、仓库 ID 和 MR / PR 编号；GitLab 读取 `project` / `object_attributes.iid`，GitHub 读取 `repository` / 顶层 `number`。缺少可靠身份时沿用立即入库流程。分组另包含端点和来源，避免跨项目、平台实例或端点混入。
+
+`IntegrationStore.enqueueWebhookBatch` 在同一 SQLite 事务中保存 receipt 的 `batch_id` 和 `integration_webhook_batches` 中加密的消息/映射参数快照。只有新的命中投递可以覆盖 pending 批次的载荷，并把 `due_at` 更新为最后接收时间加静默期，最大不超过首次接收后 5 分钟。重复投递先读取原 receipt，不改变窗口；未命中事件不覆盖、不延期、不取消既有决定。已经到期的批次冻结为 dispatching，后续事件创建新批次；按接收顺序选最后载荷，不推断 SHA 新旧或拉取平台当前状态。
+
+`WebhookBatchDispatcher` 随应用启动和关闭，订阅事务提交后的接收与配置变更通知，只为最近到期的可派发批次设置定时器；空闲或全部暂停时不轮询。每轮按到期索引读取最多 10 个批次，一次只执行一个 drain。派发前重新读取状态、期限和启用配置，先冻结载荷，再复用 Coordinator 创建 Task。批次持久化的随机 `webhook-batch:<UUID>` 请求键保证崩溃后重试幂等；Task 已提交但完成标记失败时，恢复先查找原 Task。成功后置 completed 并清除加密快照；入库失败保留冻结载荷、记录固定错误码并在 30 秒后自动重试。不会自动重跑已经入库但运行失败的 Task。关闭时停止定时器并等待当前 drain 完成。
+
+端点/接收器停用，或当前来源与批次不同时暂停派发，恢复相应配置后自动继续。关闭合并只影响新事件，已接收批次继续处理。批次和 receipt 元数据随端点删除级联清理；完成后的关联元数据不随 Session 存储清理删除，防止旧投递再次创建任务。管理接收记录通过批次请求键关联同一个 Task，返回等待状态、计划时间和固定错误码，不返回加密载荷；预览仍只求值筛选规则。
 
 ### 6.5 Webhook 扩展边界
 
@@ -196,6 +206,7 @@ GitLab 配置为 `authMode: signature` 时校验 Signing token（`whsec_` 前缀
 - `webhook-adapters/` 中的 `WebhookAdapter` 负责来源协议：声明支持的验证方式、校验 Secret、验证请求、输出统一的事件类型、投递 ID 和载荷；仅来源协议允许时可缺省 ID，由接收层根据内容生成。连接测试可返回忽略原因。适配器不访问数据库、不创建 Session、不启动 Agent。
 - `webhook-filter.ts` 定义受限规则契约和纯函数求值器，前后端共用验证；`all/any` 组合标量比较、存在判断及数组包含 / 不包含判断，缺失和类型错误不会通过负向比较。`not_contains` 要求数组每个元素存在且与比较值同类型，空数组匹配；通配提取中任一元素字段缺失或类型不符时不放行。字段路径只读事件与载荷自有属性，允许一次数组通配。预览与入站使用同一求值器。
 - 适配器目录同时声明字段提示与审核预设，UI 不硬编码平台规则。
+- `review-presets.ts` 复用平台的开启、草稿和代码变化条件，提供普通审核预设与显式标签审核预设。后者要求当前有 `CodeReview` 且无 `Done-Pass`，并接收从不满足标签条件到满足条件的更新：GitLab 比较 `changes.labels.previous` 与当前标签，GitHub 检查变动动作和标签名。未知历史标签不视作新增标签。预设仅生成现有 DSL，不扩展接收器持久化或任务调度；已有规则需显式重新选择并保存，当前仍不满足标签条件的事件不会放行。
 - `WebhookIngress` 负责接收配置、筛选决定、已声明参数提取和调用现有 Coordinator。Task 的事务、幂等、Session、并发、取消和恢复由原有组件统一管理。
 
 新增来源时实现适配器、加入静态注册表和来源类型，并添加原生请求测试。管理平台目录从注册表生成，前后端共用接收配置类型；数据库的来源与验证方式列保存字符串，具体支持范围由适配器校验，因此新增来源不需要新增业务表或修改 Task 调度。这里不提供运行时加载插件、自定义脚本或通用工作流引擎。

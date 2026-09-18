@@ -6,7 +6,7 @@ import { IntegrationCoordinatorError, type IntegrationCoordinator } from "./inte
 import { IntegrationEndpointManagerError } from "./integration-endpoint-manager.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type {
-  ExternalIntegrationTask, IntegrationEndpoint, WebhookReceiverDetail, WebhookReceiverInput
+  ExternalIntegrationTask, IntegrationEndpoint, PendingWebhookResponse, WebhookReceipt, WebhookReceiverDetail, WebhookReceiverInput
 } from "./integration-types.js";
 
 import { WebhookIngressError } from "./webhook-adapters/adapter.js";
@@ -37,7 +37,7 @@ export class WebhookIngress {
     const receiver = this.dependencies.store.getWebhookReceiver(endpointId);
     return receiver === undefined ? null : {
       provider: receiver.provider, authMode: receiver.authMode, enabled: receiver.enabled, secretConfigured: true,
-      filter: receiver.filter, filterVersion: receiver.filterVersion
+      filter: receiver.filter, filterVersion: receiver.filterVersion, debounceSeconds: receiver.debounceSeconds
     };
   }
 
@@ -58,6 +58,7 @@ export class WebhookIngress {
       enabled: input.enabled,
       filter,
       filterVersion: (current?.filterVersion ?? 1) + (filterChanged ? 1 : 0),
+      debounceSeconds: input.debounceSeconds ?? (current?.provider === input.provider ? current.debounceSeconds : 60),
       encryptedSecret: input.secret === undefined ? current!.encryptedSecret : this.dependencies.secrets.encrypt(input.secret)
     });
     return this.get(endpointId)!;
@@ -76,7 +77,7 @@ export class WebhookIngress {
   }
 
   async receive(slug: string, headers: IncomingHttpHeaders, body: Buffer): Promise<
-    { status: "ignored"; reason: string } | ExternalIntegrationTask
+    { status: "ignored"; reason: string } | PendingWebhookResponse | ExternalIntegrationTask
   > {
     const endpoint = this.dependencies.store.getEndpointBySlug(slug);
     const receiver = endpoint === undefined ? undefined : this.dependencies.store.getWebhookReceiver(endpoint.id);
@@ -108,22 +109,32 @@ export class WebhookIngress {
       // Existing Tasks retain their admission even when upgrading from a version without receipts.
       const reason = existing !== undefined ? "filter_matched" : event.ignoreReason === "ping" ? "ping"
         : matched ? "filter_matched" : "filter_not_matched";
-      receipt = this.dependencies.store.createWebhookReceipt(endpoint.id, {
+      const receiptInput: Omit<WebhookReceipt, "id" | "createdAt" | "batchId"> = {
         provider: receiver.provider, deliveryId, eventType: event.eventType,
         fingerprint, filterVersion: receiver.filterVersion,
         decision: reason === "filter_matched" ? "accepted" : "ignored", reason
-      });
+      };
+      if (existing === undefined && reason === "filter_matched" && receiver.debounceSeconds > 0 && event.coalescingKey !== undefined) {
+        receipt = this.dependencies.store.enqueueWebhookBatch(endpoint.id, receiptInput, {
+          groupKey: event.coalescingKey, debounceSeconds: receiver.debounceSeconds, now: Date.now(),
+          encryptedInput: this.dependencies.secrets.encrypt(JSON.stringify({ message, parameters: this.parameters(endpoint, event.payload) }))
+        });
+      } else {
+        receipt = this.dependencies.store.createWebhookReceipt(endpoint.id, receiptInput);
+      }
     }
     if (receipt.decision === "ignored") return { status: "ignored", reason: receipt.reason };
+    if (receipt.batchId !== null) {
+      const batch = this.dependencies.store.getWebhookBatch(receipt.batchId)!;
+      const task = this.dependencies.store.getTaskByRequestId(endpoint.id, batch.requestId);
+      if (task !== undefined) return this.dependencies.coordinator.toExternalTask(task);
+      return { status: "pending", batchId: batch.id, scheduledAt: new Date(batch.dueAt).toISOString() };
+    }
     if (existing !== undefined) return this.dependencies.coordinator.toExternalTask(existing);
     const pending = this.admissions.get(receipt.id);
     if (pending !== undefined) return pending;
 
-    const parameters = Object.fromEntries(endpoint.parameterMappings.flatMap((mapping) => {
-      if (mapping.source !== "request") return [];
-      const value = payloadValue(event.payload, mapping.requestKey);
-      return value === undefined ? [] : [[mapping.requestKey, value]];
-    }));
+    const parameters = this.parameters(endpoint, event.payload);
     // The durable decision precedes admission. After a crash, look up the Task by its stable
     // requestId; if it does not exist, retry admission using the original decision.
     const admission = this.dependencies.coordinator.submit(endpoint, { requestId, message, parameters })
@@ -134,6 +145,14 @@ export class WebhookIngress {
     } finally {
       this.admissions.delete(receipt.id);
     }
+  }
+
+  private parameters(endpoint: IntegrationEndpoint, payload: Record<string, unknown>): Record<string, string> {
+    return Object.fromEntries(endpoint.parameterMappings.flatMap((mapping) => {
+      if (mapping.source !== "request") return [];
+      const value = payloadValue(payload, mapping.requestKey);
+      return value === undefined ? [] : [[mapping.requestKey, value]];
+    }));
   }
 
   private requireEndpoint(endpointId: number): IntegrationEndpoint {

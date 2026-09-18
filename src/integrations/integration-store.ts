@@ -1,6 +1,6 @@
 import { AttachmentStore } from "../attachments/attachment-store.js";
 import type { AttachmentInput } from "../attachments/attachment-types.js";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import type Database from "better-sqlite3";
 
@@ -20,6 +20,9 @@ import type {
   WebhookReceiptDetail,
   WebhookSubscription
 } from "./integration-types.js";
+import type { WebhookBatch } from "./integration-types.js";
+
+type NewWebhookReceipt = Omit<WebhookReceipt, "id" | "createdAt" | "batchId"> & { batchId?: number };
 
 type EndpointRow = {
   id: number;
@@ -338,6 +341,7 @@ export class IntegrationStore {
   private toTask = (row: TaskRow): IntegrationTask => ({ ...toTask(row), ...this.attachments.projection({ taskId: row.id }) });
   private readonly taskListeners = new Map<number, Set<() => unknown>>();
   private readonly deliveryListeners = new Set<() => unknown>();
+  private readonly webhookBatchListeners = new Set<() => void>();
 
   constructor(private readonly dependencies: { db: Database.Database }) {
     this.attachments = new AttachmentStore(dependencies.db);
@@ -350,7 +354,7 @@ export class IntegrationStore {
   getWebhookReceiver(endpointId: number): WebhookReceiver | undefined {
     const row = this.db.prepare(`
       SELECT provider, auth_mode AS authMode, enabled, encrypted_secret AS encryptedSecret,
-        filter_json AS filterJson, filter_version AS filterVersion
+        filter_json AS filterJson, filter_version AS filterVersion, debounce_seconds AS debounceSeconds
       FROM integration_webhook_receivers WHERE endpoint_id = ?
     `).get(endpointId) as (Omit<WebhookReceiver, "enabled" | "filter"> & { enabled: 0 | 1; filterJson: string | null }) | undefined;
     if (row === undefined) return undefined;
@@ -360,41 +364,127 @@ export class IntegrationStore {
 
   setWebhookReceiver(endpointId: number, receiver: WebhookReceiver): void {
     this.db.prepare(`
-      INSERT INTO integration_webhook_receivers (endpoint_id, provider, auth_mode, enabled, encrypted_secret, filter_json, filter_version)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO integration_webhook_receivers (endpoint_id, provider, auth_mode, enabled, encrypted_secret, filter_json, filter_version, debounce_seconds)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(endpoint_id) DO UPDATE SET
         provider = excluded.provider, auth_mode = excluded.auth_mode,
         enabled = excluded.enabled, encrypted_secret = excluded.encrypted_secret,
-        filter_json = excluded.filter_json, filter_version = excluded.filter_version
+        filter_json = excluded.filter_json, filter_version = excluded.filter_version, debounce_seconds = excluded.debounce_seconds
     `).run(endpointId, receiver.provider, receiver.authMode, receiver.enabled ? 1 : 0, receiver.encryptedSecret,
-      receiver.filter === null ? null : JSON.stringify(receiver.filter), receiver.filterVersion);
+      receiver.filter === null ? null : JSON.stringify(receiver.filter), receiver.filterVersion, receiver.debounceSeconds);
+    this.notifyWebhookBatchesChanged();
   }
 
   getWebhookReceipt(endpointId: number, provider: string, deliveryId: string): WebhookReceipt | undefined {
     return this.db.prepare(`SELECT id, provider, delivery_id AS deliveryId, event_type AS eventType,
-      fingerprint, filter_version AS filterVersion, decision, reason, created_at AS createdAt
+      fingerprint, filter_version AS filterVersion, decision, reason, created_at AS createdAt, batch_id AS batchId
       FROM integration_webhook_receipts WHERE endpoint_id = ? AND provider = ? AND delivery_id = ?
     `).get(endpointId, provider, deliveryId) as WebhookReceipt | undefined;
   }
 
-  createWebhookReceipt(endpointId: number, receipt: Omit<WebhookReceipt, "id" | "createdAt">): WebhookReceipt {
+  createWebhookReceipt(endpointId: number, receipt: NewWebhookReceipt): WebhookReceipt {
     this.db.prepare(`INSERT INTO integration_webhook_receipts
-      (endpoint_id, provider, delivery_id, event_type, fingerprint, filter_version, decision, reason, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (endpoint_id, provider, delivery_id, event_type, fingerprint, filter_version, decision, reason, created_at, batch_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(endpointId, receipt.provider, receipt.deliveryId, receipt.eventType, receipt.fingerprint,
-      receipt.filterVersion, receipt.decision, receipt.reason, new Date().toISOString());
+      receipt.filterVersion, receipt.decision, receipt.reason, new Date().toISOString(), receipt.batchId ?? null);
     return this.getWebhookReceipt(endpointId, receipt.provider, receipt.deliveryId)!;
   }
 
   listWebhookReceipts(endpointId: number): WebhookReceiptDetail[] {
-    return this.db.prepare(`SELECT receipt.id, receipt.provider, receipt.delivery_id AS deliveryId,
+    return (this.db.prepare(`SELECT receipt.id, receipt.provider, receipt.delivery_id AS deliveryId,
       receipt.event_type AS eventType, receipt.filter_version AS filterVersion, receipt.decision,
-      receipt.reason, receipt.created_at AS createdAt, task.id AS taskId
+      receipt.reason, receipt.created_at AS createdAt, task.id AS taskId, receipt.batch_id AS batchId,
+      batch.status AS batchStatus, batch.due_at AS dueAt, batch.last_error AS dispatchError
       FROM integration_webhook_receipts receipt
+      LEFT JOIN integration_webhook_batches batch ON batch.id = receipt.batch_id
       LEFT JOIN integration_tasks task ON task.endpoint_id = receipt.endpoint_id
-        AND task.request_id = receipt.provider || ':' || receipt.delivery_id
+        AND task.request_id = COALESCE(batch.request_id, receipt.provider || ':' || receipt.delivery_id)
       WHERE receipt.endpoint_id = ? ORDER BY receipt.id DESC LIMIT 30
-    `).all(endpointId) as WebhookReceiptDetail[];
+    `).all(endpointId) as (Omit<WebhookReceiptDetail, "scheduledAt"> & { dueAt: number | null })[])
+      .map(({ dueAt, ...receipt }) => ({ ...receipt, scheduledAt: dueAt === null ? null : new Date(dueAt).toISOString() }));
+  }
+
+  /** Queue payload and receipt atomically, so an acknowledged delivery survives a restart. */
+  enqueueWebhookBatch(endpointId: number, receipt: NewWebhookReceipt, input: {
+    groupKey: string; encryptedInput: string; debounceSeconds: number; now: number;
+  }): WebhookReceipt {
+    const saved = this.db.transaction(() => {
+      let pending = this.db.prepare(`SELECT id, due_at AS dueAt, first_received_at AS firstReceivedAt
+        FROM integration_webhook_batches WHERE endpoint_id = ? AND provider = ? AND group_key = ? AND status = 'pending'
+      `).get(endpointId, receipt.provider, input.groupKey) as Pick<WebhookBatch, "id" | "dueAt" | "firstReceivedAt"> | undefined;
+      // A deadline that already elapsed closes the batch even if dispatch is temporarily busy.
+      if (pending !== undefined && pending.dueAt <= input.now) {
+        this.db.prepare("UPDATE integration_webhook_batches SET status = 'dispatching' WHERE id = ?").run(pending.id);
+        pending = undefined;
+      }
+      const dueAt = Math.min(input.now + input.debounceSeconds * 1_000, (pending?.firstReceivedAt ?? input.now) + 300_000);
+      let batchId: number;
+      if (pending === undefined) {
+        batchId = insertedId(this.db.prepare(`INSERT INTO integration_webhook_batches
+          (endpoint_id, provider, group_key, request_id, status, encrypted_input, first_received_at, due_at)
+          VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+        `).run(endpointId, receipt.provider, input.groupKey, `webhook-batch:${randomUUID()}`, input.encryptedInput, input.now, dueAt));
+      } else {
+        batchId = pending.id;
+        this.db.prepare("UPDATE integration_webhook_batches SET encrypted_input = ?, due_at = ? WHERE id = ?")
+          .run(input.encryptedInput, dueAt, batchId);
+      }
+      return this.createWebhookReceipt(endpointId, { ...receipt, batchId });
+    })();
+    this.notifyWebhookBatchesChanged();
+    return saved;
+  }
+
+  getWebhookBatch(id: number): WebhookBatch | undefined {
+    return this.db.prepare(`SELECT id, endpoint_id AS endpointId, provider, group_key AS groupKey,
+      request_id AS requestId, status, encrypted_input AS encryptedInput,
+      first_received_at AS firstReceivedAt, due_at AS dueAt, last_error AS lastError
+      FROM integration_webhook_batches WHERE id = ?`).get(id) as WebhookBatch | undefined;
+  }
+
+  listDueWebhookBatchIds(now: number): number[] {
+    return (this.db.prepare(`SELECT batch.id FROM integration_webhook_batches batch
+      JOIN integration_endpoints endpoint ON endpoint.id = batch.endpoint_id AND endpoint.enabled = 1
+      JOIN integration_webhook_receivers receiver ON receiver.endpoint_id = batch.endpoint_id
+        AND receiver.enabled = 1 AND receiver.provider = batch.provider
+      WHERE batch.status != 'completed' AND batch.due_at <= ? ORDER BY batch.due_at, batch.id LIMIT 10
+    `).all(now) as { id: number }[]).map(({ id }) => id);
+  }
+
+  nextWebhookBatchDueAt(): number | undefined {
+    const row = this.db.prepare(`SELECT batch.due_at AS dueAt FROM integration_webhook_batches batch
+      JOIN integration_endpoints endpoint ON endpoint.id = batch.endpoint_id AND endpoint.enabled = 1
+      JOIN integration_webhook_receivers receiver ON receiver.endpoint_id = batch.endpoint_id
+        AND receiver.enabled = 1 AND receiver.provider = batch.provider
+      WHERE batch.status != 'completed' ORDER BY batch.due_at, batch.id LIMIT 1
+    `).get() as { dueAt: number } | undefined;
+    return row?.dueAt;
+  }
+
+  subscribeWebhookBatches(listener: () => void): () => void {
+    this.webhookBatchListeners.add(listener);
+    return () => { this.webhookBatchListeners.delete(listener); };
+  }
+
+  private notifyWebhookBatchesChanged(): void {
+    for (const listener of this.webhookBatchListeners) {
+      try { listener(); } catch { /* Observers cannot invalidate committed admission. */ }
+    }
+  }
+
+  claimWebhookBatch(id: number): WebhookBatch | undefined {
+    this.db.prepare("UPDATE integration_webhook_batches SET status = 'dispatching' WHERE id = ? AND status = 'pending'").run(id);
+    return this.getWebhookBatch(id);
+  }
+
+  completeWebhookBatch(id: number): void {
+    this.db.prepare("UPDATE integration_webhook_batches SET status = 'completed', encrypted_input = NULL, last_error = NULL WHERE id = ?").run(id);
+  }
+
+  retryWebhookBatch(id: number, dueAt: number): void {
+    this.db.prepare("UPDATE integration_webhook_batches SET due_at = ?, last_error = 'webhook_dispatch_failed' WHERE id = ? AND status = 'dispatching'")
+      .run(dueAt, id);
   }
 
   listEndpoints(): IntegrationEndpoint[] {
@@ -489,7 +579,9 @@ export class IntegrationStore {
   }
 
   updateEndpoint(id: number, input: EndpointPersistenceInput): IntegrationEndpoint | undefined {
-    return this.immediateTransaction(() => this.updateEndpointInTransaction(id, input));
+    const endpoint = this.immediateTransaction(() => this.updateEndpointInTransaction(id, input));
+    this.notifyWebhookBatchesChanged();
+    return endpoint;
   }
 
   updateEndpointInTransaction(id: number, input: EndpointPersistenceInput): IntegrationEndpoint | undefined {
@@ -516,7 +608,9 @@ export class IntegrationStore {
   }
 
   deleteEndpoint(id: number): boolean {
-    return this.immediateTransaction(() => this.deleteEndpointInTransaction(id));
+    const deleted = this.immediateTransaction(() => this.deleteEndpointInTransaction(id));
+    this.notifyWebhookBatchesChanged();
+    return deleted;
   }
 
   deleteEndpointInTransaction(id: number): boolean {

@@ -330,10 +330,10 @@ POST /integration/v1/endpoints/:slug/webhook
 | GitHub | Payload URL and Secret; JSON and form `payload` are supported | HMAC-SHA256 over the original request body, using `X-Hub-Signature-256` |
 | GitLab | URL and generated Signing token (`whsec_` prefix), or Secret token for older versions; keep native JSON | `webhook-signature` HMAC-SHA256, or legacy `X-Gitlab-Token` |
 
-Each endpoint has one source platform. Separate GitHub and GitLab endpoints can share an Agent. Set the business instructions in the endpoint's fixed prompt, for example, “Review this code change and report your findings.” The event type and native JSON payload become the task message and use the existing Task persistence, queue, and execution flow. Each matching new delivery creates an independent Task and Session; PRs, MRs, and branches do not automatically share a Conversation.
+Each endpoint has one source platform. Separate GitHub and GitLab endpoints can share an Agent. Set the business instructions in the endpoint's fixed prompt, for example, “Review this code change and report your findings.” The event type and native JSON payload become the task message and use the existing Task persistence, queue, and execution flow. By default, matching events for the same MR / PR merge into one Task and Session after a 60-second quiet period. Other event types, or events with merging disabled, create tasks separately. PRs, MRs, and branches do not automatically share a Conversation.
 
-- Accepted business events return `202` with the existing Task response. GitHub `ping` returns `200` and `{"status":"ignored","reason":"ping"}` without creating a task. GitLab test deliveries also pass through filtering and create tasks when matched.
-- The generated `requestId` is `github:<X-GitHub-Delivery>` or `gitlab:<delivery ID>`. GitLab delivery headers are checked in order: `webhook-id`, `Idempotency-Key`, then `X-Gitlab-Webhook-UUID`. Repeating an ID with the same input within one endpoint returns the original Task; different input returns `409 idempotency_conflict`.
+- Immediately admitted business events return `202` with the existing Task response. GitHub `ping` returns `200` and `{"status":"ignored","reason":"ping"}` without creating a task. GitLab test deliveries also pass through filtering and create tasks when matched.
+- For unbatched events, the generated `requestId` is `github:<X-GitHub-Delivery>` or `gitlab:<delivery ID>`. GitLab delivery headers are checked in order: `webhook-id`, `Idempotency-Key`, then `X-Gitlab-Webhook-UUID`. Repeating an ID with the same input within one endpoint returns the original Task; different input returns `409 idempotency_conflict`.
 - For older GitLab versions in Token mode, when all three ID headers are absent, the receiver generates a `sha256:<digest>` delivery ID from the provider, event type, and complete parsed and re-serialized payload. No custom headers are needed. JSON indentation does not affect deduplication; changes to the event type or payload produce a new ID. Independent events with identical content within one endpoint are also treated as retries, retaining the first filter decision or returning the original Task.
 - A parameter mapping's request field is a payload path for this entry point, such as GitLab's `project.id` or `object_attributes.iid`, or GitHub's `repository.full_name`. String, number, and boolean values become strings. Fixed mappings still work. Missing required parameters reject task admission.
 - Missing receiver configuration or invalid credentials returns `401 invalid_webhook_credentials`; a disabled receiver or endpoint returns `403 endpoint_disabled`. A missing event type or GitHub delivery ID, an invalid JSON object, or supplied GitLab ID headers with no valid value returns `400 invalid_webhook_request`. GitLab signature mode still requires a valid `webhook-id`; its absence fails authentication with `401`. The default request-body limit remains 1 MiB; larger requests return `413`.
@@ -351,24 +351,38 @@ The management API uses the server `API_TOKEN`. `GET /api/integration-webhook-pr
 }
 ```
 
+#### Merge closely spaced MR / PR events
+
+To avoid two reviews when a review label and a new commit arrive almost together, event merging is enabled by default with a **60-second** quiet period. Adjust **Receive events → MR / PR event debounce (seconds)**, or set **0** to disable. This setting is independent of filtering; keep your existing label, author, and action conditions.
+
+- `debounceSeconds` is an integer from 0–300, defaulting to `60` (enabled). Upgrading a database without this field also sets it to 60. Existing saved values, including an explicit `0` to disable, remain unchanged. Omitting it in a same-provider update preserves the value; omitting it when switching provider resets it to 60.
+- Authentication, delivery deduplication, and filtering happen first. Events are grouped by endpoint, provider, repository origin and ID, and MR / PR number. Each new matching event restarts the quiet period, with a maximum merge wait of five minutes. Retries and filtered events neither replace the payload nor extend the deadline, and do not cancel previously accepted events.
+- Only the last received matching payload and its mapped parameters are retained for one Task / Session when the window closes. This does not compare commit versions, fetch current platform state, or cancel reviews already started. New events after the window closes enter another batch.
+- Only GitLab `Merge Request Hook` / `merge_request` and GitHub `pull_request` events are merged. Other events or events missing a valid repository origin, ID, or MR / PR number still create tasks immediately, avoiding unsafe grouping or dropped events.
+- Waiting deliveries return `202` with `{"status":"pending","batchId":123,"scheduledAt":"2026-09-18T00:01:00.000Z"}` before a Task / Session exists. Redelivery after dispatch returns the batch's Task. Every delivery keeps its receipt, showing waiting or retry status, and links to the shared Task after dispatch.
+- Pending payloads are encrypted at rest and survive restarts. Failed admission retries automatically every 30 seconds with a stable request ID; temporary payloads are cleared after Task persistence. Disabled endpoints/receivers and receivers switched to a different provider pause old batches; restoring the provider and enabled state resumes dispatch. Existing Tasks continue normally. Setting debounce to 0 affects new events; accepted batches still finish.
+
+Save `"debounceSeconds": 0` through the receiver configuration `PUT` API to disable merging, or `60` to enable it again. Same-provider updates can omit `secret` and `filter` to retain their values. Filter preview only evaluates rules; it does not create or preview batches.
+
 #### Event filters
 
-In **Receive events**, apply the **MR / PR review events** preset, then add project, author, or label conditions. “Match all” means AND; “Match any” means OR. Groups can be nested. The preset selects open, non-draft requests on creation, reopening, new commits, or becoming ready for review. Ordinary GitLab title, label, or approval updates do not trigger this preset; unknown draft status is also rejected. Adding a label alone does not trigger a review; adjust the action conditions if that behavior is required. The preset does not classify authors; add account rules separately.
+In **Receive events**, apply a review preset, then add project and author conditions. “Match all” means AND; “Match any” means OR. Groups can be nested. **MR / PR review events** selects open, non-draft requests on creation, reopening, new commits, or becoming ready for review. Ordinary title, description, assignment, label, or approval updates do not trigger this preset; unknown draft status is also rejected.
 
-For example, a GitLab MR whose labels contain `CodeReview` but not `Done-Pass`, and whose author is not account ID `900`:
+For label-controlled reviews, choose **Label-gated MR / PR reviews**. It requires current labels to contain `CodeReview` and exclude `Done-Pass`. Besides the events above, it accepts adding `CodeReview` or removing `Done-Pass` when that change makes the label conditions pass, so a request created without the review label can enter review later. Unrelated label changes, description edits, and task-list checkboxes do not trigger it. GitLab checks `changes.labels.previous` to establish that the previous labels failed the gate; missing previous labels do not imply a label change. GitHub checks `labeled` / `unlabeled` and the changed `label.name`. Requests still carrying `Done-Pass`, missing `CodeReview`, closed, or in draft remain excluded.
+
+Presets are editable templates; saved receivers do not upgrade automatically. Applying a preset replaces the editor's current rules, so add project and author restrictions again before saving. To use different label names, change their values in both the current-label and label-transition conditions. Actual new commits still match; presets only select events, while the separate debounce setting controls merging.
+
+For example, append this condition to the outer **Match all** group of **Label-gated MR / PR reviews** to exclude GitLab MR author ID `900`:
 
 ```json
 {
-  "all": [
-    { "field": "eventType", "op": "eq", "value": "Merge Request Hook" },
-    { "field": "payload.labels.*.title", "op": "contains", "value": "CodeReview" },
-    { "field": "payload.labels.*.title", "op": "not_contains", "value": "Done-Pass" },
-    { "field": "payload.object_attributes.author_id", "op": "neq", "value": 900 }
-  ]
+  "field": "payload.object_attributes.author_id",
+  "op": "neq",
+  "value": 900
 }
 ```
 
-Save this object as the receiver's `filter` field. GitHub labels use `payload.pull_request.labels.*.name`, and the author login is `payload.pull_request.user.login`. Native GitLab MR events identify the author through `payload.object_attributes.author_id`; `payload.user.id` is the event actor and must not substitute for the author. GitHub's `payload.sender.id` is also the actor. To review only developer MRs, prefer an author ID allowlist with `in: [101,102]`, or maintain a complete agent ID denylist with `not_in`. Replace example IDs with actual account IDs.
+This is one condition to append; save the complete preset and added conditions as the receiver's `filter`. API clients can obtain `filter` from the provider catalog's `label-code-review` entry in `filterPresets`, append conditions to its top-level `all`, and save it. GitHub labels use `payload.pull_request.labels.*.name`, and the author login is `payload.pull_request.user.login`. Native GitLab MR events identify the author through `payload.object_attributes.author_id`; `payload.user.id` is the event actor and must not substitute for the author. GitHub's `payload.sender.id` is also the actor. To review only developer MRs, prefer an author ID allowlist with `in: [101,102]`, or maintain a complete agent ID denylist with `not_in`. Replace example IDs with actual account IDs.
 
 - Fields must be `eventType` or dot-separated paths beginning with `payload.`. A path may contain one `*` to project array elements, such as `labels.*.title`. Filters cannot read headers or execute scripts.
 - `eq` / `neq` compare a scalar; `in` / `not_in` check a scalar against a configured list; `contains` / `not_contains` check whether an event array contains / excludes a configured scalar, useful for labels. In the UI, select **List does not contain** and enter one JSON value, such as `"Done-Pass"`, rather than an array. `not_in` cannot substitute for array exclusion. `exists` takes a boolean requiring presence or absence. A wildcard field is present when at least one element has the selected field; empty arrays or only missing fields count as absent. Strings are exact and case-sensitive.

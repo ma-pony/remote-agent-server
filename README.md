@@ -330,10 +330,10 @@ POST /integration/v1/endpoints/:slug/webhook
 | GitHub | Payload URL、Secret；支持 JSON 和表单 `payload` | 原始请求体的 `X-Hub-Signature-256` HMAC-SHA256 签名 |
 | GitLab | URL、生成的 Signing token（`whsec_` 开头）；旧版可用 Secret token；保留默认 JSON | `webhook-signature` HMAC-SHA256 签名，或旧版 `X-Gitlab-Token` |
 
-每个端点配置一个来源平台；可分别创建 GitHub 和 GitLab 端点并绑定同一 Agent。业务规则写在端点的固定提示中，例如“检查这次代码变更并给出审查结论”。事件类型和原生 JSON 载荷作为任务正文，进入现有 Task 入库、排队和执行流程。每个命中筛选规则的新投递创建独立 Task 和 Session；不会自动按 PR、MR 或分支续接 Conversation。
+每个端点配置一个来源平台；可分别创建 GitHub 和 GitLab 端点并绑定同一 Agent。业务规则写在端点的固定提示中，例如“检查这次代码变更并给出审查结论”。事件类型和原生 JSON 载荷作为任务正文，进入现有 Task 入库、排队和执行流程。默认将同一 MR / PR 的命中事件在 60 秒静默期后合并为一个 Task 和 Session；其他事件或关闭合并时逐次创建。不会自动按 PR、MR 或分支续接 Conversation。
 
-- 验证并入库成功返回 `202` 和现有 Task 响应。GitHub `ping` 返回 `200`、`{"status":"ignored","reason":"ping"}`，不创建任务。GitLab 的测试投递也经过筛选，命中时创建任务。
-- `requestId` 自动生成为 `github:<X-GitHub-Delivery>` 或 `gitlab:<投递ID>`。GitLab 按 `webhook-id`、`Idempotency-Key`、`X-Gitlab-Webhook-UUID` 的顺序读取投递 ID。同一端点重投相同 ID、相同输入返回原 Task；输入不同返回 `409 idempotency_conflict`。
+- 验证并立即入库成功返回 `202` 和现有 Task 响应；等待合并时返回下文的 pending 响应。GitHub `ping` 返回 `200`、`{"status":"ignored","reason":"ping"}`，不创建任务。GitLab 的测试投递也经过筛选，命中时创建任务。
+- 未合并事件的 `requestId` 自动生成为 `github:<X-GitHub-Delivery>` 或 `gitlab:<投递ID>`。GitLab 按 `webhook-id`、`Idempotency-Key`、`X-Gitlab-Webhook-UUID` 的顺序读取投递 ID。同一端点重投相同 ID、相同输入返回原 Task 或待派发批次；输入不同返回 `409 idempotency_conflict`。
 - 旧版 GitLab 的 Token 模式在上述三个 ID 头全部缺失时，自动以平台、事件类型和解析后重新序列化的完整载荷计算 SHA-256，生成 `sha256:<摘要>` 投递 ID，无需自定义请求头。JSON 缩进不影响去重；事件类型或载荷变化会产生新 ID。同一端点内容完全相同的独立事件也会被视为重投，沿用首次筛选决定或返回原 Task。
 - 参数映射的“请求字段”在此入口中表示载荷路径，例如 GitLab 的 `project.id`、`object_attributes.iid`，或 GitHub 的 `repository.full_name`。字符串、数字、布尔值转换成字符串；固定值映射继续适用。缺少必填参数会拒绝入库。
 - 未配置接收器或凭证错误返回 `401 invalid_webhook_credentials`；接收器或端点停用返回 `403 endpoint_disabled`；缺少事件类型或 GitHub 投递 ID、载荷不是有效 JSON 对象，或 GitLab 已提供的 ID 头均无有效值时，返回 `400 invalid_webhook_request`。GitLab 签名模式仍要求有效的 `webhook-id`，缺失时验证失败返回 `401`。请求体沿用服务默认的 1 MiB 上限，超出返回 `413`。
@@ -351,24 +351,38 @@ POST /integration/v1/endpoints/:slug/webhook
 }
 ```
 
+#### 合并短时间内的 MR / PR 事件
+
+为避免“加审核标签”和“推送新提交”几乎同时发生时审核两次，默认开启 **60 秒** 事件合并。可在 **接收事件 → MR / PR 事件合并等待（秒）** 调整，填 **0** 可关闭。该设置独立于筛选规则，保留已有标签、作者和动作限制即可。
+
+- `debounceSeconds` 为 0–300 的整数，默认 `60` 开启；旧数据库首次增加此字段时也使用 60。已经保存的值（包括明确关闭的 `0`）保持不变。相同平台更新时省略该字段保留原值，切换平台时省略则恢复为 60。
+- 先验签、去重和筛选，再按“接入端点 + 平台 + 仓库所在站点与 ID + MR / PR 编号”合并。每个新的命中事件重置静默期，合并等待最长 5 分钟；重复投递和未命中事件不更新载荷、不延长等待，也不撤销已经接收的事件。
+- 窗口内只保留最后收到的命中事件载荷和映射参数，窗口结束后创建一次 Task / Session。它不比较提交版本或读取平台最新状态，也不撤回已开始的审核；窗口结束后到达的新事件进入下一批。
+- GitLab 仅合并 `Merge Request Hook` / `merge_request`，GitHub 仅合并 `pull_request`。其他事件或缺少有效仓库站点、ID、MR / PR 编号时仍立即入库，避免误合并或丢事件。
+- 等待中的投递返回 `202` 和 `{"status":"pending","batchId":123,"scheduledAt":"2026-09-18T00:01:00.000Z"}`，此时还没有 Task / Session；派发后重投返回该批次的 Task。接收记录保留每条投递，展示等待或自动重试状态，派发后链接同一 Task。
+- 待派发载荷加密持久化，服务重启继续处理。任务入库失败每 30 秒自动重试，使用同一请求标识防止重复创建；任务入库后清除临时载荷。接收器或端点停用、或接收器切换到其他平台时暂停旧批次派发，恢复原平台并启用后继续。已入库任务不受影响；将合并时间改为 0 仅影响新事件，已接收批次继续处理。
+
+通过接收配置 `PUT` 接口保存 `"debounceSeconds": 0` 可关闭，保存 `60` 可重新启用；同平台更新可省略 `secret` 和 `filter` 以保留原配置。筛选预览只检查规则是否命中，不创建或展示合并批次。
+
 #### 事件筛选
 
-在“接收事件”中应用 **MR / PR 审核事件** 预设，再添加项目、作者、标签等条件。选择“满足全部条件”表示 AND，“满足任一条件”表示 OR；条件组可以嵌套。预设选择非草稿且仍开启的请求：新建、重新开启、新提交或转为可审核。GitLab 的普通标题、标签、审批等更新不会触发该预设；未知草稿状态也不放行。添加标签不会单独触发审核；若需要该行为，调整动作条件。预设不判断作者身份，需要自行添加账号规则。
+在“接收事件”中应用审核预设，再添加项目、作者等条件。选择“满足全部条件”表示 AND，“满足任一条件”表示 OR；条件组可以嵌套。**MR / PR 审核事件** 预设选择非草稿且仍开启的请求：新建、重新开启、新提交或转为可审核。普通标题、描述、指派、标签、审批等更新不会触发该预设；未知草稿状态也不放行。
 
-例如，GitLab MR 的 labels 中包含 `CodeReview`、不包含 `Done-Pass`，并且作者不是 ID `900` 的账号：
+按标签控制审核时，选择 **按标签审核 MR / PR** 预设。它要求当前标签包含 `CodeReview` 且不含 `Done-Pass`，除上述审核事件外，还接收新增 `CodeReview` 或移除 `Done-Pass` 后开始满足标签条件的事件，避免创建时没有标签、后补标签却漏审。添加或删除其他标签、编辑描述及勾选任务清单不会触发。GitLab 使用 `changes.labels.previous` 判断此前是否不满足条件；缺少该字段时不推断标签变化。GitHub 使用 `labeled` / `unlabeled` 动作及本次变动的 `label.name`。仍带 `Done-Pass`、缺少 `CodeReview`、已关闭或草稿中的请求不通过。
+
+预设是可编辑模板，已有接收器配置不会自动升级。应用预设会替换编辑器当前规则，保存前重新补入项目和作者限制；如需更换标签名称，应同时修改当前标签条件和标签变化条件里的对应值。实际新提交仍会命中；预设只负责筛选，是否合并由独立的事件合并等待设置决定。
+
+例如，在 **按标签审核 MR / PR** 预设最外层的“满足全部条件”中追加以下条件，排除作者 ID 为 `900` 的 GitLab MR：
 
 ```json
 {
-  "all": [
-    { "field": "eventType", "op": "eq", "value": "Merge Request Hook" },
-    { "field": "payload.labels.*.title", "op": "contains", "value": "CodeReview" },
-    { "field": "payload.labels.*.title", "op": "not_contains", "value": "Done-Pass" },
-    { "field": "payload.object_attributes.author_id", "op": "neq", "value": 900 }
-  ]
+  "field": "payload.object_attributes.author_id",
+  "op": "neq",
+  "value": 900
 }
 ```
 
-以上对象作为接收配置的 `filter` 字段保存。GitHub 标签路径为 `payload.pull_request.labels.*.name`；作者账号可用 `payload.pull_request.user.login`。GitLab 原生 MR 事件使用 `payload.object_attributes.author_id`；`payload.user.id` 是事件操作者，不能替代作者。GitHub 的 `payload.sender.id` 同样是操作者。只审核开发人员 MR 时，建议为作者 ID 配置 `in: [101,102]` 白名单；也可用 `not_in` 维护完整的 Agent ID 黑名单。示例 ID 需替换为实际账号 ID。
+以上是要追加的单条条件，完整预设及追加条件共同作为接收配置的 `filter` 保存。通过 API 配置时，可从平台目录取得 `filterPresets` 中 `label-code-review` 的 `filter`，向其顶层 `all` 追加条件后保存。GitHub 标签路径为 `payload.pull_request.labels.*.name`；作者账号可用 `payload.pull_request.user.login`。GitLab 原生 MR 事件使用 `payload.object_attributes.author_id`；`payload.user.id` 是事件操作者，不能替代作者。GitHub 的 `payload.sender.id` 同样是操作者。只审核开发人员 MR 时，建议为作者 ID 配置 `in: [101,102]` 白名单；也可用 `not_in` 维护完整的 Agent ID 黑名单。示例 ID 需替换为实际账号 ID。
 
 - 字段只允许 `eventType` 或 `payload.` 开头的点分路径；一个路径最多允许一个 `*`，用于提取数组元素，如 `labels.*.title`。不读取请求头或执行脚本。
 - `eq` / `neq` 比较单个标量；`in` / `not_in` 判断标量是否属于配置列表；`contains` / `not_contains` 判断事件数组是否包含 / 不包含配置标量，适合标签。界面中选择“列表不包含”，比较值填写单个 JSON 值，例如 `"Done-Pass"`，不能填数组。`not_in` 不能代替数组排除条件。`exists` 的布尔值指定字段必须存在或缺失，通配路径以至少一个元素存在目标字段为准，空数组或所有元素均缺失该字段时视为不存在。字符串精确匹配、区分大小写。

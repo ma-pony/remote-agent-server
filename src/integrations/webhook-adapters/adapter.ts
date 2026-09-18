@@ -18,6 +18,7 @@ export type NormalizedWebhook = {
   deliveryId: string | undefined;
   payload: Record<string, unknown>;
   ignoreReason?: string;
+  coalescingKey?: string;
 };
 
 /** Provider protocol only: no persistence, Agent configuration, or task scheduling. */
@@ -27,6 +28,21 @@ export interface WebhookAdapter {
   authenticate(request: WebhookRequest, secret: string, mode: WebhookAuthMode): boolean;
   normalize(request: WebhookRequest): NormalizedWebhook;
 }
+
+/** Stable repository identity plus MR/PR number; never group unrelated or incomplete events. */
+export const reviewCoalescingKey = (repositoryId: unknown, number: unknown, repositoryUrl: unknown): string | undefined => {
+  if (typeof repositoryId !== "number" || !Number.isSafeInteger(repositoryId) || repositoryId <= 0
+    || typeof number !== "number" || !Number.isSafeInteger(number) || number <= 0
+    || typeof repositoryUrl !== "string") return undefined;
+  try {
+    const url = new URL(repositoryUrl);
+    if (url.protocol !== "https:" && url.protocol !== "http:") return undefined;
+    return JSON.stringify([url.origin, repositoryId, number]);
+  } catch { return undefined; }
+};
+
+export const webhookRecord = (value: unknown): Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
 const headerSchema = z.string().trim().min(1).max(512);
 export const webhookHeader = (headers: IncomingHttpHeaders, name: string): string | undefined => {

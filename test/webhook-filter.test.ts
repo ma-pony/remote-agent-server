@@ -126,3 +126,87 @@ describe("Review event presets", () => {
     expect(evaluateWebhookFilter(preset("github"), { eventType: "pull_request", payload: { action, pull_request: { state, draft } } }).matched).toBe(matched);
   });
 });
+
+describe("Label-gated review event presets", () => {
+  const preset = (provider: string) => {
+    const selected = listWebhookProviders().find((item) => item.id === provider)!.filterPresets
+      .find((item) => item.id === "label-code-review");
+    expect(selected, `${provider} label review preset`).toBeDefined();
+    return webhookFilterSchema.parse(selected!.filter);
+  };
+  const labels = (titles: readonly string[]) => titles.map((title) => ({ title }));
+
+  it.each([
+    ["add review label", [], ["CodeReview"], true],
+    ["remove blocking label", ["CodeReview", "Done-Pass"], ["CodeReview"], true],
+    ["add unrelated label", ["CodeReview"], ["CodeReview", "other"], false],
+    ["remove unrelated label", ["CodeReview", "other"], ["CodeReview"], false],
+    ["remove review label", ["CodeReview"], [], false],
+    ["add blocking label", ["CodeReview"], ["CodeReview", "Done-Pass"], false],
+    ["still blocked", ["Done-Pass"], ["Done-Pass", "CodeReview"], false],
+    ["still missing review label", ["Done-Pass"], [], false],
+    ["same labels", ["CodeReview"], ["CodeReview"], false],
+    ["case sensitive", [], ["codereview"], false]
+  ] as const)("GitLab: %s", (_name, previous, current, matched) => {
+    const payload = { object_kind: "merge_request", labels: labels(current),
+      object_attributes: { action: "update", state: "opened", work_in_progress: false },
+      changes: { labels: { previous: labels(previous), current: labels(current) } } };
+    expect(evaluateWebhookFilter(preset("gitlab"), { eventType: "Merge Request Hook", payload }).matched).toBe(matched);
+  });
+
+  it.each([
+    [{ action: "open" }, {}, true],
+    [{ action: "reopen" }, {}, true],
+    [{ action: "update", oldrev: "a".repeat(40) }, {}, true],
+    [{ action: "update", oldrev: "" }, {}, false],
+    [{ action: "update" }, { draft: { previous: true, current: false } }, true],
+    [{ action: "update", draft: undefined, work_in_progress: false }, { work_in_progress: { previous: true, current: false } }, true],
+    [{ action: "update" }, { description: { previous: "[ ]", current: "[x]" } }, false],
+    [{ action: "update" }, { assignees: { previous: [], current: [{ id: 1 }] } }, false],
+    [{ action: "approved" }, {}, false],
+    [{ action: "update", draft: true }, { labels: { previous: [] } }, false],
+    [{ action: "update", state: "closed" }, { labels: { previous: [] } }, false],
+    [{ action: "update" }, { labels: { current: labels(["CodeReview"]) } }, false],
+    [{ action: "update" }, { labels: { previous: null } }, false],
+    [{ action: "update" }, { labels: { previous: [{}] } }, false]
+  ])("GitLab preserves event and state boundaries: %j %j", (attributes, changes, matched) => {
+    const payload = JSON.parse(JSON.stringify({ object_kind: "merge_request", labels: labels(["CodeReview"]),
+      object_attributes: { state: "opened", draft: false, ...attributes }, changes }));
+    expect(evaluateWebhookFilter(preset("gitlab"), { eventType: "Merge Request Hook", payload }).matched).toBe(matched);
+  });
+
+  it.each([
+    ["labeled", "CodeReview", ["CodeReview"], true],
+    ["unlabeled", "Done-Pass", ["CodeReview"], true],
+    ["labeled", "other", ["CodeReview", "other"], false],
+    ["unlabeled", "other", ["CodeReview"], false],
+    ["labeled", "Done-Pass", ["CodeReview", "Done-Pass"], false],
+    ["unlabeled", "CodeReview", [], false],
+    ["labeled", "CodeReview", ["CodeReview", "Done-Pass"], false],
+    ["unlabeled", "Done-Pass", [], false],
+    ["labeled", undefined, ["CodeReview"], false],
+    ["opened", undefined, ["CodeReview"], true],
+    ["reopened", undefined, ["CodeReview"], true],
+    ["synchronize", undefined, ["CodeReview"], true],
+    ["synchronize", undefined, ["CodeReview", "Done-Pass"], false],
+    ["ready_for_review", undefined, ["CodeReview"], true],
+    ["edited", undefined, ["CodeReview"], false]
+  ] as const)("GitHub handles %s %s with %j", (action, name, current, matched) => {
+    const payload = { action, label: { name }, pull_request: { state: "open", draft: false, labels: current.map((value) => ({ name: value })) } };
+    expect(evaluateWebhookFilter(preset("github"), { eventType: "pull_request", payload }).matched).toBe(matched);
+    if (matched) {
+      expect(evaluateWebhookFilter(preset("github"), { eventType: "pull_request", payload: {
+        ...payload, pull_request: { ...payload.pull_request, draft: true }
+      } }).matched).toBe(false);
+    }
+  });
+
+  it.each(["gitlab", "github"])("%s can add project and author conditions within the DSL limits", (provider) => {
+    const filter = preset(provider);
+    if (!("all" in filter)) throw new Error("expected all group");
+    expect(webhookFilterSchema.safeParse({ all: [...filter.all,
+      { field: "payload.project.id", op: "eq", value: 42 },
+      { field: "payload.object_attributes.author_id", op: "not_in", value: [900, 901] }
+    ] }).success).toBe(true);
+  });
+});

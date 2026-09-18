@@ -47,7 +47,12 @@ export const WebhookReceiptHistory = ({ endpointId }: { endpointId: number }) =>
               {receipt.reason === "ping" ? text("连接检查", "Connection check") : receipt.decision === "accepted" ? text("筛选通过", "Filter passed") : text("未命中筛选规则", "Filter did not match")}
             </Badge>
             {receipt.taskId !== null ? <Button variant="link" size="sm" asChild><Link to={`/integration-tasks/${receipt.taskId}`}>#{receipt.taskId}</Link></Button>
-              : receipt.decision === "accepted" ? <span className="text-sm text-muted-foreground">{text("尚未入队，等待平台重试", "Not queued; awaiting platform retry")}</span> : null}</div>
+              : receipt.batchStatus === "pending" || receipt.batchStatus === "dispatching"
+                ? <span className="text-sm text-muted-foreground">{receipt.dispatchError
+                  ? text("入库失败，自动重试", "Admission failed; retrying automatically")
+                  : receipt.batchStatus === "pending" ? text("等待合并", "Waiting to merge") : text("正在入队", "Queuing")}
+                  {receipt.scheduledAt ? ` · ${formatDate(receipt.scheduledAt)}` : ""}</span>
+                : receipt.decision === "accepted" ? <span className="text-sm text-muted-foreground">{text("尚未入队，等待平台重试", "Not queued; awaiting platform retry")}</span> : null}</div>
           </div>)}</div>}
 
     </CardContent>

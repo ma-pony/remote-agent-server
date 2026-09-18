@@ -14,6 +14,7 @@ const receiverSchema = z.object({
   authMode: z.enum(["signature", "token"]),
   enabled: z.boolean(),
   filter: webhookFilterSchema.nullable().optional(),
+  debounceSeconds: z.number().int().min(0).max(300).optional(),
   secret: z.string().min(1).max(1024).refine((value) => value.trim() !== "").optional()
 }).strict();
 

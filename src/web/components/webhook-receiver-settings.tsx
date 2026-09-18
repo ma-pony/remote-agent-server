@@ -24,6 +24,7 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
   const [provider, setProvider] = useState("");
   const [authMode, setAuthMode] = useState<WebhookReceiver["authMode"]>("signature");
   const [enabled, setEnabled] = useState(true);
+  const [debounceSeconds, setDebounceSeconds] = useState("60");
   const [secret, setSecret] = useState("");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
@@ -45,6 +46,7 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
       setProvider(result?.provider ?? definitions[0]?.id ?? "");
       setAuthMode(result?.authMode ?? definitions[0]?.authModes[0] ?? "signature");
       setEnabled(result?.enabled ?? true);
+      setDebounceSeconds(String(result?.debounceSeconds ?? 60));
       setFilterDraft(draftFilter(result?.filter ?? null));
     }).catch((reason: unknown) => {
       if (!controller.signal.aborted) setError(errorMessage(reason));
@@ -56,8 +58,10 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
   const definition = providers.find((item) => item.id === provider);
   const secretRequired = receiver == null || receiver.provider !== provider || receiver.authMode !== authMode;
   const parsedFilter = parseFilterDraft(filterDraft);
+  const parsedDebounce = Number(debounceSeconds);
+  const debounceValid = debounceSeconds.trim() !== "" && Number.isInteger(parsedDebounce) && parsedDebounce >= 0 && parsedDebounce <= 300;
   const canSave = parsedFilter.valid && receiver !== undefined && definition !== undefined && definition.authModes.includes(authMode)
-    && !busy && (!secretRequired || secret.trim() !== "");
+    && debounceValid && !busy && (!secretRequired || secret.trim() !== "");
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     if (!canSave || definition === undefined || !parsedFilter.valid) return;
@@ -66,7 +70,8 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
     setSaved(false);
     try {
       const result = await integrationApi.configureWebhookReceiver(endpoint.id, {
-        provider: definition.id, authMode, enabled, filter: parsedFilter.filter, ...(secret === "" ? {} : { secret })
+        provider: definition.id, authMode, enabled, filter: parsedFilter.filter, debounceSeconds: parsedDebounce,
+        ...(secret === "" ? {} : { secret })
       });
       setReceiver(result);
       setSecret("");
@@ -105,6 +110,7 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
                     setProvider(event.target.value);
                     setAuthMode(providers.find((item) => item.id === event.target.value)?.authModes[0] ?? "signature");
                     setFilterDraft(null);
+                    setDebounceSeconds("60");
                     setSecret(""); setSaved(false);
                   }}>
                     {providers.map((item) => <NativeSelectOption key={item.id} value={item.id}>{text(item.name, item.name)}</NativeSelectOption>)}
@@ -138,6 +144,16 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
                   {!endpoint.enabled ? <FieldDescription>{text("接入端点已停用，启用端点后才能接收事件。", "The integration endpoint is disabled. Enable it before receiving events.")}</FieldDescription> : null}
                 </Field>
                 <WebhookFilterEditor draft={filterDraft} onChange={(draft) => { setFilterDraft(draft); setSaved(false); }} definition={definition} disabled={busy} />
+                <Field data-invalid={!debounceValid} data-disabled={busy}>
+                  <FieldLabel htmlFor="receiver-debounce">{text("MR / PR 事件合并等待（秒）", "MR / PR event debounce (seconds)")}</FieldLabel>
+                  <Input id="receiver-debounce" type="number" min={0} max={300} step={1} required disabled={busy}
+                    aria-invalid={!debounceValid} aria-describedby="receiver-debounce-help" value={debounceSeconds}
+                    onChange={(event) => { setDebounceSeconds(event.target.value); setSaved(false); }} />
+                  <FieldDescription id="receiver-debounce-help">{text(
+                    "默认 60 秒，设为 0 可关闭。同一 MR / PR 的新命中事件会重新计时，最长等待 5 分钟，然后用最后收到的载荷创建一个任务。重复投递和未命中事件不延长等待；其他事件仍立即创建任务。",
+                    "Defaults to 60 seconds; set 0 to disable. New matching events for the same MR / PR restart the wait, up to 5 minutes, then create one task from the last received payload. Retries and filtered events do not extend the wait. Other event types create tasks immediately."
+                  )}</FieldDescription>
+                </Field>
                 <WebhookFilterPreview endpointId={endpoint.id} definition={definition} filter={parsedFilter.valid ? parsedFilter.filter : null} disabled={busy || !parsedFilter.valid} />
                 <div className="flex items-center gap-3">
                   <Button type="submit" disabled={!canSave}>{busy ? text("保存中…", "Saving…") : text("保存接收配置", "Save receiver")}</Button>
@@ -154,7 +170,7 @@ export const WebhookReceiverSettings = ({ endpoint }: { endpoint: IntegrationEnd
         <Card>
           <CardHeader><CardTitle>{text("事件如何触发任务", "How events trigger tasks")}</CardTitle></CardHeader>
           <CardContent className="flex flex-col gap-3 text-sm text-muted-foreground">
-            <p>{text("每个命中规则的新事件创建独立任务，事件类型和默认 JSON 载荷会连同端点固定提示发送给智能体。相同投递 ID 的重试会返回原任务。", "Each matching new event creates an independent task. Its type and native JSON payload are sent with the endpoint's fixed prompt. Retries with the same delivery ID return the original task.")}</p>
+            <p>{text("默认将同一 MR / PR 的命中事件等待 60 秒后合并为一次任务；等待状态会保留，服务重启后继续处理。关闭合并或其他事件类型会立即创建任务。事件类型和 JSON 载荷会连同端点固定提示发送给智能体。", "By default, matching events for the same MR / PR merge into one task after a 60-second quiet period; pending events survive restarts. Disabling merging or receiving other event types creates tasks immediately. The event type and JSON payload are sent with the endpoint's fixed prompt.")}</p>
             <p>{text("在平台选择触发事件。GitHub ping 仅检查连接；GitLab 的测试事件同样经过筛选，命中时会创建任务。", "Select triggering events on the platform. GitHub ping only checks the connection; GitLab test events are also filtered and create tasks when matched.")}</p>
             <p>{text("需要智能体参数时，可在参数映射中用 project.id 等载荷路径读取值，也可使用固定值。", "For agent parameters, map payload paths such as project.id or use fixed values.")}</p>
             <div className="flex flex-wrap gap-3">

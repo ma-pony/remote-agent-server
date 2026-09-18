@@ -22,6 +22,7 @@ import {
 import { IntegrationStore } from "./integrations/integration-store.js";
 import { WebhookDispatcher } from "./integrations/webhook-dispatcher.js";
 import { WebhookIngress } from "./integrations/webhook-ingress.js";
+import { WebhookBatchDispatcher } from "./integrations/webhook-batch-dispatcher.js";
 import { registerWebhookIngressRoutes, registerWebhookReceiverAdminRoutes } from "./integrations/webhook-ingress-routes.js";
 import { SdkMcpChecker, type McpChecker } from "./mcp/mcp-checker.js";
 import { McpManager } from "./mcp/mcp-manager.js";
@@ -211,6 +212,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   });
 
   const webhookIngress = new WebhookIngress({ store: integrationStore, secrets, coordinator: integrationCoordinator });
+  const webhookBatchDispatcher = new WebhookBatchDispatcher({ store: integrationStore, secrets, coordinator: integrationCoordinator });
   app.get("/api/health", () => ({ ok: true }));
   app.register((api) => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
@@ -266,6 +268,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     if (stopped) return;
     stopped = true;
     const failures: unknown[] = [];
+    try { await webhookBatchDispatcher.stop(); } catch (error) { failures.push(error); }
     try { await skillSourceManager.close(); } catch (error) { failures.push(error); }
     integrationTaskScheduler.stop();
     try {
@@ -297,6 +300,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   });
   scheduler.start();
   integrationTaskScheduler.start();
+  webhookBatchDispatcher.start();
   webhookDispatcher.start();
   projectEnvironmentScheduler.start();
   sessionCleanupScheduler.start();

@@ -627,6 +627,24 @@ export const migrate = (
     CREATE INDEX IF NOT EXISTS integration_webhook_receipts_recent
     ON integration_webhook_receipts(endpoint_id, id DESC);
 
+    CREATE TABLE IF NOT EXISTS integration_webhook_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      endpoint_id INTEGER NOT NULL REFERENCES integration_endpoints(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL,
+      group_key TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending', 'dispatching', 'completed')),
+      encrypted_input TEXT,
+      first_received_at INTEGER NOT NULL,
+      due_at INTEGER NOT NULL,
+      last_error TEXT,
+      UNIQUE(endpoint_id, request_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS integration_webhook_batch_pending
+      ON integration_webhook_batches(endpoint_id, provider, group_key) WHERE status = 'pending';
+    CREATE INDEX IF NOT EXISTS integration_webhook_batches_due
+      ON integration_webhook_batches(due_at, id) WHERE status != 'completed';
+
     CREATE TABLE IF NOT EXISTS integration_conversations (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       endpoint_id INTEGER NOT NULL REFERENCES integration_endpoints(id),
@@ -854,6 +872,12 @@ export const migrate = (
   }
   if (!hasColumn("integration_webhook_receivers", "filter_version")) {
     db.exec("ALTER TABLE integration_webhook_receivers ADD COLUMN filter_version INTEGER NOT NULL DEFAULT 1");
+  }
+  if (!hasColumn("integration_webhook_receivers", "debounce_seconds")) {
+    db.exec("ALTER TABLE integration_webhook_receivers ADD COLUMN debounce_seconds INTEGER NOT NULL DEFAULT 60");
+  }
+  if (!hasColumn("integration_webhook_receipts", "batch_id")) {
+    db.exec("ALTER TABLE integration_webhook_receipts ADD COLUMN batch_id INTEGER REFERENCES integration_webhook_batches(id)");
   }
   if (!hasColumn("integration_tasks", "event_sequences_json")) {
     db.exec("ALTER TABLE integration_tasks ADD COLUMN event_sequences_json TEXT NOT NULL DEFAULT '{}'");
