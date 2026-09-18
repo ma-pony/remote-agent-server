@@ -10,7 +10,32 @@ Prepare repositories and dependencies once, then give each session an independen
 
 Under the hood, it is a self-hosted execution gateway built on [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol), with Skills, MCP, provider extensions, and model policies. A single Fastify process uses SQLite WAL, with no separate database server or message broker to deploy.
 
-[Install and start](#install-and-start) · [Run your first task](#complete-one-agent-run) · [HTTP / webhook integration](#integrating-another-system) · [Features](#features) · [Execution model](#execution-model) · [Configuration](#configuration) · [Deployment guide](docs/deployment.md)
+[Demo](#business-integration-demo) · [Install and start](#install-and-start) · [Run your first task](#complete-one-agent-run) · [HTTP / webhook integration](#integrating-another-system) · [Features](#features) · [Execution model](#execution-model) · [Configuration](#configuration) · [Deployment guide](docs/deployment.md)
+
+## Business integration demo
+
+A ticket investigation workflow: **submit work through the Task API → inspect status and results → open the linked session to continue**.
+
+![Business integration demo showing the task endpoint, result, and linked session](docs/media/business-workflow-en.gif)
+
+Recorded from the real management console with synthetic tickets, simulated tool events, and fixed replies. No live model was called. This illustrates the API and UI workflow, not model quality or execution speed. [Watch the MP4](docs/media/business-workflow-en.mp4) · [Integration guide](#integrating-another-system)
+
+<details>
+<summary>View full screenshots: API entry point, task result, and session history</summary>
+
+**API entry point**: inspect the HTTP endpoint, authentication, and parameters, then try a task from the console.
+
+![Endpoint usage instructions and test task form](docs/media/integration-en.png)
+
+**Task result**: review the business request, final reply, execution trace, and linked session together.
+
+![Business task status, final reply, and linked resources](docs/media/task-en.png)
+
+**Session history**: inspect messages and tool events, then add more context to the same conversation.
+
+![Linked session showing the ticket, tool events, and sample reply](docs/media/session-en.png)
+
+</details>
 
 ## Use cases
 

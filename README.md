@@ -10,7 +10,32 @@
 
 底层是基于 [acpx](https://github.com/openclaw/acpx) 和 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol) 的自托管执行网关，支持 Skills、MCP、执行器扩展与模型策略。单个 Fastify 进程配合 SQLite WAL，无需额外部署数据库或消息队列。
 
-[安装并启动](#安装并启动) · [完成第一条任务](#从零完成一次-agent-执行) · [HTTP / Webhook 接入](#其他系统如何接入) · [主要功能](#主要功能) · [执行模型](#执行模型) · [配置](#配置) · [部署文档](docs/deployment.md)
+[界面演示](#业务系统接入演示) · [安装并启动](#安装并启动) · [完成第一条任务](#从零完成一次-agent-执行) · [HTTP / Webhook 接入](#其他系统如何接入) · [主要功能](#主要功能) · [执行模型](#执行模型) · [配置](#配置) · [部署文档](docs/deployment.md)
+
+## 业务系统接入演示
+
+以工单排查为例：**业务系统通过 Task API 提交任务 → 查看状态与结果 → 打开关联会话继续处理**。
+
+![业务系统接入演示：查看调用入口、任务回复和关联会话](docs/media/business-workflow-zh.gif)
+
+真实管理台录屏，使用合成的示例工单、工具事件和固定回复，未调用真实模型。录屏展示接口与界面流程，不代表模型排查效果或执行耗时。[查看 MP4](docs/media/business-workflow-zh.mp4) · [接入文档](#其他系统如何接入)
+
+<details>
+<summary>查看完整截图：调用入口、任务结果、会话记录</summary>
+
+**调用入口**：查看 HTTP 接口、认证方式与参数，并在管理台试调。
+
+![接入端点的调用说明与测试任务表单](docs/media/integration-zh.png)
+
+**任务结果**：将业务请求、最终回复、执行轨迹和关联会话放在一起核对。
+
+![业务工单的任务状态、最终回复和关联资源](docs/media/task-zh.png)
+
+**会话记录**：查看消息和工具事件，在原有上下文中继续补充信息。
+
+![关联会话中的工单消息、工具事件和示例回复](docs/media/session-zh.png)
+
+</details>
 
 ## 适用场景
 
