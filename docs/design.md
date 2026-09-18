@@ -241,7 +241,9 @@ Git 来源的稳定身份来自配置的 URL、ref 和子目录；Skill 身份�
 
 Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace 条目的 Skills 声明，并包含默认 `skills/`；当条目指向 marketplace 根目录且明确选择子路径时，仅导入所选路径。`strict: false` 与插件自身 Skills 声明冲突时提示并保留该插件的上一可用版本。Codex 插件按显式声明选择目录，没有声明时才使用默认目录。普通仓库递归发现 Skills；不支持的源类型会显示提示。
 
-完整包限制为 50 MiB、10,000 个目录项和 32 层深度；不分发包内符号链接或特殊文件。来源 manifest 限制为 1 MiB，marketplace 最多 1,000 个插件条目。文本差异预览单文件最多 8 KiB、合计最多 64 KiB，超限内容仍返回文件变化和权限信息。
+完整包限制为 50 MiB、10,000 个目录项和 32 层深度；不分发包内符号链接或特殊文件。来源 manifest 限制为 1 MiB，marketplace 最多 1,000 个插件条目。
+
+差异列表只返回文件状态、`beforeBytes` / `afterBytes`（缺失一侧为 `null`）、权限、`preview` 类型及 `previewLimitBytes`，不内嵌文本。文本通过单文件接口按需加载：每侧最多 1 MiB，使用 Git 在私有临时目录中比较固定名称的内容副本，禁用外部 diff、textconv 和继承的 Git 配置，命令最多执行 5 秒，完成、失败或取消时回收进程树和临时文件。返回带 3 行上下文的差异片段，最多 64 KiB，并以 `truncated` 标记截断；没有跨文件总额度。无法预览的类型分别为 `binary`（含 NUL）、`unsupported_encoding`（非 UTF-8）和 `too_large`。单文件请求必须携带列表返回的 `baseRevision`（实际安装内容摘要）；基线变动返回 `409 skill_revision_conflict`，包内不存在的路径返回 `404 skill_file_not_found`，Git 预览失败返回 `503 skill_preview_failed`。路径只能从经过验证的包内文件集合查找。读取期间目标内容摘要必须仍等于请求的 `revision`。
 
 `DATA_DIR/skill-sources/` 保存来源索引和不可变完整包快照；`skill-revisions/` 保存被选用的内容版本。Agent 的 `skills/<id>/` 是私有包副本，内含版本记录及包内 Skill 路径；旧式直接目录继续可读。更新先保留旧版本，再用临时目录与备份交换安装目录；启动恢复中断的交换。内容摘要包含全部文件、路径和可执行权限。版本预览限制文本体积，二进制、大文件仍返回变化状态。应用要求 `expectedRevision` 匹配且没有本地修改，防止旧页面覆盖新配置。
 
@@ -253,7 +255,8 @@ Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace �
 | `POST /skill-sources/:id/refresh` | 手动发现新版本，不改变 Agent 选择 |
 | `DELETE /skill-sources/:id` | 移除发现来源，保留安装副本和历史 |
 | `GET /agents/:id/skills/:skillId/revisions` | 当前、最新版本及历史 |
-| `GET /agents/:id/skills/:skillId/diff?revision=<sha256>` | 与当前安装内容比较 |
+| `GET /agents/:id/skills/:skillId/diff?revision=<sha256>` | 与当前安装内容比较，返回元数据、`expectedRevision` 和 `baseRevision` |
+| `GET /agents/:id/skills/:skillId/diff/file?revision=<sha256>&baseRevision=<sha256>&path=<encoded-path>` | 单文件预览：`{path, kind, patch, truncated}`；无法预览时返回对应 `kind`，超限时附 `limitBytes` |
 | `POST /agents/:id/skills/:skillId/revision` | 用 `{revision, expectedRevision}` 明确应用或回退 |
 | `POST /agents/:id/skills/:skillId/upload` | 用原 ZIP 请求格式发布同名新版，不自动应用 |
 

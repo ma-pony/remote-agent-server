@@ -281,6 +281,8 @@ Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Sessio
 
 在 Agent 的 **Skills** 页面管理共享 Git 来源，可填写 GitHub、GitLab 或其他 Git 服务的 HTTPS/SSH 地址，以及可选分支、标签、提交 SHA 和仓库子目录。支持普通 Skills 仓库、Claude 的 `.claude-plugin/marketplace.json`、Codex 的 `.agents/plugins/marketplace.json`，以及 `plugin.json`、`.codex-plugin/plugin.json` 和 `.claude-plugin/plugin.json` 中的 Skills 声明。marketplace 的本地目录和 Git 插件源会解析为完整包快照；不支持的条目会显示提示。导入只提供 Skills，不执行插件 Hook、MCP 或依赖安装命令。
 
+版本预览先列出变化文件、大小和权限，点击文件的“查看差异”后才加载文本变更片段。每个文件的当前和目标内容分别支持最多 1 MiB 的 UTF-8 文本，差异最多显示 64 KiB，超出时明确提示截断；文件之间不共用预览额度。二进制、非 UTF-8 和超限文件分别说明原因，仍保留文件变化信息。预览期间内容发生变化时，需要重新点击“预览变更”。
+
 手动刷新来源只发现新版本。已启用的 Agent 保持原版本；在版本预览中检查文件变化，再明确应用到当前 Agent，也可以选择历史版本回退。同名上传 ZIP 可作为原 Skill 的新版本发布，发布后仍需单独应用。版本摘要覆盖整个包的文件内容和可执行权限，修改 scripts、references 也会被识别。重复启用已启用的 Skill 不会更新版本，本地副本有修改时会阻止覆盖。移除 Git 来源保留已启用副本和版本历史；不同 Agent 的选择互不影响。
 
 每次 Run 使用自己的 Session 投影，运行中的任务保留原内容。Run 管理 API 的 `skillsRevision` 记录实际投影的摘要；升级前的历史 Run 为 `null`。来源管理及版本接口使用同一个管理 API Token，详见[能力投影设计](docs/design.md#8-agent-能力投影)。

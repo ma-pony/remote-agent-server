@@ -62,10 +62,13 @@ export const readSkillTree = (directory: string, ignoreInstallation = false): Ma
   return result;
 };
 
-export const skillTreeDigest = (directory: string, ignoreInstallation = false): string => {
+export const skillFilesDigest = (files: Map<string, SkillFile>): string => {
   const hash = createHash("sha256");
-  for (const [path, file] of readSkillTree(directory, ignoreInstallation)) {
+  for (const [path, file] of files) {
     hash.update(JSON.stringify([path, file.mode, file.contents.length])).update("\0").update(file.contents);
   }
   return hash.digest("hex");
 };
+
+export const skillTreeDigest = (directory: string, ignoreInstallation = false): string =>
+  skillFilesDigest(readSkillTree(directory, ignoreInstallation));

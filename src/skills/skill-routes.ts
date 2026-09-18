@@ -23,6 +23,8 @@ export const handleSkillError = (reply: FastifyReply, error: unknown) => {
   if (error instanceof SkillManagerError || error instanceof SkillContentError) {
     const messages: Record<string, string> = {
       skill_not_found: "Skill not found", skill_revision_not_found: "Skill revision not found; refresh the preview",
+      skill_file_not_found: "File not found in the Skill comparison",
+      skill_preview_failed: "File preview failed; retry or check Git availability",
       skill_not_enabled: "Enable the Skill before changing its revision",
       skill_revision_conflict: "The selected version has changed; refresh the preview",
       skill_locally_modified: "The installed Skill has local changes. Preserve them before disabling and enabling the Skill again.",
@@ -30,7 +32,7 @@ export const handleSkillError = (reply: FastifyReply, error: unknown) => {
       skill_archive_too_large: "Skill ZIP exceeds the upload limit", invalid_skill_content: "Skill package contains unsupported files",
       skill_content_too_large: "Skill package exceeds the content limit"
     };
-    const status = error.code.endsWith("not_found") ? 404
+    const status = error.code === "skill_preview_failed" ? 503 : error.code.endsWith("not_found") ? 404
       : ["skill_revision_conflict", "skill_locally_modified", "skill_not_enabled", "skill_name_conflict"].includes(error.code) ? 409 : 400;
     return reply.code(status).send({ error: { code: error.code, message: messages[error.code] ?? "Skill operation failed" } });
   }
@@ -87,6 +89,17 @@ export const registerSkillRoutes = (
     if (!query.success) return invalid(reply);
     try { return skills.diff(id, request.params.skillId, query.data.revision); }
     catch (error) { return handleSkillError(reply, error); }
+  });
+  app.get<{ Params: Params }>("/agents/:id/skills/:skillId/diff/file", async (request, reply) => {
+    const id = agentId(request.params, reply); if (id === undefined) return reply;
+    const query = z.object({ revision: revisionSchema, baseRevision: revisionSchema, path: z.string().min(1).max(4_096) }).strict().safeParse(request.query);
+    if (!query.success) return invalid(reply);
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    reply.raw.once("close", abort);
+    try { return await skills.previewFile(id, request.params.skillId, query.data.revision, query.data.path, query.data.baseRevision, controller.signal); }
+    catch (error) { return handleSkillError(reply, error); }
+    finally { reply.raw.off("close", abort); }
   });
   app.post<{ Params: Params }>("/agents/:id/skills/:skillId/revision", (request, reply) => {
     const id = agentId(request.params, reply); if (id === undefined) return reply;

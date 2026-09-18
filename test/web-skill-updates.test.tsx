@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { App } from "../src/web/app.js";
 
@@ -16,7 +16,7 @@ const revisions = { currentRevision: current, latestRevision: latest, revisions:
 // Transform the real lazy route before starting interaction assertion deadlines.
 beforeAll(async () => { await import("../src/web/pages/agent-pages.js"); });
 beforeEach(() => { sessionStorage.setItem("apiToken", "test"); window.history.replaceState({}, "", `/agents/${agent.id}/skills`); });
-afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); sessionStorage.clear(); localStorage.clear(); vi.unstubAllGlobals(); });
 
 it("刷新来源只重新发现目录，不会应用版本", async () => {
   const calls: string[] = [];
@@ -39,7 +39,7 @@ it("选择版本后必须预览，才用 expectedRevision 明确应用或回滚"
     if (url === `/api/agents/${agent.id}`) return response(agent);
     if (url === `/api/agents/${agent.id}/skills`) return response([skill]);
     if (url.endsWith("/revisions")) return response(revisions);
-    if (url.includes("/diff?revision=")) return response({ revision: latest, expectedRevision: current, locallyModified: false, files: [{ path: "SKILL.md", status: "modified", before: "old", after: "new", beforeMode: 420, afterMode: 420 }] });
+    if (url.includes("/diff?revision=")) return response({ revision: latest, expectedRevision: current, baseRevision: current, previewLimitBytes: 1024 * 1024, locallyModified: false, files: [{ path: "SKILL.md", status: "modified", beforeBytes: 3, afterBytes: 3, preview: "text", beforeMode: 420, afterMode: 420 }] });
     if (url.endsWith("/revision") && init?.method === "POST") { bodies.push(JSON.parse(String(init.body))); return response({ ...skill, currentRevision: latest }); }
     throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
   }));
@@ -67,7 +67,7 @@ it("选择历史版本时以同一预览流程明确回滚", async () => {
     if (url === `/api/agents/${agent.id}`) return response(agent);
     if (url === `/api/agents/${agent.id}/skills`) return response([skill]);
     if (url.endsWith("/revisions")) return response(revisions);
-    if (url.includes(`/diff?revision=${older}`)) return response({ revision: older, expectedRevision: current, locallyModified: false, files: [{ path: "SKILL.md", status: "modified", before: "new", after: "old", beforeMode: 420, afterMode: 420 }] });
+    if (url.includes(`/diff?revision=${older}`)) return response({ revision: older, expectedRevision: current, baseRevision: current, previewLimitBytes: 1024 * 1024, locallyModified: false, files: [{ path: "SKILL.md", status: "modified", beforeBytes: 3, afterBytes: 3, preview: "text", beforeMode: 420, afterMode: 420 }] });
     if (url.endsWith("/revision") && init?.method === "POST") { bodies.push(JSON.parse(String(init.body))); return response({ ...skill, currentRevision: older }); }
     throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
   }));
@@ -142,4 +142,89 @@ it("重新打开版本弹窗会清除旧预览", async () => {
   fireEvent.click(await screen.findByRole("button", { name: "查看更新" }));
   await screen.findByRole("button", { name: "预览变更" });
   expect(screen.queryByRole("button", { name: "应用此版本" })).not.toBeInTheDocument();
+});
+
+const fileDiff = { revision: latest, expectedRevision: current, baseRevision: current, locallyModified: false, previewLimitBytes: 1024 * 1024, files: [
+  { path: "references/guide.md", status: "modified", beforeBytes: 32_000, afterBytes: 32_100, beforeMode: 420, afterMode: 420, preview: "text" },
+  { path: "scripts/check.sh", status: "modified", beforeBytes: 100, afterBytes: 110, beforeMode: 420, afterMode: 493, preview: "text" },
+  { path: "image.png", status: "added", beforeBytes: null, afterBytes: 1_000, beforeMode: null, afterMode: 420, preview: "binary" },
+  { path: "legacy.txt", status: "added", beforeBytes: null, afterBytes: 1_000, beforeMode: null, afterMode: 420, preview: "unsupported_encoding" },
+  { path: "huge.txt", status: "added", beforeBytes: null, afterBytes: 2_000_000, beforeMode: null, afterMode: 420, preview: "too_large" }
+] };
+const setupFilePreview = async (preview: (url: string, init?: RequestInit) => Promise<Response>, english = false) => {
+  vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/agents/${agent.id}`) return Promise.resolve(response(agent));
+    if (url === `/api/agents/${agent.id}/skills`) return Promise.resolve(response([skill]));
+    if (url.endsWith("/revisions")) return Promise.resolve(response(revisions));
+    if (url.includes("/diff?revision=")) return Promise.resolve(response({ ...fileDiff, revision: new URL(url, "http://localhost").searchParams.get("revision") }));
+    if (url.includes("/diff/file?")) return preview(url, init);
+    throw new Error(`unexpected ${url}`);
+  }));
+  if (english) localStorage.setItem("remote-agent-locale", "en");
+  render(<App />); fireEvent.click(await screen.findByRole("button", { name: english ? "View update" : "查看更新" }));
+  fireEvent.click(await screen.findByRole("button", { name: english ? "Preview changes" : "预览变更" }));
+  await screen.findByText("references/guide.md");
+};
+
+it("按文件加载较大文本差异，展示大小、截断及无法预览的具体原因", async () => {
+  const calls: string[] = [];
+  let finish: ((result: Response) => void) | undefined;
+  await setupFilePreview((url) => { calls.push(url); return new Promise((resolve) => { finish = resolve; }); });
+  expect(calls).toEqual([]);
+  expect(screen.getByText("31.3 KiB → 31.3 KiB")).toBeInTheDocument();
+  expect(screen.getByText("二进制文件，不提供文本差异。")).toBeInTheDocument();
+  expect(screen.getByText("文件不是有效的 UTF-8 文本，无法预览。")).toBeInTheDocument();
+  expect(screen.getByText("文件超过单侧 1.0 MiB 的预览限制。")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "查看 references/guide.md 的差异" }));
+  expect(screen.getByRole("button", { name: "查看 references/guide.md 的差异" })).toBeDisabled();
+  await waitFor(() => expect(calls).toHaveLength(1));
+  const query = new URL(calls[0]!, "http://localhost").searchParams;
+  expect(Object.fromEntries(query)).toEqual({ revision: latest, baseRevision: current, path: "references/guide.md" });
+  await act(async () => finish?.(response({ path: "references/guide.md", kind: "text", patch: "@@ -10 +10 @@\n-old\n+new\n", truncated: true })));
+  expect(await screen.findByText(/-old/)).toBeInTheDocument();
+  expect(screen.getByText("差异超过 64 KiB，当前仅显示开头部分。")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 scripts/check.sh 的差异" })).toBeEnabled();
+  expect(calls).toHaveLength(1);
+});
+
+it("单文件加载失败可重试，成功后移除错误", async () => {
+  let attempts = 0;
+  await setupFilePreview(async () => {
+    if (++attempts === 1) return response({ error: { code: "skill_preview_failed", message: "Preview unavailable" } }, 503);
+    return response({ path: "references/guide.md", kind: "text", patch: "-before\n+after\n", truncated: false });
+  });
+  fireEvent.click(screen.getByRole("button", { name: "查看 references/guide.md 的差异" }));
+  expect(await screen.findByText("Preview unavailable")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "重试 references/guide.md 的差异" }));
+  expect(await screen.findByText(/\+after/)).toBeInTheDocument();
+  expect(screen.queryByText("Preview unavailable")).not.toBeInTheDocument();
+  expect(attempts).toBe(2);
+});
+
+it("切换版本取消单文件请求，迟到结果不会混入新的预览", async () => {
+  let signal: AbortSignal | null | undefined;
+  let finish: ((result: Response) => void) | undefined;
+  await setupFilePreview((_url, init) => { signal = init?.signal; return new Promise((resolve) => { finish = resolve; }); });
+  fireEvent.click(screen.getByRole("button", { name: "查看 references/guide.md 的差异" }));
+  await waitFor(() => expect(signal).toBeDefined());
+  fireEvent.change(screen.getByLabelText("目标版本"), { target: { value: older } });
+  expect(signal?.aborted).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "预览变更" }));
+  await screen.findByText("references/guide.md");
+  await act(async () => finish?.(response({ path: "references/guide.md", kind: "text", patch: "stale preview", truncated: false })));
+  expect(screen.queryByText("stale preview")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 references/guide.md 的差异" })).toBeEnabled();
+});
+
+it("英文界面显示明确的预览原因，并在关闭弹窗时取消文件请求", async () => {
+  let signal: AbortSignal | null | undefined;
+  await setupFilePreview((_url, init) => { signal = init?.signal; return new Promise(() => undefined); }, true);
+  expect(screen.getByText("Binary file; text diff is unavailable.")).toBeInTheDocument();
+  expect(screen.getByText("The file is not valid UTF-8 text and cannot be previewed.")).toBeInTheDocument();
+  expect(screen.getByText("The file exceeds the 1.0 MiB preview limit per side.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "View changes for references/guide.md" }));
+  await waitFor(() => expect(signal).toBeDefined());
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await waitFor(() => expect(signal?.aborted).toBe(true));
 });

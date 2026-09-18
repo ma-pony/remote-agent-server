@@ -14,6 +14,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SkillFileDiff } from "@/components/skill-file-diff";
 
 const SkillError = ({ message }: { message: string }) => {
   const { text } = useI18n();
@@ -158,14 +159,9 @@ export const SkillRevisionDialog = ({ agentId, skill, onApplied, disabled }: { a
             <AlertTitle>{diff.locallyModified ? text("检测到本地修改", "Local modifications detected") : text("版本比较", "Revision comparison")}</AlertTitle>
             <AlertDescription>{diff.locallyModified ? text("为保护本地内容，无法覆盖。请先保存本地修改，再恢复原内容或停用后重新启用。", "Applying is blocked to protect local content. Save your edits, then restore the original files or disable and enable the Skill.") : text(`${diff.files.length} 个文件发生变化。`, `${diff.files.length} files changed.`)}</AlertDescription>
           </Alert>
-          {diff.files.length === 0 ? <p className="text-sm text-muted-foreground">{text("文件内容和权限没有变化。", "File contents and permissions are unchanged.")}</p> : <div className="max-h-80 divide-y overflow-y-auto rounded-lg border">{diff.files.map((file) => <div key={file.path} className="flex flex-col gap-2 p-3">
-            <div className="flex items-start gap-2"><Badge variant="outline">{{ added: text("新增", "Added"), removed: text("删除", "Removed"), modified: text("修改", "Modified") }[file.status]}</Badge><code className="break-all text-xs">{file.path}</code></div>
-            {file.beforeMode !== file.afterMode ? <p className="text-xs text-muted-foreground">{text("文件权限", "Permissions")}: {file.beforeMode?.toString(8) ?? "—"} → {file.afterMode?.toString(8) ?? "—"}</p> : null}
-            {file.before !== undefined && file.after !== undefined ? <div className="grid gap-2 sm:grid-cols-2">
-              <div><p className="mb-1 text-xs text-muted-foreground">{text("当前", "Current")}</p><pre className="max-h-48 overflow-auto rounded bg-muted p-2 text-xs whitespace-pre-wrap">{file.before}</pre></div>
-              <div><p className="mb-1 text-xs text-muted-foreground">{text("目标", "Target")}</p><pre className="max-h-48 overflow-auto rounded bg-muted p-2 text-xs whitespace-pre-wrap">{file.after}</pre></div>
-            </div> : <p className="text-xs text-muted-foreground">{text("二进制或较大文件不展示文本预览。", "Text preview is omitted for binary or large files.")}</p>}
-          </div>)}</div>}
+          {diff.files.length === 0 ? <p className="text-sm text-muted-foreground">{text("文件内容和权限没有变化。", "File contents and permissions are unchanged.")}</p> : <div className="max-h-[55vh] divide-y overflow-y-auto rounded-lg border">{diff.files.map((file) =>
+            <SkillFileDiff key={`${diff.revision}:${diff.baseRevision}:${file.path}`} base={base} diff={diff} file={file} />
+          )}</div>}
           <DialogFooter>
             <Button variant="outline" disabled={busy !== ""} onClick={() => setOpen(false)}>{text("取消", "Cancel")}</Button>
             <Button disabled={disabled || diff.locallyModified || busy !== "" || diff.revision !== revision || diff.revision === history.currentRevision} onClick={() => void apply()}>{busy === "apply" ? <Loader2 className="animate-spin" /> : null}{diff.revision === history.latestRevision ? text("应用此版本", "Apply this version") : text("回滚到此版本", "Roll back to this version")}</Button>

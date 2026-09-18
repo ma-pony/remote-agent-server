@@ -14,7 +14,8 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
-import { SkillContentError, readSkillMetadata as metadata, readSkillTree, skillTreeDigest } from "./skill-content.js";
+import { SkillContentError, readSkillMetadata as metadata, readSkillTree, skillFilesDigest, skillTreeDigest } from "./skill-content.js";
+import { previewSkillFile, skillPreviewFileLimit, skillPreviewKind, type SkillFilePreview, type SkillPreviewKind } from "./skill-diff.js";
 import { installationFile, installedSkillDirectory, readInstallation, SkillRevisions, type SkillPackage, type SkillRevision } from "./skill-revisions.js";
 
 export type SkillSource = "codex" | "agents" | "claude" | "plugin" | "upload" | "git" | "missing";
@@ -169,30 +170,41 @@ export class SkillManager {
   }
 
   diff(agentId: number, id: string, revision: string): SkillDiff {
+    const { current, before, after, baseRevision } = this.comparison(agentId, id, revision);
+    const files: SkillDiff["files"] = [];
+    for (const path of [...new Set([...before.keys(), ...after.keys()])].sort()) {
+      const previous = before.get(path);
+      const next = after.get(path);
+      if (previous !== undefined && next !== undefined && previous.mode === next.mode && previous.contents.equals(next.contents)) continue;
+      files.push({ path, status: previous === undefined ? "added" : next === undefined ? "removed" : "modified",
+        beforeBytes: previous?.contents.length ?? null, afterBytes: next?.contents.length ?? null,
+        preview: skillPreviewKind(previous, next), beforeMode: previous?.mode ?? null, afterMode: next?.mode ?? null
+      });
+    }
+    return { revision, expectedRevision: current.revision, baseRevision, locallyModified: current.locallyModified,
+      previewLimitBytes: skillPreviewFileLimit, files };
+  }
+
+  async previewFile(agentId: number, id: string, revision: string, path: string, baseRevision: string,
+    signal: AbortSignal = new AbortController().signal): Promise<SkillFilePreview> {
+    const comparison = this.comparison(agentId, id, revision);
+    if (comparison.baseRevision !== baseRevision) throw new SkillManagerError("skill_revision_conflict");
+    // Lookup in the validated package tree, never join an untrusted request path onto a filesystem root.
+    const before = comparison.before.get(path);
+    const after = comparison.after.get(path);
+    if (before === undefined && after === undefined) throw new SkillManagerError("skill_file_not_found");
+    try { return await previewSkillFile(path, before, after, signal); }
+    catch { throw new SkillManagerError("skill_preview_failed"); }
+  }
+
+  private comparison(agentId: number, id: string, revision: string) {
     const target = this.resolveRevision(id, revision);
     const current = this.current(agentId, id);
     if (current === undefined) throw new SkillManagerError("skill_not_enabled");
     const before = readSkillTree(realpathSync(this.destination(agentId, id)), true);
     const after = readSkillTree(target.directory);
-    const files: SkillDiff["files"] = [];
-    let previewBytes = 0;
-    for (const path of [...new Set([...before.keys(), ...after.keys()])].sort()) {
-      const previous = before.get(path);
-      const next = after.get(path);
-      if (previous !== undefined && next !== undefined && previous.mode === next.mode && previous.contents.equals(next.contents)) continue;
-      const canPreview = [previous, next].every((file) => file === undefined || (
-        file.contents.length <= 8_192 && !file.contents.includes(0)
-        && Buffer.from(file.contents.toString("utf8")).equals(file.contents)
-      ));
-      const size = (previous?.contents.length ?? 0) + (next?.contents.length ?? 0);
-      const includeText = canPreview && previewBytes + size <= 64 * 1024;
-      if (includeText) previewBytes += size;
-      files.push({ path, status: previous === undefined ? "added" : next === undefined ? "removed" : "modified",
-        ...(includeText ? { before: previous?.contents.toString("utf8") ?? "", after: next?.contents.toString("utf8") ?? "" } : {}),
-        beforeMode: previous?.mode ?? null, afterMode: next?.mode ?? null
-      });
-    }
-    return { revision, expectedRevision: current.revision, locallyModified: current.locallyModified, files };
+    if (skillFilesDigest(after) !== revision) throw new SkillManagerError("skill_revision_conflict");
+    return { current, before, after, baseRevision: skillFilesDigest(before) };
   }
 
   applyRevision(agentId: number, id: string, revision: string, expectedRevision: string): SkillCatalogItem {
@@ -543,12 +555,15 @@ export class SkillManager {
 export type SkillDiff = {
   revision: string;
   expectedRevision: string;
+  baseRevision: string;
   locallyModified: boolean;
-  files: { path: string; status: "added" | "removed" | "modified"; before?: string; after?: string; beforeMode: number | null; afterMode: number | null }[];
+  previewLimitBytes: number;
+  files: { path: string; status: "added" | "removed" | "modified"; beforeBytes: number | null; afterBytes: number | null;
+    preview: SkillPreviewKind; beforeMode: number | null; afterMode: number | null }[];
 };
 
 export class SkillManagerError extends Error {
-  constructor(readonly code: "invalid_skill_archive" | "skill_archive_too_large" | "skill_name_conflict" | "skill_not_found" | "skill_revision_not_found" | "skill_revision_conflict" | "skill_locally_modified" | "skill_not_enabled") {
+  constructor(readonly code: "invalid_skill_archive" | "skill_archive_too_large" | "skill_name_conflict" | "skill_not_found" | "skill_revision_not_found" | "skill_revision_conflict" | "skill_locally_modified" | "skill_not_enabled" | "skill_file_not_found" | "skill_preview_failed") {
     super(code);
     this.name = "SkillManagerError";
   }

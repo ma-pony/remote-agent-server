@@ -113,8 +113,9 @@ export type SkillRevisionHistory = {
 export type SkillDiffFile = {
   path: string;
   status: "added" | "removed" | "modified";
-  before?: string;
-  after?: string;
+  beforeBytes: number | null;
+  afterBytes: number | null;
+  preview: "text" | "binary" | "unsupported_encoding" | "too_large";
   beforeMode: number | null;
   afterMode: number | null;
 };
@@ -122,9 +123,17 @@ export type SkillDiffFile = {
 export type SkillDiff = {
   revision: string;
   expectedRevision: string;
+  baseRevision: string;
   locallyModified: boolean;
+  previewLimitBytes: number;
   files: SkillDiffFile[];
 };
+
+export type SkillFilePreview = { path: string } & (
+  | { kind: "text"; patch: string; truncated: boolean }
+  | { kind: "binary" | "unsupported_encoding" }
+  | { kind: "too_large"; limitBytes: number }
+);
 
 export type ProviderExtensionCatalogItem = {
   id: string;

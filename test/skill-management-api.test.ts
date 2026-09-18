@@ -50,13 +50,23 @@ it("authenticates source management and explicitly applies a previewed revision 
     expect(history.currentRevision).toBe(enabled.currentRevision);
     expect(history.latestRevision).not.toBe(history.currentRevision);
     const diff = (await app.inject({ url: `${base}/diff?revision=${history.latestRevision}`, headers })).json();
-    expect(diff.files[0].after).toContain("second");
+    expect(diff.files[0]).toMatchObject({ path: "SKILL.md", preview: "text" });
+    expect(diff.files[0]).not.toHaveProperty("after");
+    const fileUrl = `${base}/diff/file?revision=${history.latestRevision}&baseRevision=${diff.baseRevision}&path=SKILL.md`;
+    expect((await app.inject({ url: fileUrl })).statusCode).toBe(401);
+    const file = await app.inject({ url: fileUrl, headers });
+    expect(file.statusCode).toBe(200);
+    expect(file.json()).toMatchObject({ path: "SKILL.md", kind: "text", truncated: false, patch: expect.stringContaining("+second") });
+    expect((await app.inject({ url: `${base}/diff/file?revision=${history.latestRevision}&path=SKILL.md`, headers })).statusCode).toBe(400);
+    expect((await app.inject({ url: fileUrl.replace("path=SKILL.md", "path=..%2Fsecret.txt"), headers })).statusCode).toBe(404);
+    expect((await app.inject({ url: fileUrl.replace(diff.baseRevision, "d".repeat(64)), headers })).statusCode).toBe(409);
     expect((await app.inject({ method: "POST", url: `${base}/revision`, headers,
       payload: { revision: diff.revision, expectedRevision: diff.expectedRevision, force: true } })).statusCode).toBe(400);
     const applied = await app.inject({ method: "POST", url: `${base}/revision`, headers,
       payload: { revision: diff.revision, expectedRevision: diff.expectedRevision } });
     expect(applied.statusCode).toBe(200);
     expect(applied.json().currentRevision).toBe(history.latestRevision);
+    expect((await app.inject({ url: fileUrl, headers })).statusCode).toBe(409);
     const stale = await app.inject({ method: "POST", url: `${base}/revision`, headers,
       payload: { revision: enabled.currentRevision, expectedRevision: enabled.currentRevision } });
     expect(stale.statusCode).toBe(409);

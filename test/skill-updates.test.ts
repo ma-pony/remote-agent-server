@@ -26,7 +26,7 @@ describe("manual Skill updates", () => {
     expect(latest.updateAvailable).toBe(true);
     expect(manager.setEnabled(1, id, true)!.currentRevision).toBe(installed.currentRevision);
     const preview = manager.diff(1, id, latest.latestRevision!);
-    expect(preview.files).toEqual([expect.objectContaining({ path: "scripts/check.sh", status: "modified", before: "first", after: "second" })]);
+    expect(preview.files).toEqual([expect.objectContaining({ path: "scripts/check.sh", status: "modified", beforeBytes: 5, afterBytes: 6, preview: "text" })]);
     const updated = manager.applyRevision(1, id, latest.latestRevision!, installed.currentRevision!);
     expect(updated.currentRevision).toBe(latest.latestRevision);
     expect(manager.list(2)[0]!.currentRevision).toBe(installed.currentRevision);
@@ -99,7 +99,7 @@ describe("manual Skill updates", () => {
     writeFileSync(join(skill, "scripts", "check.sh"), "next version");
     const current = manager.list(1)[0]!;
     expect(manager.diff(1, id, current.latestRevision!).files).toEqual([
-      expect.objectContaining({ path: "scripts/check.sh", before: "first", after: "next version" })
+      expect.objectContaining({ path: "scripts/check.sh", beforeBytes: 5, afterBytes: 12, preview: "text" })
     ]);
     manager.applyRevision(1, id, current.latestRevision!, current.currentRevision!);
     expect(lstatSync(installation).isDirectory()).toBe(true);

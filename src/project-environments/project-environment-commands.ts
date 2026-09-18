@@ -80,7 +80,7 @@ const terminateProcessTree = async (child: ChildProcess): Promise<void> => {
 export const runProcess = (
   command: string,
   args: string[],
-  options: { cwd?: string; environment: NodeJS.ProcessEnv; signal: AbortSignal; timeoutMs?: number }
+  options: { cwd?: string; environment: NodeJS.ProcessEnv; signal: AbortSignal; timeoutMs?: number; successExitCodes?: readonly number[] }
 ): Promise<ProcessResult> => new Promise((resolve, reject) => {
   const child = spawn(command, args, {
     cwd: options.cwd,
@@ -141,7 +141,7 @@ export const runProcess = (
       finish(() => {
         if (options.signal.aborted) {
           reject(new Error("project_environment_command_aborted"));
-        } else if (signal !== null || code !== 0) {
+        } else if (signal !== null || code === null || !(options.successExitCodes ?? [0]).includes(code)) {
           reject(new Error((output || `Command exited with ${String(code)}`).trim()));
         } else {
           resolve({ stdout, stderr });
