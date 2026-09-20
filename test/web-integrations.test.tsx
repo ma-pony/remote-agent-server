@@ -335,6 +335,71 @@ it("筛选编辑器校验条件、预览草稿并保存，接收记录解释忽�
   expect(screen.getByRole("button", { name: "保存接收配置" })).toBeEnabled();
 });
 
+it("字段比较可以选择、校验、预览和保存，重新加载及切换比较方式不会误用字段路径", async () => {
+  window.history.replaceState({}, "", `/integration-endpoints/${endpoint.id}/receiver`);
+  const field = "payload.user.id";
+  const valueField = "payload.merge_request.author_id";
+  let saved: Record<string, unknown> = { filter: { field, op: "eq", value: 101 } };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/integration-endpoints/${endpoint.id}`) return jsonResponse(endpoint);
+    if (url === "/api/agents") return jsonResponse([agent]);
+    if (url === "/api/integration-webhook-providers") return jsonResponse(listWebhookProviders());
+    if (url.endsWith("/webhook-receiver/receipts")) return jsonResponse([]);
+    if (url.endsWith("/webhook-receiver/preview")) {
+      expect(JSON.parse(String(init?.body))).toMatchObject({ filter: { field, op: "eq", valueField }, eventType: "Note Hook" });
+      return jsonResponse({ matched: false, reason: "filter_not_matched", checks: [
+        { path: "$", field, op: "eq", valueField, matched: false, reason: "missing_field" }
+      ] });
+    }
+    if (url.endsWith("/webhook-receiver")) {
+      if (init?.method === "PUT") saved = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return jsonResponse({ provider: "gitlab", authMode: "token", enabled: true, secretConfigured: true, ...saved, filterVersion: 2 });
+    }
+    throw new Error(`Unexpected request ${url}`);
+  }));
+  const view = render(<App />);
+  const source = await screen.findByLabelText("比较对象");
+  expect(source).toHaveValue("value");
+  fireEvent.change(source, { target: { value: "field" } });
+  const reference = screen.getByLabelText("比较字段路径");
+  expect(reference).toHaveValue("");
+  expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+  for (const invalid of ["headers.token", "payload.__proto__.id"]) {
+    fireEvent.change(reference, { target: { value: invalid } });
+    expect(screen.getByRole("button", { name: "保存接收配置" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "预览筛选" })).toBeDisabled();
+  }
+  fireEvent.change(reference, { target: { value: valueField } });
+  fireEvent.change(screen.getByLabelText("比较方式"), { target: { value: "neq" } });
+  expect(reference).toHaveValue(valueField);
+  fireEvent.change(screen.getByLabelText("比较方式"), { target: { value: "eq" } });
+  fireEvent.change(screen.getByLabelText("预览事件类型"), { target: { value: "Note Hook" } });
+  fireEvent.change(screen.getByLabelText("示例事件载荷（JSON）"), { target: { value: '{"user":{"id":101}}' } });
+  fireEvent.click(screen.getByRole("button", { name: "预览筛选" }));
+  expect(await screen.findByText(/payload.user.id = payload.merge_request.author_id · 字段缺失/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
+  await screen.findByText("接收配置已保存");
+  expect(saved.filter).toEqual({ field, op: "eq", valueField });
+  view.unmount();
+  render(<App />);
+  expect(await screen.findByLabelText("比较对象")).toHaveValue("field");
+  expect(screen.getByLabelText("比较字段路径")).toHaveValue(valueField);
+  fireEvent.change(screen.getByLabelText("比较方式"), { target: { value: "contains" } });
+  expect(screen.queryByLabelText("比较对象")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("比较字段路径")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("比较值（JSON）")).toHaveValue('""');
+  fireEvent.change(screen.getByLabelText("比较值（JSON）"), { target: { value: '"CodeReview"' } });
+  fireEvent.click(screen.getByRole("button", { name: "保存接收配置" }));
+  await screen.findByText("接收配置已保存");
+  expect(saved.filter).toEqual({ field, op: "contains", value: "CodeReview" });
+  fireEvent.change(screen.getByLabelText("比较方式"), { target: { value: "eq" } });
+  fireEvent.change(screen.getByLabelText("比较对象"), { target: { value: "field" } });
+  fireEvent.change(screen.getByLabelText("比较字段路径"), { target: { value: valueField } });
+  fireEvent.change(screen.getByLabelText("比较对象"), { target: { value: "value" } });
+  expect(screen.getByLabelText("比较值（JSON）")).toHaveValue('""');
+});
+
 it("接入端点列表分别展示排队和运行任务数", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();

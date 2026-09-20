@@ -384,6 +384,28 @@ POST /integration/v1/endpoints/:slug/webhook
 
 以上是要追加的单条条件，完整预设及追加条件共同作为接收配置的 `filter` 保存。通过 API 配置时，可从平台目录取得 `filterPresets` 中 `label-code-review` 的 `filter`，向其顶层 `all` 追加条件后保存。GitHub 标签路径为 `payload.pull_request.labels.*.name`；作者账号可用 `payload.pull_request.user.login`。GitLab 原生 MR 事件使用 `payload.object_attributes.author_id`；`payload.user.id` 是事件操作者，不能替代作者。GitHub 的 `payload.sender.id` 同样是操作者。只审核开发人员 MR 时，建议为作者 ID 配置 `in: [101,102]` 白名单；也可用 `not_in` 维护完整的 Agent ID 黑名单。示例 ID 需替换为实际账号 ID。
 
+需要比较两个字段时，在“等于 / 不等于”下将“比较对象”切换为“另一个字段”，填写路径，无需 JSON 引号。API 用 `valueField` 替代 `value`，两者不能同时提供；仅支持 `eq` / `neq`。两侧只比较同类型标量（字符串、数字、布尔值或 `null`），缺失、类型不符、数组或对象均不匹配。
+
+例如，只处理创建者本人操作的 MR 评论，且 MR 仍开启、带 `CodeReview` 而不带 `Done-Pass`：
+
+```json
+{
+  "all": [
+    {"field": "eventType","op": "eq","value": "Note Hook"},
+    {"field": "payload.object_kind","op": "eq","value": "note"},
+    {"field": "payload.object_attributes.noteable_type","op": "eq","value": "MergeRequest"},
+    {"field": "payload.object_attributes.system","op": "eq","value": false},
+    {"field": "payload.merge_request.state","op": "eq","value": "opened"},
+    {"field": "payload.merge_request.labels.*.title","op": "contains","value": "CodeReview"},
+    {"field": "payload.merge_request.labels.*.title","op": "not_contains","value": "Done-Pass"},
+    {"field": "payload.user.id","op": "eq","valueField": "payload.merge_request.author_id"}
+  ]
+}
+```
+
+这是独立的评论筛选示例；如需同时接收原有 MR 事件，可与 MR 预设用 `any` 组合，并分别保留项目和作者账号限制。先在 GitLab 项目 Webhook 中订阅 **Comments**，再用实际 `Note Hook` 载荷预览。按 [GitLab 官方评论事件示例](https://docs.gitlab.com/user/project/integrations/webhook_events/#comment-on-a-merge-request)，MR 作者路径是 `payload.merge_request.author_id`；评论事件的 `payload.object_attributes.author_id` 则是评论作者，不能用于排除 Agent 创建的 MR。`payload.user.id` 是本次事件操作者；评论编辑也可能触发事件，如仅需新评论，应在确认实际版本提供该字段后加 `payload.object_attributes.action == "create"`。评论事件不属于 MR / PR 合并范围，命中后立即创建任务。
+
+- 字段比较沿用相同路径限制；预览的对应 `checks` 条目增加 `valueField` 并展示两侧路径，不返回解析出的比较值。已有固定值规则保持原义，`value: "payload.user.id"` 仍表示字符串。
 - 字段只允许 `eventType` 或 `payload.` 开头的点分路径；一个路径最多允许一个 `*`，用于提取数组元素，如 `labels.*.title`。不读取请求头或执行脚本。
 - `eq` / `neq` 比较单个标量；`in` / `not_in` 判断标量是否属于配置列表；`contains` / `not_contains` 判断事件数组是否包含 / 不包含配置标量，适合标签。界面中选择“列表不包含”，比较值填写单个 JSON 值，例如 `"Done-Pass"`，不能填数组。`not_in` 不能代替数组排除条件。`exists` 的布尔值指定字段必须存在或缺失，通配路径以至少一个元素存在目标字段为准，空数组或所有元素均缺失该字段时视为不存在。字符串精确匹配、区分大小写。
 - 不做类型转换：数字 `101` 不等于字符串 `"101"`。字段缺失或类型不符时比较不匹配，负向比较也不放行。`null` 是已存在的值。空数组不能命中 `contains`，但能命中 `not_contains`；若同时要求包含 `CodeReview`，空数组仍不通过组合规则。`not_contains` 要求数组所有元素均存在且与比较值同类型，通配路径中任一元素缺少目标字段也不会放行。

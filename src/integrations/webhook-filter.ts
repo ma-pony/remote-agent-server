@@ -2,12 +2,13 @@ import { z } from "zod";
 
 export type WebhookScalar = string | number | boolean | null;
 export type WebhookCondition =
+  | { field: string; op: "eq" | "neq"; valueField: string }
   | { field: string; op: "eq" | "neq" | "contains" | "not_contains"; value: WebhookScalar }
   | { field: string; op: "in" | "not_in"; value: WebhookScalar[] }
   | { field: string; op: "exists"; value: boolean };
 export type WebhookFilter = WebhookCondition | { all: WebhookFilter[] } | { any: WebhookFilter[] };
 export type WebhookFilterEvent = { eventType: string; payload: Record<string, unknown> };
-export type WebhookFilterCheck = { path: string; field: string; op: WebhookCondition["op"]; matched: boolean;
+export type WebhookFilterCheck = { path: string; field: string; op: WebhookCondition["op"]; valueField?: string; matched: boolean;
   reason: "matched" | "value_mismatch" | "missing_field" | "type_mismatch" };
 export type WebhookFilterResult = { matched: boolean; checks: WebhookFilterCheck[] };
 
@@ -17,6 +18,7 @@ const fieldSchema = z.string().max(256).regex(/^(eventType|payload(?:\.(?:[A-Za-
   .refine((path) => path.split("*").length <= 2)
   .refine((path) => !path.split(".").some((part) => ["__proto__", "prototype", "constructor"].includes(part)));
 const conditionSchema = z.union([
+  z.object({ field: fieldSchema, op: z.enum(["eq", "neq"]), valueField: fieldSchema }).strict(),
   z.object({ field: fieldSchema, op: z.enum(["eq", "neq", "contains", "not_contains"]), value: scalarSchema }).strict(),
   z.object({ field: fieldSchema, op: z.enum(["in", "not_in"]), value: z.array(scalarSchema).min(1).max(100)
     .refine((values) => values.every((value) => scalarType(value) === scalarType(values[0]))) }).strict(),
@@ -79,7 +81,13 @@ export const evaluateWebhookFilter = (filter: WebhookFilter | null, event: Webho
     const actual = webhookFieldValue(event, rule.field);
     let matched = false;
     let reason: WebhookFilterCheck["reason"] = "value_mismatch";
-    if (rule.op === "exists") {
+    if ("valueField" in rule) {
+      const expected = webhookFieldValue(event, rule.valueField);
+      if (actual === undefined || expected === undefined) reason = "missing_field";
+      else if (scalarType(actual) !== scalarType(expected) || !["string", "number", "boolean", "null"].includes(scalarType(actual))) {
+        reason = "type_mismatch";
+      } else matched = rule.op === "eq" ? actual === expected : actual !== expected;
+    } else if (rule.op === "exists") {
       const exists = rule.field.includes("*") && Array.isArray(actual)
         ? actual.some((value) => value !== undefined) : actual !== undefined;
       matched = exists === rule.value;
@@ -102,7 +110,8 @@ export const evaluateWebhookFilter = (filter: WebhookFilter | null, event: Webho
         matched = rule.op === "neq" || rule.op === "not_in" ? !included : included;
       }
     }
-    checks.push({ path, field: rule.field, op: rule.op, matched, reason: matched ? "matched" : reason });
+    checks.push({ path, field: rule.field, op: rule.op, ...("valueField" in rule ? { valueField: rule.valueField } : {}),
+      matched, reason: matched ? "matched" : reason });
     return matched;
   };
   return { matched: filter === null || visit(filter, "$"), checks };

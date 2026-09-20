@@ -204,6 +204,8 @@ Receiver `debounce_seconds` defaults to 60; the management API accepts 0–300 s
 
 Disabled endpoints/receivers or a changed provider pause dispatch until the matching configuration is enabled again. Disabling merging affects new events; accepted batches still finish. Endpoint deletion cascades batches and receipts. Completed metadata survives Session storage cleanup so old deliveries cannot recreate tasks. Management receipt history joins all batch receipts to the same Task, exposing pending state, scheduled time, and a fixed error code without encrypted payloads. Preview remains a pure filter evaluation.
 
+Field comparisons use `{field, op: "eq" | "neq", valueField}`, strictly exclusive with the existing `{field, op, value}` form. Both sides share bounded path resolution restricted to own `eventType` / `payload` properties. Only same-type scalars (including `null`) are compared; missing fields, mismatched types, arrays, and objects fail even `neq`. There is no string-path interpolation, coercion, or deep comparison. Existing receiver JSON persistence and versioning require no database migration. Management writes, previews, and admission share the schema/evaluator. Preview checks add only an optional `valueField` path, never resolved values; existing literal rules and first-delivery decisions retain their semantics.
+
 ### 6.5 Webhook extension boundaries
 
 - Routes own HTTP transport, original bytes, management authentication, input validation, and error mapping.

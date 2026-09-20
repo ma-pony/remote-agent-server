@@ -94,6 +94,64 @@ describe("Webhook filter semantics", () => {
   });
 });
 
+describe("Webhook field comparisons", () => {
+  it.each([
+    [101, 101, true, "matched"], [101, 102, false, "value_mismatch"],
+    ["developer", "developer", true, "matched"], ["Developer", "developer", false, "value_mismatch"],
+    [false, false, true, "matched"], [false, true, false, "value_mismatch"],
+    [0, 0, true, "matched"], ["", "", true, "matched"], [null, null, true, "matched"],
+    [101, "101", false, "type_mismatch"], [null, 101, false, "type_mismatch"],
+    [undefined, 101, false, "missing_field"], [101, undefined, false, "missing_field"],
+    [undefined, undefined, false, "missing_field"],
+    [[101], [101], false, "type_mismatch"], [{ id: 101 }, { id: 101 }, false, "type_mismatch"]
+  ])("compares two scalar fields without coercion: %j vs %j", (left, right, equal, reason) => {
+    for (const op of ["eq", "neq"] as const) {
+      const filter = webhookFilterSchema.parse({ field: "payload.user.id", op, valueField: "payload.merge_request.author_id" });
+      const matched = reason === "matched" || reason === "value_mismatch" ? (op === "eq" ? equal : !equal) : false;
+      expect(evaluateWebhookFilter(filter, { eventType: "Note Hook", payload: { user: { id: left }, merge_request: { author_id: right } } }))
+        .toEqual({ matched, checks: [{ path: "$", field: "payload.user.id", op, valueField: "payload.merge_request.author_id",
+          matched, reason: matched ? "matched" : reason === "matched" ? "value_mismatch" : reason }] });
+    }
+  });
+
+  it("supports event fields and nested groups while retaining literal path strings", () => {
+    const rule = webhookFilterSchema.parse({ all: [
+      { field: "eventType", op: "eq", valueField: "payload.event" },
+      { any: [{ field: "payload.text", op: "eq", value: "payload.event" },
+        { field: "payload.id", op: "neq", valueField: "payload.author_id" }] }
+    ] });
+    expect(evaluateWebhookFilter(rule, { eventType: "Note Hook", payload: { event: "Note Hook", text: "payload.event" } }).matched).toBe(true);
+  });
+
+  it("fails closed for inherited or array-valued field references", () => {
+    const inherited = Object.create({ author_id: 101 }) as Record<string, unknown>;
+    for (const op of ["eq", "neq"] as const) {
+      const rule = webhookFilterSchema.parse({ field: "payload.user.id", op, valueField: "payload.merge_request.author_id" });
+      expect(evaluateWebhookFilter(rule, { eventType: "Note Hook", payload: { user: { id: 101 }, merge_request: inherited } }))
+        .toMatchObject({ matched: false, checks: [{ reason: "missing_field" }] });
+      for (const fields of [
+        { field: "payload.ids.*", valueField: "payload.id" },
+        { field: "payload.id", valueField: "payload.ids.*" }
+      ]) {
+        expect(evaluateWebhookFilter(webhookFilterSchema.parse({ ...fields, op }), { eventType: "test", payload: { ids: [101], id: 101 } }))
+          .toMatchObject({ matched: false, checks: [{ reason: "type_mismatch" }] });
+      }
+    }
+  });
+
+  it("validates references with the same path limits and requires one comparison operand", () => {
+    for (const rule of [
+      { field: "payload.id", op: "eq" },
+      { field: "payload.id", op: "eq", value: 101, valueField: "payload.author_id" },
+      ...["contains", "not_contains", "in", "not_in", "exists"].map((op) => ({ field: "payload.id", op, valueField: "payload.author_id" })),
+      ...["", "headers.token", "payload.__proto__.id", "payload.constructor.id", "payload.prototype.id", "payload.a.*.b.*", `payload.${"x".repeat(256)}`]
+        .map((valueField) => ({ field: "payload.id", op: "eq", valueField })),
+      { field: "payload.__proto__.id", op: "eq", valueField: "payload.id" },
+      { field: "payload.id", op: "eq", valueField: 101 }
+    ]) expect(webhookFilterSchema.safeParse(rule).success).toBe(false);
+  });
+});
+
 describe("Review event presets", () => {
   const preset = (provider: string) => webhookFilterSchema.parse(listWebhookProviders().find((item) => item.id === provider)!.filterPresets[0]!.filter);
   it.each([

@@ -17,6 +17,10 @@ export const gitlabWebhookAdapter: WebhookAdapter = {
     filterFields: [
       {"path": "payload.labels.*.title", "label": {"zh": "MR 标签名称列表", "en": "MR label titles"}},
       {"path": "payload.user.id", "label": {"zh": "事件操作者 ID（不是 MR 作者）", "en": "Event actor ID (not MR author)"}},
+      {"path": "payload.merge_request.author_id", "label": {"zh": "评论所属 MR 的作者 ID（Note Hook）", "en": "Commented MR author ID (Note Hook)"}},
+      {"path": "payload.merge_request.state", "label": {"zh": "评论所属 MR 的状态（Note Hook）", "en": "Commented MR state (Note Hook)"}},
+      {"path": "payload.merge_request.labels.*.title", "label": {"zh": "评论所属 MR 的标签（Note Hook）", "en": "Commented MR label titles (Note Hook)"}},
+      {"path": "payload.object_attributes.noteable_type", "label": {"zh": "评论对象类型（Note Hook）", "en": "Comment target type (Note Hook)"}},
       {
         "path": "eventType",
         "label": {
@@ -34,8 +38,8 @@ export const gitlabWebhookAdapter: WebhookAdapter = {
       {
         "path": "payload.object_attributes.author_id",
         "label": {
-          "zh": "MR 作者 ID",
-          "en": "MR author ID"
+          "zh": "MR 作者 ID（Merge Request Hook）",
+          "en": "MR author ID (Merge Request Hook)"
         }
       },
       {

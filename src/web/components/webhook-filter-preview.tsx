@@ -65,7 +65,7 @@ export const WebhookFilterPreview = ({ endpointId, definition, filter, disabled 
         {current.reason === "ping" ? <p>{text("GitHub ping 仅检查连接。", "GitHub ping only checks the connection.")}</p> : null}
         {current.matched ? <p>{text("实际接收还需通过认证、启用状态和任务参数校验。", "Actual delivery also requires authentication, enabled status, and valid task parameters.")}</p> : null}
         <ul className="flex flex-col gap-1">{current.checks.map((check) => <li key={check.path}>
-          {check.path} · {check.field} · {check.matched ? text("匹配", "Matched") : check.reason === "missing_field" ? text("字段缺失", "Missing field")
+          {check.path} · {check.field}{check.valueField === undefined ? null : ` ${check.op === "eq" ? "=" : "≠"} ${check.valueField}`} · {check.matched ? text("匹配", "Matched") : check.reason === "missing_field" ? text("字段缺失", "Missing field")
             : check.reason === "type_mismatch" ? text("类型不符", "Type mismatch") : text("值不匹配", "Value mismatch")}
         </li>)}</ul>
       </AlertDescription>

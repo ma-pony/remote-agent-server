@@ -11,17 +11,20 @@ import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select"
 import { Textarea } from "@/components/ui/textarea";
 import { webhookFilterSchema, type WebhookFilter } from "../../integrations/webhook-filter.js";
 
-export type FilterDraft = { field: string; op: string; valueText: string }
+export type FilterDraft = { field: string; op: string; valueSource: "value" | "field"; valueText: string }
   | { mode: "all" | "any"; children: FilterDraft[] };
 export const draftFilter = (filter: WebhookFilter | null): FilterDraft | null => {
   if (filter === null) return null;
   if ("all" in filter) return { mode: "all", children: filter.all.map((child) => draftFilter(child)!) };
   if ("any" in filter) return { mode: "any", children: filter.any.map((child) => draftFilter(child)!) };
-  return { field: filter.field, op: filter.op, valueText: JSON.stringify(filter.value) };
+  return "valueField" in filter
+    ? { field: filter.field, op: filter.op, valueSource: "field", valueText: filter.valueField }
+    : { field: filter.field, op: filter.op, valueSource: "value", valueText: JSON.stringify(filter.value) };
 };
 const draftValue = (draft: FilterDraft): unknown => "mode" in draft
   ? { [draft.mode]: draft.children.map(draftValue) }
-  : { field: draft.field, op: draft.op, value: JSON.parse(draft.valueText) as unknown };
+  : { field: draft.field, op: draft.op, ...(draft.valueSource === "field"
+    ? { valueField: draft.valueText } : { value: JSON.parse(draft.valueText) as unknown }) };
 export const parseFilterDraft = (draft: FilterDraft | null): { valid: true; filter: WebhookFilter | null } | { valid: false } => {
   if (draft === null) return { valid: true, filter: null };
   try {
@@ -29,7 +32,7 @@ export const parseFilterDraft = (draft: FilterDraft | null): { valid: true; filt
     return parsed.success ? { valid: true, filter: parsed.data } : { valid: false };
   } catch { return { valid: false }; }
 };
-const newCondition = (): FilterDraft => ({ field: "eventType", op: "eq", valueText: '""' });
+const newCondition = (): FilterDraft => ({ field: "eventType", op: "eq", valueSource: "value", valueText: '""' });
 
 const RuleEditor = ({ draft, onChange, onRemove, fieldsId, depth = 0 }: {
   draft: FilterDraft; onChange(draft: FilterDraft): void; onRemove?(): void; fieldsId: string; depth?: number;
@@ -72,21 +75,42 @@ const RuleEditor = ({ draft, onChange, onRemove, fieldsId, depth = 0 }: {
     </Field>
     <Field>
       <FieldLabel htmlFor={`${id}-op`}>{text("比较方式", "Operator")}</FieldLabel>
-      <NativeSelect id={`${id}-op`} value={draft.op} onChange={(event) => onChange({ ...draft, op: event.target.value })}>
+      <NativeSelect id={`${id}-op`} value={draft.op} onChange={(event) => {
+        const op = event.target.value;
+        onChange({ ...draft, op, ...(draft.valueSource === "field" && op !== "eq" && op !== "neq"
+          ? { valueSource: "value", valueText: op === "exists" ? "true" : op === "in" || op === "not_in" ? "[]" : '""' } : {}) });
+      }}>
         {[["eq", "等于", "Equals"], ["neq", "不等于", "Does not equal"], ["in", "属于列表", "In list"],
           ["not_in", "不属于列表", "Not in list"], ["contains", "列表包含", "List contains"],
           ["not_contains", "列表不包含", "List does not contain"], ["exists", "字段存在", "Field exists"]].map(([value, zh, en]) =>
           <NativeSelectOption key={value} value={value}>{text(zh!, en!)}</NativeSelectOption>)}
       </NativeSelect>
     </Field>
-    <Field data-invalid={!valid}>
+    <FieldGroup className="gap-3">
+    {draft.op === "eq" || draft.op === "neq" ? <Field>
+      <FieldLabel htmlFor={`${id}-source`}>{text("比较对象", "Compare with")}</FieldLabel>
+      <NativeSelect id={`${id}-source`} value={draft.valueSource} onChange={(event) => {
+        const valueSource = event.target.value as "value" | "field";
+        onChange({ ...draft, valueSource, valueText: valueSource === "field" ? "" : '""' });
+      }}>
+        <NativeSelectOption value="value">{text("固定值", "Fixed value")}</NativeSelectOption>
+        <NativeSelectOption value="field">{text("另一个字段", "Another field")}</NativeSelectOption>
+      </NativeSelect>
+    </Field> : null}
+    {draft.valueSource === "field" ? <Field data-invalid={!valid}>
+      <FieldLabel htmlFor={`${id}-value`}>{text("比较字段路径", "Comparison field path")}</FieldLabel>
+      <Input id={`${id}-value`} list={fieldsId} maxLength={256} aria-invalid={!valid} value={draft.valueText}
+        onChange={(event) => onChange({ ...draft, valueText: event.target.value })} />
+      <FieldDescription>{text("填写另一个字段路径，无需 JSON 引号。两侧必须存在且为同类型标量，不比较数组或对象。", "Enter another field path without JSON quotes. Both fields must exist and contain scalars of the same type; arrays and objects are not compared.")}</FieldDescription>
+    </Field> : <Field data-invalid={!valid}>
       <FieldLabel htmlFor={`${id}-value`}>{text("比较值（JSON）", "Value (JSON)")}</FieldLabel>
       <Textarea id={`${id}-value`} rows={1} aria-invalid={!valid} value={draft.valueText} onChange={(event) => onChange({ ...draft, valueText: event.target.value })} />
       <FieldDescription>{draft.op === "exists" ? text("true 表示必须存在；false 表示必须缺失。通配路径按是否至少有一个元素存在该字段判断。", "true requires presence; false requires absence. Wildcard paths require at least one element with the selected field to count as present.")
         : draft.op === "contains" ? text('填写单个值，如 "CodeReview"。字段可用 labels.*.title 提取所有标签名。', 'Enter a single value, such as "CodeReview". Use labels.*.title to select every label title.')
         : draft.op === "not_contains" ? text('填写要排除的单个值，如 "Done-Pass"。字段必须为数组，所有元素须完整且与比较值同类型；空数组符合此条件。', 'Enter one value to exclude, such as "Done-Pass". The field must be an array with every element present and of the same type as the value; an empty array matches.')
         : text('例如：42、"main"、false 或 [101,102]。列表中的值须为同一类型。', 'Examples: 42, "main", false, or [101,102]. List values must have the same type.')}</FieldDescription>
-    </Field>
+    </Field>}
+    </FieldGroup>
     {onRemove === undefined ? null : <Button type="button" variant="ghost" size="sm" className="self-start" onClick={onRemove}><Trash2 data-icon="inline-start" />{text("删除条件", "Remove condition")}</Button>}
   </FieldGroup>;
 };

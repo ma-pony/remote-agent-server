@@ -384,6 +384,28 @@ For example, append this condition to the outer **Match all** group of **Label-g
 
 This is one condition to append; save the complete preset and added conditions as the receiver's `filter`. API clients can obtain `filter` from the provider catalog's `label-code-review` entry in `filterPresets`, append conditions to its top-level `all`, and save it. GitHub labels use `payload.pull_request.labels.*.name`, and the author login is `payload.pull_request.user.login`. Native GitLab MR events identify the author through `payload.object_attributes.author_id`; `payload.user.id` is the event actor and must not substitute for the author. GitHub's `payload.sender.id` is also the actor. To review only developer MRs, prefer an author ID allowlist with `in: [101,102]`, or maintain a complete agent ID denylist with `not_in`. Replace example IDs with actual account IDs.
 
+To compare two fields, select **Equals / Does not equal → Compare with → Another field** and enter the path without JSON quotes. API clients replace `value` with `valueField`; supplying both is invalid. Only `eq` / `neq` support this form. Both sides must be scalars of the same type (string, number, boolean, or `null`); missing fields, type mismatches, arrays, and objects fail the condition.
+
+For example, accept MR comment events performed by the MR creator, while the MR is open, has `CodeReview`, and has no `Done-Pass`:
+
+```json
+{
+  "all": [
+    {"field": "eventType","op": "eq","value": "Note Hook"},
+    {"field": "payload.object_kind","op": "eq","value": "note"},
+    {"field": "payload.object_attributes.noteable_type","op": "eq","value": "MergeRequest"},
+    {"field": "payload.object_attributes.system","op": "eq","value": false},
+    {"field": "payload.merge_request.state","op": "eq","value": "opened"},
+    {"field": "payload.merge_request.labels.*.title","op": "contains","value": "CodeReview"},
+    {"field": "payload.merge_request.labels.*.title","op": "not_contains","value": "Done-Pass"},
+    {"field": "payload.user.id","op": "eq","valueField": "payload.merge_request.author_id"}
+  ]
+}
+```
+
+This is a standalone comment filter. To also receive existing MR events, combine it with the MR preset using `any` and retain project and author-account restrictions for each event type. Enable **Comments** in the GitLab project webhook, then preview a real `Note Hook` payload. In the [official GitLab comment example](https://docs.gitlab.com/user/project/integrations/webhook_events/#comment-on-a-merge-request), the MR author is `payload.merge_request.author_id`; `payload.object_attributes.author_id` identifies the comment author and cannot exclude agent-created MRs. `payload.user.id` is the event actor. Edited comments can also trigger events; to accept only new comments, add `payload.object_attributes.action == "create"` after verifying that the installed version supplies it. Comment events are outside MR / PR merging and create tasks immediately when matched.
+
+- Field references use the same path restrictions. Corresponding preview `checks` entries add `valueField` and display both paths without exposing resolved values. Existing literal rules keep their meaning: `value: "payload.user.id"` remains a string.
 - Fields must be `eventType` or dot-separated paths beginning with `payload.`. A path may contain one `*` to project array elements, such as `labels.*.title`. Filters cannot read headers or execute scripts.
 - `eq` / `neq` compare a scalar; `in` / `not_in` check a scalar against a configured list; `contains` / `not_contains` check whether an event array contains / excludes a configured scalar, useful for labels. In the UI, select **List does not contain** and enter one JSON value, such as `"Done-Pass"`, rather than an array. `not_in` cannot substitute for array exclusion. `exists` takes a boolean requiring presence or absence. A wildcard field is present when at least one element has the selected field; empty arrays or only missing fields count as absent. Strings are exact and case-sensitive.
 - No coercion: numeric `101` differs from string `"101"`. Missing fields and type mismatches fail comparisons, including negative comparisons. `null` is present. Empty arrays never match `contains` but match `not_contains`; combining it with a required `CodeReview` label still rejects empty arrays. `not_contains` requires every array element to be present and of the same type as the comparison value; a missing projected field in any element also fails the condition.
