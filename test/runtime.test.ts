@@ -1014,6 +1014,22 @@ describe("AcpxAgentRuntime", () => {
     expect(acpTurn.closeStream).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves structured MCP identity through runtime tool projection", async () => {
+    const root = makeRoot();
+    acpxMocks.createAcpRuntime.mockReturnValue(runtimeStub({ events: [{
+      type: "tool_call", text: "Search", toolCallId: "mcp-call", kind: "execute",
+      rawInput: { server: "tools", tool: "search", arguments: { query: "test" } }
+    }] }));
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root));
+    const turn = runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
+    const events = [];
+    for await (const event of turn.events) events.push(event);
+    expect(events[0]).toMatchObject({ type: "tool", content: { mcp: { server: "tools", tool: "search" } } });
+    await turn.result;
+    await runtime.shutdown();
+  });
+
   it("将 acpx usage_update 保留为结构化用量并独立忽略无效字段", async () => {
     const root = makeRoot();
     const acp = runtimeStub({
@@ -1128,6 +1144,13 @@ describe("AcpxAgentRuntime", () => {
       reason: "provider_session_reset",
       discardPersistentState: true
     }));
+  });
+
+  it("重置已释放的 Session 不会为了丢弃状态再次启动 Provider", async () => {
+    const root = makeRoot();
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.reset(sessionInput(root));
+    expect(acpxMocks.createAcpRuntime).not.toHaveBeenCalled();
   });
 
   it("遗忘未缓存的 Session 不会启动 Provider", async () => {
@@ -1531,4 +1554,46 @@ describe("AcpxAgentRuntime", () => {
     const options = acpxMocks.createAcpRuntime.mock.calls[0]?.[0] as AcpRuntimeOptions;
     expect(options.agentRegistry.list()).toEqual([]);
   });
+});
+
+it.each(["codex", "claude_code"] as const)("%s 自动采集使用实际启动配置隔离上游密钥，并把复用第二 Run 绑定到新请求", async (provider) => {
+  const { createServer } = await import("node:http");
+  const { exec } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { createRequire } = await import("node:module");
+  const { createTestDatabase } = await import("./helpers.js");
+  const { HostUsageCollector } = await import("../src/agent-usage/host-collector.js");
+  const { HostUsageCapture } = await import("../src/agent-usage/capture/host-capture.js");
+  const { takeCaptureSecrets } = await import("../src/agent-usage/capture/config.js");
+  const root = makeRoot(); const config = makeConfig(root); const { db, seed } = createTestDatabase(); const session = seed.session();
+  seed.run(session.id, "running"); let response = 0;
+  const upstream = createServer((req, res) => { expect(provider === "codex" ? req.headers.authorization : req.headers["x-api-key"]).toBe(provider === "codex" ? "Bearer UPSTREAM_KEY_SENTINEL" : "UPSTREAM_KEY_SENTINEL"); req.resume(); req.on("end", () => res.end(JSON.stringify({ id: `resp${++response}`, usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } }))); });
+  await new Promise<void>((resolve, reject) => { upstream.once("error", reject); upstream.listen(0, "127.0.0.1", resolve); });
+  config.usageCaptureUpstreams = { [provider]: { baseUrl: `http://127.0.0.1:${(upstream.address() as { port: number }).port}/v1`, protocol: provider === "codex" ? "responses" : "anthropic_messages", apiKeyEnv: "TEST_CAPTURE_SECRET" } };
+  vi.stubEnv("TEST_CAPTURE_SECRET", "UPSTREAM_KEY_SENTINEL"); vi.stubEnv("OPENAI_API_KEY", "INHERITED_KEY_SENTINEL");
+  const capture = new HostUsageCapture(new HostUsageCollector(db), config.usageCaptureUpstreams, takeCaptureSecrets(config.usageCaptureUpstreams, process.env));
+  const script = join(root, "fake-provider.cjs");
+  writeFileSync(script, `const provider=${JSON.stringify(provider)};
+    const config = provider==='codex' ? JSON.parse(process.env.CODEX_CONFIG) : null;
+    const p=config ? config.model_providers[config.model_provider] : {base_url:process.env.ANTHROPIC_BASE_URL,env_key:'ANTHROPIC_API_KEY',wire_api:'responses',supports_websockets:false};
+    if (process.env.TEST_CAPTURE_SECRET || (provider==='codex' && process.env.OPENAI_API_KEY === 'INHERITED_KEY_SENTINEL')) throw Error('credential leak');
+    if(p.wire_api !== 'responses' || p.supports_websockets !== false) throw Error('unsupported route');
+    fetch(p.base_url + (provider==='codex'?'/responses':'/v1/messages'), {method:'POST',headers:{authorization:'Bearer '+process.env[p.env_key]},body:JSON.stringify({input:'fake request'})}).then(async r=>{if(!r.ok)throw Error('http');await r.text()});`);
+  let command = ""; const acp = runtimeStub();
+  acpxMocks.createAcpRuntime.mockImplementation((options: AcpRuntimeOptions) => {
+    acp.ensureSession.mockImplementation(async (input) => { const actual = options.agentRegistry!.resolve(input.agent); command = provider === 'codex' ? actual.replace(`'${createRequire(import.meta.url).resolve("@agentclientprotocol/codex-acp")}'`, `'${script}'`) : actual.replace(/npx -y @agentclientprotocol\/claude-agent-acp@\^0\.60\.0$/, `'${process.execPath}' '${script}'`); return { sessionKey: "test", backend: "acpx", runtimeSessionName: "test", agentSessionId: "provider-session-1" }; });
+    acp.startTurn.mockImplementation(() => ({ events: { async *[Symbol.asyncIterator]() {} }, result: (command.includes(script) ? promisify(exec)(command, { timeout: 2000 }) : Promise.reject(new Error("fake provider replacement missing"))).then(() => ({ status: "completed" })), closeStream: async () => {}, cancel: async () => {} })); return acp;
+  });
+  const runtime = new AcpxAgentRuntime(config, undefined, undefined, capture);
+  try {
+    const input = sessionInput(root, { provider }); await runtime.ensureSession(input);
+    for (const runId of [1, 2]) {
+      if (runId === 2) { db.prepare("UPDATE runs SET status='succeeded' WHERE id=1").run(); seed.run(session.id, "running"); await runtime.ensureSession(input); }
+      const turn = runtime.startTurn({ sessionId: session.id, requestId: runId, text: "hello" });
+      await turn.result; await turn.closeEvents(); await capture.drain();
+    }
+    const records = capture["host"].store.records(); expect(records.map((row) => row.executionId)).toEqual(["1", "2"]);
+    expect(capture["host"].store.summary().usage.totalTokens).toBe(24); expect(acp.ensureSession).toHaveBeenCalledTimes(1);
+    expect(command).not.toContain("UPSTREAM_KEY_SENTINEL"); expect(db.serialize().includes(Buffer.from("UPSTREAM_KEY_SENTINEL"))).toBe(false);
+  } finally { await runtime.shutdown(); await capture.close(); upstream.closeAllConnections(); await new Promise<void>((resolve) => upstream.close(() => resolve())); db.close(); }
 });

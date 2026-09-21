@@ -1,3 +1,5 @@
+import { HostUsageCapture } from "./agent-usage/capture/host-capture.js";
+import { takeCaptureSecrets } from "./agent-usage/capture/config.js";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +9,7 @@ import type { FastifyInstance } from "fastify";
 import { ZodError } from "zod";
 
 import { buildApp } from "./app.js";
+import { ManagedUsageSources } from "./agent-usage/managed-sources.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { migrate, openDatabase } from "./db.js";
 import { readEnvironmentFile } from "./environment-file.js";
@@ -58,6 +61,8 @@ const defaultListen = (app: FastifyInstance, config: AppConfig): Promise<string>
  */
 export const startServer = async (options: StartServerOptions = {}): Promise<RunningServer> => {
   const config = loadConfig(options.env ?? process.env);
+  const captureKeys = takeCaptureSecrets(config.usageCaptureUpstreams ?? {}, options.env ?? process.env);
+  for (const upstream of Object.values(config.usageCaptureUpstreams ?? {})) delete process.env[upstream.apiKeyEnv];
   removeServiceSecretsFromEnvironment(process.env);
   mkdirSync(config.dataDir, { recursive: true });
   mkdirSync(dirname(config.databasePath), { recursive: true });
@@ -86,10 +91,13 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       fileSystemInspector: options.fileSystemInspector
     });
     await workspaceManager.check();
+    const usageSources = new ManagedUsageSources(db, config);
+    const usageCapture = new HostUsageCapture(usageSources.collector, config.usageCaptureUpstreams ?? {}, captureKeys);
     await recoverIncompleteSessions(db, workspaceManager);
     await recoverSessionMaintenance({
       db,
       workspaceManager,
+      usageCollector: usageSources.collector,
       providerSessionCleaner: new SystemProviderSessionCleaner(config.dataDir)
     });
 
@@ -125,9 +133,10 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
     });
     webhookDispatcher.recover();
     const providerExtensionManager = new ProviderExtensionManager({ db });
-    const runtime = options.runtime ?? new AcpxAgentRuntime(config, undefined, providerExtensionManager);
+    const runtime = options.runtime ?? new AcpxAgentRuntime(config, undefined, providerExtensionManager, usageCapture);
     const mcpManager = new McpManager({ db, secrets });
     app = buildApp({
+      usageSources,
       config,
       db,
       runtime,
@@ -160,6 +169,9 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       return closing;
     };
 
+    // Run readiness hooks (including queued-work dispatch) before binding the listener.
+    // Background usage recovery schedules its owned continuation without blocking readiness.
+    await app.ready();
     await (options.listen ?? defaultListen)(app, config);
     if (options.installSignalHandlers ?? true) {
       const exitProcess = options.exitProcess ?? ((code: number): never => process.exit(code));

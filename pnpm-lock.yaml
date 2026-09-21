@@ -32,6 +32,9 @@ importers:
       '@fontsource-variable/geist':
         specifier: ^5.3.0
         version: 5.3.0
+      '@huggingface/tokenizers':
+        specifier: 0.2.0
+        version: 0.2.0
       '@microsoft/fetch-event-source':
         specifier: ^2.0.1
         version: 2.0.1
@@ -566,6 +569,9 @@ packages:
     engines: {node: '>=20'}
     peerDependencies:
       hono: 4.13.5
+
+  '@huggingface/tokenizers@0.2.0':
+    resolution: {integrity: sha512-LidMHe1FpcSYH4vcSjXooda34pC0M8m1gmDOv7SQi6Iv+ib1zX7J3sHBCC9/3FPCkn2k1b55FneVqMRxrr99pg==}
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -4265,6 +4271,8 @@ snapshots:
   '@hono/node-server@2.1.0(hono@4.13.5)':
     dependencies:
       hono: 4.13.5
+
+  '@huggingface/tokenizers@0.2.0': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:

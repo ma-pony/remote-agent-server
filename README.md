@@ -313,6 +313,16 @@ Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选�
 
 这些上限控制当前 Remote Agent Server 进程。项目当前按单进程部署设计，不提供跨多个服务实例的分布式并发配额。
 
+### 用量分析
+
+侧栏、Agent 和 Session 页面提供“用量分析”入口，可按 Agent、Session、日期及 Runtime 查看已知模型用量，并按具体 MCP Tool、CLI、Skill、插件查看调用和输入贡献。已报告用量与按模型配置的 Hugging Face 本地分词估算分开；未配置词表时使用明确标注的多语言兜底估算，仍可按 token 或输入字节排名；缓存子集和重叠能力视角不重复相加。
+
+托管的 Codex／Claude Code 日志补充 Runtime 证据，启动恢复和关闭时补采，MCP 观察器记录执行事实。配置 `USAGE_CAPTURE_UPSTREAMS` 后可自动采集支持的 API-key 模型请求，查看具体工具定义、结果首次／重复输入及 Skill／插件归属；也可手动导入通用“上下文快照（Context Snapshot）”。上报用量、实际执行与上下文证据分别计量，不要求外部遥测平台。Reset 和存储清理前先采集，保留历史统计；显式删除 Session 清除对应统计并拒收迟到重放。
+
+排名切换与翻页独立刷新；日期筛选和输入证据分页在数据库侧收窄读取范围，首次／重复归因仍基于完整历史。托管日志只解析新增记录，未写完的行保留为待重试采集。
+
+旧 `usage`／`usageSummary` API 保持原语义，新账本通过 `/api/usage/*` 提供。来源边界、缺失说明、快照格式及可执行接入示例见[用量分析指南](docs/agent-usage.md)。
+
 ## 其他系统如何接入
 
 外部接入是异步接口。调用方提交 Task 后立即得到 `202 Accepted`，不需要等待 Agent 完成，也不需要长期保持 SSE 连接。
@@ -770,6 +780,9 @@ curl --fail-with-body \
 | `PORT` | 否 | `3000` | HTTP 端口。 |
 | `DATA_DIR` | 否 | `/srv/remote-agent/data` | 运行数据和加密主密钥目录。 |
 | `DATABASE_PATH` | 否 | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite 数据库路径。 |
+| `USAGE_TOKENIZERS` | 否 | `[]` | 按完整模型名匹配的本地词表配置与 SHA-256；未知模型使用通用文本兜底估算，见[多模型词表](docs/agent-usage.md#配置多模型词表)。 |
+| `USAGE_IMPORT_ROOTS` | 否 | `{}` | 用量文件导入根目录的 JSON 对象，值必须是绝对路径；默认不允许外部目录导入，见[接入指南](docs/agent-usage.md)。 |
+| `USAGE_CAPTURE_UPSTREAMS` | 否 | `{}` | 托管 Runtime 自动模型请求采集的上游配置；声明协议、API base URL 和 API key 环境变量名。显式选择 API-key 路由，见[接入指南](docs/agent-usage.md)。 |
 | `PROJECT_ENVIRONMENTS_ROOT` | 否 | `/srv/remote-agent/environments` | 项目环境版本目录。 |
 | `SESSIONS_ROOT` | 否 | `/srv/remote-agent/sessions` | Session Workspace 目录。 |
 | `MAX_CONCURRENT_RUNS` | 否 | `4` | 首次创建数据库时写入的全局 Run 并发默认值，范围 1–64。之后在系统设置中管理。 |

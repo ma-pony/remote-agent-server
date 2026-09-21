@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
+import { HostUsageCollector } from "../src/agent-usage/host-collector.js";
 import { EventStore } from "../src/events/event-store.js";
 import type {
   AgentRuntime,
@@ -65,6 +66,7 @@ const setup = (
   const eventStore = new EventStore({ db });
   const run = runRepository.create({ sessionId: TEST_SESSION_ID, input: "修复问题" });
   const skillProjector = { prepare };
+  const usageCollector = new HostUsageCollector(db);
   const executor = new RunExecutor({
     runtime,
     skillProjector,
@@ -74,7 +76,8 @@ const setup = (
     mcpPreparer: { prepare: mcpPrepare },
     providerExtensionManager: { revision: providerExtensionRevision },
     runtimeSettings,
-    runTimeoutMs
+    runTimeoutMs,
+    usageCollector
   });
   return {
     db,
@@ -85,6 +88,7 @@ const setup = (
     run,
     runRepository,
     sessionManager,
+    usageCollector,
     workspacePath
   };
 };
@@ -94,6 +98,24 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("persists usage immediately even when the following runtime event fails", async () => {
+    const runtime = createFakeRuntime();
+    const h = setup(runtime);
+    runtime.startTurn = () => ({
+      events: { async *[Symbol.asyncIterator]() {
+        yield { type: "usage" as const, usage: { inputTokens: 123 } };
+        expect(h.usageCollector.store.records({ namespace: h.usageCollector.namespace })[0]?.metrics.inputTotalTokens).toBe(123);
+        throw new Error("runtime stream interrupted");
+      } },
+      result: new Promise<RuntimeTurnResult>(() => undefined), cancel: async () => undefined, closeEvents: async () => undefined
+    });
+    try {
+      const result = await h.executor.execute(h.run.id);
+      expect(result.status).toBe("failed");
+      expect(h.usageCollector.store.records({ namespace: h.usageCollector.namespace })[0]?.metrics.inputTotalTokens).toBe(123);
+      expect(h.eventStore.list(h.run.id, 0).some((event) => String(event.type) === "usage")).toBe(false);
+    } finally { h.db.close(); }
+  });
   it("persists the projected Skill fingerprint on the executed Run", async () => {
     const runtime = createFakeRuntime();
     const result = setup(runtime);
@@ -101,6 +123,46 @@ describe("RunExecutor", () => {
       expect(result.runRepository.get(result.run.id)?.skillsRevision).toBeNull();
       await result.executor.execute(result.run.id);
       expect(result.runRepository.get(result.run.id)).toMatchObject({ status: "succeeded", skillsRevision: "skills-v1" });
+    } finally { result.db.close(); }
+  });
+  it("registers projected Skills before Runtime execution and feeds tool evidence", async () => {
+    const skillDirectory = "/projected/skills/review";
+    const runtime = createFakeRuntime({ events: [
+      { type: "tool", content: {
+        toolCallId: "read-skill", kind: "read", status: "in_progress",
+        rawInput: { path: `${skillDirectory}/SKILL.md` }
+      } },
+      { type: "tool", content: {
+        toolCallId: "read-skill", status: "completed", rawOutput: "done"
+      } }
+    ] });
+    const prepare = vi.fn(() => ({
+      memory: "remember this",
+      revision: "skills-v1",
+      projectedSkills: [{
+        id: "review",
+        name: "Review",
+        revision: "a".repeat(64),
+        source: "git",
+        skillMdPath: `${skillDirectory}/SKILL.md`,
+        directoryAliases: [skillDirectory]
+      }]
+    }));
+    const result = setup(runtime, prepare);
+    runtime.ensureSession = vi.fn(async () => {
+      expect(result.usageCollector.runtimeCapabilities.stageCounts({ namespace: result.usageCollector.namespace }))
+        .toContainEqual(expect.objectContaining({ stage: "catalog_visible", count: 1 }));
+      return { providerSessionId: null };
+    });
+    try {
+      await result.executor.execute(result.run.id);
+      expect(result.usageCollector.attribution.rankings({ namespace: result.usageCollector.namespace }, "skill"))
+        .toEqual([expect.objectContaining({ calls: 1, successes: 1, rawResultBytes: 4 })]);
+      expect(result.usageCollector.runtimeCapabilities.stageCounts({ namespace: result.usageCollector.namespace }))
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({ stage: "catalog_visible", count: 1 }),
+          expect.objectContaining({ stage: "body_read", count: 1 })
+        ]));
     } finally { result.db.close(); }
   });
   it("使用在线配置的 Run 硬超时终止 Turn、释放 Runtime 并稳定失败", async () => {

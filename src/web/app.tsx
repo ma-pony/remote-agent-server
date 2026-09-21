@@ -35,6 +35,7 @@ const SessionCreatePage = lazy(async () => ({ default: (await sessionPages()).Se
 const SessionListPage = lazy(async () => ({ default: (await sessionPages()).SessionListPage }));
 const SessionSettingsPage = lazy(async () => ({ default: (await import("./pages/session-settings-page.js")).SessionSettingsPage }));
 const ConcurrencySettingsPage = lazy(async () => ({ default: (await import("./pages/system-settings-page.js")).ConcurrencySettingsPage }));
+const AgentUsagePage = lazy(async () => ({ default: (await import("./pages/agent-usage-page.js")).AgentUsagePage }));
 
 const integrationPages = () => import("./pages/integration-pages.js");
 const IntegrationConversationPage = lazy(async () => ({ default: (await integrationPages()).IntegrationConversationPage }));
@@ -122,6 +123,7 @@ const Application = () => {
       <Route path="/sessions/new" element={<SessionCreatePage />} />
       <Route path="/sessions/:id" element={<SessionRoute />} />
       <Route path="/sessions/:id/settings" element={<SessionSettingsPage />} />
+      <Route path="/usage" element={<AgentUsagePage />} />
       <Route path="/system-settings" element={<Navigate to="/system-settings/concurrency" replace />} />
       <Route path="/system-settings/concurrency" element={<ConcurrencySettingsPage />} />
       <Route path="/integration-endpoints" element={<IntegrationEndpointListPage />} />

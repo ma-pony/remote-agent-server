@@ -1,9 +1,15 @@
+import { HostUsageCapture } from "./agent-usage/capture/host-capture.js";
+import { takeCaptureSecrets } from "./agent-usage/capture/config.js";
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import type Database from "better-sqlite3";
+import { ManagedUsageSources } from "./agent-usage/managed-sources.js";
+import { registerUsageSourceRoutes } from "./agent-usage/source-routes.js";
+import { registerUsageQueryRoutes } from "./agent-usage/query-routes.js";
+import { McpUsageObserver } from "./agent-usage/mcp-observer.js";
 
 import { registerAgentRoutes } from "./agents/agent-routes.js";
 import { AgentManager } from "./agents/agent-manager.js";
@@ -87,6 +93,7 @@ export type AppDependencies = {
   concurrencySettingsStore?: ConcurrencySettingsStore;
   webhookFetch?: typeof fetch;
   webRoot?: string;
+  usageSources?: ManagedUsageSources;
 };
 
 /**
@@ -94,6 +101,10 @@ export type AppDependencies = {
  */
 export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const app = Fastify({ forceCloseConnections: true });
+  const usageSources = deps.usageSources ?? new ManagedUsageSources(deps.db, deps.config);
+  const usageObserver = new McpUsageObserver(usageSources.collector);
+  const usageCapture = usageSources.collector.capture ?? new HostUsageCapture(usageSources.collector, deps.config.usageCaptureUpstreams ?? {},
+    takeCaptureSecrets(deps.config.usageCaptureUpstreams ?? {}, process.env));
   const concurrencySettingsStore = deps.concurrencySettingsStore ?? new ConcurrencySettingsStore(deps.db);
   const skillSourceManager = deps.skillSourceManager ?? new SkillSourceManager({ dataDir: deps.config.dataDir });
   const skillManager = deps.skillManager ?? new SkillManager({ dataDir: deps.config.dataDir, sourceCatalog: () => skillSourceManager.catalog() });
@@ -105,8 +116,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   });
   const mcpChecker = deps.mcpChecker ?? new SdkMcpChecker();
   const providerMcpCatalog = new ProviderMcpCatalog({ db: deps.db, mcpManager });
-  const mcpPreparer = new RunMcpPreparer({ manager: mcpManager, checker: mcpChecker });
-  const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config, skillManager, providerExtensionManager);
+  const mcpPreparer = new RunMcpPreparer({ manager: mcpManager, checker: mcpChecker, observer: usageObserver });
+  const runtime = deps.runtime ?? new AcpxAgentRuntime(deps.config, skillManager, providerExtensionManager, usageCapture);
   const projectEnvironmentStore = deps.projectEnvironmentStore ?? new ProjectEnvironmentStore({ db: deps.db });
   const projectEnvironmentCommands = deps.projectEnvironmentCommands ?? new SystemProjectEnvironmentCommands();
   const agentManager = new AgentManager({
@@ -150,7 +161,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     projectEnvironmentRevisionCleaner: projectEnvironmentBuilder,
     projectEnvironmentCommands,
     projectPrepareTimeoutMs: deps.config.projectPrepareTimeoutMs,
-    mcpManager
+    mcpManager,
+    usageCollector: usageSources.collector
   });
   const sessionCleanupScheduler = deps.sessionCleanupScheduler ?? new SessionCleanupScheduler({
     sessionManager,
@@ -217,6 +229,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
   app.register((api) => {
     api.addHook("onRequest", requireApiToken(deps.config.apiToken));
     api.get("/auth/verify", async (_request, reply) => reply.code(204).send());
+    registerUsageSourceRoutes(api, usageSources);
+    registerUsageQueryRoutes(api, usageSources.collector);
     registerConcurrencySettingsRoutes(api, concurrencySettingsStore);
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager, skillManager, runRepository, providerExtensionManager);
@@ -286,24 +300,36 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     } catch (error) {
       failures.push(error);
     }
-    sessionCleanupScheduler.stop();
+    try {
+      await sessionCleanupScheduler.stop();
+    } catch (error) {
+      failures.push(error);
+    }
+    try { await usageSources.collector.stopRecovery(); } catch (error) { failures.push(error); }
     try {
       await runtime.shutdown();
     } catch (error) {
       failures.push(error);
     }
+    try { await usageCapture.close(); } catch (error) { failures.push(error); }
+    try { await usageSources.collector.harvestFinalSessions(); } catch (error) { failures.push(error); }
+    try { await usageSources.collector.sources.close(); } catch (error) { failures.push(error); }
+    try { await usageObserver.close(); } catch (error) { failures.push(error); }
     if (failures.length === 1) shutdownError = failures[0];
     if (failures.length > 1) shutdownError = new AggregateError(failures, "Application shutdown failed");
   });
   app.addHook("onClose", async () => {
     if (shutdownError !== undefined) throw shutdownError;
   });
-  scheduler.start();
-  integrationTaskScheduler.start();
-  webhookBatchDispatcher.start();
-  webhookDispatcher.start();
-  projectEnvironmentScheduler.start();
-  sessionCleanupScheduler.start();
+  app.addHook("onReady", async () => {
+    usageSources.collector.startRecovery();
+    scheduler.start();
+    integrationTaskScheduler.start();
+    webhookBatchDispatcher.start();
+    webhookDispatcher.start();
+    projectEnvironmentScheduler.start();
+    sessionCleanupScheduler.start();
+  });
 
   return app;
 };

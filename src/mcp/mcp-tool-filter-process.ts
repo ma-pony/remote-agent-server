@@ -1,4 +1,7 @@
 import { pathToFileURL } from "node:url";
+import { randomUUID } from "node:crypto";
+import type { McpObservation } from "../agent-usage/mcp-observer.js";
+import { sendMcpObservation } from "../agent-usage/mcp-observer-client.js";
 
 import {
   Client,
@@ -75,27 +78,45 @@ const upstreamTransport = (config: McpToolFilterConfig): ClientTransport => {
 
 export const createMcpToolFilterServer = (
   name: string,
-  toolNames: string[],
-  client: ForwardingMcpClient
+  toolNames: string[] | null,
+  client: ForwardingMcpClient,
+  observe?: (event: McpObservation) => Promise<void>
 ): Server => {
-  const allowedTools = new Set(toolNames);
+  const allowedTools = toolNames === null ? null : new Set(toolNames);
+  const notify = async (event: McpObservation): Promise<void> => {
+    try { await observe?.(event); } catch { /* Capture cannot change a business tool result. */ }
+  };
   const capabilities = forwardedCapabilities(client);
   const server = new Server(
     { name, version: "1.0.0" },
     { capabilities, instructions: client.getInstructions?.() }
   );
-  server.setRequestHandler("tools/list", async (request, context) =>
-    filterListedTools(await client.listTools(request.params, {
+  server.setRequestHandler("tools/list", async (request, context) => {
+    const result = await client.listTools(request.params, {
       ...requestOptions(context.mcpReq.signal),
       cacheMode: "bypass"
-    }), allowedTools));
+    });
+    return allowedTools === null ? result : filterListedTools(result, allowedTools);
+  });
   server.setRequestHandler("tools/call", async (request, context) => {
     try {
-      requireAllowedTool(request.params.name, allowedTools);
+      if (allowedTools !== null) requireAllowedTool(request.params.name, allowedTools);
     } catch (error) {
       throw new ProtocolError(INVALID_PARAMS, error instanceof Error ? error.message : "MCP tool is not allowed");
     }
-    return client.callTool(request.params, requestOptions(context.mcpReq.signal));
+    const invocationId = randomUUID();
+    const toolName = request.params.name;
+    await notify({ invocationId, toolName, phase: "start", occurredAt: new Date().toISOString() });
+    try {
+      const result = await client.callTool(request.params, requestOptions(context.mcpReq.signal));
+      await notify({ invocationId, toolName, phase: "end", occurredAt: new Date().toISOString(),
+        status: result.isError ? "tool_error" : "succeeded", resultBytes: Buffer.byteLength(JSON.stringify(result)) });
+      return result;
+    } catch (error) {
+      await notify({ invocationId, toolName, phase: "end", occurredAt: new Date().toISOString(),
+        status: context.mcpReq.signal.aborted ? "cancelled" : "transport_error" });
+      throw error;
+    }
   });
 
   if (capabilities.resources !== undefined) {
@@ -166,7 +187,8 @@ export const createMcpToolFilterServer = (
 export const runMcpToolFilter = async (config: McpToolFilterConfig): Promise<void> => {
   const client = new Client({ name: "remote-agent-mcp-filter", version: "1.0.0" });
   await client.connect(upstreamTransport(config));
-  const server = createMcpToolFilterServer(config.upstream.name, config.allowedTools, client);
+  const server = createMcpToolFilterServer(config.upstream.name, config.allowedTools, client,
+    config.observer ? (event) => sendMcpObservation(config.observer!, event) : undefined);
   const downstream = new StdioServerTransport() as ServerTransport;
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {

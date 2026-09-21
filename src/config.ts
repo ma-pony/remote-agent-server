@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { captureUpstreamsSchema, captureSecrets, type CaptureUpstreams } from "./agent-usage/capture/config.js";
+import { isAbsolute } from "node:path";
+import { tokenizerProfilesSchema, type TokenizerProfileConfig } from "./agent-usage/tokenizer-config.js";
 
 export type AppConfig = {
   host: string;
@@ -16,6 +19,9 @@ export type AppConfig = {
   sessionRetentionMs: number;
   runTimeoutMs?: number;
   runtimeIdleMs?: number;
+  usageImportRoots?: Record<string, string>;
+  usageCaptureUpstreams?: CaptureUpstreams;
+  usageTokenizers?: TokenizerProfileConfig[];
 };
 
 const configSchema = z.object({
@@ -33,7 +39,19 @@ const configSchema = z.object({
   PROJECT_PREPARE_TIMEOUT_MINUTES: z.coerce.number().positive().default(30),
   SESSION_RETENTION_HOURS: z.coerce.number().int().min(0).max(8760).default(7 * 24),
   RUN_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(1440).default(60),
-  RUNTIME_IDLE_MINUTES: z.coerce.number().nonnegative().default(5)
+  RUNTIME_IDLE_MINUTES: z.coerce.number().nonnegative().default(5),
+  USAGE_TOKENIZERS: z.string().default("[]").transform((value, context) => {
+    try { return JSON.parse(value) as unknown; }
+    catch { context.addIssue({ code: "custom", message: "USAGE_TOKENIZERS must be a JSON array" }); return z.NEVER; }
+  }).pipe(tokenizerProfilesSchema),
+  USAGE_CAPTURE_UPSTREAMS: z.string().default("{}").transform((value, context) => {
+    try { return JSON.parse(value) as unknown; }
+    catch { context.addIssue({ code: "custom", message: "USAGE_CAPTURE_UPSTREAMS must be a JSON object" }); return z.NEVER; }
+  }).pipe(captureUpstreamsSchema),
+  USAGE_IMPORT_ROOTS: z.string().default("{}").transform((value, context) => {
+    try { return JSON.parse(value) as unknown; }
+    catch { context.addIssue({ code: "custom", message: "USAGE_IMPORT_ROOTS must be a JSON object" }); return z.NEVER; }
+  }).pipe(z.record(z.string().regex(/^[a-zA-Z0-9_-]+$/), z.string().refine(isAbsolute, "Import roots must be absolute paths")))
 });
 
 /**
@@ -41,6 +59,7 @@ const configSchema = z.object({
  */
 export const loadConfig = (env: Record<string, string | undefined>): AppConfig => {
   const config = configSchema.parse(env);
+  captureSecrets(config.USAGE_CAPTURE_UPSTREAMS, env);
 
   return {
     host: config.HOST,
@@ -57,6 +76,9 @@ export const loadConfig = (env: Record<string, string | undefined>): AppConfig =
     projectPrepareTimeoutMs: config.PROJECT_PREPARE_TIMEOUT_MINUTES * 60 * 1000,
     sessionRetentionMs: config.SESSION_RETENTION_HOURS * 60 * 60 * 1000,
     runTimeoutMs: config.RUN_TIMEOUT_MINUTES * 60 * 1000,
-    runtimeIdleMs: config.RUNTIME_IDLE_MINUTES * 60 * 1000
+    runtimeIdleMs: config.RUNTIME_IDLE_MINUTES * 60 * 1000,
+    usageImportRoots: config.USAGE_IMPORT_ROOTS,
+    usageCaptureUpstreams: config.USAGE_CAPTURE_UPSTREAMS,
+    usageTokenizers: config.USAGE_TOKENIZERS
   };
 };

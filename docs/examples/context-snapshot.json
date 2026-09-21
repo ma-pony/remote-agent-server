@@ -1,0 +1,49 @@
+{
+  "format": "context-snapshot-v1",
+  "revision": 1,
+  "historyComplete": true,
+  "capabilities": [
+    {
+      "runtimeName": "mcp_search",
+      "capability": { "id": "mcp:example-server:search", "kind": "mcp_tool", "name": "search", "serverId": "example-server" }
+    }
+  ],
+  "requests": [
+    {
+      "id": "request-1",
+      "session_id": "example-capture",
+      "timestamp": "2026-09-21T01:00:00Z",
+      "provider": "openai",
+      "endpoint": "/v1/responses",
+      "agent": "codex",
+      "context_fidelity": "complete",
+      "response_complete": true,
+      "canonical_request_body": "{\"model\":\"example-model\",\"tools\":[{\"type\":\"function\",\"name\":\"mcp_search\",\"parameters\":{\"type\":\"object\"}}],\"input\":[]}",
+      "canonical_response_body": "{\"output\":[{\"type\":\"function_call\",\"call_id\":\"call-1\",\"name\":\"mcp_search\",\"arguments\":\"{}\"}],\"usage\":{\"input_tokens\":100,\"output_tokens\":20}}"
+    },
+    {
+      "id": "request-2",
+      "session_id": "example-capture",
+      "timestamp": "2026-09-21T01:01:00Z",
+      "provider": "openai",
+      "endpoint": "/v1/responses",
+      "agent": "codex",
+      "context_fidelity": "complete",
+      "response_complete": true,
+      "canonical_request_body": "{\"model\":\"example-model\",\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":\"hello world\"}]}",
+      "canonical_response_body": "{\"output\":[],\"usage\":{\"input_tokens\":150,\"output_tokens\":10}}"
+    },
+    {
+      "id": "request-3",
+      "session_id": "example-capture",
+      "timestamp": "2026-09-21T01:02:00Z",
+      "provider": "openai",
+      "endpoint": "/v1/responses",
+      "agent": "codex",
+      "context_fidelity": "complete",
+      "response_complete": true,
+      "canonical_request_body": "{\"model\":\"example-model\",\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"call-1\",\"output\":\"hello world\"}]}",
+      "canonical_response_body": "{\"output\":[],\"usage\":{\"input_tokens\":150,\"output_tokens\":10}}"
+    }
+  ]
+}

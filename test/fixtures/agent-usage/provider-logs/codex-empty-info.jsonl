@@ -1,0 +1,2 @@
+{"timestamp":"2026-09-21T01:30:00.000Z","type":"session_meta","payload":{"id":"codex-session-empty"}}
+{"timestamp":"2026-09-21T01:30:01.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":3.0}}}}

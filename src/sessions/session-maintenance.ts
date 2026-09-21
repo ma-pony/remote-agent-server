@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { HostUsageCollector } from "../agent-usage/host-collector.js";
 
 import type { Provider } from "../domain.js";
 import type { ProviderSessionCleaner } from "../runtime/provider-session-cleaner.js";
@@ -17,6 +18,7 @@ type MaintenanceDependencies = {
   db: Database.Database;
   workspaceManager: Pick<WorkspaceManager, "deleteSession">;
   providerSessionCleaner: ProviderSessionCleaner;
+  usageCollector?: HostUsageCollector;
 };
 
 const requireClaim = (db: Database.Database, id: number, operation: SessionMaintenanceOperation): MaintenanceRow => {
@@ -35,7 +37,8 @@ export const finishSessionMaintenance = (
   db: Database.Database,
   id: number,
   operation: SessionMaintenanceOperation,
-  completedAt = new Date().toISOString()
+  completedAt = new Date().toISOString(),
+  usageCollector = new HostUsageCollector(db)
 ): void => {
   db.transaction(() => {
     requireClaim(db, id, operation);
@@ -43,6 +46,7 @@ export const finishSessionMaintenance = (
       db.prepare("DELETE FROM webhook_deliveries WHERE task_id IN (SELECT id FROM integration_tasks WHERE session_id = ?)").run(id);
     }
     if (operation === "delete") {
+      usageCollector.deleteSession(id);
       db.prepare("DELETE FROM integration_task_events WHERE task_id IN (SELECT id FROM integration_tasks WHERE session_id = ?)").run(id);
       db.prepare("DELETE FROM integration_tasks WHERE session_id = ?").run(id);
       db.prepare("DELETE FROM integration_conversations WHERE session_id = ?").run(id);
@@ -50,12 +54,14 @@ export const finishSessionMaintenance = (
       db.prepare("DELETE FROM runs WHERE session_id = ?").run(id);
       db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
     } else if (operation === "cleanup") {
+      usageCollector.finishMaintenance(id);
       db.prepare("UPDATE message_attachments SET data = NULL WHERE session_id = ?").run(id);
       db.prepare(`
         UPDATE sessions SET status = 'idle', pending_operation = NULL,
           provider_session_id = NULL, storage_cleaned_at = ? WHERE id = ?
       `).run(completedAt, id);
     } else {
+      usageCollector.finishMaintenance(id);
       db.prepare(`
         UPDATE sessions SET status = 'idle', pending_operation = NULL, provider_session_id = NULL,
           input_tokens = NULL, output_tokens = NULL, cached_read_tokens = NULL,
@@ -74,6 +80,12 @@ export const completeSessionMaintenance = async (
   completedAt = new Date().toISOString()
 ): Promise<void> => {
   const row = requireClaim(dependencies.db, id, operation);
+  const usageCollector = dependencies.usageCollector ?? new HostUsageCollector(dependencies.db);
+  if (operation === "delete") usageCollector.deleteSession(id);
+  else {
+    usageCollector.importLegacy();
+    await usageCollector.prepareMaintenance(id, operation);
+  }
   await dependencies.providerSessionCleaner.purge({
     agentId: row.agent_id,
     provider: row.provider,
@@ -81,7 +93,7 @@ export const completeSessionMaintenance = async (
     providerSessionId: row.provider_session_id
   });
   if (operation !== "reset") await dependencies.workspaceManager.deleteSession(id);
-  finishSessionMaintenance(dependencies.db, id, operation, completedAt);
+  finishSessionMaintenance(dependencies.db, id, operation, completedAt, usageCollector);
 };
 
 /** Runs before any scheduling; failed operations keep their durable claim for a later retry. */

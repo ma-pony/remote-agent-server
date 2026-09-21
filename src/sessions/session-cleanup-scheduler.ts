@@ -4,7 +4,7 @@ import { SessionManagerError, type SessionManager } from "./session-manager.js";
 export interface SessionCleanupSchedulerLike {
   start(): void;
   runCleanup(): Promise<void>;
-  stop(): void;
+  stop(): void | Promise<void>;
 }
 
 /** Periodically releases large storage owned by idle Sessions after their retention period. */
@@ -32,15 +32,17 @@ export class SessionCleanupScheduler implements SessionCleanupSchedulerLike {
   }
 
   runCleanup(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
     const retentionMs = this.retentionMs();
     this.running ??= this.cleanup(retentionMs).finally(() => { this.running = undefined; });
     return this.running;
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     this.stopped = true;
     if (this.timer !== undefined) clearInterval(this.timer);
     this.timer = undefined;
+    await this.running;
   }
 
   private async cleanup(retentionMs: number): Promise<void> {

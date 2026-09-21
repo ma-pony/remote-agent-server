@@ -63,6 +63,8 @@ const handleError = (reply: FastifyReply, error: unknown) => {
       return sendError(reply, 500, error.code, "Failed to delete session");
     case "session_cleanup_failed":
       return sendError(reply, 500, error.code, "Failed to clean session storage");
+    case "usage_collection_pending":
+      return sendError(reply, 409, error.code, "Usage collection must finish before session storage is removed");
   }
 };
 

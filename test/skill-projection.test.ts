@@ -25,6 +25,18 @@ it("projects an entire selected package while preserving sibling resources and a
   const oldSession = join(root, "old"); const newSession = join(root, "new");
   const projected = projector.prepare({ id: 1, provider: "codex" }, { id: 1, workspacePath: oldSession });
   const linked = realpathSync(join(oldSession, ".agents", "skills", "_remote-agent-managed-repository-review"));
+  expect(projected.projectedSkills).toEqual([expect.objectContaining({
+    id: "repository-review",
+    name: "review",
+    source: "git",
+    sourceId: "example",
+    packageName: "review-package",
+    skillMdPath: join(linked, "SKILL.md"),
+    directoryAliases: [
+      join(oldSession, ".agents", "skills", "_remote-agent-managed-repository-review"),
+      linked
+    ]
+  })]);
   const shared = join(dirname(dirname(linked)), "shared.txt");
   expect(readFileSync(shared, "utf8")).toBe("first");
   writeFileSync(join(packageDirectory, "shared.txt"), "second");

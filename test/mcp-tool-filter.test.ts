@@ -310,6 +310,28 @@ describe("MCP tool filter", () => {
     expect(() => requireAllowedTool("ticket_get", new Set(["ticket_get"]))).not.toThrow();
   });
 
+  it("透明观察全部工具并区分工具错误，观察失败不改变工具结果", async () => {
+    const observations: Array<{ phase: string; status?: string; invocationId: string }> = [];
+    const result = { content: [{ type: "text" as const, text: "private tool result" }], isError: true };
+    const upstream = { listTools: async () => ({ tools: [{ name: "search", inputSchema: { type: "object" } }] }),
+      callTool: vi.fn(async () => result) };
+    const server = createMcpToolFilterServer("all-tools", null, upstream, async (event) => {
+      observations.push(event);
+      if (event.phase === "end") throw new Error("observer unavailable");
+    });
+    const client = new Client({ name: "observer-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    closeCallbacks.push(() => client.close(), () => server.close());
+    expect((await client.listTools()).tools).toHaveLength(1);
+    expect(await client.callTool({ name: "search", arguments: { query: "private arguments" } })).toEqual(result);
+    expect(observations.map(({ phase, status }) => ({ phase, status }))).toEqual([
+      { phase: "start", status: undefined }, { phase: "end", status: "tool_error" }
+    ]);
+    expect(observations[0]!.invocationId).toBe(observations[1]!.invocationId);
+    expect(JSON.stringify(observations)).not.toContain("private");
+  });
+
   it("通过真实 MCP 协议隐藏工具并拒绝手工调用，同时原样转发允许工具结果", async () => {
     const upstream = {
       listTools: vi.fn(async () => ({

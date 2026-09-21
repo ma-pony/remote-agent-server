@@ -19,6 +19,21 @@ export type SkillProjectionSession = {
 export type SkillProjection = {
   memory: string;
   revision: string;
+  projectedSkills?: ProjectedSkill[];
+};
+
+export type ProjectedSkill = {
+  id: string;
+  name: string;
+  revision: string;
+  source: string;
+  sourceId?: string;
+  packageName?: string;
+  pluginId?: string;
+  pluginName?: string;
+  pluginVersion?: string;
+  skillMdPath: string;
+  directoryAliases: string[];
 };
 
 const managedPrefix = "_remote-agent-managed-";
@@ -68,6 +83,10 @@ export class SkillProjector {
     const movedExisting: string[] = [];
     const installed: string[] = [];
     const fingerprints: [string, string, string][] = [];
+    const projected: Array<{
+      projectionName: string;
+      skill: Omit<ProjectedSkill, "skillMdPath" | "directoryAliases">;
+    }> = [];
     const enabledSkills = this.fileSystem.exists(source)
       ? this.fileSystem.list(source).filter((entry) => !entry.startsWith("."))
       : [];
@@ -83,12 +102,16 @@ export class SkillProjector {
         if (skillPath === ".") {
           const destination = join(temporary, `${managedPrefix}${name}`);
           this.fileSystem.copy(realpathSync(sourceDirectory), destination);
-          fingerprints.push([name, skillPath, skillTreeDigest(destination, true)]);
+          const revision = skillTreeDigest(destination, true);
+          fingerprints.push([name, skillPath, revision]);
+          projected.push({ projectionName: name, skill: this.projectedSkill(name, record, revision) });
         } else {
           const packageName = `${packagePrefix}${name}-${token}`;
           const destination = join(temporary, packageName);
           this.fileSystem.copy(realpathSync(sourceDirectory), destination);
-          fingerprints.push([name, skillPath, skillTreeDigest(destination, true)]);
+          const revision = skillTreeDigest(destination, true);
+          fingerprints.push([name, skillPath, revision]);
+          projected.push({ projectionName: name, skill: this.projectedSkill(name, record, revision) });
           this.fileSystem.link(`${packageName}/${skillPath}`, join(temporary, `${managedPrefix}${name}`));
         }
       }
@@ -115,9 +138,41 @@ export class SkillProjector {
       if (this.fileSystem.exists(backup)) this.fileSystem.remove(backup);
     }
 
+    const projectedSkills = projected.map(({ projectionName, skill }) => {
+      const alias = join(skillsRoot, `${managedPrefix}${projectionName}`);
+      const actual = realpathSync(alias);
+      return {
+        ...skill,
+        skillMdPath: join(actual, "SKILL.md"),
+        directoryAliases: [...new Set([alias, actual])]
+      };
+    });
     return {
       memory,
-      revision: createHash("sha256").update(JSON.stringify(fingerprints)).digest("hex")
+      revision: createHash("sha256").update(JSON.stringify(fingerprints)).digest("hex"),
+      projectedSkills
+    };
+  }
+
+  private projectedSkill(
+    id: string,
+    record: ReturnType<typeof readInstallation>,
+    revision: string
+  ): Omit<ProjectedSkill, "skillMdPath" | "directoryAliases"> {
+    const pluginId = record?.source === "plugin"
+      ? record.sourceId ?? record.packageName ?? record.id
+      : undefined;
+    return {
+      id: record?.id ?? id,
+      name: record?.name ?? id,
+      revision,
+      source: record?.source ?? "managed",
+      ...(record?.sourceId === undefined ? {} : { sourceId: record.sourceId }),
+      ...(record?.packageName === undefined ? {} : { packageName: record.packageName }),
+      ...(pluginId === undefined ? {} : {
+        pluginId,
+        pluginName: record?.packageName ?? record?.sourceId ?? pluginId
+      })
     };
   }
 

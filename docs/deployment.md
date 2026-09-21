@@ -291,6 +291,28 @@ curl --fail-with-body \
 
 ## 7. 外部系统接入
 
+### 用量采集与导入目录
+
+用量账本和归因表保存在现有 SQLite 中，无需部署外部遥测服务。升级前按既有流程备份 SQLite 和 `secret.key`；首次启动创建新的 `agent_usage_*` 表并幂等保留旧 Session／Run 计数为未验证证据，不把它们补成精确账单。现有 `usage` API 保持语义。服务管理的 MCP 增加本地观察包装，Unix socket 位于私有临时目录，正常关闭会清理；没有需要对外开放的观察端口。
+
+已有归因数据升级时，首次启动会回填首次结果索引、证据排序键和估算元数据字典，需要读取历史数据并写入 SQLite/WAL；按数据库规模预留启动时间和磁盘空间。迁移幂等，完成后不逐次重建；不会截断历史或自动执行全库 VACUUM。迁移释放的数据库页供后续写入复用，文件体积不保证立即缩小。
+
+托管的 Codex／Claude Code Session 日志在启动恢复、Run 收尾、维护前和 Runtime 关闭后尝试采集；未登记来源的日志也参加恢复，失败状态持久保留。不扫描服务用户的任意个人日志，也不启用 Claude Code 原生遥测。外部来源默认关闭。需要显式文件导入时，在 `.env` 增加绝对路径映射，例如：
+
+```dotenv
+USAGE_IMPORT_ROOTS='{"manual":"/srv/remote-agent/usage-imports"}'
+```
+
+目录由运维创建和授权，只放本次需要导入的数据。来源登记要求管理 Token、目录 ID、相对路径、来源 Session 到业务 Session／epoch 的映射；拒绝任意绝对文件路径、远端 URL 和越界符号链接。上下文快照使用本项目的 `context-snapshot-v1` 格式，不宣称兼容某第三方的原生导出。逐步操作、合成示例和查询命令见[用量分析指南](agent-usage.md)。
+
+需要自动工具输入排名时，配置 `USAGE_CAPTURE_UPSTREAMS`，例如 `{"codex":{"baseUrl":"https://api.openai.com/v1","protocol":"responses","apiKeyEnv":"USAGE_OPENAI_API_KEY"}}`，并由 Secret 管理方式向服务注入对应 key。配置明确切换到指定 API-key 上游，不沿用本机 OAuth／Bedrock／Vertex 凭据。采集入口仅监听 loopback，按 Session／epoch 隔离，无需开放防火墙端口；只在下一次服务启动生效。不要把 key 放入 JSON、命令参数或文档。未启用 HTTP 采集时仍保留原生日志和执行观察能力，工具输入 token 继续显示未知。
+
+转发过程中只使用有界内存解析正文，超限、缺失及中断显式显示采集不完整；不会将模型原文写入新账本。服务必须能访问配置的上游，并给受信任的托管 Provider 进程访问本地入口的权限。上线验收应使用专门测试 Session 核对一次真实请求的上报用量和具体 MCP 身份；仓库的受控协议测试不能替代该环境验收。
+
+单文件上限 16 MiB，单来源采集限时 30 秒；同来源串行并保存 checkpoint，失败保留已提交统计，sources API 与界面显示采集状态。快照原位更新时递增 revision；文件轮换／替换需新 sourceKey。新的归因账本只保存计数和关联，不保存请求／工具正文；导入根目录的原文件由操作者管理，备份数据库不会自动备份它们。
+
+Reset／存储清理先冻结来源并提交尾部数据，超时返回 `usage_collection_pending`，保留源和维护占用，重试或重启续做。不要绕过该状态手工删除 Provider 文件。成功清理保留统计，显式删除 Session 才撤销映射并清除其统计。停止服务会等待已接纳清理与采集收尾；部署工具需允许这一关闭阶段完成。
+
 ### 7.1 创建接入端点并保存 Token
 
 管理员在“外部接入”页面创建 Endpoint，选择一个已启用且项目环境可用的 Agent。Endpoint Token 只在创建或轮换成功后展示一次，服务端只保存哈希，离开提示页后不能找回。应立即把 Token 放进调用方的 Secret 管理系统；不要写入 Git、请求日志、Webhook Header 或 Remote Agent Server 的 `.env`。
@@ -468,3 +490,9 @@ Session 存储清理成功时，也会删除通过 Task 关联的全部 Webhook 
 升级自动创建 `message_attachments` 表，无需回填旧消息或引入新依赖。原始附件存储在 SQLite BLOB 中，执行时另在 Session 工作区保留副本，备份与容量规划应覆盖数据库、WAL 及工作区。Session 保留策略清除 BLOB 内容和工作区副本，但 SQLite 文件大小不保证立即缩小；释放的页可供后续写入复用。重置上下文不删除附件，过期清理和 Session 删除沿用既有可恢复维护流程。
 
 文字与参数的 JSON 内容（不含 `attachments`）仍限制为 1 MiB，附件不会扩大纯文本的持久化上限。
+
+## 本地模型分词配置
+
+需要模型对应的工具 token 估算时，配置 `USAGE_TOKENIZERS`，把固定版本的词表与配置作为服务可读资产部署，填写绝对路径及 SHA-256。详细格式与可核验的 Qwen 示例见[用量分析指南](agent-usage.md#配置多模型词表)。服务只在启动时加载并验证有界普通文件，不运行模型、不自动联网下载；备份／迁移主机时同时保留配置和对应资产。资产损坏或模型绑定冲突使启动失败。默认 `[]` 仍保留 Provider 上报用量、工具调用、输入字节及上下文证据，工具 token 自动使用通用文本兜底估算；旧估算保留原计量版本。
+
+未配置 `USAGE_TOKENIZERS` 时仍可使用工具 token 排名：服务使用带明确标记的通用文本兜底估算。配置真实模型词表可提高对应模型的估算依据；更换配置不重算历史统计。

@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import type Database from "better-sqlite3";
+import { HostUsageCollector } from "../agent-usage/host-collector.js";
 
 import type { AgentManager } from "../agents/agent-manager.js";
 import { insertedId } from "../db.js";
@@ -22,7 +23,7 @@ import {
   type ProviderSessionCleaner
 } from "../runtime/provider-session-cleaner.js";
 import { WorkspaceCreateError, type WorkspaceManager } from "../workspaces/workspace-manager.js";
-import { completeSessionMaintenance, finishSessionMaintenance, type SessionMaintenanceOperation } from "./session-maintenance.js";
+import { completeSessionMaintenance, type SessionMaintenanceOperation } from "./session-maintenance.js";
 
 type SessionRow = {
   id: number;
@@ -116,7 +117,7 @@ export type ListSessionsInput = {
 
 export class SessionManagerError extends Error {
   constructor(
-    readonly code: "agent_not_found" | "agent_disabled" | "project_environment_unavailable" | "session_not_found" | "session_busy" | "session_storage_cleaned" | "session_create_failed" | "runtime_reset_failed" | "session_delete_failed" | "session_cleanup_failed",
+    readonly code: "agent_not_found" | "agent_disabled" | "project_environment_unavailable" | "session_not_found" | "session_busy" | "session_storage_cleaned" | "session_create_failed" | "runtime_reset_failed" | "session_delete_failed" | "session_cleanup_failed" | "usage_collection_pending",
     options?: ErrorOptions
   ) {
     super(code, options);
@@ -135,6 +136,7 @@ export type SessionManagerDependencies = {
   projectPrepareTimeoutMs?: number;
   mcpManager?: McpManager;
   providerSessionCleaner?: ProviderSessionCleaner;
+  usageCollector?: HostUsageCollector;
 };
 
 const ENVIRONMENT_PREPARED_MARKER = ".project-environment-prepared-v1";
@@ -168,6 +170,7 @@ export const recoverIncompleteSessions = async (
  * Persists Session records and coordinates their workspace and runtime lifecycle.
  */
 export class SessionManager {
+  readonly usageCollector: HostUsageCollector;
   private readonly db: Database.Database;
   private readonly maintenanceInProgress = new Set<number>();
   private readonly dataDir: string;
@@ -194,7 +197,8 @@ export class SessionManager {
     projectEnvironmentCommands,
     projectPrepareTimeoutMs,
     mcpManager,
-    providerSessionCleaner
+    providerSessionCleaner,
+    usageCollector
   }: SessionManagerDependencies) {
     this.db = db;
     this.dataDir = dataDir;
@@ -207,6 +211,8 @@ export class SessionManager {
     this.projectPrepareTimeoutMs = projectPrepareTimeoutMs ?? DEFAULT_PROJECT_PREPARE_TIMEOUT_MS;
     this.mcpManager = mcpManager ?? new McpManager({ db, secrets: SecretStore.open({ dataDir }) });
     this.providerSessionCleaner = providerSessionCleaner ?? new SystemProviderSessionCleaner(dataDir);
+    this.usageCollector = usageCollector ?? new HostUsageCollector(db);
+    this.usageCollector.importLegacy();
   }
 
   /**
@@ -493,11 +499,12 @@ export class SessionManager {
       const agent = this.agentManager.get(session.agentId);
       if (agent === undefined) throw new SessionManagerError("agent_not_found");
       const claim = this.claimMaintenance(id, "reset");
+      await this.prepareUsageMaintenance(id, "reset");
       if (claim === "resuming") {
         try {
           await this.runtime.forgetSession(id);
           await completeSessionMaintenance({
-            db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner
+            db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner, usageCollector: this.usageCollector
           }, id, "reset");
           return this.get(id)!;
         } catch (error) {
@@ -518,17 +525,14 @@ export class SessionManager {
           mcpServers: []
         });
       } catch (error) {
-        try {
-          this.releaseResetClaim(id, false);
-        } catch (releaseError) {
-          throw new SessionManagerError("runtime_reset_failed", {
-            cause: new AggregateError([error, releaseError], "Runtime reset and Session claim release failed")
-          });
-        }
+        // A failed discard may have removed part of the Provider state. Keep the durable claim for recovery.
         throw new SessionManagerError("runtime_reset_failed", { cause: error });
       }
       try {
-        return this.releaseResetClaim(id, true);
+        await completeSessionMaintenance({
+          db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner, usageCollector: this.usageCollector
+        }, id, "reset");
+        return this.get(id)!;
       } catch (error) {
         throw new SessionManagerError("runtime_reset_failed", { cause: error });
       }
@@ -544,6 +548,7 @@ export class SessionManager {
         ? undefined
         : this.projectEnvironmentStore.getRevision(session.projectEnvironmentRevisionId);
       this.claimMaintenance(id, "delete");
+      this.usageCollector.deleteSession(id);
       try {
         await this.runtime.forgetSession(id);
       } catch {
@@ -551,7 +556,7 @@ export class SessionManager {
       }
       try {
         await completeSessionMaintenance({
-          db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner
+          db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner, usageCollector: this.usageCollector
         }, id, "delete");
       } catch (error) {
         // Keep the claim: some storage may already be gone and must not be reused.
@@ -565,10 +570,11 @@ export class SessionManager {
   async cleanupStorage(id: number, cutoff: string, cleanedAt = new Date().toISOString()): Promise<void> {
     return this.withMaintenance(id, async () => {
       if (this.claimMaintenance(id, "cleanup", cutoff) === "skipped") return;
+      await this.prepareUsageMaintenance(id, "cleanup");
       try {
         await this.runtime.forgetSession(id);
         await completeSessionMaintenance({
-          db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner
+          db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner, usageCollector: this.usageCollector
         }, id, "cleanup", cleanedAt);
       } catch (error) {
         // The next scheduler pass retries this durable claim without reopening partially removed storage.
@@ -605,6 +611,15 @@ export class SessionManager {
       }
       throw new SessionManagerError("session_busy");
     });
+  }
+
+  private async prepareUsageMaintenance(id: number, operation: "reset" | "cleanup"): Promise<void> {
+    try {
+      await this.runtime.releaseSession?.(id);
+      await this.usageCollector.prepareMaintenance(id, operation);
+    } catch (error) {
+      throw new SessionManagerError("usage_collection_pending", { cause: error });
+    }
   }
 
   private async withMaintenance<T>(id: number, operation: () => Promise<T>): Promise<T> {
@@ -647,24 +662,6 @@ export class SessionManager {
     } catch (error) {
       console.error(error);
     }
-  }
-
-  private releaseResetClaim(id: number, clearProviderSessionId: boolean): Session {
-    if (clearProviderSessionId) {
-      finishSessionMaintenance(this.db, id, "reset");
-    } else {
-      this.inImmediateTransaction(() => {
-        const result = this.db.prepare(`
-          UPDATE sessions SET status = 'idle', pending_operation = NULL, updated_at = ?
-          WHERE id = ? AND status = 'running' AND pending_operation = 'reset'
-            AND NOT EXISTS (SELECT 1 FROM runs WHERE session_id = sessions.id AND status IN ('queued', 'running'))
-        `).run(new Date().toISOString(), id);
-        if (result.changes !== 1) throw new Error("session_reset_claim_release_failed");
-      });
-    }
-    const session = this.get(id);
-    if (session === undefined) throw new SessionManagerError("session_not_found");
-    return session;
   }
 
   private inImmediateTransaction<T>(operation: () => T): T {

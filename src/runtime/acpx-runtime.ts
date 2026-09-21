@@ -1,4 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { HostUsageCapture } from "../agent-usage/capture/host-capture.js";
+import type { RelayRoute } from "../agent-usage/capture/http-relay.js";
+import { captureRuntimeEnvironment } from "../agent-usage/capture/runtime-config.js";
 import { constants } from "node:fs";
 import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -21,6 +24,7 @@ import {
 import type { AppConfig } from "../config.js";
 import Database from "better-sqlite3";
 import type { Provider, TokenUsage, TokenUsageTotals } from "../domain.js";
+import { SystemProviderSessionCleaner } from "./provider-session-cleaner.js";
 import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 import { SkillManager } from "../skills/skill-manager.js";
 import type {
@@ -55,6 +59,7 @@ const CODEX_ACP_ENTRYPOINT = createRequire(import.meta.url).resolve("@agentclien
 
 const providers = new Set<Provider>(["claude_code", "codex", "hermes"]);
 type RuntimeTarget = {
+  captureRoute?: RelayRoute;
   provider: Provider;
   agentId: number;
   sessionId: number;
@@ -70,7 +75,8 @@ export class AgentRuntimeError extends Error {
       | "session_not_ready"
       | "session_resume_failed"
       | "runtime_shutdown"
-      | "model_selection_unsupported",
+      | "model_selection_unsupported"
+      | "usage_capture_auth_conflict",
     message: string
   ) {
     super(message);
@@ -341,6 +347,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
 
     const providerHome = join(this.dataDir, "agents", String(target.agentId), "provider-home");
     const environment = [`REMOTE_AGENT_BROWSER_PROFILE=${shellQuote(target.browserProfilePath)}`];
+    const capture = target.captureRoute ? captureRuntimeEnvironment(target.provider, target.captureRoute) : undefined;
     if (target.provider === "hermes") {
       const legacyHome = join(providerHome, "hermes");
       const home = join(legacyHome, "sessions", String(target.sessionId));
@@ -364,15 +371,27 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
         disabledSkills
       );
       await writeFile(join(home, "config.toml"), config === "" ? "" : `${config}\n`, { mode: 0o600 });
+      if (capture) await rm(join(home, "auth.json"), { force: true });
       environment.push(`CODEX_HOME=${shellQuote(home)}`);
     } else {
       const home = join(providerHome, "claude");
       const hostHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
       await this.prepareProviderHome(hostHome, home);
       await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home });
+      if (capture) {
+        await rm(join(home, ".credentials.json"), { force: true });
+        const settingsPath = join(home, "settings.json");
+        if (await fileExists(settingsPath)) {
+          const settings = JSON.parse(await readFile(settingsPath, "utf8")) as Record<string, unknown>;
+          if (settings.apiKeyHelper || Object.keys((settings.env ?? {}) as object).some((key) => capture.unset.includes(key)))
+            throw new AgentRuntimeError("usage_capture_auth_conflict", "Managed Claude settings contain conflicting authentication or routing");
+        }
+      }
       environment.push(`CLAUDE_CONFIG_DIR=${shellQuote(home)}`);
     }
-    this.commands.set(agentName, `env ${environment.join(" ")} ${acpCommand(target.provider)}`);
+    if (capture) environment.push(...Object.entries(capture.values).map(([key, value]) => `${key}=${shellQuote(value)}`));
+    const unset = capture?.unset.map((key) => `-u ${key}`).join(" ") ?? "";
+    this.commands.set(agentName, `env ${unset ? `${unset} ` : ""}${environment.join(" ")} ${acpCommand(target.provider)}`);
   }
 
   resolve(agentName: string): string {
@@ -494,6 +513,13 @@ const toolContent = (event: Extract<AcpRuntimeEvent, { type: "tool_call" }>): Re
   ] as const) {
     const value = event[key];
     if (value !== undefined) content[key] = value;
+  }
+  const rawInput = event.rawInput;
+  if (typeof rawInput === "object" && rawInput !== null && !Array.isArray(rawInput)) {
+    const input = rawInput as Record<string, unknown>;
+    if (typeof input.server === "string" && typeof input.tool === "string") {
+      content.mcp = { server: input.server, tool: input.tool };
+    }
   }
   return content;
 };
@@ -621,7 +647,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
   constructor(
     private readonly config: AppConfig,
     private readonly skillManager = new SkillManager({ dataDir: config.dataDir }),
-    providerExtensionManager?: ProviderExtensionManager
+    providerExtensionManager?: ProviderExtensionManager,
+    private readonly usageCapture?: HostUsageCapture
   ) {
     this.extensionProjector = providerExtensionManager === undefined
       ? undefined
@@ -661,7 +688,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
       this.providerHomePreparations,
       this.extensionProjector
     );
+    const captureRoute = await this.usageCapture?.prepare(input);
     const agent = registry.register({
+      captureRoute,
       provider: input.provider,
       agentId: input.agentId,
       sessionId: input.sessionId,
@@ -669,7 +698,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions
     });
-    await registry.prepare(agent);
+    try { await registry.prepare(agent); } catch (error) { await this.usageCapture?.release(input.sessionId); throw error; }
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
     const sessionOptions = {
       ...(input.model === undefined ? {} : { model: input.model }),
@@ -684,7 +713,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       cwd: input.workspacePath,
       ...(Object.keys(sessionOptions).length === 0 ? {} : { sessionOptions }),
       ...(input.providerSessionId === null ? {} : { resumeSessionId: input.providerSessionId })
-    });
+    }).catch(async (error: unknown) => { await this.usageCapture?.release(input.sessionId); throw error; });
     const providerSessionId = handle.agentSessionId ?? handle.backendSessionId ?? null;
 
     if (this.shuttingDown) {
@@ -761,13 +790,15 @@ export class AcpxAgentRuntime implements AgentRuntime {
     if (this.activeTurns.has(input.sessionId)) {
       throw new AgentRuntimeError("session_not_ready", "Runtime session still has an active Turn");
     }
-    const turn = session.runtime.startTurn({
+    this.usageCapture?.startRun(input.sessionId, input.requestId);
+    let turn: AcpRuntimeTurn;
+    try { turn = session.runtime.startTurn({
       handle: session.handle,
       text: input.text,
       ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
       mode: "prompt",
       requestId: String(input.requestId)
-    });
+    }); } catch (error) { this.usageCapture?.endRun(input.sessionId, input.requestId); throw error; }
     const activeTurn = { handle: session.handle, turn };
     this.activeTurns.set(input.sessionId, activeTurn);
     const result = turn.result.then(async (canonical): Promise<RuntimeTurnResult> => {
@@ -782,7 +813,8 @@ export class AcpxAgentRuntime implements AgentRuntime {
         return mapped;
       }
     });
-    const clearActiveTurn = (): void => this.clearActiveTurn(input.sessionId, activeTurn);
+    void result.then(() => this.usageCapture?.endRun(input.sessionId, input.requestId), () => this.usageCapture?.endRun(input.sessionId, input.requestId));
+    const clearActiveTurn = (): void => { this.usageCapture?.endRun(input.sessionId, input.requestId); this.clearActiveTurn(input.sessionId, activeTurn); };
 
     return {
       events: {
@@ -840,18 +872,22 @@ export class AcpxAgentRuntime implements AgentRuntime {
       if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId);
       this.activeTurns.delete(sessionId);
       session.registry.unregister(session.target);
+      await this.usageCapture?.release(sessionId);
     });
   }
 
   async reset(input: RuntimeSessionInput): Promise<void> {
     this.assertRunning();
+    await this.usageCapture?.release(input.sessionId);
     this.clearIdleTimer(input.sessionId);
     this.clearReleaseRetryTimer(input.sessionId);
     await this.serializeSession(input.sessionId, async () => {
-      await this.ensureSessionLocked(input);
       const session = this.sessions.get(input.sessionId);
       if (session === undefined) {
-        throw new AgentRuntimeError("session_not_ready", "Runtime session has not been ensured");
+        await new SystemProviderSessionCleaner(this.config.dataDir).purge({
+          agentId: input.agentId, provider: input.provider, sessionId: input.sessionId, providerSessionId: input.providerSessionId
+        });
+        return;
       }
       await session.runtime.close({
         handle: session.handle,
@@ -866,6 +902,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   async forgetSession(sessionId: number): Promise<void> {
     this.assertRunning();
+    await this.usageCapture?.release(sessionId);
     this.clearIdleTimer(sessionId);
     this.clearReleaseRetryTimer(sessionId);
     await this.serializeSession(sessionId, async () => {
@@ -1151,7 +1188,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     mcpServers: RuntimeSessionInput["mcpServers"] = []
   ): AcpRuntime {
     const providerMcpServers = mcpServers
-      .map(({ startupTimeoutSeconds: _startupTimeoutSeconds, ...server }) => server);
+      .map(({ startupTimeoutSeconds: _startupTimeoutSeconds, usageIdentity: _usageIdentity, ...server }) => server);
     const options: AcpRuntimeOptions = {
       cwd: this.config.projectEnvironmentsRoot,
       sessionStore: createRuntimeStore({ stateDir: join(this.config.dataDir, "acpx") }),

@@ -21,7 +21,7 @@ export type RuntimeMcpServer = (
       args: string[];
       env: Array<{ name: string; value: string }>;
     }
-  ) & { startupTimeoutSeconds?: number; allowedTools?: string[] };
+  ) & { startupTimeoutSeconds?: number; allowedTools?: string[]; usageIdentity?: { serverId: string; tools: string[] } };
 
 export type ResolvedMcpServer = {
   id: number;

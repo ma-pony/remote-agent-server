@@ -313,6 +313,16 @@ Cleanup rechecks expiry when claiming a Session. A failed cleanup or deletion ke
 
 These limits control the current Remote Agent Server process. The project is designed for single-process deployment and does not provide distributed concurrency quotas across multiple service instances.
 
+### Usage analysis
+
+The sidebar, Agent and Session pages open one usage analysis view with Agent, Session, date and Runtime filters. Local Hugging Face tokenizers use explicitly configured model vocabularies; unmapped models use a labeled multilingual text fallback and retain byte counts. It separates reported model usage from estimated input contributions for individual MCP tools, CLI commands, Skills and plugins. Missing values remain unknown; cache subsets and overlapping capability dimensions are not added twice.
+
+Managed Codex/Claude Code logs supplement Runtime evidence, including startup and shutdown harvesting; the MCP observer records executions. Configure `USAGE_CAPTURE_UPSTREAMS` to automatically capture supported API-key model requests and inspect concrete tool definitions, first/repeated result inputs and Skill/plugin attribution. Generic **Context Snapshot** imports remain available. Reported usage, actual executions and context evidence are counted separately without an external telemetry platform. Reset and storage cleanup collect before purging and preserve historical statistics; explicit Session deletion clears its statistics and rejects late replay.
+
+Ranking controls refresh independently. Database-side filtering and bounded evidence pages preserve lifetime first/repeat attribution. Managed logs parse only new records; incomplete trailing lines remain pending for retry.
+
+Existing `usage`/`usageSummary` API semantics remain unchanged. The new ledger is exposed through `/api/usage/*`; see the [usage analysis guide](docs/agent-usage.md) for collection boundaries, the snapshot contract and executable import examples.
+
 ## Integrating another system
 
 The external API is asynchronous. Submission returns `202 Accepted` without waiting for the agent and does not require a permanent SSE connection.
@@ -764,6 +774,9 @@ The table lists application defaults when values are not supplied. `pnpm run ini
 | `DATABASE_PATH` | No | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite database path. |
 | `PROJECT_ENVIRONMENTS_ROOT` | No | `/srv/remote-agent/environments` | Project-environment revision directory. |
 | `SESSIONS_ROOT` | No | `/srv/remote-agent/sessions` | Session workspace directory. |
+| `USAGE_TOKENIZERS` | No | `[]` | Local tokenizer profiles matched by exact model ID, with SHA-256-pinned assets. Unmapped models use a labeled text heuristic; see the [tokenizer guide](docs/agent-usage.md). |
+| `USAGE_IMPORT_ROOTS` | No | `{}` | JSON object mapping authorized usage import roots to absolute paths. External directory import is disabled by default; see the [import guide](docs/agent-usage.md). |
+| `USAGE_CAPTURE_UPSTREAMS` | No | `{}` | Upstreams for automatic model-request capture in managed runtimes: protocol, API base URL and API-key environment variable name. Explicitly selects API-key routing; see the [setup guide](docs/agent-usage.md). |
 | `MAX_CONCURRENT_RUNS` | No | `4` | Initial global run concurrency for a new database, from 1–64. Manage later changes in System settings. |
 | `MAX_CONCURRENT_WEBHOOK_DELIVERIES` | No | `4` | Initial Webhook-delivery concurrency for a new database, from 1–64. |
 | `MAX_CONCURRENT_ENVIRONMENT_BUILDS` | No | `1` | Initial project-environment build concurrency for a new database, from 1–64. |

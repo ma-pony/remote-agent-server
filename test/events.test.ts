@@ -7,6 +7,8 @@ import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
+import { ManagedUsageSources } from "../src/agent-usage/managed-sources.js";
+import type { AppConfig } from "../src/config.js";
 import type { Event } from "../src/domain.js";
 import { openDatabase, migrate } from "../src/db.js";
 import { EventStore } from "../src/events/event-store.js";
@@ -46,8 +48,7 @@ const createEventApp = async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "remote-agent-event-api-"));
   tempDirs.push(dataDir);
   const eventStore = new EventStore({ db });
-  const app = buildApp({
-    config: {
+  const config: AppConfig = {
       host: "127.0.0.1",
       port: 3000,
       apiToken,
@@ -61,7 +62,10 @@ const createEventApp = async () => {
       projectEnvironmentCheckIntervalMs: 3 * 60 * 60 * 1000,
       projectPrepareTimeoutMs: 30 * 60 * 1000,
       sessionRetentionMs: 0
-    },
+  };
+  const usageSources = new ManagedUsageSources(db, config);
+  const app = buildApp({
+    config, usageSources,
     db,
     runtime: createFakeRuntime(),
     eventStore,
@@ -79,7 +83,7 @@ const createEventApp = async () => {
   });
   applications.push({ app, db });
   await app.ready();
-  return { app, eventStore, runId: run.id };
+  return { app, eventStore, runId: run.id, usageSources };
 };
 
 const readSseEvents = async (reader: ReadableStreamDefaultReader<Uint8Array>, count: number): Promise<Event[]> => {
@@ -275,7 +279,10 @@ describe("Event API", () => {
   it("SSE write false 且永不 drain 时有界结束、退订并清理 timer", async () => {
     vi.useFakeTimers();
     try {
-      const { eventStore, runId } = await createEventApp();
+      const { usageSources, eventStore, runId } = await createEventApp();
+      // App readiness owns the recovery continuation; stream cleanup must remove only its own timers.
+      const backgroundTimers = vi.getTimerCount();
+      expect(backgroundTimers).toBe(1);
       const writer = new FakeSseWriter();
       writer.write.mockReturnValue(false);
       const originalSubscribe = eventStore.subscribe.bind(eventStore);
@@ -297,6 +304,9 @@ describe("Event API", () => {
 
       expect(unsubscribed).toHaveBeenCalledTimes(1);
       expect(writer.end).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(backgroundTimers);
+      await usageSources.collector.stopRecovery();
+      // Stopping the actual recovery owner removes its timer; an orphan SSE timer would remain.
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();

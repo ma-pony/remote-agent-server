@@ -291,6 +291,30 @@ Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace �
 
 当前并发控制属于单进程范围。多个服务实例不会共享运行配额，也不能同时操作同一个 SQLite 和 Workspace 根目录。
 
+## 用量账本与能力归因
+
+`src/agent-usage/core` 和 SQLite 投影使用通用字符串身份；`HostUsageCollector` 负责转换业务 Agent／Session／Run、维护 epoch 和校验宿主映射。来源观察、去重及选定的账本投影保存在现有数据库中，采集记录按最多 100 条分批，事件、上下文派生数据和批次末 checkpoint 在一个事务中提交；读取失败可提交此前已验证的批次，取消后不继续提交。Provider 的缓存字段作为输入子集；未知 scope／semantics 和旧 Session／Run 快照保留证据，不进入可累加总量。父范围汇总与明细按指标选择非重叠会计基础。
+
+MCP 包装器通过私有 Unix socket 发送无正文元数据，由宿主统一写库；调用开始时冻结 Run 归属，缺少显式执行身份时标为推断。Runtime 结构化工具事件补充 CLI、Skill 读取／脚本及插件归属，目录投影不计为调用。通用上下文快照导入模型可见定义、参数和结果，使用 `@huggingface/tokenizers` 按实际模型匹配本地词表估算每次暴露，实际执行与模型输入证据无法明确关联时保持分离。Skill、插件等维度是重叠视角，不构成可相加账单。
+
+自动模型请求采集使用独立于业务表的 loopback HTTP/SSE 转发层，由宿主适配器绑定 Session generation、epoch 和请求开始时的 Run。它与手动快照共用规范化和归因逻辑，识别 Responses、Chat Completions、Anthropic Messages。`USAGE_CAPTURE_UPSTREAMS` 显式选择 API-key 上游；子进程只拿本地凭据，服务端注入指定环境变量的上游 key。原始正文只在有界内存中解析，数据库保存采集意图／状态与无正文投影。实际请求中逐次命中已投影 Skill 路径的调用才增加 Skill／插件标签。
+
+托管启动适配当前支持 Codex Responses 和 Claude Messages；Hermes 自动接入配置明确拒绝，通用 Chat Completions 解析器不代表已接通 Hermes。OAuth／Bedrock／Vertex 路由继续使用原有日志和执行来源。实际模型请求的日期依据优先于同 epoch／指标的原生累计差额，不能将两者相加；累计父范围仍用于补全不限日期总量，未覆盖部分保留为未定位用量。
+
+原生日志与 HTTP 记录使用共同 Provider 身份对账；Claude 采用原生 message ID。Codex 累计量保留父范围，已验证的累计差额作为 interval，不能伪装成模型请求或直接按导入日期分摊。`calls` 只包含执行证据，`contextOnlyCalls` 单列模型输入中的工具证据，MCP 的 ACP 镜像不会再次进入 CLI。发现和采集失败持久保留，启动补采也覆盖首次来源登记前退出的 Session。
+
+输入证据按能力与模型请求直接从暴露投影查询，不要求存在工具执行或主要工具调用行；Skill／插件标签、未使用的 MCP 定义及未知输入都可下钻。数据库聚合排名并下推日期筛选；首次结果索引按 Session／epoch／内容身份保存最早位置，同时维护全运行时与指定运行时视角。上下文修订在同一事务中修复旧首项、加入新首项，迟到记录不会被误判为首次。输入证据先按持久化排序键选取有匹配暴露的有界上下文候选，再分组和生成游标；调用列表也在 SQL 中分页，MCP 完成事件仅按主键读取执行记录。
+
+Reset／cleanup 在停止生产者后排空已接纳的请求采集，再冻结文件来源并提交尾部数据；屏障未完成时保留维护 claim 和源文件。成功后旧映射转为 retained，Reset 同事务切换 epoch。显式 Session 删除先撤销主体／映射，再清除账本与归因；所有迟到写入和重放校验 generation 与 epoch。关闭时等待已接纳清理，停止 Runtime，排空请求采集并补采最终日志，然后关闭采集器和数据库。
+
+管理查询统一支持 Agent／Session／日期／Runtime，UTC 保存、IANA 时区分组、`[from,to)` 筛选；无时间的范围汇总单列，调用开始时间与输入请求时间分开。首版不自动推断 Provider 内部子 Agent 树，也不计算无证据的工具内部模型账单。原业务 `usage` 字段保持语义，新查询位于 `/api/usage/*`，沿用管理鉴权，不进入公共事件投影。新账本仅保存计数、身份、哈希和来源元数据；未提供诊断正文保留开关。
+
+来源注册、快照合同、限制及用户操作见[用量分析指南](agent-usage.md)。核心与宿主分层支持将来提取，但当前仍在单进程内运行。
+
+分词 profile 由 `USAGE_TOKENIZERS` 显式配置，精确匹配模型及可选 Provider 身份，启动时验证本地文件大小与 SHA-256。未知模型自动使用带版本的 Unicode 字符加权兜底估算；上报用量独立计量。每次暴露保存引擎、词表内容指纹、模型与缺口原因，相同词表指纹复用一个引擎和纯计数缓存；profile／Provider 身份仍分别投影。估算元数据字典去重，暴露保存字典引用，读取仍返回完整来源元数据。旧估算迁移为 `legacy_reference`，多个模型／词表及兜底估算可汇成近似 token 小计用于排名，同时保留各口径分项。估算覆盖完整只表示每项有数值，不表示准确度一致。模型缺失和分词失败不等于未采集输入，前端同时提供字节排名。
+
+托管 JSONL 使用字节游标、行号、行内观测序号与无正文解析状态恢复，包括 Codex 累计基线。固定 64 KiB 缓冲区校验完整旧前缀，仅保留新增尾部；没有换行但完整的 JSON 可处理，半行或半个 UTF-8 字符不会跨过 checkpoint，采集保持失败待重试。快照文件继续按修订对账。HTTP 调用缓存只增量写入变化及淘汰项，内存状态在事务成功后更新；MCP ticket 按会话索引，在维护收尾／删除或下一 Run 移除服务器时释放。
+
 ## 10. 安全边界
 
 管理 API 使用全局 `API_TOKEN`。通用 Task API 使用独立 Endpoint Token，服务端只保存哈希。原生 Webhook 入口使用每端点加密保存的独立 Secret，校验 GitHub HMAC-SHA256，或 GitLab 的 `whsec_` 签名 Token / 旧式 `X-Gitlab-Token`。出站 Webhook 订阅另有独立签名密钥和 HMAC-SHA256。

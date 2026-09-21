@@ -1,4 +1,5 @@
 import { prepareAttachments } from "../attachments/prepare-attachments.js";
+import type { HostUsageCollector } from "../agent-usage/host-collector.js";
 import { dirname, join } from "node:path";
 
 import { resolveModelPolicy } from "../agents/model-policy.js";
@@ -23,6 +24,7 @@ export type RunExecutorDependencies = {
   providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
   runtimeSettings?: Pick<ConcurrencySettingsStore, "getRuntime">;
   runTimeoutMs?: number;
+  usageCollector?: HostUsageCollector;
 };
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
@@ -74,6 +76,7 @@ export class RunExecutor {
   private readonly providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
   private readonly runtimeSettings: Pick<ConcurrencySettingsStore, "getRuntime"> | undefined;
   private readonly runTimeoutMs: number;
+  private readonly usageCollector: HostUsageCollector;
   private readonly cancellationIntents = new Set<number>();
 
   constructor({
@@ -85,7 +88,8 @@ export class RunExecutor {
     mcpPreparer,
     providerExtensionManager,
     runtimeSettings,
-    runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS
+    runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS,
+    usageCollector
   }: RunExecutorDependencies) {
     this.runtime = runtime;
     this.skillProjector = skillProjector;
@@ -96,6 +100,7 @@ export class RunExecutor {
     this.providerExtensionManager = providerExtensionManager;
     this.runtimeSettings = runtimeSettings;
     this.runTimeoutMs = runTimeoutMs;
+    this.usageCollector = usageCollector ?? sessionManager.usageCollector;
   }
 
   /**
@@ -187,8 +192,16 @@ export class RunExecutor {
         publicNoticeCode = "mcp_preflight_failed";
         throw error;
       }
-      const { memory, revision: skillsRevision } = this.skillProjector.prepare(agent, session);
+      const { memory, revision: skillsRevision, projectedSkills } = this.skillProjector.prepare(agent, session);
       this.runRepository.setSkillsRevision(run.id, skillsRevision);
+      if (projectedSkills !== undefined) {
+        try {
+          this.usageCollector.runtimeCapabilities.recordProjection(run.id, projectedSkills);
+        } catch {
+          // Observability failure must not change the model's business result or expose payloads.
+          console.error(`runtime_capability_projection_failed runId=${run.id}`);
+        }
+      }
       const extensionsRevision = this.providerExtensionManager.revision(agent.id);
       const resolvedModel = resolveModelPolicy(agent.modelPolicy, new Date()) ?? agent.providerDefaultModel ?? undefined;
       this.runRepository.setResolvedModel(run.id, resolvedModel ?? null);
@@ -297,11 +310,25 @@ export class RunExecutor {
         flushMessageBatch();
         if (runtimeEvent.type === "usage") {
           usage = { ...usage, ...runtimeEvent.usage };
+          try {
+            this.usageCollector.recordRunUsage(run.id, usage, runtimeEvent.observation);
+          } catch {
+            // Observability failure must not change the model's business result or expose payloads.
+            console.error(`usage_persistence_failed runId=${run.id}`);
+          }
           nextEvent = this.nextEvent(iterator);
           continue;
         }
         const event = persistedEvent(runtimeEvent);
         this.eventStore.append(run.id, event.type, event.content);
+        if (runtimeEvent.type === "tool") {
+          try {
+            this.usageCollector.runtimeCapabilities.recordTool(run.id, runtimeEvent.content);
+          } catch {
+            // Observability failure must not change the model's business result or expose payloads.
+            console.error(`runtime_capability_persistence_failed runId=${run.id}`);
+          }
+        }
         nextEvent = this.nextEvent(iterator);
       }
 
@@ -325,6 +352,8 @@ export class RunExecutor {
       clearMessageFlushTimer();
       if (runTimeoutTimer !== undefined) clearTimeout(runTimeoutTimer);
       this.cancellationIntents.delete(run.id);
+      try { await this.usageCollector.collectSession(run.sessionId); }
+      catch { console.error(`usage_collection_failed sessionId=${run.sessionId}`); }
     }
   }
 

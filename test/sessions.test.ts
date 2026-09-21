@@ -899,7 +899,7 @@ describe("Session API", () => {
     expect(accepted.statusCode).toBe(201);
   });
 
-  it("Runtime reset 失败时释放 claim、保留 Provider Session ID 并允许创建 Run", async () => {
+  it("Runtime reset 失败时保留维护 claim，重试完成后才允许创建 Run", async () => {
     const resetRelease = deferred<void>();
     const reset = vi.fn(async () => {
       await resetRelease.promise;
@@ -925,17 +925,23 @@ describe("Session API", () => {
     expect(busy.statusCode).toBe(409);
     expect(response.statusCode).toBe(500);
     expect(response.json()).toEqual({ error: { code: "runtime_reset_failed", message: "Failed to reset runtime session" } });
-    expect(db.prepare("SELECT status, provider_session_id FROM sessions WHERE id = ?").get(session.id)).toEqual({
-      status: "idle",
+    expect(db.prepare("SELECT status, provider_session_id, pending_operation FROM sessions WHERE id = ?").get(session.id)).toEqual({
+      status: "running",
+      pending_operation: "reset",
       provider_session_id: "provider-session-1"
     });
 
-    const accepted = await app.inject({
+    const refused = await app.inject({
       method: "POST",
       url: `/api/sessions/${session.id}/runs`,
       headers: authHeaders(),
       payload: { input: "失败后继续" }
     });
+    expect(refused.statusCode).toBe(409);
+    const retry = await app.inject({ method: "POST", url: `/api/sessions/${session.id}/reset`, headers: authHeaders() });
+    expect(retry.statusCode).toBe(200);
+    expect(db.prepare("SELECT status, pending_operation FROM sessions WHERE id = ?").get(session.id)).toEqual({ status: "idle", pending_operation: null });
+    const accepted = await app.inject({ method: "POST", url: `/api/sessions/${session.id}/runs`, headers: authHeaders(), payload: { input: "恢复后继续" } });
     expect(accepted.statusCode).toBe(201);
   });
 

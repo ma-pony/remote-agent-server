@@ -53,6 +53,34 @@ const createHarness = (options: { beforeWorkspaceDelete?: (id: number) => Promis
 };
 
 describe("SessionCleanupScheduler", () => {
+  it("停止时等待已准入的清理完成，并拒绝启动后续清理", async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const admitted = new Promise<void>((resolve) => { started = resolve; });
+    const cleanupStorage = vi.fn(async () => { started(); await blocked; });
+    const listExpiredIds = vi.fn(() => [101]);
+    const scheduler = new SessionCleanupScheduler({
+      sessionManager: { listExpiredIds, cleanupStorage },
+      retentionMs: 1,
+      intervalMs: 60 * 60 * 1000
+    });
+
+    const cleanup = scheduler.runCleanup();
+    await admitted;
+    let stopped = false;
+    const stop = scheduler.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+
+    release();
+    await Promise.all([cleanup, stop]);
+    expect(cleanupStorage).toHaveBeenCalledTimes(1);
+    await scheduler.runCleanup();
+    expect(listExpiredIds).toHaveBeenCalledTimes(1);
+    expect(cleanupStorage).toHaveBeenCalledTimes(1);
+  });
+
   it.each([0, 365 * 24])("存储清理失败后阻止复用，保留期改为 %s 小时也继续已开始的清理", async (nextRetentionHours) => {
     let shouldFail = true;
     const { db, manager, root, insertSession } = createHarness({

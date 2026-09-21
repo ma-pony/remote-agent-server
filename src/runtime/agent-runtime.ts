@@ -1,5 +1,6 @@
 import type { Provider, TokenUsage, TokenUsageTotals } from "../domain.js";
 import type { RuntimeMcpServer } from "../mcp/mcp-types.js";
+import type { UsageObservation } from "../agent-usage/core/types.js";
 
 export type RuntimeSessionInput = {
   sessionId: number;
@@ -22,7 +23,7 @@ export type RuntimeEvent =
   | { type: "message"; stream: "output" | "thought"; text: string }
   | { type: "tool"; content: Record<string, unknown> }
   | { type: "status"; text: string }
-  | { type: "usage"; usage: Partial<TokenUsage> }
+  | { type: "usage"; usage: Partial<TokenUsage>; observation?: UsageObservation }
   | { type: "error"; code?: string; message: string };
 export type RuntimeTurnResult = (
   | { status: "completed" }

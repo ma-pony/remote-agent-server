@@ -6,6 +6,9 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
+import { accountingRequests } from "./fixtures/agent-usage/accounting.js";
+import { HostUsageCollector } from "../src/agent-usage/host-collector.js";
+import type { UsageSourceAdapter } from "../src/agent-usage/source-coordinator.js";
 import { AttachmentStore } from "../src/attachments/attachment-store.js";
 import { prepareAttachments } from "../src/attachments/prepare-attachments.js";
 import { migrate } from "../src/db.js";
@@ -19,7 +22,7 @@ import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 const cleanups: Array<() => void> = [];
 afterEach(() => { cleanups.splice(0).forEach((cleanup) => cleanup()); });
 
-const harness = (options: { beforeDelete?: () => Promise<void> } = {}) => {
+const harness = (options: { beforeDelete?: () => Promise<void>; usageAdapters?: Record<string, UsageSourceAdapter> } = {}) => {
   const { db, seed } = createTestDatabase();
   const root = mkdtempSync(join(tmpdir(), "session-maintenance-"));
   cleanups.push(() => { db.close(); rmSync(root, { recursive: true, force: true }); });
@@ -47,12 +50,39 @@ const harness = (options: { beforeDelete?: () => Promise<void> } = {}) => {
   const providerSessionCleaner = new SystemProviderSessionCleaner(root);
   const manager = new SessionManager({
     db, dataDir: root, runtime, workspaceManager, providerSessionCleaner,
+    usageCollector: new HostUsageCollector(db, options.usageAdapters),
     agentManager: new AgentManager({ db, dataDir: root, runtime })
   });
   return { db, root, session, workspace, manager, runtime, seed, workspaceManager, providerSessionCleaner };
 };
 
 describe("durable Session maintenance", () => {
+  it("collects the final unread source tail before cleanup destroys provider files", async () => {
+    let stopped = false;
+    const h: ReturnType<typeof harness> = harness({ usageAdapters: { "test-tail": {
+      describe: () => ({ usage: "model_request", context: "none", identity: "explicit", version: "1" }),
+      freeze: async () => { expect(stopped).toBe(true); expect(existsSync(h.workspace)).toBe(true); return "end"; },
+      async *collect() { yield { sourceSessionKey: "capture", observation: accountingRequests()[0]!, checkpoint: "end" }; }
+    } } });
+    h.runtime.releaseSession = async () => { stopped = true; };
+    h.manager.usageCollector.sources.registerSource({ namespace: h.manager.usageCollector.namespace, sourceKey: "tail", kind: "test-tail", inputRef: {},
+      mappings: [{ sourceSessionKey: "capture", agentId: String(h.seed.agent.id), sessionId: String(h.session.id), providerEpochId: h.manager.usageCollector.epoch(h.session.id) }] });
+    await h.manager.cleanupStorage(h.session.id, "2099-01-01T00:00:00Z");
+    expect(existsSync(h.workspace)).toBe(false);
+    expect(h.manager.usageCollector.store.summary({ namespace: h.manager.usageCollector.namespace }).usage.totalTokens).toBe(1100);
+  });
+
+  it("keeps the reset claim and source files when usage collection fails", async () => {
+    const h = harness({ usageAdapters: { "unavailable-tail": {
+      describe: () => ({ usage: "model_request", context: "none", identity: "explicit", version: "1" }),
+      freeze: async () => { throw new Error("source unavailable"); }, async *collect() { /* no completed records */ }
+    } } });
+    h.manager.usageCollector.sources.registerSource({ namespace: h.manager.usageCollector.namespace, sourceKey: "tail", kind: "unavailable-tail", inputRef: {},
+      mappings: [{ sourceSessionKey: "capture", agentId: String(h.seed.agent.id), sessionId: String(h.session.id), providerEpochId: h.manager.usageCollector.epoch(h.session.id) }] });
+    await expect(h.manager.resetProviderSession(h.session.id)).rejects.toMatchObject({ code: "usage_collection_pending" });
+    expect(existsSync(h.workspace)).toBe(true);
+    expect(h.db.prepare("SELECT status, pending_operation FROM sessions WHERE id = ?").get(h.session.id)).toEqual({ status: "running", pending_operation: "reset" });
+  });
   it("Hermes 存储清理只删除目标 Session Home，并清理匹配的旧历史", async () => {
     const root = mkdtempSync(join(tmpdir(), "hermes-session-cleanup-"));
     cleanups.push(() => rmSync(root, { recursive: true, force: true }));
