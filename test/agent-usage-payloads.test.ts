@@ -15,12 +15,12 @@ const setup = () => {
 };
 
 describe("default tool content measurement", () => {
-  it("ranks ordinary runtime content without enabling HTTP capture, preserving sparse updates", () => {
+  it("ranks ordinary runtime content without enabling HTTP capture, preserving sparse updates", async () => {
     const { host, run, session } = setup();
-    host.runtimeCapabilities.recordTool(run.id, { toolCallId: "read", kind: "read", status: "in_progress",
+    await host.runtimeCapabilities.recordTool(run.id, { toolCallId: "read", kind: "read", status: "in_progress",
       rawInput: { path: "README.md" } });
-    host.runtimeCapabilities.recordTool(run.id, { toolCallId: "read", status: "completed", rawOutput: "abcdefgh" });
-    host.runtimeCapabilities.recordTool(run.id, { toolCallId: "read", status: "completed" });
+    await host.runtimeCapabilities.recordTool(run.id, { toolCallId: "read", status: "completed", rawOutput: "abcdefgh" });
+    await host.runtimeCapabilities.recordTool(run.id, { toolCallId: "read", status: "completed" });
     const [row] = host.attribution.rankings({ namespace: host.namespace, sessionId: String(session.id) }, "builtin_tool");
     expect(row).toMatchObject({ calls: 1, observedResultTokens: 2, observedArgumentCalls: 1, observedResultCalls: 1,
       totalInputTokens: null, exposureCount: 0 });
@@ -30,9 +30,9 @@ describe("default tool content measurement", () => {
     expect(host.attribution.invocations()[0]).toMatchObject({ resultEstimate: { tokens: 2, byteLength: 8, partial: false } });
   });
 
-  it("measures ACP text results without counting image base64 as text tokens", () => {
+  it("measures ACP text results without counting image base64 as text tokens", async () => {
     const { host, run } = setup();
-    host.runtimeCapabilities.recordTool(run.id, { toolCallId: "content", kind: "read", status: "completed",
+    await host.runtimeCapabilities.recordTool(run.id, { toolCallId: "content", kind: "read", status: "completed",
       rawInput: { path: "notes.md" }, content: [
         { type: "content", content: { type: "text", text: "abcdefgh" } },
         { type: "content", content: { type: "image", data: "a".repeat(100_000), mimeType: "image/png" } }
@@ -43,9 +43,9 @@ describe("default tool content measurement", () => {
     expect(detail).toMatchObject({ resultEstimate: { tokens: 2, partial: true } });
   });
 
-  it("keeps payload estimates through restart and removes them on explicit Session deletion", () => {
+  it("keeps payload estimates through restart and removes them on explicit Session deletion", async () => {
     const { host, run, db, session } = setup();
-    host.runtimeCapabilities.recordTool(run.id, { toolCallId: "private", kind: "read", status: "completed",
+    await host.runtimeCapabilities.recordTool(run.id, { toolCallId: "private", kind: "read", status: "completed",
       rawInput: { path: "private-file.md" }, rawOutput: "never-persist-this-content" });
     const reopened = new HostUsageCollector(db);
     expect(reopened.attribution.rankings({}, "builtin_tool")[0]!.observedResultTokens).toBeGreaterThan(0);

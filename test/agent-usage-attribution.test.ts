@@ -33,9 +33,9 @@ const context = (): ModelContextInput => ({
 });
 
 describe("agent usage invocation attribution", () => {
-  it("selects bounded indexed context candidates before building evidence page IDs", () => {
+  it("selects bounded indexed context candidates before building evidence page IDs", async () => {
     const { db, attribution, binding } = setup();
-    for (let index = 0; index < 200; index++) attribution.upsertContext(binding, {
+    for (let index = 0; index < 200; index++) await attribution.upsertContext(binding, {
       ...context(), invocationId: `page-${index}`, occurredAt: new Date(Date.UTC(2026, 8, 20, 0, index)).toISOString()
     });
     let ids = 0;
@@ -50,9 +50,9 @@ describe("agent usage invocation attribution", () => {
     expect(next.map((row) => row.modelInvocationId)).toEqual(["page-194", "page-193", "page-192", "page-191", "page-190"]);
     expect(ids).toBeLessThanOrEqual(20);
   });
-  it("materializes aggregate rows instead of the exposure history for rankings", () => {
+  it("materializes aggregate rows instead of the exposure history for rankings", async () => {
     const { db, attribution, binding } = setup();
-    for (let index = 0; index < 200; index++) attribution.upsertContext(binding, {
+    for (let index = 0; index < 200; index++) await attribution.upsertContext(binding, {
       ...context(), invocationId: `request-${index}`, occurredAt: new Date(Date.UTC(2026, 8, 20, 0, index)).toISOString()
     });
     const prepare = db.prepare.bind(db); let largest = 0;
@@ -72,24 +72,24 @@ describe("agent usage invocation attribution", () => {
       expect(largest).toBeLessThanOrEqual(10);
     } finally { spy.mockRestore(); }
   });
-  it("repairs first-use indexes for late contexts, timestamp revisions, removed blocks and restart", () => {
+  it("repairs first-use indexes for late contexts, timestamp revisions, removed blocks and restart", async () => {
     const { usage, attribution, binding } = setup();
     const input = context();
-    attribution.upsertContext(binding, input);
-    attribution.upsertContext(binding, { ...input, invocationId: "older", occurredAt: "2026-09-20T10:00:00Z", historyComplete: false });
+    await attribution.upsertContext(binding, input);
+    await attribution.upsertContext(binding, { ...input, invocationId: "older", occurredAt: "2026-09-20T10:00:00Z", historyComplete: false });
     const latest = { namespace: "test", from: "2026-09-21T00:00:00Z" };
     expect(attribution.rankings(latest, "mcp_tool")[0]).toMatchObject({ firstResultInputTokens: 0, repeatedResultInputTokens: 2 });
-    attribution.upsertContext(binding, { ...input, invocationId: "older", revision: 2, occurredAt: "2026-09-22T10:00:00Z" });
+    await attribution.upsertContext(binding, { ...input, invocationId: "older", revision: 2, occurredAt: "2026-09-22T10:00:00Z" });
     expect(attribution.rankings(latest, "mcp_tool")[0]).toMatchObject({ firstResultInputTokens: 2, repeatedResultInputTokens: 2 });
-    attribution.upsertContext(binding, { ...input, revision: 2, blocks: [] });
+    await attribution.upsertContext(binding, { ...input, revision: 2, blocks: [] });
     const restarted = new AttributionStore(usage, fixtureTokenizers());
     expect(restarted.rankings(latest, "mcp_tool")[0]).toMatchObject({ firstResultInputTokens: 2, repeatedResultInputTokens: 0 });
   });
-  it("keeps lifetime repeat classification beyond SQLite's historical context variable limit", () => {
+  it("keeps lifetime repeat classification beyond SQLite's historical context variable limit", async () => {
     const { db, attribution, binding } = setup();
     const old = context(); old.invocationId = "old-model"; old.occurredAt = "2026-01-01T10:00:00Z";
-    attribution.upsertContext(binding, old);
-    attribution.upsertContext(binding, context());
+    await attribution.upsertContext(binding, old);
+    await attribution.upsertContext(binding, context());
     db.exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < 32767)
       INSERT INTO agent_usage_contexts
       SELECT 'historical-' || x, namespace, agent_id, session_id, generation, 'historical-' || x,
@@ -99,10 +99,10 @@ describe("agent usage invocation attribution", () => {
       .toMatchObject({ calls: 0, firstResultInputTokens: 0, repeatedResultInputTokens: 2, exposureCount: 1 });
   });
 
-  it("separates context-only tool evidence from execution counts with and without dates", () => {
+  it("separates context-only tool evidence from execution counts with and without dates", async () => {
     const { attribution, binding } = setup();
     attribution.observeInvocation(binding, invocation({ origin: "context", startedAt: null, status: "succeeded" }));
-    attribution.upsertContext(binding, context());
+    await attribution.upsertContext(binding, context());
     for (const filter of [{ namespace: "test" }, { namespace: "test", from: "2026-09-21T00:00:00Z", to: "2026-09-22T00:00:00Z" }]) {
       expect(attribution.rankings(filter, "mcp_tool")[0]).toMatchObject({ calls: 0, contextOnlyCalls: 1 });
       expect(attribution.invocations(filter)).toEqual([]);
@@ -128,12 +128,12 @@ describe("agent usage invocation attribution", () => {
     });
   });
 
-  it("uses invocation time for calls and context time for input contribution", () => {
+  it("uses invocation time for calls and context time for input contribution", async () => {
     const { attribution, binding } = setup();
     attribution.observeInvocation(binding, invocation({
       revision: 2, endedAt: "2026-09-20T10:00:01Z", status: "succeeded", rawResultBytes: 10
     }));
-    attribution.upsertContext(binding, context());
+    await attribution.upsertContext(binding, context());
 
     const dayOne = attribution.rankings({ namespace: "test", from: "2026-09-20T00:00:00Z", to: "2026-09-21T00:00:00Z" }, "mcp_tool")[0]!;
     expect(dayOne).toMatchObject({ calls: 1, exposureCount: 0, totalInputTokens: null });
@@ -141,12 +141,12 @@ describe("agent usage invocation attribution", () => {
     expect(dayTwo).toMatchObject({ calls: 0, exposureCount: 1, firstResultInputTokens: 2 });
   });
 
-  it("returns stable collision-safe public IDs and body-free detail", () => {
+  it("returns stable collision-safe public IDs and body-free detail", async () => {
     const { attribution, usage, binding } = setup();
     attribution.observeInvocation(binding, invocation({
       revision: 2, endedAt: "2026-09-20T10:00:01Z", status: "succeeded", rawResultBytes: 10
     }));
-    attribution.upsertContext(binding, context());
+    await attribution.upsertContext(binding, context());
     const first = attribution.invocations({ namespace: "test" })[0]!;
     const detail = attribution.detail("test", first.id)!;
     expect(detail).toMatchObject({
@@ -162,10 +162,10 @@ describe("agent usage invocation attribution", () => {
     expect(attribution.invocations({ namespace: "test", sessionId: "session-2" })[0]!.id).not.toBe(first.id);
   });
 
-  it("deletes only the selected session and rejects late or stale writes", () => {
+  it("deletes only the selected session and rejects late or stale writes", async () => {
     const { attribution, usage, binding } = setup();
     attribution.observeInvocation(binding, invocation());
-    attribution.upsertContext(binding, context());
+    await attribution.upsertContext(binding, context());
     const other = usage.bindSession("test", "agent-1", "session-2");
     attribution.observeInvocation(other, invocation());
 
@@ -175,7 +175,7 @@ describe("agent usage invocation attribution", () => {
     expect(attribution.invocations({ namespace: "test", sessionId: "session-1" })).toEqual([]);
     expect(attribution.invocations({ namespace: "test", sessionId: "session-2" })).toHaveLength(1);
     expect(() => attribution.observeInvocation(binding, invocation({ revision: 2 }))).toThrow("usage_subject_deleted");
-    expect(() => attribution.upsertContext(binding, { ...context(), revision: 2 })).toThrow("usage_subject_deleted");
+    await expect(attribution.upsertContext(binding, { ...context(), revision: 2 })).rejects.toThrow("usage_subject_deleted");
   });
 
   it("keeps unknown capabilities queryable", () => {
@@ -203,14 +203,14 @@ describe("agent usage invocation attribution", () => {
     ]));
   });
 
-  it("uses execution observations as the call-counting source while retaining context evidence for detail", () => {
+  it("uses execution observations as the call-counting source while retaining context evidence for detail", async () => {
     const { attribution, binding } = setup();
     attribution.observeInvocation(binding, invocation({
       invocationId: "context-call", startedAt: null, origin: "context", sourceId: "context-snapshot"
     }));
     const contextOnly = attribution.invocations({ namespace: "test" }, "context")[0]!;
     attribution.observeInvocation(binding, invocation({ invocationId: "wrapper-call", origin: "execution" }));
-    attribution.upsertContext(binding, {
+    await attribution.upsertContext(binding, {
       ...context(),
       blocks: [{ ...context().blocks[0]!, toolInvocationId: "context-call" }]
     });
@@ -235,7 +235,7 @@ describe("agent usage invocation attribution", () => {
 
   it.each(["execution-first", "context-first"] as const)(
     "keeps execution authoritative for the same canonical call when %s",
-    (order) => {
+    async (order) => {
       const { attribution, binding } = setup();
       const execution = invocation({
         invocationId: "canonical-call", revision: 1, origin: "execution", executionEvidence: "direct",
@@ -254,7 +254,7 @@ describe("agent usage invocation attribution", () => {
         attribution.observeInvocation(binding, imported);
         attribution.observeInvocation(binding, execution);
       }
-      attribution.upsertContext(binding, {
+      await attribution.upsertContext(binding, {
         ...context(),
         blocks: [{
           ...context().blocks[0]!, toolInvocationId: "canonical-call"

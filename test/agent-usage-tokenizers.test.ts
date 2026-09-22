@@ -47,14 +47,14 @@ describe("model-specific text estimates", () => {
     expect(engine.count("🚀", "closed-model").tokens).toBe(2);
     expect(engine.count("{}[]", "closed-model").tokens).toBe(2);
     expect(engine.count("a".repeat(100), null).tokens).toBeLessThan(engine.count("你".repeat(100), null).tokens!);
-    expect(engine.count("你".repeat(100000), null)).toMatchObject({ tokens: null, reason: "size_limit" });
+    expect(engine.count("你".repeat(100000), null)).toMatchObject({ tokens: 100000, reason: "model_missing" });
   });
   it("counts ordinary special-marker text without injecting BOS or EOS", () => {
     const engine = new ModelTokenizers([fixtureProfile()]);
     expect(engine.count("[CLS]", "fixture-model").tokens).toBe(3);
     expect(engine.count("", "fixture-model").tokens).toBe(0);
     expect(engine.count("你好", "fixture-model").tokens).toBe(2);
-    expect(engine.count("你".repeat(100000), "fixture-model")).toMatchObject({ tokens: null, reason: "size_limit" });
+    expect(engine.count("你".repeat(100000), "fixture-model")).toMatchObject({ tokens: 1, reason: null });
   });
   it("fails startup on modified assets or ambiguous model mappings", () => {
     const config = fixtureTokenizerConfig();

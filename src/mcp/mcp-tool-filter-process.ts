@@ -43,9 +43,9 @@ type ForwardingMcpClient = Pick<Client, "listTools" | "callTool"> & Partial<Pick
 // normal timeout and cancellation path.
 const FORWARDED_REQUEST_TIMEOUT_MS = 0x7fffffff;
 
-const contentSample = (value: unknown, part: "arguments" | "result"): McpObservation["argumentContent"] => {
+const contentSample = async (value: unknown, part: "arguments" | "result"): Promise<McpObservation["argumentContent"]> => {
   try {
-    const measurement = measureToolContent(value, part);
+    const measurement = await measureToolContent(value, part);
     if (measurement === undefined) return undefined;
     const { tokens, byteLength, partial } = measurement;
     const reason = measurement.estimate.reason;
@@ -121,12 +121,12 @@ export const createMcpToolFilterServer = (
     const invocationId = randomUUID();
     const toolName = request.params.name;
     await notify({ invocationId, toolName, phase: "start", occurredAt: new Date().toISOString(),
-      argumentContent: observe === undefined ? undefined : contentSample(request.params.arguments ?? {}, "arguments") });
+      argumentContent: observe === undefined ? undefined : await contentSample(request.params.arguments ?? {}, "arguments") });
     try {
       const result = await client.callTool(request.params, requestOptions(context.mcpReq.signal));
       await notify({ invocationId, toolName, phase: "end", occurredAt: new Date().toISOString(),
         status: result.isError ? "tool_error" : "succeeded", resultBytes: Buffer.byteLength(JSON.stringify(result)),
-        resultContent: observe === undefined ? undefined : contentSample(result, "result") });
+        resultContent: observe === undefined ? undefined : await contentSample(result, "result") });
       return result;
     } catch (error) {
       await notify({ invocationId, toolName, phase: "end", occurredAt: new Date().toISOString(),

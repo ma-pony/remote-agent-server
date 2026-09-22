@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
 import { HostUsageCollector } from "../src/agent-usage/host-collector.js";
+import { ModelTokenizers } from "../src/agent-usage/core/tokenizers.js";
 import { EventStore } from "../src/events/event-store.js";
 import type {
   AgentRuntime,
@@ -98,6 +99,43 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it.each(["cancel", "timeout"] as const)("interrupts content counting on %s and leaves retained evidence for backfill", async mode => {
+    vi.useFakeTimers();
+    const waiting = deferred<void>();
+    const result = deferred<RuntimeTurnResult>();
+    const original = ModelTokenizers.prototype.countAsync;
+    let countingSignal: AbortSignal | undefined;
+    const count = vi.spyOn(ModelTokenizers.prototype, "countAsync").mockImplementation(function(text, model, provider, signal) {
+      if (text !== "tool result awaiting counting") return original.call(this, text, model, provider, signal);
+      countingSignal = signal;
+      waiting.resolve();
+      return new Promise((_, reject) => signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+    });
+    const runtime = createFakeRuntime();
+    runtime.startTurn = () => ({
+      events: { async *[Symbol.asyncIterator]() {
+        yield { type: "tool" as const, content: { toolCallId: "counting", kind: "read", status: "completed", rawOutput: "tool result awaiting counting" } };
+      } },
+      result: result.promise, cancel: async () => undefined, closeEvents: async () => undefined
+    });
+    runtime.cancel = async () => result.resolve({ status: "cancelled" });
+    const h = setup(runtime, undefined, undefined, undefined, undefined, 1000);
+    try {
+      const execution = h.executor.execute(h.run.id);
+      await vi.advanceTimersByTimeAsync(0);
+      await waiting.promise;
+      expect(countingSignal).toBeInstanceOf(AbortSignal);
+      if (mode === "cancel") await h.executor.cancel(h.run.id);
+      else await vi.advanceTimersByTimeAsync(1000);
+      expect(await execution).toMatchObject(mode === "cancel" ? { status: "cancelled" } : { status: "failed", error: "run_timed_out" });
+      expect(countingSignal?.aborted).toBe(true);
+      expect(h.usageCollector.contentBackfill.status().status).toBe("pending");
+      count.mockRestore();
+      h.db.prepare("UPDATE agent_usage_runtime_backfills SET retry_after=0").run();
+      await h.usageCollector.contentBackfill.step();
+      expect(h.usageCollector.attribution.rankings({}, "builtin_tool")).toMatchObject([{ calls: 1, observedResultTokens: expect.any(Number) }]);
+    } finally { count.mockRestore(); h.db.close(); vi.useRealTimers(); }
+  });
   it("records prompt estimates after persisting the resolved model", async () => {
     const h = setup(createFakeRuntime());
     h.db.prepare("UPDATE agents SET provider_default_model = 'resolved-fixture-model'").run();

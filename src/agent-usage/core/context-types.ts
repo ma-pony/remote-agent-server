@@ -98,7 +98,7 @@ export type TokenEstimate = {
   tokenizerId: string | null;
   tokenizerRevision: string | null;
   encoding: string | null;
-  reason: "model_missing" | "model_unmapped" | "unsupported_content" | "size_limit" | "tokenization_failed" | "legacy_unavailable" | null;
+  reason: "model_missing" | "model_unmapped" | "tokenizer_pending" | "unsupported_content" | "size_limit" | "tokenization_failed" | "legacy_unavailable" | null;
 };
 
 export type TokenEstimateSummary = TokenEstimate & {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RuntimeContentBackfill } from "../src/agent-usage/runtime-backfill.js";
+import { UsageError } from "../src/agent-usage/core/errors.js";
 import { UsageStore } from "../src/agent-usage/storage/usage-store.js";
 import { createTestDatabase } from "./helpers.js";
 
@@ -21,6 +22,23 @@ const setup = () => {
 };
 
 describe("historical runtime content backfill", () => {
+  it("retries explicitly scheduled live Runs and preserves permanent gaps across vocabulary retries", async () => {
+    const { db, run, event } = setup(), live = run("running");
+    event(live.runId, 1, "malformed"); event(live.runId, 2);
+    let ready = false;
+    const backfill = new RuntimeContentBackfill(db, "test", () => {
+      if (!ready) throw new UsageError("usage_tokenizer_pending");
+    });
+    expect(await backfill.step()).toBe(false); // Active Runs are not scanned without an explicit request.
+    backfill.schedule(live.runId);
+    db.prepare("UPDATE agent_usage_runtime_backfills SET retry_after=0").run();
+    await backfill.step();
+    expect(backfill.status()).toMatchObject({ status: "pending", errorCode: "usage_runtime_event_malformed" });
+    ready = true;
+    db.prepare("UPDATE agent_usage_runtime_backfills SET retry_after=0").run();
+    await backfill.step();
+    expect(backfill.status()).toMatchObject({ status: "failed", processedEvents: 1, errorCode: "usage_runtime_event_malformed" });
+  });
   it("advances message-only batches without one progress write per message", async () => {
     const { db, run, event } = setup(), history = run();
     for (let sequence = 1; sequence <= 100; sequence++) event(history.runId, sequence, "{}", "message");
@@ -117,13 +135,17 @@ describe("historical runtime content backfill", () => {
     expect(persisted).not.toContain("secret");
     expect(await backfill.step()).toBe(false);
   });
-  it("rolls back failed consume writes with their checkpoint and preserves other successful records", async () => {
+  it("awaits atomic sinks outside a transaction and advances only successful counts", async () => {
     const { db, run, event } = setup(), history = run();
     event(history.runId, 1); event(history.runId, 2);
     db.exec("CREATE TABLE consumed_events (sequence INTEGER PRIMARY KEY)");
-    const backfill = new RuntimeContentBackfill(db, "test", (_id, _value, detail) => {
-      db.prepare("INSERT INTO consumed_events VALUES (?)").run(detail.sequence);
-      if (detail.sequence === 1) throw new Error("secret-provider-output");
+    const backfill = new RuntimeContentBackfill(db, "test", async (_id, _value, detail) => {
+      expect(db.inTransaction).toBe(false);
+      await Promise.resolve();
+      db.transaction(() => {
+        db.prepare("INSERT INTO consumed_events VALUES (?)").run(detail.sequence);
+        if (detail.sequence === 1) throw new Error("secret-provider-output");
+      })();
     });
     expect(await backfill.step()).toBe(false);
     expect(db.prepare("SELECT * FROM consumed_events").all()).toEqual([{ sequence: 2 }]);

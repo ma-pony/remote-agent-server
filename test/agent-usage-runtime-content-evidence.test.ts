@@ -8,11 +8,11 @@ import { listRuntimeContentEvidence, getRuntimeContentEvidence, runtimeContentSc
 
 const dbs: Database.Database[] = [];
 afterEach(() => { vi.restoreAllMocks(); for (const db of dbs.splice(0)) db.close(); });
-it("pages metadata-only runtime evidence with stable tied cursors, scoped details and no duplicate rows", () => {
+it("pages metadata-only runtime evidence with stable tied cursors, scoped details and no duplicate rows", async () => {
   const db = new Database(":memory:"); dbs.push(db);
   const usage = new UsageStore(db), attribution = new AttributionStore(usage);
   new RuntimeConversationCollector(usage, attribution, "test");
-  const estimate = JSON.stringify(measureToolContent("private content never belongs in evidence", "result")!.estimate);
+  const estimate = JSON.stringify((await measureToolContent("private content never belongs in evidence", "result"))!.estimate);
   const insert = db.prepare("INSERT INTO agent_usage_conversation_content VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
   for (let run = 1; run <= 50; run++) for (const category of ["user_prompt", "configured_instructions", "assistant_output", "assistant_thought"]) {
     insert.run("test", "session", "agent", run, "1", category, "2026-09-22T01:00:00.000Z", "codex", run, 10, 0, estimate);

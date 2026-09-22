@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { UsageError } from "./core/errors.js";
 import type { UsageBinding, UsageObservation } from "./core/types.js";
 import type { UsageStore } from "./storage/usage-store.js";
+import type { TokenCount } from "./core/tokenizers.js";
 import type { ModelContextInput, InvocationInput } from "./core/context-types.js";
 export type SourceCapabilities = { usage: string; context: "full" | "partial" | "opaque" | "none"; identity: "explicit" | "partial"; version: string };
 export type SourceConfig = { namespace: string; sourceKey: string; kind: string; inputRef: Record<string, string>; mappings: Array<{ sourceSessionKey: string; agentId: string; sessionId: string; providerEpochId: string }> };
@@ -23,7 +24,8 @@ export interface UsageSourceAdapter {
 export type UsageSourceEntry = { sourceSessionKey: string; observation: UsageObservation; context?: ModelContextInput; invocations?: InvocationInput[] };
 export type UsageCollectionEntry = (UsageSourceEntry | { observation?: never }) & { checkpoint: string };
 export type AttributionSink = {
-  upsertContext(binding: UsageBinding, input: ModelContextInput): void;
+  prepareContext(input: ModelContextInput, signal?: AbortSignal): Promise<Map<number, TokenCount>>;
+  commitContext(binding: UsageBinding, input: ModelContextInput, estimates: Map<number, TokenCount>): void;
   observeInvocation(binding: UsageBinding, input: InvocationInput): void;
   deleteSession(namespace: string, sessionId: string): void;
 };
@@ -112,9 +114,18 @@ export class UsageSourceCoordinator {
       const boundary = frozenBoundary ?? await adapter.freeze(input);
       controller.signal.throwIfAborted();
       let pending: UsageCollectionEntry[] = [];
-      const flush = () => {
+      const flush = async () => {
         if (!pending.length) return;
         const batch = pending; pending = [];
+        const estimates = new Map<UsageCollectionEntry, Map<number, TokenCount>>();
+        for (const entry of batch) {
+          controller.signal.throwIfAborted();
+          if (entry.observation && entry.context) {
+            if (!this.attribution) throw new UsageError("usage_attribution_unavailable");
+            estimates.set(entry, await this.attribution.prepareContext(entry.context, controller.signal));
+          }
+        }
+        controller.signal.throwIfAborted();
         this.store.db.transaction(() => {
           // Re-read authority after awaits. No await occurs inside this atomic batch.
           const mappings = new Map(this.mappings(id).map((row) => [row.source_session_key, row]));
@@ -128,7 +139,7 @@ export class UsageSourceCoordinator {
                 this.store.observe(this.binding(mapping), { ...entry.observation, sourceId: id, providerEpochId: mapping.epoch_id });
                 if (entry.context || entry.invocations?.length) {
                   if (!this.attribution) throw new UsageError("usage_attribution_unavailable");
-                  if (entry.context) this.attribution.upsertContext(this.binding(mapping), { ...entry.context, sourceId: id, providerEpochId: mapping.epoch_id });
+                  if (entry.context) this.attribution.commitContext(this.binding(mapping), { ...entry.context, sourceId: id, providerEpochId: mapping.epoch_id }, estimates.get(entry)!);
                   for (const invocation of entry.invocations ?? []) this.attribution.observeInvocation(this.binding(mapping), { ...invocation, sourceId: id, providerEpochId: mapping.epoch_id });
                 }
               } catch (error) {
@@ -147,13 +158,13 @@ export class UsageSourceCoordinator {
           controller.signal.throwIfAborted();
           pending.push(entry);
           if (pending.length >= COLLECTION_YIELD_INTERVAL) {
-            flush(); await yieldToEventLoop(); controller.signal.throwIfAborted();
+            await flush(); await yieldToEventLoop(); controller.signal.throwIfAborted();
           }
         }
-        controller.signal.throwIfAborted(); flush();
+        controller.signal.throwIfAborted(); await flush();
       } catch (error) {
         // Preserve valid entries before a read/parse failure, but never commit work after cancellation.
-        if (!controller.signal.aborted) flush();
+        if (!controller.signal.aborted) await flush();
         throw error;
       }
       controller.signal.throwIfAborted();

@@ -17,7 +17,7 @@ export const tokenizerProfilesSchema = z.array(z.object({
 export type TokenizerProfileConfig = z.infer<typeof tokenizerProfilesSchema>[number];
 
 /** Bounded, local-only startup loading; never called on the capture/request path. */
-export const loadModelTokenizers = (input: TokenizerProfileConfig[] = []): ModelTokenizers => {
+export const loadModelTokenizers = (input: TokenizerProfileConfig[] = [], automaticCacheDirectory?: string): ModelTokenizers => {
   const profiles = tokenizerProfilesSchema.parse(input);
   let totalBytes = 0;
   const load = (path: string, digest: string, limit: number): Record<string, unknown> => {
@@ -44,5 +44,5 @@ export const loadModelTokenizers = (input: TokenizerProfileConfig[] = []): Model
   return new ModelTokenizers(profiles.map((profile) => ({ ...profile,
     tokenizerJson: load(profile.tokenizerPath, profile.tokenizerSha256, 16 * 1024 * 1024),
     tokenizerConfig: load(profile.configPath, profile.configSha256, 1024 * 1024)
-  })));
+  })), { automaticCacheDirectory });
 };

@@ -21,14 +21,14 @@ const context = (id: string, model = "fixture-model"): ModelContextInput => ({
 });
 
 describe("persisted tokenizer provenance", () => {
-  it("preserves original measurements and their breakdown when a registry change creates a mixed estimate", () => {
+  it("preserves original measurements and their breakdown when a registry change creates a mixed estimate", async () => {
     const { store, db, usage, binding } = setup();
-    store.upsertContext(binding, context("old"));
+    await store.upsertContext(binding, context("old"));
     const modified = fixtureProfile(); delete modified.tokenizerJson.model.vocab.hello;
     Object.assign(modified.tokenizerJson.model.vocab, { he: 30, "##llo": 31 });
     const next = new AttributionStore(usage, new ModelTokenizers([modified]));
     expect(next.rankings({}, "mcp_tool")[0]!.totalInputTokens).toBe(2);
-    next.upsertContext(binding, context("new"));
+    await next.upsertContext(binding, context("new"));
     const row = next.rankings({}, "mcp_tool")[0]!;
     expect(row).toMatchObject({ tokenizationStatus: "mixed", totalInputTokens: 5, inputBytes: 22 });
     expect(row.tokenEstimates.map((item) => item.totalInputTokens).sort()).toEqual([2, 3]);
@@ -36,9 +36,9 @@ describe("persisted tokenizer provenance", () => {
     const persisted = db.prepare("SELECT estimate_json FROM agent_usage_exposures").all();
     expect(JSON.stringify(persisted)).not.toContain("hello world");
   });
-  it("keeps a rankable mixed estimate and its fallback provenance when another model is unconfigured", () => {
+  it("keeps a rankable mixed estimate and its fallback provenance when another model is unconfigured", async () => {
     const { store, binding } = setup();
-    store.upsertContext(binding, context("known")); store.upsertContext(binding, context("unknown", "closed-model"));
+    await store.upsertContext(binding, context("known")); await store.upsertContext(binding, context("unknown", "closed-model"));
     const row = store.rankings({}, "mcp_tool")[0]!;
     expect(row).toMatchObject({ totalInputTokens: 5, tokenizationStatus: "mixed", estimateCompleteness: "complete", missingExposureCount: 0 });
     expect(row.tokenEstimates).toContainEqual(expect.objectContaining({ model: "closed-model", method: "text_heuristic", reason: "model_unmapped", totalInputTokens: 3 }));
@@ -47,9 +47,9 @@ describe("persisted tokenizer provenance", () => {
       tokens: 3, byteLength: 11, model: "closed-model", method: "text_heuristic", reason: "model_unmapped", coverage: "full"
     });
   });
-  it("migrates the old schema once without relabeling historical estimates as model-specific", () => {
+  it("migrates the old schema once without relabeling historical estimates as model-specific", async () => {
     const { store, usage, db, binding } = setup();
-    store.upsertContext(binding, context("old"));
+    await store.upsertContext(binding, context("old"));
     db.exec("ALTER TABLE agent_usage_exposures DROP COLUMN estimate_json");
     if ((db.prepare("PRAGMA table_info(agent_usage_exposures)").all() as Array<{ name: string }>).some((column) => column.name === "estimate_id")) {
       db.exec("ALTER TABLE agent_usage_exposures DROP COLUMN estimate_id");
@@ -60,7 +60,7 @@ describe("persisted tokenizer provenance", () => {
     const before = db.prepare("SELECT estimate_json FROM agent_usage_exposures").get();
     new AttributionStore(usage);
     expect(db.prepare("SELECT estimate_json FROM agent_usage_exposures").get()).toEqual(before);
-    migrated.upsertContext(binding, context("new"));
+    await migrated.upsertContext(binding, context("new"));
     expect(migrated.rankings({}, "mcp_tool")[0]?.tokenizationStatus).toBe("mixed");
   });
 });

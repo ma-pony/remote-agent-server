@@ -32,20 +32,20 @@ it("keeps mixed capability, content and provider totals scoped while independent
     await app.ready(); await host.stopRecovery();
     const builtin: Capability = { kind: "builtin_tool", id: "read", name: "Read" };
     const cli: Capability = { kind: "cli", id: "build", name: "Build" };
-    const populate = (sessionId: number, day: number, capability: Capability, tokens: number, runtimeKind = "codex") => {
+    const populate = async (sessionId: number, day: number, capability: Capability, tokens: number, runtimeKind = "codex") => {
       const binding = host.binding(sessionId), providerEpochId = host.epoch(sessionId);
       const id = `${sessionId}-${day}-${runtimeKind}`, occurredAt = `2026-09-${day}T01:00:00.000Z`;
       host.attribution.observeInvocation(binding, { invocationId: `call-${id}`, providerEpochId, executionId: null,
         capability, startedAt: occurredAt, endedAt: occurredAt, status: "succeeded", runtimeKind,
         sourceId: "fixture-runtime", revision: 1, rawResultBytes: 30,
-        argumentEstimate: measureToolContent("PRIVATE_SCOPE_FIXTURE".repeat(tokens), "arguments"),
-        resultEstimate: measureToolContent("PRIVATE_SCOPE_FIXTURE result", "result") });
+        argumentEstimate: await measureToolContent("PRIVATE_SCOPE_FIXTURE".repeat(tokens), "arguments"),
+        resultEstimate: await measureToolContent("PRIVATE_SCOPE_FIXTURE result", "result") });
       for (let repeat = 0; repeat < 3; repeat++) {
         const invocationId = `model-${id}-${repeat}`;
         host.store.observe(binding, { ...accountingRequests()[0]!, eventId: invocationId, coverageId: invocationId,
           invocationId, executionId: null, providerEpochId, occurredAt, runtimeKind,
           metrics: { inputTotalTokens: tokens, outputTotalTokens: 1 } });
-        host.attribution.upsertContext(binding, { invocationId, providerEpochId, sourceId: "fixture-context", revision: 1,
+        await host.attribution.upsertContext(binding, { invocationId, providerEpochId, sourceId: "fixture-context", revision: 1,
           occurredAt, runtimeKind, model: "fixture-unmapped", coverage: "full", historyComplete: true,
           blocks: [
             { position: 0, kind: "result", toolInvocationId: `call-${id}`,
@@ -59,13 +59,13 @@ it("keeps mixed capability, content and provider totals scoped while independent
           ] });
       }
     };
-    populate(selected.id, 20, builtin, 10);
-    populate(selected.id, 21, cli, 20);
-    populate(selected.id, 22, builtin, 1000); // Exclusive upper bound.
-    populate(selected.id, 19, builtin, 1000); // Before the lower bound.
-    populate(selected.id, 20, builtin, 1000, "claude_code");
-    populate(sibling.id, 20, builtin, 1000);
-    populate(foreign.id, 20, builtin, 1000);
+    await populate(selected.id, 20, builtin, 10);
+    await populate(selected.id, 21, cli, 20);
+    await populate(selected.id, 22, builtin, 1000); // Exclusive upper bound.
+    await populate(selected.id, 19, builtin, 1000); // Before the lower bound.
+    await populate(selected.id, 20, builtin, 1000, "claude_code");
+    await populate(sibling.id, 20, builtin, 1000);
+    await populate(foreign.id, 20, builtin, 1000);
     for (const sessionId of [selected.id, sibling.id, foreign.id]) {
       const binding = host.binding(sessionId);
       for (let index = 0; index < 3; index++) host.sources.registerSource({ namespace: host.namespace,
@@ -123,8 +123,8 @@ it("keeps mixed capability, content and provider totals scoped while independent
         const run = db.prepare("SELECT MAX(id) AS id FROM runs WHERE session_id=?").get(sessionId) as { id: number };
         db.prepare("UPDATE runs SET input=?,started_at=? WHERE id=?")
           .run("PRIVATE_SCOPE_FIXTURE prompt", "2026-09-21T02:00:00.000Z", run.id);
-        host.conversationContent.recordRun(run.id);
-        host.conversationContent.recordMessage(run.id, { stream: "output", text: "PRIVATE_SCOPE_FIXTURE reply" },
+        await host.conversationContent.recordRun(run.id);
+        await host.conversationContent.recordMessage(run.id, { stream: "output", text: "PRIVATE_SCOPE_FIXTURE reply" },
           { sequence: 1, occurredAt: "2026-09-21T02:00:01.000Z" });
       }
     }

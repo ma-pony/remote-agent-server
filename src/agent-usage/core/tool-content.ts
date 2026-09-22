@@ -1,5 +1,4 @@
-import type { TokenEstimate, ToolContentEstimate } from "./context-types.js";
-import { MAX_TOKENIZABLE_BLOCK_BYTES } from "./context.js";
+import type { ToolContentEstimate } from "./context-types.js";
 import { ModelTokenizers, type TokenCount } from "./tokenizers.js";
 
 const fallback = new ModelTokenizers();
@@ -66,32 +65,11 @@ const resultText = (value: unknown): ContentText => {
   return jsonText(record?.structuredContent !== undefined ? record.structuredContent : value);
 };
 
-// Sixteen stratified windows bound Unicode work to ~16K UTF-16 units even for a
-// 16 MiB historical event. Avoid cutting surrogate pairs, then extrapolate the
-// existing versioned heuristic by sampled UTF-16 length. This is marked partial.
-const sampleText = (text: string): string => {
-  const windows: string[] = [];
-  const width = 1024;
-  for (let index = 0; index < 16; index += 1) {
-    let start = Math.floor((text.length - width) * index / 15);
-    let end = start + width;
-    if (start > 0 && text.charCodeAt(start) >= 0xdc00 && text.charCodeAt(start) <= 0xdfff) start -= 1;
-    if (end < text.length && text.charCodeAt(end - 1) >= 0xd800 && text.charCodeAt(end - 1) <= 0xdbff) end += 1;
-    windows.push(text.slice(start, end));
-  }
-  return windows.join("");
-};
-
-const heuristic = (text: string, model: string | null, provider: string | null, reason: TokenEstimate["reason"], sampled: boolean): TokenCount => {
-  const sample = sampled ? sampleText(text) : text;
-  const counted = fallback.count(sample, model, provider);
-  return { ...counted, reason, tokens: sampled ? Math.ceil(counted.tokens! * text.length / sample.length) : counted.tokens };
-};
-
-export const measureToolContent = (
+export const measureToolContent = async (
   value: unknown, part: "arguments" | "result", tokenizers = fallback,
-  model: string | null = null, modelProvider: string | null = null
-): ToolContentEstimate | undefined => {
+  model: string | null = null, modelProvider: string | null = null, signal?: AbortSignal
+): Promise<ToolContentEstimate | undefined> => {
+  signal?.throwIfAborted();
   if (value === undefined) return undefined;
   try {
     const content = part === "result" ? resultText(value)
@@ -99,17 +77,20 @@ export const measureToolContent = (
     const byteLength = Buffer.byteLength(content.text);
     if (content.partial && content.text.length === 0) return { tokens: null, byteLength, partial: true,
       estimate: { ...fallback.describe(model, modelProvider), method: "unavailable", reason: "unsupported_content" } };
-    const sampled = byteLength > MAX_TOKENIZABLE_BLOCK_BYTES;
     let counted: TokenCount;
-    if (sampled) counted = heuristic(content.text, model, modelProvider, "size_limit", true);
-    else {
-      try { counted = tokenizers.count(content.text, model, modelProvider); }
-      catch { counted = { ...fallback.describe(model, modelProvider), tokens: null, reason: "tokenization_failed" }; }
-      if (counted.tokens === null) counted = heuristic(content.text, model, modelProvider, counted.reason ?? "tokenization_failed", false);
+    try { counted = await tokenizers.countAsync(content.text, model, modelProvider, signal); }
+    catch {
+      signal?.throwIfAborted();
+      counted = { ...tokenizers.describe(model, modelProvider), method: "unavailable", tokens: null, reason: "tokenization_failed" };
+    }
+    if (counted.tokens === null && !tokenizers.hasVocabulary(model, modelProvider)) {
+      const reason = counted.reason ?? "tokenization_failed";
+      counted = { ...await fallback.countAsync(content.text, model, modelProvider, signal), reason };
     }
     const { tokens, ...estimate } = counted;
-    return { tokens, byteLength, estimate, partial: content.partial || sampled };
+    return { tokens, byteLength, estimate, partial: content.partial };
   } catch {
+    signal?.throwIfAborted();
     // Observability must never fail the tool call (cycles, exotic getters, etc.).
     return undefined;
   }

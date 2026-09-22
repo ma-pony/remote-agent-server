@@ -1,8 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Capability, ContextBlock } from "./context-types.js";
 
-export const MAX_TOKENIZABLE_BLOCK_BYTES = 256 * 1024;
-export const MAX_TOKENIZABLE_CONTEXT_BYTES = 1024 * 1024;
 export const MAX_CONTEXT_BLOCKS = 2048;
 export const MAX_CAPABILITY_REFERENCES_PER_BLOCK = 128;
 

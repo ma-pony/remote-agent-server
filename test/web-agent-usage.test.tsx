@@ -30,6 +30,7 @@ beforeEach(() => {
     if (url.pathname === "/api/agents") return response([{ id: 1, name: "Example Agent" }]);
     if (url.pathname === "/api/sessions") return response({ items: [{ id: 2, title: "Example Session", agentId: 1 }], total: 1, page: 1, pageSize: 20, totalPages: 1 });
     if (url.pathname === "/api/usage/summary") return response(summary);
+    if (url.pathname === "/api/usage/status") return response({ revision: "updated", sourceCounts: {}, contentBackfill: { status: "completed" } });
     if (url.pathname === "/api/usage/capabilities") return response({ items: ranks, total: ranks.length });
     if (url.pathname === "/api/usage/timeseries") return response({ items: [{ period: "2026-09-21", usage }] });
     if (url.pathname === "/api/usage/sources") return response([]);
@@ -47,6 +48,40 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 const mount = () => render(<I18nProvider><BrowserRouter><AgentUsagePage /></BrowserRouter></I18nProvider>);
+
+it("renders available rankings and sources while summary is still loading or fails", async () => {
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  let resolveSummary!: (value: Response) => void;
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary")
+    ? new Promise<Response>(resolve => { resolveSummary = resolve; }) : original(input, init));
+  mount();
+  expect(await screen.findByRole("button", { name: "查看 search 的调用" })).toBeInTheDocument();
+  expect(screen.getByLabelText("正在加载用量分析")).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "数据来源分页" })).toBeInTheDocument();
+  await act(async () => resolveSummary(response({ error: { message: "summary unavailable" } }, 500)));
+  expect(screen.getByText("用量分析加载失败")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 search 的调用" })).toBeInTheDocument();
+});
+
+it("pauses status polling while hidden and refreshes changed data on return", async () => {
+  vi.useFakeTimers();
+  const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+  try {
+    const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+    let revision = "one";
+    fetch.mockImplementation(async (input, init) => String(input).includes("/usage/status")
+      ? response({ revision, contentBackfill: { status: "pending" } })
+      : String(input).includes("/usage/summary") ? response({ ...summary, revision,
+        contentBackfill: { status: "pending", processedEvents: 1, errorCode: null } }) : original(input, init));
+    await act(async () => { mount(); });
+    fetch.mockClear(); visibility.mockReturnValue("hidden");
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    expect(fetch).not.toHaveBeenCalled();
+    revision = "two"; visibility.mockReturnValue("visible");
+    await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/summary"))).toHaveLength(1);
+  } finally { cleanup(); visibility.mockRestore(); vi.useRealTimers(); }
+});
 
 it("keeps polling a collecting source outside the visible source page", async () => {
   const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
@@ -498,17 +533,20 @@ it("自动采集尚未观察到请求时显示等待状态并刷新到已观察"
     captureHealth: [{ sessionId: "2", runtimeKind: "codex", status: ++gets === 1 ? "waiting" : "observed", observed: gets === 1 ? 0 : 1, incomplete: 0, errorCode: null }] }) : original(input, init));
   mount(); expect(await screen.findByText(/已观察 1 次请求/)).toBeInTheDocument();
 });
-it("等待首次请求达到轮询上限后安静停止，不把正常空闲状态显示成加载失败", async () => {
+it("等待首次请求时只轮询轻量状态，不反复加载整页", async () => {
   vi.useFakeTimers();
   try {
     const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
-    fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary") ? response({ ...summary,
+    fetch.mockImplementation(async (input, init) => String(input).includes("/usage/status")
+      ? response({ revision: "waiting", captureHealthCounts: { waiting: 1 } })
+      : String(input).includes("/usage/summary") ? response({ ...summary, revision: "waiting",
       captureHealth: [{ sessionId: "2", runtimeKind: "codex", status: "waiting", observed: 0, incomplete: 0, errorCode: null }] }) : original(input, init));
     mount(); await act(async () => { await vi.advanceTimersByTimeAsync(0); });
     expect(screen.getByText("3,300")).toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
     const requests = fetch.mock.calls.filter(([input]) => String(input).includes("/usage/summary")).length;
-    expect(requests).toBe(61);
+    expect(requests).toBe(1);
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/status")).length).toBeGreaterThan(1);
     expect(screen.getByText("等待请求，覆盖尚未验证")).toBeInTheDocument();
     expect(screen.queryByText("用量分析加载失败")).not.toBeInTheDocument();
     await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
@@ -589,17 +627,56 @@ it("历史内容回填自动刷新到完成并停止显示进行中状态", asyn
   expect(screen.queryByText("历史内容回填中")).not.toBeInTheDocument();
 });
 
+it("等待词表超过一分钟时降低刷新频率并在补算完成后显示模型词表计数", async () => {
+  vi.useFakeTimers();
+  try {
+    const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+    let ready = false, summaryGets = 0;
+    fetch.mockImplementation(async (input, init) => {
+      if (String(input).includes("/usage/status")) return response({ revision: ready ? "ready" : "waiting",
+        contentBackfill: { status: ready ? "completed" : "pending" } });
+      if (String(input).includes("/usage/summary")) {
+        summaryGets++;
+        return response({ ...summary, revision: ready ? "ready" : "waiting", contentBackfill: { status: ready ? "completed" : "pending", processedEvents: ready ? 1 : 0, errorCode: ready ? null : "usage_tokenizer_pending" } });
+      }
+      if (String(input).includes("/usage/capabilities")) return response({ items: [{ ...ranks[0], observedTotalTokens: ready ? 25 : null,
+        payloadEstimates: [{ ...payloadEstimate, model: "deepseek-flash", method: ready ? "model_tokenizer" : "unavailable", reason: ready ? null : "tokenizer_pending" }] }], total: 1 });
+      return original(input, init);
+    });
+    await act(async () => { mount(); });
+    expect(screen.getByText(/等待词表计量/)).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(61000); });
+    expect(screen.queryByText(/采集状态刷新超时/)).not.toBeInTheDocument();
+    expect(screen.getByText(/正在获取词表/)).toBeInTheDocument();
+    const previous = summaryGets;
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+    expect(summaryGets).toBe(previous);
+    ready = true;
+    await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+    expect(screen.queryByText(/等待词表计量/)).not.toBeInTheDocument();
+    expect(screen.getByText(/模型词表估算/)).toBeInTheDocument();
+    expect(screen.queryByText("历史内容回填中")).not.toBeInTheDocument();
+  } finally { cleanup(); vi.useRealTimers(); }
+});
+
 
 it("仅排名返回回填进度时持续轮询直到完成", async () => {
   const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
   let rankingGets = 0;
-  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/capabilities")
-    ? response({ items: ranks, total: ranks.length, contentBackfill: {
-      status: ++rankingGets < 3 ? "running" : "completed", processedEvents: rankingGets * 25, errorCode: null
-    } }) : original(input, init));
+  let finishStatus!: (value: Response) => void;
+  fetch.mockImplementation(async (input, init) => {
+    if (String(input).includes("/usage/status")) return new Promise<Response>(resolve => { finishStatus = resolve; });
+    return String(input).includes("/usage/capabilities")
+      ? response({ items: ranks, total: ranks.length, contentBackfill: {
+        status: ++rankingGets < 2 ? "running" : "completed", processedEvents: rankingGets * 25, errorCode: null
+      } }) : original(input, init);
+  });
   mount();
   expect(await screen.findByText("历史内容回填中")).toBeInTheDocument();
+  await waitFor(() => expect(finishStatus).toBeTypeOf("function"));
+  await act(async () => finishStatus(response({ revision: "completed", contentBackfill: { status: "completed" } })));
   await waitFor(() => expect(screen.queryByText("历史内容回填中")).not.toBeInTheDocument(), { timeout: 2500 });
+  expect(rankingGets).toBe(2);
 });
 
 

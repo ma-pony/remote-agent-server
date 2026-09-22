@@ -315,6 +315,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     try { await usageSources.collector.harvestFinalSessions(); } catch (error) { failures.push(error); }
     try { await usageSources.collector.sources.close(); } catch (error) { failures.push(error); }
     try { await usageObserver.close(); } catch (error) { failures.push(error); }
+    try { await usageSources.collector.attribution.close(); } catch (error) { failures.push(error); }
     if (failures.length === 1) shutdownError = failures[0];
     if (failures.length > 1) shutdownError = new AggregateError(failures, "Application shutdown failed");
   });

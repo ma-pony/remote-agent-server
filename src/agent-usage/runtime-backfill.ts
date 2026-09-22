@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { setImmediate } from "node:timers/promises";
 import type { UsageFilter } from "./core/types.js";
+import { UsageError } from "./core/errors.js";
 
 export type RuntimeBackfillStatus = { status: "pending" | "running" | "completed" | "failed"; processedEvents: number; errorCode: string | null };
 type EventMetadata = { id: number; seq: number; type: string; bytes: number; created_at: string };
@@ -11,11 +12,11 @@ const MAX_EVENT_BYTES = 16 * 1024 * 1024;
 /** Historical replay owns only progress and sanitized failures, never a second copy of event content. */
 export class RuntimeContentBackfill {
   constructor(private readonly db: Database.Database, private readonly namespace: string,
-    private readonly consume: (runId: number, content: Record<string, unknown>, event: { eventId: number; sequence: number; occurredAt: string }) => void,
+    private readonly consume: (runId: number, content: Record<string, unknown>, event: { eventId: number; sequence: number; occurredAt: string }) => void | Promise<void>,
     private readonly conversation?: {
-      recordRun(runId: number): void;
-      recordMessage(runId: number, content: Record<string, unknown>, event: { sequence: number; occurredAt: string }): void;
-    }) {
+      recordRun(runId: number): void | Promise<void>;
+      recordMessage(runId: number, content: Record<string, unknown>, event: { sequence: number; occurredAt: string }): void | Promise<void>;
+    }, private readonly knownModels: string[] = []) {
     db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_runtime_backfills (
       namespace TEXT NOT NULL, run_id INTEGER NOT NULL, session_id TEXT NOT NULL,
       last_seq INTEGER NOT NULL DEFAULT 0, processed_events INTEGER NOT NULL DEFAULT 0,
@@ -29,25 +30,38 @@ export class RuntimeContentBackfill {
     )`);
     const columns = db.prepare("PRAGMA table_info(agent_usage_runtime_backfills)").all() as Array<{ name: string }>;
     if (!columns.some(({ name }) => name === "content_version")) db.exec("ALTER TABLE agent_usage_runtime_backfills ADD COLUMN content_version INTEGER NOT NULL DEFAULT 1");
+    if (!columns.some(({ name }) => name === "retry_after")) db.exec("ALTER TABLE agent_usage_runtime_backfills ADD COLUMN retry_after INTEGER NOT NULL DEFAULT 0");
+    if (!columns.some(({ name }) => name === "tokenizer_model")) db.exec("ALTER TABLE agent_usage_runtime_backfills ADD COLUMN tokenizer_model TEXT");
     // Tool-only checkpoints predate conversation content. Replay them once; both sinks are idempotent.
     if (conversation) db.prepare(`UPDATE agent_usage_runtime_backfills SET content_version=2,
       last_seq=0,processed_events=0,status='pending',error_code=NULL WHERE namespace=? AND content_version<2`).run(namespace);
+    // Replay retained content once for models that now have a vocabulary. Other history is untouched.
+    if (knownModels.length) db.prepare(`UPDATE agent_usage_runtime_backfills SET content_version=3,
+      last_seq=0,processed_events=0,status='pending',error_code=NULL,retry_after=0,
+      tokenizer_model=(SELECT resolved_model FROM runs WHERE id=agent_usage_runtime_backfills.run_id)
+      WHERE namespace=? AND tokenizer_model IS NULL AND run_id IN (
+        SELECT id FROM runs WHERE resolved_model IN (SELECT value FROM json_each(?)))`).run(namespace, JSON.stringify(knownModels));
   }
 
   async step(): Promise<boolean> {
     const scope = this.scope();
     // Only business metadata is discovered here. Active Runs remain eligible when they later finish.
-    this.db.prepare(`INSERT INTO agent_usage_runtime_backfills (namespace, run_id, session_id, content_version)
-      SELECT ?, r.id, CAST(s.id AS TEXT), ${this.conversation ? 2 : 1} ${scope.sql} AND j.run_id IS NULL
+    this.db.prepare(`INSERT INTO agent_usage_runtime_backfills (namespace, run_id, session_id, content_version, tokenizer_model)
+      SELECT ?, r.id, CAST(s.id AS TEXT), ${this.conversation ? 3 : 1},
+      CASE WHEN r.resolved_model IN (SELECT value FROM json_each(?)) THEN r.resolved_model ELSE NULL END ${scope.sql} AND j.run_id IS NULL
       ORDER BY r.id DESC LIMIT ${BATCH_EVENTS} ON CONFLICT(namespace, run_id) DO NOTHING`)
-      .run(this.namespace, ...scope.params);
+      .run(this.namespace, JSON.stringify(this.knownModels), ...scope.params);
     const job = this.db.prepare(`SELECT j.run_id, j.last_seq ${scope.sql}
-      AND j.status IN ('pending', 'running') ORDER BY r.id DESC LIMIT 1`).get(...scope.params) as { run_id: number; last_seq: number } | undefined;
+      AND j.status IN ('pending', 'running') AND j.retry_after<=? ORDER BY r.id DESC LIMIT 1`).get(...scope.params, Date.now()) as { run_id: number; last_seq: number } | undefined;
     if (!job) return false;
-    this.db.prepare("UPDATE agent_usage_runtime_backfills SET status = 'running' WHERE namespace = ? AND run_id = ?")
+    this.db.prepare(`UPDATE agent_usage_runtime_backfills SET status = 'running',
+      error_code=CASE WHEN error_code='usage_tokenizer_pending' THEN NULL ELSE error_code END WHERE namespace = ? AND run_id = ?`)
       .run(this.namespace, job.run_id);
-    try { this.conversation?.recordRun(job.run_id); }
-    catch { this.progress(job.run_id, job.last_seq, 0, "usage_runtime_prompt_failed"); }
+    try { await this.conversation?.recordRun(job.run_id); }
+    catch (error) {
+      if (error instanceof UsageError && error.code === "usage_tokenizer_pending") return this.retry(job.run_id, job.last_seq);
+      this.progress(job.run_id, job.last_seq, 0, "usage_runtime_prompt_failed");
+    }
     // Bound traversal as well as replay: a Run containing many message events still yields promptly.
     const events = this.db.prepare(`SELECT id, seq, type, created_at,
       CASE WHEN type = 'tool' ${this.conversation ? "OR type = 'message'" : ""} THEN octet_length(content_json) ELSE 0 END AS bytes
@@ -65,24 +79,23 @@ export class RuntimeContentBackfill {
       bytes += event.bytes;
       let errorCode = "usage_runtime_backfill_failed";
       try {
-        this.db.transaction(() => {
-          const row = this.db.prepare(`SELECT CASE WHEN octet_length(content_json) <= ? THEN content_json END AS content
-            FROM events WHERE id = ? AND run_id = ?`).get(MAX_EVENT_BYTES, event.id, job.run_id) as { content: string | null } | undefined;
-          if (!row || row.content === null) {
-            errorCode = row ? "usage_runtime_event_too_large" : "usage_runtime_event_missing";
-            throw new Error(errorCode);
-          }
-          errorCode = "usage_runtime_event_malformed";
-          const content: unknown = JSON.parse(row.content);
-          if (content === null || typeof content !== "object" || Array.isArray(content)) throw new Error(errorCode);
-          errorCode = "usage_runtime_backfill_failed";
-          const evidence = { eventId: event.id, sequence: event.seq, occurredAt: event.created_at };
-          if (event.type === "message") this.conversation?.recordMessage(job.run_id, content as Record<string, unknown>, evidence);
-          else this.consume(job.run_id, content as Record<string, unknown>, evidence);
-          this.progress(job.run_id, event.seq, 1);
-        })();
-      } catch {
-        // The failed record's writes rolled back. Keep a sanitized gap and continue subsequent records.
+        const row = this.db.prepare(`SELECT CASE WHEN octet_length(content_json) <= ? THEN content_json END AS content
+          FROM events WHERE id = ? AND run_id = ?`).get(MAX_EVENT_BYTES, event.id, job.run_id) as { content: string | null } | undefined;
+        if (!row || row.content === null) {
+          errorCode = row ? "usage_runtime_event_too_large" : "usage_runtime_event_missing";
+          throw new Error(errorCode);
+        }
+        errorCode = "usage_runtime_event_malformed";
+        const content: unknown = JSON.parse(row.content);
+        if (content === null || typeof content !== "object" || Array.isArray(content)) throw new Error(errorCode);
+        errorCode = "usage_runtime_backfill_failed";
+        const evidence = { eventId: event.id, sequence: event.seq, occurredAt: event.created_at };
+        if (event.type === "message") await this.conversation?.recordMessage(job.run_id, content as Record<string, unknown>, evidence);
+        else await this.consume(job.run_id, content as Record<string, unknown>, evidence);
+        this.progress(job.run_id, event.seq, 1);
+      } catch (error) {
+        if (error instanceof UsageError && error.code === "usage_tokenizer_pending") return this.retry(job.run_id, lastSequence);
+        // Each sink commits atomically. Advance the cursor only after it finishes; replay is idempotent.
         this.progress(job.run_id, event.seq, 0, errorCode);
       }
       lastSequence = event.seq;
@@ -94,8 +107,20 @@ export class RuntimeContentBackfill {
       SET status = CASE WHEN error_code IS NULL THEN 'completed' ELSE 'failed' END WHERE namespace = ? AND run_id = ?`)
       .run(this.namespace, job.run_id);
     await setImmediate();
-    return this.db.prepare(`SELECT 1 ${scope.sql} AND (j.run_id IS NULL OR j.status IN ('pending', 'running')) LIMIT 1`)
-      .get(...scope.params) !== undefined;
+    return this.db.prepare(`SELECT 1 ${scope.sql} AND (j.run_id IS NULL OR (j.status IN ('pending', 'running') AND j.retry_after<=?)) LIMIT 1`)
+      .get(...scope.params, Date.now()) !== undefined;
+  }
+
+  /** A live Run can request deferred counting without waiting for network downloads. */
+  schedule(runId: number, errorCode: "usage_tokenizer_pending" | null = "usage_tokenizer_pending"): void {
+    this.db.prepare(`INSERT INTO agent_usage_runtime_backfills
+      (namespace,run_id,session_id,content_version,status,error_code,retry_after,tokenizer_model)
+      SELECT ?,id,CAST(session_id AS TEXT),3,'pending',?,?,
+        CASE WHEN resolved_model IN (SELECT value FROM json_each(?)) THEN resolved_model ELSE NULL END FROM runs WHERE id=?
+      ON CONFLICT(namespace,run_id) DO UPDATE SET status='pending',
+        error_code=COALESCE(agent_usage_runtime_backfills.error_code,excluded.error_code),
+        retry_after=MIN(agent_usage_runtime_backfills.retry_after,excluded.retry_after)`)
+      .run(this.namespace, errorCode, Date.now() + 1000, JSON.stringify(this.knownModels), runId);
   }
 
   status(filter: UsageFilter = {}): RuntimeBackfillStatus {
@@ -121,9 +146,16 @@ export class RuntimeContentBackfill {
       error_code = COALESCE(error_code, ?) WHERE namespace = ? AND run_id = ?`).run(sequence, processed, error, this.namespace, runId);
   }
 
+  private retry(runId: number, sequence: number): boolean {
+    this.db.prepare(`UPDATE agent_usage_runtime_backfills SET last_seq=?,status='pending',
+      error_code=COALESCE(error_code,'usage_tokenizer_pending'),retry_after=? WHERE namespace=? AND run_id=?`)
+      .run(sequence, Date.now() + 60_000, this.namespace, runId);
+    return true;
+  }
+
   private scope(filter: UsageFilter = {}): { sql: string; params: string[] } {
     const params = [this.namespace, this.namespace, this.namespace];
-    const conditions = ["r.status NOT IN ('queued', 'running')", `NOT EXISTS (SELECT 1 FROM agent_usage_subjects u
+    const conditions = ["(r.status NOT IN ('queued', 'running') OR (r.status='running' AND j.run_id IS NOT NULL))", `NOT EXISTS (SELECT 1 FROM agent_usage_subjects u
       WHERE u.namespace = ? AND u.state != 'active' AND ((u.kind = 'session' AND u.subject_id = CAST(s.id AS TEXT))
         OR (u.kind = 'agent' AND u.subject_id = CAST(a.id AS TEXT))))`,
     `NOT EXISTS (SELECT 1 FROM agent_usage_runtime_backfill_deleted_sessions d WHERE d.namespace = ? AND d.session_id = CAST(s.id AS TEXT))`];

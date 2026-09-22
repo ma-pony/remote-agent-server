@@ -1,5 +1,6 @@
 import { prepareAttachments } from "../attachments/prepare-attachments.js";
 import type { HostUsageCollector } from "../agent-usage/host-collector.js";
+import { UsageError } from "../agent-usage/core/errors.js";
 import { dirname, join } from "node:path";
 
 import { resolveModelPolicy } from "../agents/model-policy.js";
@@ -78,6 +79,7 @@ export class RunExecutor {
   private readonly runTimeoutMs: number;
   private readonly usageCollector: HostUsageCollector;
   private readonly cancellationIntents = new Set<number>();
+  private readonly usageCancellations = new Map<number, AbortController>();
 
   constructor({
     runtime,
@@ -117,21 +119,27 @@ export class RunExecutor {
     let messageFlushSignal: Promise<TurnRace> | undefined;
     let runTimeoutTimer: ReturnType<typeof setTimeout> | undefined;
     const runAbortController = new AbortController();
+    const usageController = new AbortController();
+    this.usageCancellations.set(run.id, usageController);
 
     const clearMessageFlushTimer = (): void => {
       if (messageFlushTimer !== undefined) clearTimeout(messageFlushTimer);
       messageFlushTimer = undefined;
       messageFlushSignal = undefined;
     };
-    const flushMessageBatch = (): void => {
+    const flushMessageBatch = async (): Promise<void> => {
       const batch = messageBatch;
       if (batch === undefined) return;
       messageBatch = undefined;
       clearMessageFlushTimer();
       const content = { stream: batch.stream, text: batch.text };
       const event = this.eventStore.append(run.id, "message", content);
-      try { this.usageCollector.conversationContent.recordMessage(run.id, content, { sequence: event.seq, occurredAt: event.createdAt }); }
-      catch { console.error(`runtime_content_persistence_failed runId=${run.id}`); }
+      try { await this.usageCollector.conversationContent.recordMessage(run.id, content, { sequence: event.seq, occurredAt: event.createdAt }, usageController.signal); }
+      catch (error) {
+        if (usageController.signal.aborted) this.usageCollector.contentBackfill.schedule(run.id, null);
+        else if (error instanceof UsageError && error.code === "usage_tokenizer_pending") this.usageCollector.contentBackfill.schedule(run.id);
+        else console.error(`runtime_content_persistence_failed runId=${run.id}`);
+      }
     };
     const startMessageFlushTimer = (): void => {
       messageFlushSignal = new Promise<TurnRace>((resolve) => {
@@ -139,8 +147,8 @@ export class RunExecutor {
         messageFlushTimer.unref();
       });
     };
-    const bufferMessage = (event: Extract<RuntimeEvent, { type: "message" }>): void => {
-      if (messageBatch !== undefined && messageBatch.stream !== event.stream) flushMessageBatch();
+    const bufferMessage = async (event: Extract<RuntimeEvent, { type: "message" }>): Promise<void> => {
+      if (messageBatch !== undefined && messageBatch.stream !== event.stream) await flushMessageBatch();
       if (messageBatch === undefined) {
         messageBatch = { stream: event.stream, text: event.text, bytes: Buffer.byteLength(event.text) };
         startMessageFlushTimer();
@@ -148,7 +156,7 @@ export class RunExecutor {
         messageBatch.text += event.text;
         messageBatch.bytes += Buffer.byteLength(event.text);
       }
-      if (messageBatch.bytes >= MESSAGE_BATCH_MAX_BYTES) flushMessageBatch();
+      if (messageBatch.bytes >= MESSAGE_BATCH_MAX_BYTES) await flushMessageBatch();
     };
 
     try {
@@ -157,6 +165,7 @@ export class RunExecutor {
         : this.runtimeSettings.getRuntime().runTimeoutMinutes * 60 * 1000;
       const timeoutOutcome = new Promise<{ source: "timeout" }>((resolve) => {
         runTimeoutTimer = setTimeout(() => {
+          usageController.abort();
           runAbortController.abort();
           resolve({ source: "timeout" });
         }, runTimeoutMs);
@@ -213,8 +222,12 @@ export class RunExecutor {
       const extensionsRevision = this.providerExtensionManager.revision(agent.id);
       const resolvedModel = resolveModelPolicy(agent.modelPolicy, new Date()) ?? agent.providerDefaultModel ?? undefined;
       this.runRepository.setResolvedModel(run.id, resolvedModel ?? null);
-      try { this.usageCollector.conversationContent.recordRun(run.id); }
-      catch { console.error(`runtime_content_persistence_failed runId=${run.id}`); }
+      try { await this.usageCollector.conversationContent.recordRun(run.id, usageController.signal); }
+      catch (error) {
+        if (usageController.signal.aborted) this.usageCollector.contentBackfill.schedule(run.id, null);
+        else if (error instanceof UsageError && error.code === "usage_tokenizer_pending") this.usageCollector.contentBackfill.schedule(run.id);
+        else console.error(`runtime_content_persistence_failed runId=${run.id}`);
+      }
       const runtimeSessionPromise = this.runtime.ensureSession({
         sessionId: session.id,
         agentId: agent.id,
@@ -272,11 +285,11 @@ export class RunExecutor {
           throw new RunTimedOutError();
         }
         if (outcome.source === "message_flush") {
-          flushMessageBatch();
+          await flushMessageBatch();
           continue;
         }
         if (outcome.source === "result") {
-          flushMessageBatch();
+          await flushMessageBatch();
           result = outcome.result;
           const closeOutcome = await settleBestEffort(() => turn.closeEvents());
           const iteratorOutcome = await settleBestEffort(async () => iterator.return?.());
@@ -288,15 +301,15 @@ export class RunExecutor {
           break;
         }
         if (outcome.source === "result_error") {
-          flushMessageBatch();
+          await flushMessageBatch();
           throw outcome.error;
         }
         if (outcome.source === "event_error") {
-          flushMessageBatch();
+          await flushMessageBatch();
           throw outcome.error;
         }
         if (outcome.iteration.done) {
-          flushMessageBatch();
+          await flushMessageBatch();
           const canonical = await Promise.race([resultOutcome, timeoutOutcome]);
           if (canonical.source === "timeout") {
             publicNoticeCode = "run_timed_out";
@@ -313,11 +326,11 @@ export class RunExecutor {
         const runtimeEvent = outcome.iteration.value;
         if (runtimeEvent.type === "message") {
           if (runtimeEvent.stream === "output") output += runtimeEvent.text;
-          bufferMessage(runtimeEvent);
+          await bufferMessage(runtimeEvent);
           nextEvent = this.nextEvent(iterator);
           continue;
         }
-        flushMessageBatch();
+        await flushMessageBatch();
         if (runtimeEvent.type === "usage") {
           usage = { ...usage, ...runtimeEvent.usage };
           try {
@@ -333,10 +346,12 @@ export class RunExecutor {
         this.eventStore.append(run.id, event.type, event.content);
         if (runtimeEvent.type === "tool") {
           try {
-            this.usageCollector.runtimeCapabilities.recordTool(run.id, runtimeEvent.content);
-          } catch {
+            await this.usageCollector.runtimeCapabilities.recordTool(run.id, runtimeEvent.content, undefined, usageController.signal);
+          } catch (error) {
             // Observability failure must not change the model's business result or expose payloads.
-            console.error(`runtime_capability_persistence_failed runId=${run.id}`);
+            if (usageController.signal.aborted) this.usageCollector.contentBackfill.schedule(run.id, null);
+            else if (error instanceof UsageError && error.code === "usage_tokenizer_pending") this.usageCollector.contentBackfill.schedule(run.id);
+            else console.error(`runtime_capability_persistence_failed runId=${run.id}`);
           }
         }
         nextEvent = this.nextEvent(iterator);
@@ -362,6 +377,8 @@ export class RunExecutor {
       clearMessageFlushTimer();
       if (runTimeoutTimer !== undefined) clearTimeout(runTimeoutTimer);
       this.cancellationIntents.delete(run.id);
+      this.usageCancellations.delete(run.id);
+      usageController.abort();
       try { await this.usageCollector.collectSession(run.sessionId); }
       catch { console.error(`usage_collection_failed sessionId=${run.sessionId}`); }
     }
@@ -382,6 +399,7 @@ export class RunExecutor {
     }
     if (run.status === "running") {
       this.cancellationIntents.add(run.id);
+      this.usageCancellations.get(run.id)?.abort();
       await this.runtime.cancel(run.sessionId);
     }
     return this.requireRun(runId);

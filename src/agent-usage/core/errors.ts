@@ -28,6 +28,7 @@ export type UsageErrorCode =
   | "usage_subject_mismatch"
   | "usage_tokenizer_asset_invalid"
   | "usage_tokenizer_id_conflict"
+  | "usage_tokenizer_pending"
   | "usage_tokenizer_model_conflict";
 
 /** Stable domain codes; diagnostic messages are never used as control flow. */

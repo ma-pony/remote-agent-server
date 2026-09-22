@@ -1,4 +1,5 @@
 import type { TokenEstimate } from "./core/context-types.js";
+import { UsageError } from "./core/errors.js";
 import type { UsageStore } from "./storage/usage-store.js";
 import type { AttributionStore } from "./storage/attribution-store.js";
 
@@ -20,40 +21,45 @@ export class RuntimeConversationCollector {
       ON agent_usage_conversation_content(namespace,session_id,occurred_at DESC,run_id DESC,event_key,category)`);
   }
 
-  recordRun(runId: number): void {
+  async recordRun(runId: number, signal?: AbortSignal): Promise<void> {
     const row = this.store.db.prepare(`SELECT r.input,s.instructions_snapshot FROM runs r
       JOIN sessions s ON s.id=r.session_id WHERE r.id=?`).get(runId) as { input: string; instructions_snapshot: string } | undefined;
     if (!row) return;
-    this.record(runId, "run", "user_prompt", row.input);
-    if (row.instructions_snapshot) this.record(runId, "run", "configured_instructions", row.instructions_snapshot);
+    await this.record(runId, "run", "user_prompt", row.input, undefined, signal);
+    if (row.instructions_snapshot) await this.record(runId, "run", "configured_instructions", row.instructions_snapshot, undefined, signal);
   }
 
-  recordMessage(runId: number, content: Record<string, unknown>, event: { sequence: number; occurredAt: string }): void {
+  async recordMessage(runId: number, content: Record<string, unknown>, event: { sequence: number; occurredAt: string }, signal?: AbortSignal): Promise<void> {
     if (typeof content.text !== "string" || !["output", "thought"].includes(String(content.stream))) return;
-    this.record(runId, String(event.sequence), content.stream === "thought" ? "assistant_thought" : "assistant_output", content.text, event.occurredAt);
+    await this.record(runId, String(event.sequence), content.stream === "thought" ? "assistant_thought" : "assistant_output", content.text, event.occurredAt, signal);
   }
 
   deleteSession(sessionId: string): void {
     this.store.db.prepare("DELETE FROM agent_usage_conversation_content WHERE namespace=? AND session_id=?").run(this.namespace, sessionId);
   }
 
-  private record(runId: number, key: string, category: ConversationCategory, text: string, occurredAt?: string): void {
-    if (this.store.db.prepare(`SELECT 1 FROM agent_usage_conversation_content
-      WHERE namespace=? AND run_id=? AND event_key=? AND category=?`).get(this.namespace, runId, key, category)) return;
+  private async record(runId: number, key: string, category: ConversationCategory, text: string, occurredAt?: string, signal?: AbortSignal): Promise<void> {
+    const existing = this.store.db.prepare(`SELECT estimate_json FROM agent_usage_conversation_content
+      WHERE namespace=? AND run_id=? AND event_key=? AND category=?`).get(this.namespace, runId, key, category) as { estimate_json: string } | undefined;
     const row = this.store.db.prepare(`SELECT s.id AS session_id,s.agent_id,a.provider,r.resolved_model,
       COALESCE(r.started_at,r.created_at) AS occurred_at FROM runs r JOIN sessions s ON s.id=r.session_id
       JOIN agents a ON a.id=s.agent_id WHERE r.id=?`).get(runId) as {
       session_id: number; agent_id: number; provider: string; resolved_model: string | null; occurred_at: string
     } | undefined;
     if (!row) return;
+    if (existing && !this.attribution.needsReestimate({ ...JSON.parse(existing.estimate_json) as TokenEstimate, model: row.resolved_model })) return;
     const binding = this.store.bindSession(this.namespace, String(row.agent_id), String(row.session_id));
     this.store.assertBinding(binding);
-    const measured = this.attribution.measureContent(text, "result", row.resolved_model);
+    const measured = await this.attribution.measureContent(text, "result", row.resolved_model, signal);
     if (!measured) return;
+    this.store.assertBinding(binding);
     const estimate: TokenEstimate = measured.estimate;
-    this.store.db.prepare(`INSERT OR IGNORE INTO agent_usage_conversation_content
+    this.store.db.prepare(`INSERT INTO agent_usage_conversation_content
       (namespace,session_id,agent_id,run_id,event_key,category,occurred_at,runtime_kind,tokens,bytes,partial,estimate_json)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(this.namespace,binding.sessionId,binding.agentId,runId,key,category,
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(namespace,run_id,event_key,category) DO UPDATE SET
+      tokens=excluded.tokens,bytes=excluded.bytes,partial=excluded.partial,estimate_json=excluded.estimate_json
+      WHERE json_extract(agent_usage_conversation_content.estimate_json,'$.method')!='model_tokenizer'`).run(this.namespace,binding.sessionId,binding.agentId,runId,key,category,
         occurredAt ?? row.occurred_at,row.provider,measured.tokens,measured.byteLength,Number(measured.partial),JSON.stringify(estimate));
+    if (estimate.reason === "tokenizer_pending") throw new UsageError("usage_tokenizer_pending");
   }
 }

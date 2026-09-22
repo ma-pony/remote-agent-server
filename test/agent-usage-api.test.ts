@@ -77,6 +77,34 @@ const setup = async (sessionCleanupScheduler: SessionCleanupSchedulerLike = {
 
 const get = (app: FastifyInstance, path: string) => app.inject({ method: "GET", url: `/api/usage${path}`, headers });
 
+it("shares summary and trend accounting and polls status without rerunning historical queries", async () => {
+  const { app, manager, bindings } = await setup();
+  await manager.collector.stopRecovery();
+  observe(manager, bindings.first, { id: "one", at: "2026-09-20T00:00:00Z", total: 30 });
+  const records = vi.spyOn(manager.collector.store, "records");
+  const rankings = vi.spyOn(manager.collector.attribution, "rankingsPage");
+  const first = (await get(app, "/summary")).json();
+  expect(first.usage.totalTokens).toBe(30);
+  expect((await get(app, "/timeseries")).json().items[0].usage.totalTokens).toBe(30);
+  expect(records).toHaveBeenCalledTimes(1);
+  await get(app, "/capabilities"); await get(app, "/capabilities");
+  expect(rankings).toHaveBeenCalledTimes(1);
+  for (let count = 0; count < 3; count++) {
+    const status = (await get(app, "/status")).json();
+    expect(status.revision).toBe(first.revision);
+    expect(status).not.toHaveProperty("usage");
+  }
+  expect(records).toHaveBeenCalledTimes(1); expect(rankings).toHaveBeenCalledTimes(1);
+  observe(manager, bindings.first, { id: "two", at: "2026-09-20T01:00:00Z", total: 40 });
+  expect((await get(app, "/status")).json().revision).not.toBe(first.revision);
+  expect((await get(app, "/summary")).json().usage.totalTokens).toBe(70);
+  expect((await get(app, "/timeseries")).json().items[0].usage.totalTokens).toBe(70);
+  expect(records).toHaveBeenCalledTimes(2);
+  expect((await app.inject({ url: "/api/usage/status" })).statusCode).toBe(401);
+  expect((await get(app, "/status?sessionId=0")).statusCode).toBe(400);
+  records.mockRestore(); rankings.mockRestore();
+});
+
 const observe = (
   manager: ManagedUsageSources,
   binding: UsageBinding,
@@ -126,7 +154,7 @@ describe("usage query API", () => {
     const { app, manager, bindings } = await setup();
     const capability: Capability = { id: "review", name: "Review", kind: "skill" };
     for (let index = 0; index < 32; index += 1) {
-      manager.collector.attribution.upsertContext(bindings.first, {
+      await manager.collector.attribution.upsertContext(bindings.first, {
         invocationId: `r${index}`, occurredAt, providerEpochId: "epoch-1", sourceId: "fixture", revision: 1,
         runtimeKind: "claude_code", model: "fixture", coverage: "full", historyComplete: true,
         blocks: [{ position: 0, kind: "skill", toolInvocationId: null,
@@ -160,7 +188,7 @@ describe("usage query API", () => {
       { id: "unattributed", name: "Unattributed", kind: "unknown" }
     ];
     for (const [invocationId, occurredAt] of [["old-request", "2026-09-20T10:00:00Z"], ["new-request", "2026-09-21T10:00:00Z"]]) {
-      manager.collector.attribution.upsertContext(bindings.first, {
+      await manager.collector.attribution.upsertContext(bindings.first, {
         invocationId: invocationId!, occurredAt: occurredAt!, providerEpochId: "epoch-1", sourceId: "fixture", revision: 1,
         runtimeKind: "claude_code", model: "fixture", coverage: "full", historyComplete: true,
         blocks: capabilities.map((capability, position) => ({ position,
@@ -370,7 +398,7 @@ describe("usage query API", () => {
     const runId = Number(db.prepare(
       "INSERT INTO runs (session_id, status, input, created_at) VALUES (?, 'running', ?, ?)"
     ).run(Number(bindings.other.sessionId), "test", "2026-09-21T00:00:00.000Z").lastInsertRowid);
-    manager.collector.runtimeCapabilities.recordTool(runId, {
+    await manager.collector.runtimeCapabilities.recordTool(runId, {
       toolCallId: "claude-read", kind: "read", status: "completed", rawInput: { path: "README.md" }
     });
     const filter = `sessionId=${bindings.other.sessionId}&runtimeKind=claude_code`;
@@ -428,7 +456,7 @@ describe("usage query API", () => {
         capabilities: [{ capability: serverOne, evidence: "direct" }]
       }]
     };
-    manager.collector.attribution.upsertContext(bindings.first, context);
+    await manager.collector.attribution.upsertContext(bindings.first, context);
 
     const ranking = await get(app, `/capabilities?sessionId=${bindings.first.sessionId}&dimension=mcp_tool&sort=calls`);
     expect(ranking.json().items.map((item: { capability: Capability; calls: number }) =>

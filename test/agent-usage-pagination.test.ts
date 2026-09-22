@@ -47,10 +47,10 @@ it("sorts and pages mixed capability rankings in SQL without materializing invoc
 });
 
 
-it("paginates invocation and context detail exposures while keeping accurate totals", () => {
+it("paginates invocation and context detail exposures while keeping accurate totals", async () => {
   const { attribution, binding } = setup();
   attribution.observeInvocation(binding, call(1));
-  for (let index = 0; index < 24; index++) attribution.upsertContext(binding, {
+  for (let index = 0; index < 24; index++) await attribution.upsertContext(binding, {
     invocationId: `model-${String(index).padStart(2, "0")}`, providerEpochId: "epoch", sourceId: "snapshot", revision: 1,
     occurredAt: new Date(Date.UTC(2026, 8, 20, 11, index)).toISOString(), runtimeKind: "codex", model: "gpt-test", coverage: "full", historyComplete: true,
     blocks: [0, 1, 2].map((position) => ({ position, kind: "result", toolInvocationId: "call-1", content: { identity: `result-${position}`, modality: "text", text: "visible result" }, capabilities: [{ capability: call(1).capability, evidence: "direct" }] }))
@@ -66,16 +66,16 @@ it("paginates invocation and context detail exposures while keeping accurate tot
 });
 
 
-it("preserves ranking metrics and sort order for every page with mixed execution and context evidence", () => {
+it("preserves ranking metrics and sort order for every page with mixed execution and context evidence", async () => {
   const { attribution, binding } = setup();
   for (let index = 0; index < 8; index++) {
     const capability = { kind: index % 2 ? "cli" as const : "mcp_tool" as const, id: `cap-${index}`, name: `Capability ${index}` };
     for (let count = 0; count <= index; count++) attribution.observeInvocation(binding, call(index * 10 + count, {
       capability, status: count % 2 ? "tool_error" : "succeeded", endedAt: `2026-09-20T10:00:0${index}Z`,
-      argumentEstimate: measureToolContent("argument ".repeat(index + 1), "arguments"),
-      resultEstimate: measureToolContent("result ".repeat(8 - index), "result")
+      argumentEstimate: await measureToolContent("argument ".repeat(index + 1), "arguments"),
+      resultEstimate: await measureToolContent("result ".repeat(8 - index), "result")
     }));
-    for (let repeat = 0; repeat < 3; repeat++) attribution.upsertContext(binding, {
+    for (let repeat = 0; repeat < 3; repeat++) await attribution.upsertContext(binding, {
       invocationId: `model-${index}-${repeat}`, providerEpochId: "epoch", sourceId: "snapshot", revision: 1,
       occurredAt: new Date(Date.UTC(2026, 8, 20, 11, repeat)).toISOString(), runtimeKind: "codex", model: "gpt-test", coverage: "full", historyComplete: true,
       blocks: [{ position: 0, kind: "definition", content: { identity: `definition-${index}`, modality: "text", text: "tool definition ".repeat(index + 1) }, capabilities: [{ capability, evidence: "direct" }] },

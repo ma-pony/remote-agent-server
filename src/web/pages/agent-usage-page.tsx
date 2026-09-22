@@ -35,10 +35,12 @@ const ActivityCount = ({ row }: { row: AttributionRankRow }) => {
 type ContentEvidence = { id: string; runId: number; sessionId: string; category: string; capability: Capability;
   occurredAt: string; tokens: number | null; byteLength: number; partial: boolean; estimate: TokenEstimate };
 
-const formatNumber = (value: number | null | undefined, unknown = "—") => value == null ? unknown : new Intl.NumberFormat().format(value);
+const numberFormatter = new Intl.NumberFormat();
+const formatNumber = (value: number | null | undefined, unknown = "—") => value == null ? unknown : numberFormatter.format(value);
 
 type AnalysisStatus = "ready" | "collecting" | "partial" | "empty";
 type UsageMetadata = {
+  revision?: string;
   asOf: string;
   timezone: string;
   from: string | null;
@@ -53,6 +55,14 @@ type UsageMetadata = {
   collectionFailures?: Array<{ sessionId: string; status: string; errorCode: string | null }>;
 };
 type SummaryResponse = UsageSummary & UsageMetadata & { sourceCounts?: Record<string, number> };
+type StatusResponse = Pick<SummaryResponse, "revision" | "sourceCounts" | "contentBackfill" | "collectionFailureTotal" | "captureHealthCounts" | "collectionFailures" | "captureHealth">;
+const hasPendingRecovery = (status: StatusResponse | null | undefined): boolean => {
+  const backfill = status?.contentBackfill?.status;
+  return backfill === "pending" || backfill === "running" || (status?.sourceCounts?.collecting ?? 0) > 0
+    || (status?.sourceCounts?.failed ?? 0) > 0 || (status?.collectionFailureTotal ?? status?.collectionFailures?.length ?? 0) > 0
+    || (status?.captureHealthCounts ? (status.captureHealthCounts.waiting ?? 0) + (status.captureHealthCounts.pending ?? 0) > 0
+      : (status?.captureHealth ?? []).some(item => item.status === "waiting" || item.status === "pending"));
+};
 type RankingResponse = UsageMetadata & {
   measurement: "estimated";
   dimension: RankingDimension;
@@ -86,7 +96,7 @@ type RangeKey = "7d" | "30d" | "all";
 const PAGE_SIZE = 50;
 const invocationPageSize = 50;
 const sourcePollIntervalMs = 1_000;
-const maxSourcePollAttempts = 60;
+const fastSourcePollAttempts = 60;
 const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 const validTimezone = (value: string | null): string => {
   if (!value) return browserTimezone;
@@ -169,6 +179,8 @@ export const AgentUsagePage = () => {
   const sourcePage = Math.max(1, Number(searchParams.get("sourcePage")) || 1);
   const trendPage = Math.max(1, Number(searchParams.get("trendPage")) || 1);
   const [sourceTotal, setSourceTotal] = useState(0);
+  const revisionRef = useRef<string | undefined>(undefined);
+  const lastRefreshRef = useRef(0);
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [ranking, setRanking] = useState<RankingResponse | null>(null);
   const [timeseries, setTimeseries] = useState<TimeseriesResponse | null>(null);
@@ -232,7 +244,10 @@ export const AgentUsagePage = () => {
   useEffect(() => {
     const controller = new AbortController();
     setSummary(null); setError("");
-    void api<SummaryResponse>(`/usage/summary?${summaryQuery}`, { signal: controller.signal }).then(setSummary)
+    void api<SummaryResponse>(`/usage/summary?${summaryQuery}`, { signal: controller.signal }).then(next => {
+      if (controller.signal.aborted) return;
+      revisionRef.current = next.revision; setSummary(next);
+    })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [reload, summaryQuery]);
@@ -240,7 +255,9 @@ export const AgentUsagePage = () => {
   useEffect(() => {
     const controller = new AbortController();
     setTimeseries(null);
-    void api<TimeseriesResponse>(`/usage/timeseries?${trendQuery}`, { signal: controller.signal }).then(setTimeseries)
+    void api<TimeseriesResponse>(`/usage/timeseries?${trendQuery}`, { signal: controller.signal }).then(next => {
+      if (!controller.signal.aborted) setTimeseries(next);
+    })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [reload, trendQuery]);
@@ -249,6 +266,7 @@ export const AgentUsagePage = () => {
     const controller = new AbortController();
     setSources(null);
     void api<Page<UsageSource>>(sourceUrl, { signal: controller.signal }).then((next) => {
+      if (controller.signal.aborted) return;
       setSources(next.items); setSourceTotal(next.total);
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
@@ -275,68 +293,56 @@ export const AgentUsagePage = () => {
 
   const contentBackfill = summary?.contentBackfill ?? ranking?.contentBackfill;
   const contentBackfillPending = contentBackfill?.status === "pending" || contentBackfill?.status === "running";
-  const recoveryPending = contentBackfillPending || (summary?.sourceCounts?.collecting ?? 0) > 0 || (summary?.sourceCounts?.failed ?? 0) > 0 || (summary?.collectionFailureTotal ?? summary?.collectionFailures?.length ?? 0) > 0
-    || (summary?.captureHealthCounts ? (summary.captureHealthCounts.waiting ?? 0) + (summary.captureHealthCounts.pending ?? 0) > 0 : (summary?.captureHealth ?? []).some((item) => item.status === "waiting" || item.status === "pending"));
+  const recoveryPending = hasPendingRecovery(summary) || contentBackfillPending;
 
   useEffect(() => {
     if (collectingSourceIds === "" && !recoveryPending) return;
     const controller = new AbortController();
-    const trackedIds = new Set(collectingSourceIds.split(","));
     let timeout: ReturnType<typeof setTimeout> | undefined;
-    let attempts = 0;
-
+    let attempts = 0, polling = false;
+    const schedule = () => { timeout = setTimeout(() => void poll(), attempts >= fastSourcePollAttempts ? 30_000 : sourcePollIntervalMs); };
     const poll = async (): Promise<void> => {
-      let visibleSources: UsageSource[] | null = null;
+      if (polling || controller.signal.aborted) return;
+      if (document.visibilityState === "hidden") return;
+      polling = true;
       try {
-        const nextSources = await api<Page<UsageSource>>(sourceUrl, { signal: controller.signal });
+        const status = await api<StatusResponse>(`/usage/status?${scopeQuery}`, { signal: controller.signal });
         if (controller.signal.aborted) return;
-        visibleSources = nextSources.items; setSourceTotal(nextSources.total);
-        const nextById = new Map(visibleSources.map((source) => [source.id, source]));
-        const reachedTerminal = [...trackedIds].some((id) => nextById.get(id)?.status !== "collecting");
-        const stillCollecting = visibleSources.some((source) => trackedIds.has(source.id) && (source.status === "collecting" || source.status === "failed"));
-
-        let stillRecovering = recoveryPending;
-        let waitingOnly = false;
-        if (reachedTerminal || recoveryPending) {
-          const [nextSummary, nextRanking, nextTimeseries] = await Promise.all([
+        const pending = hasPendingRecovery(status);
+        const changed = status.revision !== revisionRef.current;
+        // Poll only cheap status metadata. Re-query projections on writes, at most once per five
+        // seconds while work continues; always show the final update when it completes.
+        if (changed && (!pending || Date.now() - lastRefreshRef.current >= 5_000)) {
+          lastRefreshRef.current = Date.now();
+          const [nextSummary, nextRanking, nextTimeseries, nextSources] = await Promise.all([
             api<SummaryResponse>(`/usage/summary?${summaryQuery}`, { signal: controller.signal }),
             api<RankingResponse>(`/usage/capabilities?${requestQuery}`, { signal: controller.signal }),
-            api<TimeseriesResponse>(`/usage/timeseries?${trendQuery}`, { signal: controller.signal })
+            api<TimeseriesResponse>(`/usage/timeseries?${trendQuery}`, { signal: controller.signal }),
+            api<Page<UsageSource>>(sourceUrl, { signal: controller.signal })
           ]);
           if (controller.signal.aborted) return;
-          const nextBackfill = nextSummary.contentBackfill ?? nextRanking.contentBackfill;
-          const backfillPending = nextBackfill?.status === "pending" || nextBackfill?.status === "running";
-          waitingOnly = !(nextSummary.sourceCounts?.collecting || nextSummary.sourceCounts?.failed) && (nextSummary.collectionFailureTotal ?? nextSummary.collectionFailures?.length ?? 0) === 0
-            && !(nextSummary.captureHealthCounts ? (nextSummary.captureHealthCounts.pending ?? 0) > 0 : (nextSummary.captureHealth ?? []).some((item) => item.status === "pending"))
-            && !backfillPending;
-          stillRecovering = backfillPending || (nextSummary.sourceCounts?.collecting ?? 0) > 0 || (nextSummary.sourceCounts?.failed ?? 0) > 0
-            || (nextSummary.collectionFailureTotal ?? nextSummary.collectionFailures?.length ?? 0) > 0
-            || (nextSummary.captureHealthCounts ? (nextSummary.captureHealthCounts.waiting ?? 0) + (nextSummary.captureHealthCounts.pending ?? 0) > 0 : (nextSummary.captureHealth ?? []).some((item) => item.status === "waiting" || item.status === "pending"));
-          setSummary(nextSummary);
-          setRanking(nextRanking);
-          setTimeseries(nextTimeseries);
+          revisionRef.current = status.revision;
+          setSummary(nextSummary); setRanking(nextRanking); setTimeseries(nextTimeseries);
+          setSources(nextSources.items); setSourceTotal(nextSources.total);
         }
-        setSources(visibleSources);
-        if (!stillCollecting && !stillRecovering) return;
-        attempts += 1;
-        if (attempts >= maxSourcePollAttempts) {
-          if (!waitingOnly || stillCollecting) setError(text("采集状态刷新超时，请重试。", "Collection status refresh timed out. Please retry."));
-          return;
-        }
-        timeout = setTimeout(() => void poll(), sourcePollIntervalMs);
+        if (controller.signal.aborted || !pending) return;
+        attempts++;
+        schedule();
       } catch (reason) {
-        if (controller.signal.aborted) return;
-        if (visibleSources !== null) setSources(visibleSources);
-        setError(errorMessage(reason));
-      }
+        if (!controller.signal.aborted) setError(errorMessage(reason));
+      } finally { polling = false; }
     };
-
+    const onVisible = () => {
+      if (document.visibilityState !== "visible" || polling) return;
+      clearTimeout(timeout); void poll();
+    };
     void poll();
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
-      controller.abort();
-      if (timeout !== undefined) clearTimeout(timeout);
+      controller.abort(); clearTimeout(timeout);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [collectingSourceIds, recoveryPending, requestQuery, summaryQuery, sourceUrl, trendQuery, text]);
+  }, [collectingSourceIds, recoveryPending, requestQuery, scopeQuery, summaryQuery, sourceUrl, trendQuery, reload]);
 
   const collectSource = async (source: UsageSource) => {
     setError("");
@@ -371,7 +377,7 @@ export const AgentUsagePage = () => {
   const hasModelEvidence = summary !== null && (summary.observedModelRequests > 0 || Object.values(summary.usage).some((value) => value !== null));
   const hasCapabilityEvidence = summary?.hasCapabilityEvidence === true || ranking !== null
     && (ranking.items.length > 0 || (ranking.stages?.length ?? 0) > 0);
-  const empty = !hasModelEvidence && !hasCapabilityEvidence;
+  const empty = summary !== null && ranking !== null && !hasModelEvidence && !hasCapabilityEvidence;
   const filteredEmpty = empty && (range !== "all" || agentId !== "" || sessionId !== "" || runtimeKind !== "");
   const timezoneOptions = [...new Set([browserTimezone, "UTC", timezone])];
   const runtimeOptions = [...new Set(["codex", "claude_code", "hermes", runtimeKind].filter(Boolean))];
@@ -392,12 +398,13 @@ export const AgentUsagePage = () => {
 
     {error !== "" || rankingError !== "" ? <Alert variant="destructive" className="mb-5"><TriangleAlert /><AlertTitle>{text("用量分析加载失败", "Usage analysis failed to load")}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{error || rankingError}</span><Button type="button" size="sm" variant="outline" onClick={() => setReload((value) => value + 1)}>{text("重试", "Retry")}</Button></AlertDescription></Alert> : null}
 
-    {summary === null ? error === "" ? <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" role="status" aria-label={text("正在加载用量分析", "Loading usage analysis")}>{[0, 1, 2, 3].map((item) => <Skeleton key={item} className="h-32" />)}</div> : null : <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-5">
+    {summary === null ? error === "" ? <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" role="status" aria-label={text("正在加载用量分析", "Loading usage analysis")}>{[0, 1, 2, 3].map((item) => <Skeleton key={item} className="h-32" />)}</div> : null : <>
       {summary.completeness === "partial" || summary.completeness === "conflict" || summary.analysisStatus === "partial" ? <Alert><TriangleAlert /><AlertTitle>{text("数据不完整", "Incomplete data")}</AlertTitle><AlertDescription>{text(`缺失 ${summary.requestsWithMissingUsage} 个模型请求，部分上报 ${summary.requestsWithPartialUsage} 个；另有 ${summary.unverifiedObservations} 条未核验观测与 ${summary.conflictingRanges} 个冲突范围。页面不会把缺失值当作 0。`, `${summary.requestsWithMissingUsage} model requests are missing usage and ${summary.requestsWithPartialUsage} are partial; ${summary.unverifiedObservations} observations are unverified and ${summary.conflictingRanges} ranges conflict. Missing values are never treated as zero.`)}</AlertDescription></Alert> : null}
 
       {contentBackfillPending || contentBackfill?.status === "failed" ? <Alert variant={contentBackfill?.status === "failed" ? "destructive" : "default"}>
         <Database /><AlertTitle>{contentBackfill?.status === "failed" ? text("历史内容回填失败", "Historical content backfill failed") : text("历史内容回填中", "Historical content backfill in progress")}</AlertTitle>
-        <AlertDescription>{text(`已处理 ${formatNumber(contentBackfill?.processedEvents)} 条事件；历史内容估算可能尚不完整。`, `${formatNumber(contentBackfill?.processedEvents)} events processed; historical content estimates may still be incomplete.`)}{contentBackfill?.errorCode ? <span className="ml-2 font-mono">{contentBackfill.errorCode}</span> : null}</AlertDescription>
+        <AlertDescription>{text(`已处理 ${formatNumber(contentBackfill?.processedEvents)} 条事件；历史内容估算可能尚不完整。`, `${formatNumber(contentBackfill?.processedEvents)} events processed; historical content estimates may still be incomplete.`)}{contentBackfill?.errorCode === "usage_tokenizer_pending" ? <span className="ml-2">{text("正在获取词表，失败后自动重试并补算。", "Fetching vocabulary; failures retry and measurements resume automatically.")}</span> : contentBackfill?.errorCode ? <span className="ml-2 font-mono">{contentBackfill.errorCode}</span> : null}</AlertDescription>
       </Alert> : null}
 
       {(summary.captureHealthTotal ?? summary.captureHealth?.length ?? 0) > 0 && <Alert>
@@ -424,6 +431,7 @@ export const AgentUsagePage = () => {
         {summary.accountingBasis === "interval_totals" ? <p className="mt-2 text-sm text-muted-foreground">{text("累计增量区间", "Cumulative usage intervals")}</p> : null}
       </section>
 
+    </>}
       {timeseries !== null && (timeseries.total ?? timeseries.items.length) > 1 ? <Card><CardHeader><CardTitle>{text("每日已上报总量", "Daily reported totals")}</CardTitle><CardDescription>{text("仅展示有来源时间戳且落在当前日期范围内的记录。", "Only records with a source timestamp inside the current date range are shown.")}</CardDescription></CardHeader><CardContent className="overflow-x-auto"><table className="w-full min-w-[32rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="pb-3 font-medium">{text("日期", "Date")}</th><th className="pb-3 text-right font-medium">{text("总 Token", "Total tokens")}</th><th className="pb-3 text-right font-medium">{text("观测范围", "Observed ranges")}</th></tr></thead><tbody className="divide-y">{timeseries.items.map((item) => <tr key={item.period}><td className="py-3 font-mono">{item.period}</td><td className="py-3 text-right font-mono tabular-nums">{formatNumber(item.usage.totalTokens, text("未上报", "Not reported"))}</td><td className="py-3 text-right font-mono tabular-nums">{item.observedRanges}</td></tr>)}</tbody></table><ListPagination page={trendPage} pageSize={20} total={timeseries.total ?? timeseries.items.length} totalPages={Math.ceil((timeseries.total ?? timeseries.items.length) / 20)} onPageChange={(value) => updateFilter("trendPage", String(value), false)} /></CardContent></Card> : null}
 
       <Tabs value={view} onValueChange={changeView}>
@@ -442,7 +450,7 @@ export const AgentUsagePage = () => {
       <section aria-label={text("数据来源分页", "Data source pages")}><SourceList sources={sources} onCollect={collectSource} formatDate={formatDate} />
         <ListPagination disabled={sources === null} page={sourcePage} pageSize={20} total={sourceTotal} totalPages={Math.ceil(sourceTotal / 20)} onPageChange={(value) => updateFilter("sourcePage", String(value), false)} />
       </section>
-    </div>}
+    </div>
 
     {selectedCapability === null ? null : <InvocationSheet
       key={JSON.stringify([scopeQuery, selectedCapability.kind, selectedCapability.serverId, selectedCapability.id])}
@@ -555,11 +563,13 @@ const TokenMeasurement = ({ estimate }: { estimate: TokenEstimate }) => {
     model_missing: text("缺少模型身份", "Model identity missing"),
     model_unmapped: text("未配置模型词表", "No tokenizer configured for this model"),
     unsupported_content: text("不支持此内容类型", "Unsupported content type"),
-    size_limit: text("超过估算大小限制", "Estimation size limit exceeded"),
+    size_limit: text("历史估算使用了大小限制", "Historical estimate used a size limit"),
+    tokenizer_pending: text("词表获取中，失败后自动重试", "Fetching vocabulary; failures retry automatically"),
     tokenization_failed: text("分词失败", "Tokenization failed"),
     legacy_unavailable: text("历史估算缺失", "Historical estimate unavailable")
   };
-  const label = estimate.method === "legacy_reference" ? text("历史参考估算", "Historical reference estimate")
+  const label = estimate.reason === "tokenizer_pending" ? text("等待词表计量", "Awaiting vocabulary measurement")
+    : estimate.method === "legacy_reference" ? text("历史参考估算", "Historical reference estimate")
     : estimate.method === "model_tokenizer" ? text("模型词表估算", "Model tokenizer estimate")
       : estimate.method === "text_heuristic" ? text("兜底估算（按字符类型加权）", "Fallback estimate (weighted character types)") : text("无法估算", "Unavailable");
   return <p className="mt-1 max-w-sm break-words text-xs text-muted-foreground">{[

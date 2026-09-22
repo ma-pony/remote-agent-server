@@ -4,8 +4,9 @@ import { createServer, type Server } from "node:http";
 import { createTestDatabase } from "./helpers.js";
 import { HostUsageCollector } from "../src/agent-usage/host-collector.js";
 import { HostUsageCapture } from "../src/agent-usage/capture/host-capture.js";
+import { ModelTokenizers } from "../src/agent-usage/core/tokenizers.js";
 const cleanup: Array<() => void | Promise<void>> = [];
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.restoreAllMocks(); });
 async function setup() {
   const { db, seed } = createTestDatabase(); cleanup.push(() => db.close());
   const session = seed.session(); seed.run(session.id, "running");
@@ -34,6 +35,30 @@ it("automatically reports totals and MCP definition/repeated-result exposure wit
   expect(db.serialize().includes(Buffer.from("SYNTHETIC_PAYLOAD_SENTINEL"))).toBe(false);
   expect(db.serialize().includes(Buffer.from("secret-sentinel"))).toBe(false);
   expect(capture.health({})[0]).toMatchObject({ status: "observed", observed: 3 });
+});
+it.each(["ready", "close"])("keeps reported usage while vocabulary is pending and handles %s without persisting fallback counts", async outcome => {
+  const { db, host, capture, route, session, run } = await setup(); capture.startRun(session.id, run);
+  let ready = false;
+  const count = ModelTokenizers.prototype.countAsync;
+  vi.spyOn(ModelTokenizers.prototype, "countAsync").mockImplementation(async function (text, model, provider) {
+    return ready ? count.call(this, text, model, provider) : { ...this.describe(model, provider), tokens: null, method: "unavailable", reason: "tokenizer_pending" };
+  });
+  await (await fetch(route.baseUrl + "/responses", { method: "POST", body: JSON.stringify({ model: "fixture-model",
+    tools: [{ type: "function", name: "mcp__docs__search", parameters: {} }], input: [] }) })).text();
+  await vi.waitFor(() => expect(host.store.summary().usage.totalTokens).toBe(12));
+  expect(capture.health({})[0].status).toBe("pending");
+  expect(db.prepare("SELECT * FROM agent_usage_exposures").all()).toEqual([]);
+  if (outcome === "ready") {
+    ready = true;
+    await capture.drain();
+    expect(capture.health({})[0].status).toBe("observed");
+    expect(host.attribution.rankings({}, "mcp_tool")[0].tokenEstimates[0]).toMatchObject({ method: "model_tokenizer", reason: null });
+  } else {
+    await capture.close();
+    expect(capture.health({})[0].status).toBe("incomplete");
+    expect(db.prepare("SELECT * FROM agent_usage_exposures").all()).toEqual([]);
+  }
+  expect(host.store.summary().usage.totalTokens).toBe(12);
 });
 it("does not rewrite unchanged tool call cache rows on subsequent requests", async () => {
   const { db, capture, route, session, run } = await setup(); capture.startRun(session.id, run);
@@ -157,8 +182,8 @@ it("attributes built-in and structured CLI input to the same capabilities as Run
     ["read-call", "read", { path: "/workspace/README.md" }],
     ["git-call", "execute", { argv: ["git", "status"] }]
   ] as const) {
-    host.runtimeCapabilities.recordTool(run, { toolCallId: id, kind, rawInput, status: "in_progress" });
-    host.runtimeCapabilities.recordTool(run, { toolCallId: id, kind, rawInput, status: "completed", rawOutput: "result" });
+    await host.runtimeCapabilities.recordTool(run, { toolCallId: id, kind, rawInput, status: "in_progress" });
+    await host.runtimeCapabilities.recordTool(run, { toolCallId: id, kind, rawInput, status: "completed", rawOutput: "result" });
   }
   const body = JSON.stringify({ model: "fixture-model", tools: [
     { type: "function", name: "Read", parameters: {} }, { type: "function", name: "exec_command", parameters: {} }

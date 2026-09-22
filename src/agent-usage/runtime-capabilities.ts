@@ -2,7 +2,7 @@ import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 
 import { UsageError } from "./core/errors.js";
 import { commandFiles, runtimeToolCapability, toolInput } from "./core/tool-capabilities.js";
-import type { Capability, CapabilityKind, InvocationStatus, InvocationInput } from "./core/context-types.js";
+import type { Capability, CapabilityKind, InvocationStatus, InvocationInput, ToolContentEstimate } from "./core/context-types.js";
 import type { UsageFilter } from "./core/types.js";
 import type { ProjectedSkill } from "../runtime/skill-projector.js";
 import type { AttributionStore } from "./storage/attribution-store.js";
@@ -39,6 +39,7 @@ type InvocationRow = {
   status: InvocationStatus;
   revision: number;
   raw_result_bytes: number | null;
+  replay_result_json: string | null;
 };
 
 export type RuntimeToolEvent = { eventId: number; sequence: number; occurredAt: string };
@@ -177,7 +178,7 @@ export class RuntimeCapabilityCollector {
     })();
   }
 
-  recordTool(runId: number, content: Record<string, unknown>, event?: RuntimeToolEvent): void {
+  async recordTool(runId: number, content: Record<string, unknown>, event?: RuntimeToolEvent, signal?: AbortSignal): Promise<void> {
     const nativeId = typeof content.toolCallId === "string" && content.toolCallId.length > 0
       && content.toolCallId.length <= MAX_NATIVE_ID_LENGTH
       ? content.toolCallId
@@ -192,68 +193,78 @@ export class RuntimeCapabilityCollector {
     const status = statusOf(content.status);
     const observedAt = event?.occurredAt ?? new Date().toISOString();
     const result = content.rawOutput === undefined ? content.content : content.rawOutput;
-    let measuredPayload: Pick<InvocationInput, "argumentEstimate" | "resultEstimate"> | undefined;
-    const measure = () => measuredPayload ??= {
-      argumentEstimate: this.attribution.measureContent(input?.server !== undefined && input?.tool !== undefined
-        ? input.arguments : content.rawInput, "arguments", run.model),
-      resultEstimate: this.attribution.measureContent(result, "result", run.model)
+    const liveMcp = event === undefined && ([input, mcp].some(value =>
+      typeof value?.server === "string" && typeof value?.tool === "string") || this.store.db.prepare(`SELECT 1
+        FROM agent_usage_runtime_mcp_mirrors WHERE namespace=? AND session_id=? AND provider_epoch_id=?
+          AND execution_id=? AND native_call_id=?`).get(binding.namespace, binding.sessionId, epoch, String(runId), nativeId));
+    const measuredPayload: Pick<InvocationInput, "argumentEstimate" | "resultEstimate"> = liveMcp ? {} : {
+      argumentEstimate: await this.attribution.measureContent(input?.server !== undefined && input?.tool !== undefined
+        ? input.arguments : content.rawInput, "arguments", run.model, signal),
+      resultEstimate: await this.attribution.measureContent(result, "result", run.model, signal)
     };
-    const baseInvocationId = `runtime:${run.runtimeKind}:run:${runId}:call:${nativeId}`;
+    const measure = () => measuredPayload;
+    this.store.db.transaction(() => {
+      this.store.assertBinding(binding);
+      const baseInvocationId = `runtime:${run.runtimeKind}:run:${runId}:call:${nativeId}`;
 
-    const mcpResult = this.mcpReplay.record(binding, epoch, String(runId), nativeId, input, mcp, observedAt, event !== undefined, status, measure);
-    if (mcpResult.isMcp) {
-      if (mcpResult.capability) {
-        this.observe(binding, epoch, String(runId), run.runtimeKind, baseInvocationId, mcpResult.capability,
-          status, observedAt, outputBytes(result), measure());
-      } else {
-        // Retire a sparse unknown row, or an older fallback now owned by a matched wrapper.
-        this.store.db.prepare(`DELETE FROM agent_usage_invocations WHERE namespace=? AND session_id=?
-          AND provider_epoch_id=? AND invocation_id=? AND (? OR json_extract(capability_json,'$.kind')!='mcp_tool')`)
-          .run(binding.namespace, binding.sessionId, epoch, baseInvocationId, Number(mcpResult.matched ?? false));
+      const mcpResult = this.mcpReplay.record(binding, epoch, String(runId), nativeId, input, mcp, observedAt, event !== undefined, status, measure);
+      if (mcpResult.isMcp) {
+        if (mcpResult.capability) {
+          this.observe(binding, epoch, String(runId), run.runtimeKind, baseInvocationId, mcpResult.capability,
+            status, observedAt, outputBytes(result), measure(), event !== undefined);
+        } else {
+          // Retire a sparse unknown row, or an older fallback now owned by a matched wrapper.
+          this.store.db.prepare(`DELETE FROM agent_usage_invocations WHERE namespace=? AND session_id=?
+            AND provider_epoch_id=? AND invocation_id=? AND (? OR json_extract(capability_json,'$.kind')!='mcp_tool')`)
+            .run(binding.namespace, binding.sessionId, epoch, baseInvocationId, Number(mcpResult.matched ?? false));
+        }
+        return;
       }
-      return;
-    }
 
-    const bytes = outputBytes(result);
-    const payload = measure();
-    const primary = runtimeToolCapability(run.runtimeKind, kind, input);
-    this.observe(binding, epoch, String(runId), run.runtimeKind, baseInvocationId, primary, status, observedAt, bytes, payload);
+      const bytes = outputBytes(result);
+      const payload = measure();
+      const primary = runtimeToolCapability(run.runtimeKind, kind, input);
+      this.observe(binding, epoch, String(runId), run.runtimeKind, baseInvocationId, primary, status, observedAt, bytes, payload, event !== undefined);
 
-    let associations = this.associations(binding.namespace, binding.sessionId, epoch, String(runId), nativeId);
-    if (associations.length === 0) {
-      const projections = this.projections(binding.namespace, binding.sessionId, epoch, String(runId));
-      const files = kind === "execute" ? commandFiles(input) : { readPaths: [], scriptPaths: [], cwd: undefined };
-      const directory = files.cwd === undefined ? run.workspacePath : normalizedPath(run.workspacePath, files.cwd);
-      const eventPath = this.eventPath(run.workspacePath, kind, input, content.locations);
-      const readPaths = eventPath === undefined ? files.readPaths.map(path => normalizedPath(directory, path)) : [eventPath];
-      const scriptPaths = files.scriptPaths.map(path => normalizedPath(directory, path));
-      for (const projection of projections) {
-        const capability = JSON.parse(projection.capability_json) as Capability;
-        const aliases = JSON.parse(projection.directory_aliases_json) as string[];
-        const skillMdPaths = [projection.skill_md_path, ...aliases.map((directory) => join(directory, "SKILL.md"))]
-          .map((path) => normalize(path));
-        let stage: Exclude<SkillActivityStage, "catalog_visible"> | undefined;
-        if (readPaths.some(path => skillMdPaths.includes(path))) stage = "body_read";
-        else if (readPaths.some(path => aliases.some(directory => withinDirectory(path, normalize(directory))))) {
-          stage = "reference_read";
+      let associations = this.associations(binding.namespace, binding.sessionId, epoch, String(runId), nativeId);
+      if (associations.length === 0) {
+        const projections = this.projections(binding.namespace, binding.sessionId, epoch, String(runId));
+        const files = kind === "execute" ? commandFiles(input) : { readPaths: [], scriptPaths: [], cwd: undefined };
+        const directory = files.cwd === undefined ? run.workspacePath : normalizedPath(run.workspacePath, files.cwd);
+        const eventPath = this.eventPath(run.workspacePath, kind, input, content.locations);
+        const readPaths = eventPath === undefined ? files.readPaths.map(path => normalizedPath(directory, path)) : [eventPath];
+        const scriptPaths = files.scriptPaths.map(path => normalizedPath(directory, path));
+        for (const projection of projections) {
+          const capability = JSON.parse(projection.capability_json) as Capability;
+          const aliases = JSON.parse(projection.directory_aliases_json) as string[];
+          const skillMdPaths = [projection.skill_md_path, ...aliases.map((directory) => join(directory, "SKILL.md"))]
+            .map((path) => normalize(path));
+          let stage: Exclude<SkillActivityStage, "catalog_visible"> | undefined;
+          if (readPaths.some(path => skillMdPaths.includes(path))) stage = "body_read";
+          else if (readPaths.some(path => aliases.some(directory => withinDirectory(path, normalize(directory))))) {
+            stage = "reference_read";
+          }
+          if (scriptPaths.some(path => aliases.some(directory => withinDirectory(path, normalize(directory))))) {
+            stage = "script_executed";
+          }
+          if (stage === undefined) continue;
+          const skillInvocationId = `${baseInvocationId}:skill:${capability.id}`;
+          this.recordActivity(binding, epoch, String(runId), run.runtimeKind, skillInvocationId, capability, stage, nativeId, observedAt);
+          if (projection.plugin_json !== null) {
+            const plugin = JSON.parse(projection.plugin_json) as Capability;
+            const pluginInvocationId = `${baseInvocationId}:plugin:${plugin.id}`;
+            this.recordActivity(binding, epoch, String(runId), run.runtimeKind, pluginInvocationId, plugin, stage, nativeId, observedAt);
+          }
         }
-        if (scriptPaths.some(path => aliases.some(directory => withinDirectory(path, normalize(directory))))) {
-          stage = "script_executed";
-        }
-        if (stage === undefined) continue;
-        const skillInvocationId = `${baseInvocationId}:skill:${capability.id}`;
-        this.recordActivity(binding, epoch, String(runId), run.runtimeKind, skillInvocationId, capability, stage, nativeId, observedAt);
-        if (projection.plugin_json !== null) {
-          const plugin = JSON.parse(projection.plugin_json) as Capability;
-          const pluginInvocationId = `${baseInvocationId}:plugin:${plugin.id}`;
-          this.recordActivity(binding, epoch, String(runId), run.runtimeKind, pluginInvocationId, plugin, stage, nativeId, observedAt);
-        }
+        associations = this.associations(binding.namespace, binding.sessionId, epoch, String(runId), nativeId);
       }
-      associations = this.associations(binding.namespace, binding.sessionId, epoch, String(runId), nativeId);
-    }
-    for (const association of associations) {
-      this.observe(binding, epoch, String(runId), run.runtimeKind, association.event_id,
-        JSON.parse(association.capability_json) as Capability, status, observedAt, bytes, payload);
+      for (const association of associations) {
+        this.observe(binding, epoch, String(runId), run.runtimeKind, association.event_id,
+          JSON.parse(association.capability_json) as Capability, status, observedAt, bytes, payload, event !== undefined);
+      }
+    })();
+    if ([measuredPayload.argumentEstimate, measuredPayload.resultEstimate].some(value => value?.estimate.reason === "tokenizer_pending")) {
+      throw new UsageError("usage_tokenizer_pending");
     }
   }
 
@@ -378,9 +389,10 @@ export class RuntimeCapabilityCollector {
     status: InvocationStatus,
     observedAt: string,
     bytes: number | null,
-    payload: Pick<InvocationInput, "argumentEstimate" | "resultEstimate"> = {}
+    payload: Pick<InvocationInput, "argumentEstimate" | "resultEstimate"> = {},
+    replay = false
   ): void {
-    const previous = this.store.db.prepare(`SELECT public_id, capability_json, started_at, ended_at, status, revision, raw_result_bytes
+    const previous = this.store.db.prepare(`SELECT public_id, capability_json, started_at, ended_at, status, revision, raw_result_bytes, replay_result_json
       FROM agent_usage_invocations WHERE namespace = ? AND session_id = ? AND provider_epoch_id = ? AND invocation_id = ?`)
       .get(binding.namespace, binding.sessionId, epoch, invocationId) as InvocationRow | undefined;
     const priorCapability = previous === undefined ? undefined : JSON.parse(previous.capability_json) as Capability;
@@ -390,6 +402,12 @@ export class RuntimeCapabilityCollector {
     const stableStatus = previous !== undefined && terminal(previous.status) ? previous.status : status;
     const priorTerminal = previous !== undefined && terminal(previous.status) && status === "running";
     const existingResult = priorTerminal ? this.attribution.invocation(binding.namespace, previous.public_id)?.resultEstimate : null;
+    // A sparse terminal event can refer to the final progress payload. Stage counts, never its body,
+    // until replay reaches that terminal event so older progress cannot overwrite the finished result.
+    const stagedResult = replay && status === "running" ? payload.resultEstimate : undefined;
+    const pendingResult = payload.resultEstimate?.estimate.reason === "tokenizer_pending" ? payload.resultEstimate : undefined;
+    const resultEstimate = replay && status === "running" ? pendingResult
+      : payload.resultEstimate ?? (replay && previous?.replay_result_json ? JSON.parse(previous.replay_result_json) as ToolContentEstimate : undefined);
     this.attribution.observeInvocation(binding, {
       invocationId,
       providerEpochId: epoch,
@@ -405,8 +423,11 @@ export class RuntimeCapabilityCollector {
       revision: (previous?.revision ?? 0) + 1,
       rawResultBytes: priorTerminal ? previous.raw_result_bytes ?? bytes : bytes ?? previous?.raw_result_bytes ?? null,
       ...payload,
-      resultEstimate: existingResult ? undefined : payload.resultEstimate
+      resultEstimate: existingResult && !pendingResult ? undefined : resultEstimate
     });
+    if (replay && (stagedResult || terminal(status))) this.store.db.prepare(`UPDATE agent_usage_invocations SET replay_result_json=?
+      WHERE namespace=? AND session_id=? AND provider_epoch_id=? AND invocation_id=?`)
+      .run(stagedResult ? JSON.stringify(stagedResult) : null, binding.namespace, binding.sessionId, epoch, invocationId);
   }
 
   private recordActivity(

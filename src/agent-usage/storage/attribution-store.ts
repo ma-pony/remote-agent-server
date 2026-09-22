@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { setTimeout as delay } from "node:timers/promises";
 import { runtimeContentScope } from "../runtime-content-evidence.js";
 import {
   capabilityKinds,
@@ -28,11 +29,10 @@ import {
   capabilityKey,
   MAX_CAPABILITY_REFERENCES_PER_BLOCK,
   MAX_CONTEXT_BLOCKS,
-  MAX_TOKENIZABLE_CONTEXT_BYTES,
   scopedContentKey,
   stableHash
 } from "../core/context.js";
-import { ModelTokenizers } from "../core/tokenizers.js";
+import { ModelTokenizers, type TokenCount } from "../core/tokenizers.js";
 import { measureToolContent } from "../core/tool-content.js";
 import type { UsageBinding } from "../core/types.js";
 import type { UsageStore } from "./usage-store.js";
@@ -172,6 +172,10 @@ export class AttributionStore {
         ON agent_usage_invocations(namespace, agent_id, session_id, started_at);
     `);
     const columns = store.db.prepare("PRAGMA table_info(agent_usage_exposures)").all() as Array<{ name: string }>;
+    const invocationColumns = store.db.prepare("PRAGMA table_info(agent_usage_invocations)").all() as Array<{ name: string }>;
+    if (!invocationColumns.some(column => column.name === "replay_result_json")) {
+      store.db.exec("ALTER TABLE agent_usage_invocations ADD COLUMN replay_result_json TEXT");
+    }
     if (!columns.some((column) => column.name === "estimate_json")) {
       store.db.exec("ALTER TABLE agent_usage_exposures ADD COLUMN estimate_json TEXT");
     }
@@ -213,7 +217,29 @@ export class AttributionStore {
       `${Buffer.from(contextId, "hex").toString("base64url")}.${Buffer.from(stableHash(key), "hex").toString("base64url")}`);
   }
 
-  upsertContext(binding: UsageBinding, input: ModelContextInput): void {
+  async prepareContext(input: ModelContextInput, signal?: AbortSignal): Promise<Map<number, TokenCount>> {
+    const estimates = new Map<number, TokenCount>();
+    for (const block of input.blocks.slice(0, MAX_CONTEXT_BLOCKS)) {
+      if (block.capabilities.length === 0) continue;
+      signal?.throwIfAborted();
+      let count: TokenCount;
+      do {
+        count = block.content.modality === "text"
+          ? await this.tokenizers.countAsync(block.content.text, input.model, input.modelProvider, signal)
+          : { ...this.tokenizers.describe(input.model, input.modelProvider), tokens: null, reason: "unsupported_content" };
+        if (count.reason === "tokenizer_pending") await delay(1000, undefined, { signal });
+      } while (count.reason === "tokenizer_pending");
+      estimates.set(block.position, count);
+    }
+    return estimates;
+  }
+
+  async upsertContext(binding: UsageBinding, input: ModelContextInput): Promise<void> {
+    this.commitContext(binding, input, await this.prepareContext(input));
+  }
+
+  /** Measurement finishes before opening the transaction; authority is checked again at commit. */
+  commitContext(binding: UsageBinding, input: ModelContextInput, estimates: Map<number, TokenCount>): void {
     this.store.db.transaction(() => {
       this.store.assertBinding(binding);
       validRevision(input.revision);
@@ -264,7 +290,6 @@ export class AttributionStore {
         (context_id, position, block_kind, tool_invocation_id, capability_key, capability_json, evidence,
          content_key, content_identity_hash, modality, byte_length, token_count, estimate_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-      let tokenizedBytes = 0;
       const estimateIds = new Map<string, number>();
       for (const block of blocks) {
         const references = new Map<string, typeof block.capabilities[number]>();
@@ -277,13 +302,7 @@ export class AttributionStore {
         const byteLength = block.content.modality === "text"
           ? Buffer.byteLength(block.content.text)
           : block.content.byteLength ?? null;
-        const withinContextBudget = block.content.modality !== "text"
-          || tokenizedBytes + byteLength! <= MAX_TOKENIZABLE_CONTEXT_BYTES;
-        const estimate = block.content.modality !== "text"
-          ? { ...this.tokenizers.describe(input.model, input.modelProvider), tokens: null, reason: "unsupported_content" as const }
-          : !withinContextBudget
-            ? { ...this.tokenizers.describe(input.model, input.modelProvider), tokens: null, reason: "size_limit" as const }
-            : this.tokenizers.count(block.content.text, input.model, input.modelProvider);
+        const estimate = estimates.get(block.position)!;
         const { tokens: tokenCount, ...metadata } = estimate;
         const metadataJson = JSON.stringify(metadata);
         let estimateId = estimateIds.get(metadataJson);
@@ -291,10 +310,6 @@ export class AttributionStore {
           this.store.db.prepare("INSERT OR IGNORE INTO agent_usage_token_estimates(estimate_json) VALUES (?)").run(metadataJson);
           estimateId = (this.store.db.prepare("SELECT id FROM agent_usage_token_estimates WHERE estimate_json=?").get(metadataJson) as { id: number }).id;
           estimateIds.set(metadataJson, estimateId);
-        }
-        if (block.content.modality === "text" && references.size > 0) {
-          if (estimate.reason === "size_limit") exceededBudget = true;
-          if (withinContextBudget) tokenizedBytes += byteLength!;
         }
         for (const [key, reference] of references) {
           const contentKey = stableHash(scopedContentKey(block, reference.capability));
@@ -359,8 +374,15 @@ export class AttributionStore {
     })();
   }
 
-  measureContent(value: unknown, part: "arguments" | "result", model: string | null = null): ToolContentEstimate | undefined {
-    return measureToolContent(value, part, this.tokenizers, model);
+  async close(): Promise<void> { await this.tokenizers.close(); }
+
+  measureContent(value: unknown, part: "arguments" | "result", model: string | null = null, signal?: AbortSignal): Promise<ToolContentEstimate | undefined> {
+    return measureToolContent(value, part, this.tokenizers, model, null, signal);
+  }
+
+  needsReestimate(estimate: TokenEstimate): boolean {
+    return estimate.method !== "model_tokenizer" && estimate.reason !== "unsupported_content"
+      && this.tokenizers.hasVocabulary(estimate.model, estimate.modelProvider);
   }
 
   /** Enriches existing execution evidence without changing its count, identity or terminal state. */
@@ -379,6 +401,9 @@ export class AttributionStore {
       || value.tokens !== null && (!Number.isSafeInteger(value.tokens) || value.tokens < 0)) {
       throw new Error("invalid_tool_content_estimate");
     }
+    if (value.estimate.reason === "tokenizer_pending" && this.store.db.prepare(`SELECT 1 FROM agent_usage_invocation_payloads p
+      JOIN agent_usage_token_estimates t ON t.id=p.estimate_id WHERE p.public_id=? AND p.part=?
+      AND p.token_count IS NOT NULL AND json_extract(t.estimate_json,'$.method')='model_tokenizer'`).get(id, part)) return;
     const profile = JSON.stringify(value.estimate);
     this.store.db.prepare("INSERT OR IGNORE INTO agent_usage_token_estimates(estimate_json) VALUES (?)").run(profile);
     const estimate = this.store.db.prepare("SELECT id FROM agent_usage_token_estimates WHERE estimate_json=?").get(profile) as { id: number };
@@ -425,41 +450,52 @@ export class AttributionStore {
     const execution = this.invocationWhere(filter, "execution", capability);
     const contextCalls = this.invocationWhere(filter, "context", capability);
     const content = runtimeContentScope(this.store.db, filter, capability);
-    const conditionalSum = (condition: string) => `CASE WHEN SUM(${condition})=0 THEN 0 ELSE SUM(CASE WHEN ${condition} THEN tokens END) END`;
-    const query = `WITH exposed AS (
-      SELECT e.capability_key, e.block_kind, e.token_count AS tokens, e.byte_length, ${ResultFirstUseIndex.classification} AS first_use
-      FROM agent_usage_contexts c JOIN agent_usage_exposures e ON e.context_id=c.context_id ${ResultFirstUseIndex.join}
-      WHERE ${context.clauses.join(" AND ")}),
-      contexts AS (SELECT capability_key, SUM(tokens) AS totalInputTokens, SUM(byte_length) AS inputBytes,
-        ${conditionalSum("block_kind='definition'")} AS definitionInputTokens,
-        ${conditionalSum("block_kind='result' AND first_use='first'")} AS firstResultInputTokens,
-        ${conditionalSum("block_kind='result' AND first_use='repeat'")} AS repeatedResultInputTokens
-        FROM exposed GROUP BY capability_key),
-      executions AS MATERIALIZED (SELECT i.public_id,i.capability_key,i.status,i.started_at,i.ended_at FROM agent_usage_invocations i WHERE ${execution.clauses.join(" AND ")}),
-      calls AS (SELECT capability_key, COUNT(*) AS calls, SUM(status NOT IN ('running','succeeded')) AS failures FROM executions GROUP BY capability_key),
-      context_calls AS (SELECT DISTINCT i.capability_key FROM agent_usage_invocations i WHERE ${contextCalls.clauses.join(" AND ")}),
+    // Discover identities independently of metrics. Sorting by content must not aggregate
+    // every input exposure or calculate latency percentiles before selecting a page.
+    const base = `WITH executions AS MATERIALIZED (
+      SELECT i.public_id,i.capability_key,i.status,i.started_at,i.ended_at FROM agent_usage_invocations i WHERE ${execution.clauses.join(" AND ")}),
       runtime_content AS (${content.sql}),
-      observed_parts AS (SELECT i.capability_key,p.part,p.token_count AS tokens FROM executions i JOIN agent_usage_invocation_payloads p ON p.public_id=i.public_id
-        UNION ALL SELECT capability_key, CASE WHEN category IN ('configured_instructions','user_prompt') THEN 'arguments' ELSE 'result' END,tokens FROM runtime_content),
-      payloads AS (SELECT capability_key, SUM(tokens) AS observedTotalTokens,
-        SUM(CASE WHEN part='arguments' THEN tokens END) AS observedArgumentTokens,
-        SUM(CASE WHEN part='result' THEN tokens END) AS observedResultTokens
-        FROM observed_parts GROUP BY capability_key),
-      elapsed AS (SELECT capability_key, CAST(ROUND((julianday(ended_at)-julianday(started_at))*86400000) AS INTEGER) AS value FROM executions),
-      latency_ranks AS (SELECT capability_key,value, ROW_NUMBER() OVER (PARTITION BY capability_key ORDER BY value) AS ordinal,
-        COUNT(*) OVER (PARTITION BY capability_key) AS count FROM elapsed WHERE value>=0),
-      latency AS (SELECT capability_key, MAX(CASE WHEN ordinal=(count*95+99)/100 THEN value END) AS latencyMsP95 FROM latency_ranks GROUP BY capability_key),
-      keys AS (SELECT capability_key FROM contexts UNION SELECT capability_key FROM calls UNION SELECT capability_key FROM context_calls UNION SELECT capability_key FROM runtime_content),
-      ranked AS (SELECT keys.capability_key, contexts.totalInputTokens,contexts.inputBytes,contexts.definitionInputTokens,
-        contexts.firstResultInputTokens,contexts.repeatedResultInputTokens, COALESCE(calls.calls,0) AS calls, COALESCE(calls.failures,0) AS failures,
-        payloads.observedTotalTokens,payloads.observedArgumentTokens,payloads.observedResultTokens,latency.latencyMsP95
-        FROM keys LEFT JOIN contexts USING(capability_key) LEFT JOIN calls USING(capability_key)
-        LEFT JOIN payloads USING(capability_key) LEFT JOIN latency USING(capability_key))`;
-    const params = [filter.runtimeKind === undefined ? "" : JSON.stringify(filter.runtimeKind), ...context.params, ...execution.params, ...contextCalls.params, ...content.params];
-    const total = (this.store.db.prepare(`${query} SELECT COUNT(*) AS total FROM keys`).get(...params) as { total: number }).total;
-    const keys = (this.store.db.prepare(`${query} SELECT capability_key FROM ranked
-      ORDER BY ${options.sort} DESC NULLS LAST, json_extract(capability_key,'$[2]'), capability_key LIMIT ? OFFSET ?`)
-      .all(...params, options.limit, options.offset) as Array<{ capability_key: string }>).map((row) => row.capability_key);
+      keys AS (SELECT DISTINCT e.capability_key FROM agent_usage_contexts c JOIN agent_usage_exposures e USING(context_id)
+        WHERE ${context.clauses.join(" AND ")}
+        UNION SELECT capability_key FROM executions
+        UNION SELECT i.capability_key FROM agent_usage_invocations i WHERE ${contextCalls.clauses.join(" AND ")}
+        UNION SELECT capability_key FROM runtime_content)`;
+    const params = [...execution.params, ...content.params, ...context.params, ...contextCalls.params];
+    let metric: string;
+    const metricParams: string[] = [];
+    if (options.sort.startsWith("observed")) {
+      const part = options.sort === "observedArgumentTokens" ? " WHERE part='arguments'"
+        : options.sort === "observedResultTokens" ? " WHERE part='result'" : "";
+      metric = `SELECT capability_key,SUM(tokens) AS value FROM (
+        SELECT i.capability_key,p.part,p.token_count AS tokens FROM executions i JOIN agent_usage_invocation_payloads p ON p.public_id=i.public_id
+        UNION ALL SELECT capability_key,CASE WHEN category IN ('configured_instructions','user_prompt') THEN 'arguments' ELSE 'result' END,tokens FROM runtime_content
+      )${part} GROUP BY capability_key`;
+    } else if (options.sort === "calls" || options.sort === "failures") {
+      metric = `SELECT capability_key,${options.sort === "calls" ? "COUNT(*)" : "SUM(status NOT IN ('running','succeeded'))"} AS value FROM executions GROUP BY capability_key`;
+    } else if (options.sort === "latencyMsP95") {
+      metric = `SELECT capability_key,MAX(CASE WHEN ordinal=(count*95+99)/100 THEN elapsed END) AS value FROM (
+        SELECT capability_key,elapsed,ROW_NUMBER() OVER (PARTITION BY capability_key ORDER BY elapsed) AS ordinal,
+          COUNT(*) OVER (PARTITION BY capability_key) AS count FROM (
+            SELECT capability_key,CAST(ROUND((julianday(ended_at)-julianday(started_at))*86400000) AS INTEGER) AS elapsed FROM executions
+          ) WHERE elapsed>=0) GROUP BY capability_key`;
+    } else {
+      const firstUse = options.sort === "firstResultInputTokens" || options.sort === "repeatedResultInputTokens";
+      const predicate = options.sort === "definitionInputTokens" ? "e.block_kind='definition'"
+        : firstUse ? `${ResultFirstUseIndex.classification}='${options.sort === "firstResultInputTokens" ? "first" : "repeat"}'` : undefined;
+      const value = options.sort === "inputBytes" ? "SUM(e.byte_length)" : predicate
+        ? `CASE WHEN SUM(${predicate})=0 THEN 0 ELSE SUM(CASE WHEN ${predicate} THEN e.token_count END) END` : "SUM(e.token_count)";
+      metric = `SELECT e.capability_key,${value} AS value FROM agent_usage_contexts c JOIN agent_usage_exposures e USING(context_id)
+        ${firstUse ? ResultFirstUseIndex.join : ""} WHERE ${context.clauses.join(" AND ")} GROUP BY e.capability_key`;
+      if (firstUse) metricParams.push(filter.runtimeKind === undefined ? "" : JSON.stringify(filter.runtimeKind));
+      metricParams.push(...context.params);
+    }
+    const order = options.sort === "calls" || options.sort === "failures" ? "COALESCE(metric.value,0)" : "metric.value";
+    const selected = this.store.db.prepare(`${base}, metric AS (${metric})
+      SELECT keys.capability_key,COUNT(*) OVER() AS total FROM keys LEFT JOIN metric USING(capability_key)
+      ORDER BY ${order} DESC NULLS LAST,json_extract(keys.capability_key,'$[2]'),keys.capability_key LIMIT ? OFFSET ?`)
+      .all(...params, ...metricParams, options.limit, options.offset) as Array<{ capability_key: string; total: number }>;
+    const total = selected[0]?.total ?? (this.store.db.prepare(`${base} SELECT COUNT(*) AS total FROM keys`).get(...params) as { total: number }).total;
+    const keys = selected.map(row => row.capability_key);
     const rows = new Map(this.rankings(filter, dimension, keys).map((row) => [capabilityKey(row.capability), row]));
     return { total, items: keys.map((key) => rows.get(key)!) };
   }

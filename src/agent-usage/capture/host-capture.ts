@@ -23,6 +23,8 @@ type Subject = {
   historyComplete: boolean;
   aliases: Array<{ runtimeName: string; capability: Capability }>;
   calls: Map<string, CanonicalCall>;
+  processing?: Promise<void>;
+  controller: AbortController;
 };
 type Intent = {
   id: string;
@@ -89,7 +91,7 @@ export class HostUsageCapture {
     const subject: Subject = {
       binding, epoch, provider: input.provider, workspacePath: input.workspacePath, runId: null,
       historyComplete: input.providerSessionId === null && !previousSession,
-      aliases: this.aliases(input.mcpServers), calls
+      aliases: this.aliases(input.mcpServers), calls, controller: new AbortController()
     };
     const route = await this.relay.register({ ...upstream, apiKey: this.keys.get(input.provider)! }, () => this.begin(subject),
       (intent, exchange) => this.finish(intent, exchange, upstream.protocol));
@@ -128,6 +130,13 @@ export class HostUsageCapture {
   }
   private async finish(intent: Intent | undefined, exchange: CapturedExchange, protocol: CaptureProtocol): Promise<void> {
     if (!intent) return;
+    const processing = (intent.subject.processing ?? Promise.resolve()).then(() => this.finishExchange(intent, exchange, protocol));
+    intent.subject.processing = processing;
+    try { await processing; }
+    finally { if (intent.subject.processing === processing) intent.subject.processing = undefined; }
+  }
+
+  private async finishExchange(intent: Intent, exchange: CapturedExchange, protocol: CaptureProtocol): Promise<void> {
     let issue = exchange.issue;
     try {
       const decoded = await decodeExchange(exchange, protocol);
@@ -137,31 +146,35 @@ export class HostUsageCapture {
       const native = typeof decoded.response?.id === "string" && decoded.response.id.length <= 512 ? decoded.response.id : null;
       const protocolIdentity = protocol === "anthropic_messages" ? "claude-message" : protocol;
       const invocationId = native ? `${protocolIdentity}:${native}` : `capture-unresolved:${intent.id}`;
-      let committedCalls: Map<string, CanonicalCall> | undefined;
-      this.host.db.transaction(() => {
-        this.assertIntent(intent);
-        if (decoded.request && intent.runId !== null) {
-          const subject = intent.subject;
-          const calls = new Map(subject.calls);
-          const entries = normalizeCanonicalExchanges({ revision: 1, historyComplete: subject.historyComplete, capabilities: intent.aliases,
+      this.assertIntent(intent);
+      const subject = intent.subject;
+      const calls = new Map(subject.calls);
+      const entries = decoded.request && intent.runId !== null
+        ? normalizeCanonicalExchanges({ revision: 1, historyComplete: subject.historyComplete, capabilities: intent.aliases,
             requests: [{ request: decoded.request, response: decoded.response, record: { id: intent.id, invocationId,
               session_id: intent.epoch, timestamp: intent.startedAt, provider: subject.provider, agent: subject.provider,
               modelProvider: this.upstreams[subject.provider]?.modelProvider,
               endpoint: exchange.endpoint, context_fidelity: "partial", response_complete: decoded.complete } }] }, calls, {
             callTags: (name, args) => this.skillTags(intent, name, args),
             capability: (name, args) => capturedToolCapability(subject.provider, name, args)
-          });
-          const entry = entries[0]!;
-          if ((entry.context?.blocks.length ?? 0) > MAX_CONTEXT_BLOCKS) issue ??= "context_block_limit";
-          if (entry.context?.blocks.some((block) => block.content.modality === "unsupported")) issue ??= "unsupported_content";
-          if (issue) {
-            subject.historyComplete = false;
-            if (entry.context) entry.context.historyComplete = false;
-          }
-          this.host.store.observe(intent.binding, { ...entry.observation, sourceId: "http_capture", sourcePriority: 10,
-            eventId: intent.id, providerEpochId: intent.epoch, executionId: String(intent.runId), ...(issue ? { issues: [issue] } : {}) });
+          }) : [];
+      const entry = entries[0];
+      if ((entry?.context?.blocks.length ?? 0) > MAX_CONTEXT_BLOCKS) issue ??= "context_block_limit";
+      if (entry?.context?.blocks.some((block) => block.content.modality === "unsupported")) issue ??= "unsupported_content";
+      if (issue) {
+        subject.historyComplete = false;
+        if (entry?.context) entry.context.historyComplete = false;
+      }
+      // Reported usage remains available even while the independent vocabulary is being fetched.
+      if (entry && intent.runId !== null) this.host.store.observe(intent.binding,
+        { ...entry.observation, sourceId: "http_capture", sourcePriority: 10,
+          eventId: intent.id, providerEpochId: intent.epoch, executionId: String(intent.runId), ...(issue ? { issues: [issue] } : {}) });
+      const estimates = entry?.context ? await this.host.attribution.prepareContext(entry.context, subject.controller.signal) : undefined;
+      this.host.db.transaction(() => {
+        this.assertIntent(intent);
+        if (entry && intent.runId !== null) {
           if (entry.context) {
-            this.host.attribution.upsertContext(intent.binding, { ...entry.context, sourceId: "http_capture", providerEpochId: intent.epoch });
+            this.host.attribution.commitContext(intent.binding, { ...entry.context, sourceId: "http_capture", providerEpochId: intent.epoch }, estimates!);
           }
           for (const invocation of entry.invocations ?? []) {
             this.host.attribution.observeInvocation(intent.binding,
@@ -172,14 +185,13 @@ export class HostUsageCapture {
             while (calls.size > MAX_CALLS) calls.delete(calls.keys().next().value!);
           }
           this.persistCalls(intent, calls);
-          committedCalls = calls;
         }
         this.host.db.prepare("UPDATE agent_usage_captures SET status=?, error_code=? WHERE id=?")
           .run(issue ? "incomplete" : "observed", issue, intent.id);
         this.host.db.prepare("UPDATE agent_usage_capture_sessions SET status='observed' WHERE namespace=? AND session_id=? AND epoch_id=?")
           .run(intent.binding.namespace, intent.binding.sessionId, intent.epoch);
       })();
-      if (committedCalls) intent.subject.calls = committedCalls;
+      if (entry) intent.subject.calls = calls;
     } catch {
       intent.subject.historyComplete = false;
       this.host.db.prepare("UPDATE agent_usage_captures SET status='incomplete', error_code='capture_processing_failed' WHERE id=? AND status='pending'").run(intent.id);
@@ -287,6 +299,7 @@ export class HostUsageCapture {
   async release(sessionId: number): Promise<void> {
     const subject = this.subjects.get(sessionId);
     this.subjects.delete(sessionId);
+    subject?.controller.abort();
     await subject?.route.revoke();
   }
 
@@ -302,6 +315,7 @@ export class HostUsageCapture {
   }
 
   async close(): Promise<void> {
+    for (const subject of this.subjects.values()) subject.controller.abort();
     this.subjects.clear();
     await this.relay.close();
   }

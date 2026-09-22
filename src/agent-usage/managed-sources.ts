@@ -1,7 +1,7 @@
 import { UsageError } from "./core/errors.js";
 import { loadModelTokenizers } from "./tokenizer-config.js";
 import { readdir, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type Database from "better-sqlite3";
 import type { AppConfig } from "../config.js";
 import { HostUsageCollector } from "./host-collector.js";
@@ -31,7 +31,7 @@ export class ManagedUsageSources {
       capabilities: { usage: kind === "codex_log" ? "provider_session" : "model_request", context: kind === "context_snapshot" ? "partial" : "none",
         identity: "explicit", version: kind === "context_snapshot" ? "context-snapshot/1" : "provider-logs/1" }
     })])) as Record<SourceRegistration["kind"], FileUsageSource>;
-    this.collector = new HostUsageCollector(db, this.adapters, (sessionId) => this.discover(sessionId), loadModelTokenizers(config.usageTokenizers));
+    this.collector = new HostUsageCollector(db, this.adapters, (sessionId) => this.discover(sessionId), loadModelTokenizers(config.usageTokenizers, resolve(config.dataDir, "tokenizers")));
   }
 
   private async discover(sessionId: number): Promise<void> {

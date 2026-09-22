@@ -83,9 +83,12 @@ export class RuntimeMcpReplay {
       }
     }
     if (original) {
+      const upgrade = (old: ToolContentEstimate | null, next: ToolContentEstimate | undefined) =>
+        old === null || old.estimate.method !== "model_tokenizer"
+          && (next?.estimate.method === "model_tokenizer" || next?.estimate.reason === "tokenizer_pending");
       this.attribution.recordPayload(binding, original.id, {
-        argumentEstimate: original.argumentEstimate === null ? payload.argumentEstimate : undefined,
-        resultEstimate: original.resultEstimate === null ? resultEstimate : undefined
+        argumentEstimate: upgrade(original.argumentEstimate, payload.argumentEstimate) ? payload.argumentEstimate : undefined,
+        resultEstimate: upgrade(original.resultEstimate, resultEstimate) ? resultEstimate : undefined
       });
       this.store.db.prepare(`UPDATE agent_usage_runtime_mcp_mirrors SET matched_public_id=?
         WHERE namespace=? AND session_id=? AND provider_epoch_id=? AND execution_id=? AND native_call_id=?`)

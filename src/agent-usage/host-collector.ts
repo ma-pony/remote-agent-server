@@ -40,7 +40,7 @@ export class HostUsageCollector {
     this.runtimeCapabilities = new RuntimeCapabilityCollector(this.store, this.attribution, this.namespace);
     this.conversationContent = new RuntimeConversationCollector(this.store, this.attribution, this.namespace);
     this.contentBackfill = new RuntimeContentBackfill(db, this.namespace,
-      (runId, content, event) => this.runtimeCapabilities.recordTool(runId, content, event), this.conversationContent);
+      (runId, content, event) => this.runtimeCapabilities.recordTool(runId, content, event), this.conversationContent, tokenizers.knownModels());
     this.sources = new UsageSourceCoordinator(this.store, adapters, 30_000, this.attribution);
   }
   binding(sessionId: number): UsageBinding {

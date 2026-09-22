@@ -44,7 +44,7 @@ describe("usage source management API", () => {
     expect(response.json()).toMatchObject({ analysisStatus: "ready", hasCapabilityEvidence: true,
       contentBackfill: { status: "completed", processedEvents: 1 },
       usage: { totalTokens: null } });
-    manager.collector.runtimeCapabilities.recordTool(runId, { toolCallId: "read", kind: "read", status: "completed", rawOutput: "result" });
+    await manager.collector.runtimeCapabilities.recordTool(runId, { toolCallId: "read", kind: "read", status: "completed", rawOutput: "result" });
     expect((await app.inject({ url: `/api/usage/summary?sessionId=${session.id}`, headers })).json())
       .toMatchObject({ analysisStatus: "ready", hasCapabilityEvidence: true });
   });
@@ -86,6 +86,26 @@ describe("usage source management API", () => {
     const summary = await app.inject({ method: "GET", url: "/api/usage/summary", headers });
     expect(summary.json().usage.totalTokens).toBe(280);
     expect(response.body).not.toContain("hello world");
+  });
+  it("imports and ranks a complete model-tokenized result beyond the old block and context limits", async () => {
+    const { app, root, manager, registration } = await setup();
+    const snapshot = snapshotFixture();
+    const content = "hello world ".repeat(100000);
+    snapshot.requests[1].canonical_request_body = JSON.stringify({ model: "gpt-4.1", input: [
+      { type: "function_call_output", call_id: "call-1", output: content }
+    ] });
+    await writeFile(join(root, "large.json"), JSON.stringify(snapshot));
+    const registered = await register(app, { ...registration, sourceKey: "large", kind: "context_snapshot",
+      inputRef: { importRootId: "fixtures", relativePath: "large.json" },
+      mappings: [{ ...registration.mappings[0], sourceSessionKey: "capture-session" }] });
+    expect(registered.statusCode).toBe(201);
+    expect((await app.inject({ method: "POST", url: `/api/usage/sources/${registered.json().id}/collect`, headers })).statusCode).toBe(202);
+    await vi.waitFor(() => expect(manager.collector.sources.listSources(manager.collector.namespace)[0]?.status).toBe("completed"), { timeout: 5000 });
+    const response = await app.inject({ url: "/api/usage/capabilities?dimension=mcp_tool&sort=totalInputTokens", headers });
+    expect(response.json().items[0]).toMatchObject({ firstResultInputTokens: 200000, missingExposureCount: 0,
+      tokenEstimates: [expect.objectContaining({ method: "model_tokenizer", reason: null })] });
+    expect(response.body).not.toContain(content.slice(0, 100));
+    expect((await app.inject({ url: "/api/usage/summary", headers })).json().usage.totalTokens).toBe(280);
   });
   it("recovers an unregistered completed log on startup and harvests shutdown-flushed usage", async () => {
     const root = await mkdtemp(join(tmpdir(), "usage-recovery-"));

@@ -130,6 +130,11 @@ export class UsageStore {
     return new UsageAnalysis(this.records(filter)).timeseries(filter, timezone, bucket);
   }
 
+  overview(filter: UsageFilter, timezone: string, bucket: "day" | "week" | "month"): { summary: UsageSummary; timeseries: UsageTimeseries } {
+    const analysis = new UsageAnalysis(this.records(filter));
+    return { summary: analysis.summary(filter), timeseries: analysis.timeseries(filter, timezone, bucket) };
+  }
+
   deleteSession(namespace: string, sessionId: string): void {
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO agent_usage_subjects (namespace, kind, subject_id, state)
