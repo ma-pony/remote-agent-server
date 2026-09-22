@@ -37,7 +37,7 @@ it("在独立页面管理智能体会话参数", async () => {
     const url = typeof input === "string" ? input : input.toString();
     const method = init?.method ?? "GET";
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/session-parameters` && method === "GET") return response(parameters);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20` && method === "GET") return response({ items: parameters, page: 1, pageSize: 20, total: parameters.length, totalPages: 1 });
     if (url === `/api/agents/${agent.id}/session-parameters` && method === "POST") {
       const body = JSON.parse(String(init?.body));
       const created = { ...parameter, id: 2, ...body };
@@ -82,4 +82,24 @@ it("MCP 列表页面不再加载或展示会话参数管理", async () => {
   expect(await screen.findByText("MCP 服务器")).toBeVisible();
   expect(screen.queryByRole("button", { name: "添加会话参数" })).not.toBeInTheDocument();
   expect(fetchMock).not.toHaveBeenCalledWith(`/api/agents/${agent.id}/session-parameters`, expect.anything());
+});
+
+it("会话参数仅请求当前页，翻页后展示下一页", async () => {
+  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    const page = new URL(url, "http://localhost").searchParams.get("page");
+    if (url.includes("/session-parameters?") && page !== null) return response({
+      page: Number(page), pageSize: 20, total: 21, totalPages: 2,
+      items: [{ ...parameter, id: Number(page), label: page === "1" ? "首页参数" : "第二页参数" }]
+    });
+    throw new Error(`Unexpected request: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  render(<App />);
+  await screen.findByDisplayValue("首页参数");
+  expect(fetchMock.mock.calls.some(([input]) => String(input).includes("page=2"))).toBe(false);
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  expect(await screen.findByDisplayValue("第二页参数")).toBeVisible();
+  expect(screen.queryByDisplayValue("首页参数")).not.toBeInTheDocument();
 });

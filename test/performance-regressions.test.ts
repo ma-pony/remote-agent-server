@@ -116,7 +116,7 @@ describe("performance regressions", () => {
 
     try {
       expect(latestSql).toBeDefined();
-      const plan = db.prepare(`EXPLAIN QUERY PLAN ${latestSql}`).all(task.endpointId) as Array<{ detail: string }>;
+      const plan = db.prepare(`EXPLAIN QUERY PLAN ${latestSql}`).all(task.endpointId, 20, 0) as Array<{ detail: string }>;
       const details = plan.map(({ detail }) => detail).join("\n");
       expect(details).toContain("SEARCH delivery USING INTEGER PRIMARY KEY");
       expect(details).toContain("SEARCH recent USING COVERING INDEX webhook_deliveries_subscription_recent");

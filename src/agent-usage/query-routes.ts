@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { HostUsageCollector } from "./host-collector.js";
 import { capabilityKinds, type AttributionRankRow } from "./core/context-types.js";
 import type { UsageFilter } from "./core/types.js";
+import { getRuntimeContentEvidence, listRuntimeContentEvidence } from "./runtime-content-evidence.js";
 
 const querySchema = z.object({
   agentId: z.string().regex(/^[1-9]\d*$/).optional(), sessionId: z.string().regex(/^[1-9]\d*$/).optional(),
@@ -11,10 +12,12 @@ const querySchema = z.object({
     try { new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; }
   }),
   runtimeKind: z.string().min(1).max(100).optional(), subagents: z.literal("self").default("self"),
-  dimension: z.enum(capabilityKinds).default("mcp_tool"),
-  sort: z.enum(["totalInputTokens", "inputBytes", "calls", "definitionInputTokens", "firstResultInputTokens", "repeatedResultInputTokens", "failures", "latencyMsP95"]).default("totalInputTokens"),
+  dimension: z.enum(["all", ...capabilityKinds]).default("all"),
+  sort: z.enum(["observedTotalTokens", "observedArgumentTokens", "observedResultTokens", "totalInputTokens", "inputBytes", "calls", "definitionInputTokens", "firstResultInputTokens", "repeatedResultInputTokens", "failures", "latencyMsP95"]).default("observedTotalTokens"),
   bucket: z.enum(["day", "week", "month"]).default("day"),
   limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().min(0).max(100000).default(0),
+  capturePage: z.coerce.number().int().min(1).default(1), failurePage: z.coerce.number().int().min(1).default(1),
+  stageOffset: z.coerce.number().int().min(0).max(100000).default(0),
   capabilityKind: z.enum(capabilityKinds).optional(),
   capabilityId: z.string().min(1).max(500).optional(), capabilityServerId: z.string().min(1).max(500).optional(),
   cursor: z.string().max(500).optional(),
@@ -40,7 +43,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
     if (subject.state !== "active" || subject.agent_id !== String(session.agent_id)) return null;
     return `session:${sessionId}:epoch:${subject.epoch}`;
   };
-  for (const endpoint of ["summary", "timeseries", "capabilities", "invocations", "context-evidence"] as const) {
+  for (const endpoint of ["summary", "timeseries", "capabilities", "invocations", "context-evidence", "content-evidence"] as const) {
     app.get(`/usage/${endpoint}`, (request, reply) => {
       const parsed = querySchema.safeParse(request.query);
       if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
@@ -48,30 +51,40 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       const filter: UsageFilter = { namespace, agentId: query.agentId, sessionId: query.sessionId,
         from: query.from === undefined ? undefined : new Date(query.from).toISOString(),
         to: query.to === undefined ? undefined : new Date(query.to).toISOString(), runtimeKind: query.runtimeKind };
-      const sources = collector.sources.listSources(namespace, filter);
-      const collectionFailures = collector.collectionFailures(filter);
-      const captureHealth = collector.capture?.health(filter) ?? [];
-      const capturePartial = captureHealth.some((item) => item.status !== "observed");
-      const metadata = { collectionFailures, captureHealth, asOf: new Date().toISOString(), timezone: query.timezone, from: query.from ?? null, to: query.to ?? null,
+      const sourceCounts = collector.sources.sourceStatusCounts(namespace, filter);
+      const sourceCount = Object.values(sourceCounts).reduce((sum, count) => sum + count, 0);
+      const failurePage = collector.collectionFailurePage(filter, { page: query.failurePage, pageSize: 20 });
+      const capturePage = collector.capture?.healthPage(filter, { page: query.capturePage, pageSize: 20 });
+      const collectionFailures = failurePage.items;
+      const captureHealth = capturePage?.items ?? [];
+      const captureHealthCounts = collector.capture?.healthCounts(filter) ?? {};
+      const capturePartial = Object.entries(captureHealthCounts).some(([status, count]) => status !== "observed" && count > 0);
+      const contentBackfill = collector.contentBackfill.status(filter);
+      const metadata = { collectionFailures, collectionFailureTotal: failurePage.total,
+        captureHealth, captureHealthTotal: capturePage?.total ?? 0, captureHealthCounts,
+        contentBackfill, asOf: new Date().toISOString(), timezone: query.timezone, from: query.from ?? null, to: query.to ?? null,
         subagents: "self", timeBasis: "source_timestamp", bodyStatus: "not_retained",
-        analysisStatus: sources.some((source) => source.status === "collecting") ? "collecting"
-          : capturePartial || collectionFailures.length > 0 || sources.some((source) => source.status === "failed") ? "partial" : "ready" };
+        analysisStatus: sourceCounts.collecting || contentBackfill.status === "pending" || contentBackfill.status === "running" ? "collecting"
+          : capturePartial || contentBackfill.status === "failed" || failurePage.total > 0 || sourceCounts.failed ? "partial" : "ready" };
       if (endpoint === "summary") {
         const summary = collector.store.summary(filter);
-        return { ...metadata, ...summary, ...(capturePartial && summary.completeness !== "conflict" ? { completeness: "partial" } : {}), ...(query.sessionId === undefined ? {} : { providerEpochId: providerEpoch(query.sessionId, query.agentId) }),
-          sources: sources.map((source) => ({ id: source.id, status: source.status, errorCode: source.errorCode })),
-          analysisStatus: sources.length === 0 && summary.completeness === "none" && collectionFailures.length === 0 && captureHealth.length === 0 ? "empty" : metadata.analysisStatus };
+        const hasCapabilityEvidence = collector.attribution.hasEvidence(filter);
+        return { ...metadata, ...summary, hasCapabilityEvidence,
+          ...(capturePartial && summary.completeness !== "conflict" ? { completeness: "partial" } : {}), ...(query.sessionId === undefined ? {} : { providerEpochId: providerEpoch(query.sessionId, query.agentId) }),
+          sourceCounts,
+          analysisStatus: sourceCount === 0 && summary.completeness === "none" && failurePage.total === 0 && !capturePage?.total
+            && contentBackfill.status === "completed" && !hasCapabilityEvidence ? "empty" : metadata.analysisStatus };
       }
       if (endpoint === "timeseries") {
-        return { ...metadata, ...collector.store.timeseries(filter, query.timezone, query.bucket) };
+        const series = collector.store.timeseries(filter, query.timezone, query.bucket);
+        return { ...metadata, ...series, total: series.items.length, items: series.items.slice(query.offset, query.offset + query.limit) };
       }
       if (endpoint === "capabilities") {
-        const all = collector.attribution.rankings(filter, query.dimension).sort((a, b) =>
-          (b[query.sort] ?? -1) - (a[query.sort] ?? -1) || a.capability.id.localeCompare(b.capability.id));
-        const stages = collector.runtimeCapabilities.stageCounts(filter)
-          .filter((stage) => stage.capability.kind === query.dimension);
-        return { ...metadata, measurement: "estimated", dimension: query.dimension, sort: query.sort, total: all.length, stages,
-          items: all.slice(query.offset, query.offset + query.limit).map((row) => ({ ...row, insights: insights(row) })) };
+        const page = collector.attribution.rankingsPage(filter, query.dimension, query);
+        const stages = collector.runtimeCapabilities.stageCountsPage(filter, { dimension: query.dimension, limit: 20, offset: query.stageOffset });
+        return { ...metadata, measurement: "estimated", dimension: query.dimension, sort: query.sort, total: page.total,
+          stages: stages.items, stageTotal: stages.total,
+          items: page.items.map((row) => ({ ...row, insights: insights(row) })) };
       }
       let cursor: { t: string; id: string } | undefined;
       if (query.cursor) {
@@ -80,6 +93,12 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       }
       const page = { cursor, limit: query.limit + 1, capabilityId: query.capabilityId,
         capabilityKind: query.capabilityKind, capabilityServerId: query.capabilityServerId };
+      if (endpoint === "content-evidence") {
+        const rows = listRuntimeContentEvidence(collector.db, filter, page);
+        const items = rows.slice(0, query.limit), last = items.at(-1);
+        return { ...metadata, items, nextCursor: rows.length > query.limit && last
+          ? Buffer.from(JSON.stringify({ t: last.occurredAt, id: last.id })).toString("base64url") : null };
+      }
       if (endpoint === "context-evidence") {
         const contexts = collector.attribution.contextEvidence(filter, page);
         const items = contexts.slice(0, query.limit);
@@ -94,16 +113,24 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
         ? Buffer.from(JSON.stringify({ t: last.startedAt ?? "", id: last.id })).toString("base64url") : null };
     });
   }
+  app.get<{ Params: { id: string } }>("/usage/content-evidence/:id", (request, reply) => {
+    const detail = getRuntimeContentEvidence(collector.db, namespace, request.params.id);
+    if (!detail) return reply.code(404).send({ error: { code: "usage_content_evidence_not_found", message: "Content evidence not found" } });
+    return { ...detail, bodyStatus: "not_retained", asOf: new Date().toISOString() };
+  });
   app.get<{ Params: { id: string } }>("/usage/context-evidence/:id", (request, reply) => {
-    const detail = collector.attribution.contextEvidenceDetail(namespace, request.params.id);
+    const parsed = querySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
+    const detail = collector.attribution.contextEvidenceDetail(namespace, request.params.id, parsed.data);
     if (!detail) return reply.code(404).send({ error: { code: "usage_context_evidence_not_found", message: "Usage context evidence not found" } });
     return { ...detail, bodyStatus: "not_retained", asOf: new Date().toISOString() };
   });
   app.get<{ Params: { id: string } }>("/usage/invocations/:id", (request, reply) => {
-    const detail = collector.attribution.detail(namespace, request.params.id);
+    const parsed = querySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
+    const detail = collector.attribution.detail(namespace, request.params.id, parsed.data);
     if (!detail) return reply.code(404).send({ error: { code: "usage_invocation_not_found", message: "Usage invocation not found" } });
-    const records = collector.store.records({ namespace, sessionId: detail.invocation.sessionId }).filter((row) =>
-      row.invocationId !== null && detail.subsequentModelInvocationIds.includes(row.invocationId));
+    const records = collector.store.records({ namespace, sessionId: detail.invocation.sessionId }, detail.subsequentModelInvocationIds);
     return { ...detail, bodyStatus: "not_retained", usageEvidence: records, asOf: new Date().toISOString() };
   });
 };

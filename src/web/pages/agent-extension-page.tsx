@@ -2,12 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { Blocks, CheckCircle2, PlugZap, ShieldCheck, XCircle } from "lucide-react";
 import { useParams } from "react-router";
 
-import { api, errorMessage, type ProviderExtensionCatalogItem } from "@/api";
+import { api, errorMessage, type Page, type ProviderExtensionCatalogItem } from "@/api";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Input } from "@/components/ui/input";
+import { ListPagination } from "@/components/list-pagination";
 import { useI18n } from "@/i18n";
 
 const providerName = { codex: "Codex", claude_code: "Claude Code" } as const;
@@ -45,18 +47,22 @@ const ExtensionRow = ({ item, busy, onToggle }: {
 export const AgentExtensionPage = () => {
   const { text } = useI18n();
   const { id = "" } = useParams();
-  const [items, setItems] = useState<ProviderExtensionCatalogItem[] | null>(null);
+  const [result, setResult] = useState<Page<ProviderExtensionCatalogItem> | null>(null);
+  const items = result?.items ?? null;
+  const [page, setPage] = useState(1);
+  const [query, setQuery] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
-    void api<ProviderExtensionCatalogItem[]>(`/agents/${id}/extensions`, { signal: controller.signal })
-      .then(setItems)
+    setResult(null); setError("");
+    void api<Page<ProviderExtensionCatalogItem>>(`/agents/${id}/extensions?page=${page}&pageSize=20&query=${encodeURIComponent(query)}`, { signal: controller.signal })
+      .then(setResult)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [id]);
+  }, [id, page, query]);
 
   const groups = useMemo(() => ({
     plugin: (items ?? []).filter(({ kind }) => kind === "plugin").sort((a, b) => Number(b.enabled) - Number(a.enabled)),
@@ -71,7 +77,7 @@ export const AgentExtensionPage = () => {
         `/agents/${id}/extensions/${encodeURIComponent(item.id)}`,
         { method: "PUT", body: JSON.stringify({ enabled: !item.enabled }) }
       );
-      setItems((current) => (current ?? []).map((candidate) => candidate.id === updated.id ? updated : candidate));
+      setResult(current => current === null ? null : {...current, items: current.items.map(candidate => candidate.id === updated.id ? updated : candidate)});
       setNotice(text("配置已保存，下一次运行会自动刷新执行器会话。", "Saved. The next run refreshes the executor session automatically."));
     } catch (reason) {
       setError(errorMessage(reason));
@@ -87,7 +93,7 @@ export const AgentExtensionPage = () => {
     </CardHeader>
     <CardContent>
       {items === null ? <Skeleton className="h-28" /> : groups[kind].length === 0
-        ? <div className="rounded-lg border border-dashed bg-muted/10 px-5 py-9 text-center"><p className="text-sm font-medium">{text("系统中尚未发现扩展", "No extensions discovered")}</p><p className="mt-1 text-xs text-muted-foreground">{text("在执行器系统配置中安装后即可在这里选择。", "Install one in the provider system configuration to select it here.")}</p></div>
+        ? <div className="rounded-lg border border-dashed bg-muted/10 px-5 py-9 text-center"><p className="text-sm font-medium">{text("本页没有此类扩展", "No extensions of this type on this page")}</p><p className="mt-1 text-xs text-muted-foreground">{text("可以搜索名称或翻页查看其他扩展。", "Search by name or change pages to find other extensions.")}</p></div>
         : <div className="surface-list divide-y rounded-lg border">{groups[kind].map((item) => <ExtensionRow
           key={item.id}
           item={item}
@@ -112,7 +118,9 @@ export const AgentExtensionPage = () => {
         "Discovered extensions are disabled by default and never inherited implicitly. Enabled items are projected only to this agent and apply on the next run."
       )}</p></CardContent>
     </Card>
+    <Input aria-label={text("搜索扩展", "Search extensions")} value={query} onChange={event => {setPage(1); setQuery(event.target.value);}} />
     {section("plugin", text("插件", "Plugins"), text("执行器原生插件及其随附能力。", "Provider-native plugins and their bundled capabilities."), <Blocks className="size-4" />)}
     {section("hook", text("钩子", "Hooks"), text("在执行器生命周期事件上运行的本机钩子。", "Local hooks invoked at provider lifecycle events."), <PlugZap className="size-4" />)}
+    {result === null ? null : <ListPagination {...result} onPageChange={setPage} disabled={busy !== ""} />}
   </div>;
 };

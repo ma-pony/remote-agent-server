@@ -1,3 +1,4 @@
+import { ListPagination } from "@/components/list-pagination";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { ArrowLeft, Boxes, CheckCircle2, GitBranch, Loader2, Pencil, Plus, RefreshCw, Trash2, XCircle } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams } from "react-router";
@@ -12,10 +13,12 @@ import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { EmptyState, PageContainer, PageHeader, SectionHeader } from "@/components/page-header";
-import { api, errorMessage, type EnvironmentRepository, type ProjectEnvironment } from "@/api";
+import { api, errorMessage, type Page, type EnvironmentRepository, type ProjectEnvironment } from "@/api";
 import { useI18n } from "@/i18n";
 
-const revisionStatus = (environment: ProjectEnvironment, text: (chinese: string, english: string) => string): { label: string; variant: "default" | "secondary" | "destructive" | "outline" } => {
+type EnvironmentSummary = Omit<ProjectEnvironment, "repositories"> & { repositoryCount: number };
+
+const revisionStatus = (environment: EnvironmentSummary, text: (chinese: string, english: string) => string): { label: string; variant: "default" | "secondary" | "destructive" | "outline" } => {
   if (environment.latestRevision?.status === "preparing") return { label: text("准备中", "Preparing"), variant: "secondary" };
   if (environment.latestRevision?.status === "failed") return { label: text("准备失败", "Preparation failed"), variant: "destructive" };
   if (environment.currentRevisionId !== null) return { label: text("可用", "Ready"), variant: "default" };
@@ -29,19 +32,23 @@ const ErrorAlert = ({ message }: { message: string }) => {
 
 export const ProjectEnvironmentListPage = () => {
   const { text, formatDate } = useI18n();
-  const [items, setItems] = useState<ProjectEnvironment[] | null>(null);
+  const [items, setItems] = useState<EnvironmentSummary[] | null>(null);
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState<Page<EnvironmentSummary> | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    void api<ProjectEnvironment[]>("/project-environments", { signal: controller.signal }).then(setItems).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    setItems(null);
+    void api<Page<EnvironmentSummary>>(`/project-environments?page=${page}&pageSize=20`, { signal: controller.signal }).then((result) => { setResult(result); setItems(result.items); }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, []);
+  }, [page]);
   return <PageContainer width="wide">
     <PageHeader eyebrow={text("托管工作区", "MANAGED WORKSPACES")} title={text("项目环境", "Project environments")} description={text("一个环境可以包含多个 Git 项目，会话从可用版本创建独立工作区。", "An environment can contain multiple Git projects. Sessions receive isolated workspaces from a ready revision.")} action={<Button asChild><Link to="/project-environments/new"><Plus />{text("新建项目环境", "New environment")}</Link></Button>} />
     <ErrorAlert message={error} />
     {items === null ? <div className="resource-grid">{[0, 1].map((item) => <Skeleton key={item} className="h-48" />)}</div>
       : items.length === 0 ? <EmptyState icon={Boxes} title={text("还没有项目环境", "No project environments yet")} description={text("创建环境并添加 Git 项目，系统会准备可复用的基础工作区。", "Create an environment and add Git projects to prepare a reusable base workspace.")} action={<Button asChild><Link to="/project-environments/new"><Plus />{text("新建项目环境", "New environment")}</Link></Button>} />
-      : <div className="resource-grid">{items.map((environment) => { const status = revisionStatus(environment, text); return <Card key={environment.id} className="h-full transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40"><CardHeader><div className="flex items-start justify-between gap-4"><div><CardTitle><Link className="hover:underline" to={`/project-environments/${environment.id}`}>{environment.name}</Link></CardTitle><CardDescription className="mt-2">{text(`${environment.repositories.length} 个项目`, `${environment.repositories.length} projects`)}</CardDescription></div><Badge variant={status.variant}>{status.label}</Badge></div></CardHeader><CardContent className="flex flex-col gap-2 text-sm text-muted-foreground"><p><span className="font-medium text-foreground">{text("当前版本：", "Current revision: ")}</span>{environment.currentRevisionId ?? "—"}</p><p><span className="font-medium text-foreground">{text("最近同步：", "Last sync: ")}</span>{environment.lastCheckedAt === null ? text("尚未同步", "Never") : formatDate(environment.lastCheckedAt)}</p><p><span className="font-medium text-foreground">{text("下次同步：", "Next sync: ")}</span>{environment.sync.nextScheduledAt === null ? text("尚未安排", "Not scheduled") : formatDate(environment.sync.nextScheduledAt)}</p></CardContent></Card>; })}</div>}
+      : <div className="resource-grid">{items.map((environment) => { const status = revisionStatus(environment, text); return <Card key={environment.id} className="h-full transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40"><CardHeader><div className="flex items-start justify-between gap-4"><div><CardTitle><Link className="hover:underline" to={`/project-environments/${environment.id}`}>{environment.name}</Link></CardTitle><CardDescription className="mt-2">{text(`${environment.repositoryCount} 个项目`, `${environment.repositoryCount} projects`)}</CardDescription></div><Badge variant={status.variant}>{status.label}</Badge></div></CardHeader><CardContent className="flex flex-col gap-2 text-sm text-muted-foreground"><p><span className="font-medium text-foreground">{text("当前版本：", "Current revision: ")}</span>{environment.currentRevisionId ?? "—"}</p><p><span className="font-medium text-foreground">{text("最近同步：", "Last sync: ")}</span>{environment.lastCheckedAt === null ? text("尚未同步", "Never") : formatDate(environment.lastCheckedAt)}</p><p><span className="font-medium text-foreground">{text("下次同步：", "Next sync: ")}</span>{environment.sync.nextScheduledAt === null ? text("尚未安排", "Not scheduled") : formatDate(environment.sync.nextScheduledAt)}</p></CardContent></Card>; })}</div>}
+    {result === null ? null : <ListPagination {...result} onPageChange={setPage} disabled={items === null} />}
   </PageContainer>;
 };
 
@@ -60,7 +67,7 @@ export const ProjectEnvironmentCreatePage = () => {
   return <PageContainer width="form" className="max-w-3xl"><Button asChild variant="ghost" className="mb-4"><Link to="/project-environments"><ArrowLeft />{text("返回项目环境", "Back to environments")}</Link></Button><PageHeader eyebrow={text("新建托管工作区", "NEW MANAGED WORKSPACE")} title={text("新建项目环境", "New project environment")} description={text("创建后添加一个或多个项目，系统会自动准备可复用的基础版本。", "Add one or more projects after creation. The server prepares a reusable base revision automatically.")} /><ErrorAlert message={error} /><Card><CardHeader><CardTitle>{text("环境信息", "Environment details")}</CardTitle></CardHeader><CardContent><form className="flex flex-col gap-6" onSubmit={submit}><FieldGroup><Field><FieldLabel htmlFor="environment-name">{text("项目环境名称", "Environment name")}</FieldLabel><Input id="environment-name" name="environment-name" value={name} onChange={(event) => setName(event.target.value)} /></Field><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button asChild variant="outline"><Link to="/project-environments">{text("取消", "Cancel")}</Link></Button><Button type="submit" disabled={busy}>{busy ? text("创建中…", "Creating…") : text("创建项目环境", "Create environment")}</Button></div></FieldGroup></form></CardContent></Card></PageContainer>;
 };
 
-type EnvironmentContext = { environment: ProjectEnvironment; reload(): Promise<void>; setEnvironment(value: ProjectEnvironment): void; error: string; setError(message: string): void };
+type EnvironmentContext = { environment: EnvironmentSummary; reload(): Promise<void>; setEnvironment(value: EnvironmentSummary): void; error: string; setError(message: string): void };
 const useEnvironment = () => useOutletContext<EnvironmentContext>();
 
 export const ProjectEnvironmentDetailLayout = () => {
@@ -68,10 +75,10 @@ export const ProjectEnvironmentDetailLayout = () => {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const { pathname } = useLocation();
-  const [environment, setEnvironment] = useState<ProjectEnvironment | null>(null);
+  const [environment, setEnvironment] = useState<EnvironmentSummary | null>(null);
   const [error, setError] = useState("");
-  const reload = useCallback(async () => setEnvironment(await api<ProjectEnvironment>(`/project-environments/${id}`)), [id]);
-  useEffect(() => { const controller = new AbortController(); setEnvironment(null); setError(""); void api<ProjectEnvironment>(`/project-environments/${id}`, { signal: controller.signal }).then(setEnvironment).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); }); return () => controller.abort(); }, [id]);
+  const reload = useCallback(async () => setEnvironment(await api<EnvironmentSummary>(`/project-environments/${id}/summary`)), [id]);
+  useEffect(() => { const controller = new AbortController(); setEnvironment(null); setError(""); void api<EnvironmentSummary>(`/project-environments/${id}/summary`, { signal: controller.signal }).then(setEnvironment).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); }); return () => controller.abort(); }, [id]);
   useEffect(() => {
     if (environment?.latestRevision?.status !== "preparing" && environment?.sync.status === "idle") return;
     const timer = setTimeout(() => void reload().catch((reason: unknown) => setError(errorMessage(reason))), 2_000);
@@ -93,20 +100,47 @@ export const ProjectEnvironmentOverviewPage = () => {
   const syncing = environment.sync.status !== "idle";
   const buttonLabel = busy ? text("提交中…", "Submitting…") : environment.sync.status === "queued" ? text("等待同步", "Queued") : environment.sync.status === "running" ? text("同步中…", "Syncing…") : text("立即同步", "Sync now");
   const date = (value: string | null) => value === null ? text("尚未同步", "Never") : formatDate(value);
-  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card><CardHeader><CardDescription>{text("项目数量", "Projects")}</CardDescription><CardTitle className="text-3xl">{environment.repositories.length}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("当前版本", "Current revision")}</CardDescription><CardTitle className="font-mono text-lg">{environment.currentRevisionId ?? "—"}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("最近同步", "Last sync")}</CardDescription><CardTitle className="text-base">{date(environment.lastCheckedAt)}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("下次自动同步", "Next automatic sync")}</CardDescription><CardTitle className="text-base">{environment.sync.nextScheduledAt === null ? text("尚未安排", "Not scheduled") : formatDate(environment.sync.nextScheduledAt)}</CardTitle></CardHeader></Card></div>
+  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4"><Card><CardHeader><CardDescription>{text("项目数量", "Projects")}</CardDescription><CardTitle className="text-3xl">{environment.repositoryCount}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("当前版本", "Current revision")}</CardDescription><CardTitle className="font-mono text-lg">{environment.currentRevisionId ?? "—"}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("最近同步", "Last sync")}</CardDescription><CardTitle className="text-base">{date(environment.lastCheckedAt)}</CardTitle></CardHeader></Card><Card><CardHeader><CardDescription>{text("下次自动同步", "Next automatic sync")}</CardDescription><CardTitle className="text-base">{environment.sync.nextScheduledAt === null ? text("尚未安排", "Not scheduled") : formatDate(environment.sync.nextScheduledAt)}</CardTitle></CardHeader></Card></div>
     <Card className="overflow-hidden"><CardHeader className="border-b bg-muted/30"><div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><CardTitle>{text("项目环境同步", "Environment sync")}</CardTitle><CardDescription className="mt-2">{text("所有项目一起检查并原子发布新版本。自动计划：", "All projects are checked together and published as one revision. Schedule: ")}<span className="font-medium text-foreground">{text(`每 ${environment.sync.intervalMs / 3_600_000} 小时`, `Every ${environment.sync.intervalMs / 3_600_000} hours`)}</span></CardDescription></div><Badge variant={syncing ? "secondary" : "outline"}>{environment.sync.status === "running" ? text("同步中", "Syncing") : environment.sync.status === "queued" ? text("排队中", "Queued") : text("等待计划", "Scheduled")}</Badge></div></CardHeader><CardContent className="flex flex-col gap-5 p-5"><div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{text("环境工作区", "Environment workspace")}</p><p className="mt-2 break-all rounded-md border bg-background p-3 font-mono text-xs leading-5">{environment.workspacePath ?? text("尚未生成可用工作区", "No ready workspace yet")}</p></div><div><Button onClick={() => void sync()} disabled={busy || syncing}><RefreshCw className={busy || syncing ? "animate-spin" : ""} />{buttonLabel}</Button></div></CardContent></Card>
     {revision?.status === "failed" ? <Alert variant="destructive"><XCircle /><AlertTitle>{revision.failureStage ?? text("项目环境准备失败", "Environment preparation failed")}</AlertTitle><AlertDescription className="whitespace-pre-wrap">{revision.error ?? text("请检查仓库地址和准备命令。", "Check the repository URL and preparation command.")}</AlertDescription></Alert> : null}
     {revision?.status === "ready" ? <Alert><CheckCircle2 /><AlertTitle>{text("基础版本可用", "Base revision ready")}</AlertTitle><AlertDescription>{text("新会话会从当前版本创建独立工作区。", "New sessions receive an isolated workspace from this revision.")}</AlertDescription></Alert> : null}
+    <RevisionHistory environment={environment} />
   </div>;
+};
+
+const RevisionHistory = ({ environment }: { environment: EnvironmentSummary }) => {
+  const { text, formatDate } = useI18n();
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState<Page<NonNullable<ProjectEnvironment["latestRevision"]>> | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController(); setResult(null); setError("");
+    void api<Page<NonNullable<ProjectEnvironment["latestRevision"]>>>(`/project-environments/${environment.id}/revisions?page=${page}&pageSize=20`, { signal: controller.signal })
+      .then(setResult).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    return () => controller.abort();
+  }, [environment.id, environment.latestRevision?.id, environment.latestRevision?.status, page]);
+  return <Card><CardHeader><CardTitle>{text("构建历史", "Build history")}</CardTitle></CardHeader><CardContent><ErrorAlert message={error} />
+    {result === null ? <Skeleton className="h-24" /> : <><div className="divide-y">{result.items.map((revision) => <div key={revision.id} className="flex flex-wrap items-center justify-between gap-3 py-3"><span>#{revision.id} · {formatDate(revision.createdAt)}</span><Badge variant="outline">{revision.status === "ready" ? text("可用", "Ready") : revision.status === "failed" ? text("失败", "Failed") : text("准备中", "Preparing")}</Badge></div>)}</div>{result.total === 0 ? <p>{text("暂无构建记录", "No builds yet")}</p> : null}<ListPagination {...result} onPageChange={setPage} /></>}
+  </CardContent></Card>;
 };
 
 export const ProjectEnvironmentRepositoriesPage = () => {
   const { text } = useI18n();
   const { environment, reload, error, setError } = useEnvironment();
   const [editing, setEditing] = useState<EnvironmentRepository | null | undefined>(undefined);
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState<Page<EnvironmentRepository> | null>(null);
+  useEffect(() => {
+    const controller = new AbortController(); setResult(null);
+    void api<Page<EnvironmentRepository>>(`/project-environments/${environment.id}/repositories?page=${page}&pageSize=20`, { signal: controller.signal }).then((result) => {
+      if (result.totalPages > 0 && page > result.totalPages) { setPage(result.totalPages); return; } setResult(result);
+    }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    return () => controller.abort();
+  }, [environment, page, setError]);
   const preparing = environment.latestRevision?.status === "preparing";
-  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><SectionHeader title={text("项目清单", "Projects")} description={text("每个项目会被准备到同一个基础工作区。", "Every project is prepared into the same base workspace.")} action={environment.repositories.length === 0 ? undefined : <RepositoryDialog environmentId={environment.id} repository={null} open={editing === null} onOpenChange={(open) => setEditing(open ? null : undefined)} disabled={preparing} onSaved={async () => { setEditing(undefined); await reload(); }} onError={setError}><Button disabled={preparing}><Plus />{text("添加项目", "Add project")}</Button></RepositoryDialog>} />
-    {environment.repositories.length === 0 ? <EmptyState icon={GitBranch} title={text("还没有项目", "No projects yet")} description={text("添加第一个 Git 项目后，系统会自动开始准备环境。", "Add the first Git project to start preparing the environment automatically.")} action={<RepositoryDialog environmentId={environment.id} repository={null} open={editing === null} onOpenChange={(open) => setEditing(open ? null : undefined)} disabled={preparing} onSaved={async () => { setEditing(undefined); await reload(); }} onError={setError}><Button disabled={preparing}><Plus />{text("添加项目", "Add project")}</Button></RepositoryDialog>} /> : <div className="surface-list flex flex-col gap-3">{environment.repositories.map((repository) => <Card key={repository.id}><CardContent className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><GitBranch className="size-4" /><h3 className="font-medium">{repository.name}</h3><Badge variant="outline">{text("随项目环境整体同步", "Synced with environment")}</Badge></div><p className="mt-2 truncate font-mono text-xs text-muted-foreground">{repository.gitUrl}</p><p className="mt-1 text-sm text-muted-foreground">{text("准备命令：", "Prepare command: ")}{repository.prepareCommand ?? text("无", "None")}</p><div className="mt-3"><p className="text-xs font-medium text-muted-foreground">{text("工作区路径", "Workspace path")}</p><p className="mt-1 break-all font-mono text-xs">{repository.workspacePath ?? text("尚未生成", "Not created")}</p></div></div><div className="flex flex-wrap gap-2"><RepositoryDialog environmentId={environment.id} repository={repository} open={editing?.id === repository.id} onOpenChange={(open) => setEditing(open ? repository : undefined)} disabled={preparing} onSaved={async () => { setEditing(undefined); await reload(); }} onError={setError}><Button size="sm" variant="outline" disabled={preparing}><Pencil />{text("编辑", "Edit")}</Button></RepositoryDialog><Button size="sm" variant="ghost" disabled={preparing} onClick={() => void (async () => { try { await api(`/project-environments/${environment.id}/repositories/${repository.id}`, { method: "DELETE" }); await reload(); } catch (reason) { setError(errorMessage(reason)); } })()}><Trash2 />{text("移除", "Remove")}</Button></div></CardContent></Card>)}</div>}
+  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><SectionHeader title={text("项目清单", "Projects")} description={text("每个项目会被准备到同一个基础工作区。", "Every project is prepared into the same base workspace.")} action={environment.repositoryCount === 0 ? undefined : <RepositoryDialog environmentId={environment.id} repository={null} open={editing === null} onOpenChange={(open) => setEditing(open ? null : undefined)} disabled={preparing} onSaved={async () => { setEditing(undefined); await reload(); }} onError={setError}><Button disabled={preparing}><Plus />{text("添加项目", "Add project")}</Button></RepositoryDialog>} />
+    {result === null ? <Skeleton className="h-32" /> : result.total === 0 ? <EmptyState icon={GitBranch} title={text("还没有项目", "No projects yet")} description={text("添加第一个 Git 项目后，系统会自动开始准备环境。", "Add the first Git project to start preparing the environment automatically.")} action={<RepositoryDialog environmentId={environment.id} repository={null} open={editing === null} onOpenChange={(open) => setEditing(open ? null : undefined)} disabled={preparing} onSaved={async () => { setEditing(undefined); await reload(); }} onError={setError}><Button disabled={preparing}><Plus />{text("添加项目", "Add project")}</Button></RepositoryDialog>} /> : <div className="surface-list flex flex-col gap-3">{result.items.map((repository) => <Card key={repository.id}><CardContent className="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><GitBranch className="size-4" /><h3 className="font-medium">{repository.name}</h3><Badge variant="outline">{text("随项目环境整体同步", "Synced with environment")}</Badge></div><p className="mt-2 truncate font-mono text-xs text-muted-foreground">{repository.gitUrl}</p><p className="mt-1 text-sm text-muted-foreground">{text("准备命令：", "Prepare command: ")}{repository.prepareCommand ?? text("无", "None")}</p><div className="mt-3"><p className="text-xs font-medium text-muted-foreground">{text("工作区路径", "Workspace path")}</p><p className="mt-1 break-all font-mono text-xs">{repository.workspacePath ?? text("尚未生成", "Not created")}</p></div></div><div className="flex flex-wrap gap-2"><RepositoryDialog environmentId={environment.id} repository={repository} open={editing?.id === repository.id} onOpenChange={(open) => setEditing(open ? repository : undefined)} disabled={preparing} onSaved={async () => { setEditing(undefined); await reload(); }} onError={setError}><Button size="sm" variant="outline" disabled={preparing}><Pencil />{text("编辑", "Edit")}</Button></RepositoryDialog><Button size="sm" variant="ghost" disabled={preparing} onClick={() => void (async () => { try { await api(`/project-environments/${environment.id}/repositories/${repository.id}`, { method: "DELETE" }); await reload(); } catch (reason) { setError(errorMessage(reason)); } })()}><Trash2 />{text("移除", "Remove")}</Button></div></CardContent></Card>)}</div>}
+    {result === null ? null : <ListPagination {...result} onPageChange={setPage} />}
     {preparing ? <Alert><Loader2 className="animate-spin" /><AlertTitle>{text("正在准备新版本", "Preparing a new revision")}</AlertTitle><AlertDescription>{text("准备完成前暂时不能修改项目配置。", "Project configuration is locked until preparation completes.")}</AlertDescription></Alert> : null}
   </div>;
 };

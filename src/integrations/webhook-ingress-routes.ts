@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { isPagedQuery, paginationQuerySchema } from "../pagination.js";
 
 import { IntegrationEndpointManagerError } from "./integration-endpoint-manager.js";
 import { handleIntegrationError } from "./integration-routes.js";
@@ -45,7 +46,9 @@ export const registerWebhookReceiverAdminRoutes = (app: FastifyInstance, ingress
     }
   });
   app.get<{ Params: { id: string } }>("/integration-endpoints/:id/webhook-receiver/receipts", (request, reply) => {
-    try { return ingress.receipts(Number(request.params.id)); }
+    const parsed = paginationQuerySchema.safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid receipt pagination" } });
+    try { return ingress.receipts(Number(request.params.id), isPagedQuery(request.query) ? parsed.data : undefined); }
     catch (error) { return handleIngressError(reply, error); }
   });
   app.post<{ Params: { id: string } }>("/integration-endpoints/:id/webhook-receiver/preview", (request, reply) => {

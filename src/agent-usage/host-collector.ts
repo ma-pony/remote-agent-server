@@ -1,3 +1,4 @@
+import { pageResult, type PaginationQuery } from "../pagination.js";
 import { UsageError } from "./core/errors.js";
 import { ModelTokenizers } from "./core/tokenizers.js";
 import type Database from "better-sqlite3";
@@ -9,6 +10,8 @@ import { UsageStore } from "./storage/usage-store.js";
 import { UsageSourceCoordinator, type UsageSourceAdapter } from "./source-coordinator.js";
 import { AttributionStore } from "./storage/attribution-store.js";
 import { RuntimeCapabilityCollector } from "./runtime-capabilities.js";
+import { RuntimeContentBackfill } from "./runtime-backfill.js";
+import { RuntimeConversationCollector } from "./runtime-conversation.js";
 
 /** The only layer that translates business-table IDs into the reusable usage module. */
 export class HostUsageCollector {
@@ -24,6 +27,8 @@ export class HostUsageCollector {
   readonly sources: UsageSourceCoordinator;
   readonly attribution: AttributionStore;
   readonly runtimeCapabilities: RuntimeCapabilityCollector;
+  readonly contentBackfill: RuntimeContentBackfill;
+  readonly conversationContent: RuntimeConversationCollector;
   constructor(readonly db: Database.Database, adapters: Record<string, UsageSourceAdapter> = {},
     private readonly discoverManagedSources?: (sessionId: number) => Promise<void>, tokenizers = new ModelTokenizers()) {
     this.store = new UsageStore(db);
@@ -33,6 +38,9 @@ export class HostUsageCollector {
     )`);
     this.attribution = new AttributionStore(this.store, tokenizers);
     this.runtimeCapabilities = new RuntimeCapabilityCollector(this.store, this.attribution, this.namespace);
+    this.conversationContent = new RuntimeConversationCollector(this.store, this.attribution, this.namespace);
+    this.contentBackfill = new RuntimeContentBackfill(db, this.namespace,
+      (runId, content, event) => this.runtimeCapabilities.recordTool(runId, content, event), this.conversationContent);
     this.sources = new UsageSourceCoordinator(this.store, adapters, 30_000, this.attribution);
   }
   binding(sessionId: number): UsageBinding {
@@ -199,6 +207,7 @@ export class HostUsageCollector {
   }
 
   private async recoveryBatch(): Promise<void> {
+    const contentPending = await this.contentBackfill.step();
     const deadline = Date.now() + 5_000;
     let admitted = 0;
     while (!this.recoveryStopped && this.recoveryQueue.length > 0 && admitted++ < 100 && Date.now() < deadline) {
@@ -206,7 +215,7 @@ export class HostUsageCollector {
       await work().catch(() => undefined);
     }
     if (this.recoveryStopped) return;
-    if (this.recoveryQueue.length > 0) this.scheduleRecovery(10);
+    if (this.recoveryQueue.length > 0 || contentPending) this.scheduleRecovery(10);
     else {
       this.queueRecovery(false);
       this.scheduleRecovery(30_000);
@@ -232,14 +241,33 @@ export class HostUsageCollector {
     for (const id of sessions) await this.harvestSession(id).catch(() => undefined);
   }
 
+  private collectionFailureQuery(filter: UsageFilter) {
+    return {
+      from: `FROM agent_usage_harvests h JOIN sessions s ON CAST(s.id AS TEXT) = h.session_id
+        JOIN agents a ON a.id = s.agent_id WHERE h.namespace = ? AND h.status != 'completed'
+        AND s.storage_cleaned_at IS NULL AND (? IS NULL OR h.session_id = ?)
+        AND (? IS NULL OR CAST(s.agent_id AS TEXT) = ?) AND (? IS NULL OR a.provider = ?)`,
+      parameters: [this.namespace, filter.sessionId ?? null, filter.sessionId ?? null, filter.agentId ?? null,
+        filter.agentId ?? null, filter.runtimeKind ?? null, filter.runtimeKind ?? null]
+    };
+  }
+
   collectionFailures(filter: UsageFilter = {}): Array<{ sessionId: string; status: string; errorCode: string | null }> {
-    return (this.db.prepare(`SELECT h.session_id AS sessionId, h.status, h.error_code AS errorCode
-      FROM agent_usage_harvests h JOIN sessions s ON CAST(s.id AS TEXT) = h.session_id
-      JOIN agents a ON a.id = s.agent_id WHERE h.namespace = ? AND h.status != 'completed'
-      AND s.storage_cleaned_at IS NULL AND (? IS NULL OR h.session_id = ?)
-      AND (? IS NULL OR CAST(s.agent_id AS TEXT) = ?) AND (? IS NULL OR a.provider = ?)`)
-      .all(this.namespace, filter.sessionId ?? null, filter.sessionId ?? null, filter.agentId ?? null,
-        filter.agentId ?? null, filter.runtimeKind ?? null, filter.runtimeKind ?? null)) as Array<{ sessionId: string; status: string; errorCode: string | null }>;
+    const query = this.collectionFailureQuery(filter);
+    return this.db.prepare(`SELECT h.session_id AS sessionId, h.status, h.error_code AS errorCode ${query.from} ORDER BY s.id`)
+      .all(...query.parameters) as Array<{ sessionId: string; status: string; errorCode: string | null }>;
+  }
+
+  collectionFailureCount(filter: UsageFilter = {}): number {
+    const query = this.collectionFailureQuery(filter);
+    return (this.db.prepare(`SELECT COUNT(*) AS total ${query.from}`).get(...query.parameters) as { total: number }).total;
+  }
+
+  collectionFailurePage(filter: UsageFilter, pagination: Pick<PaginationQuery, "page" | "pageSize">) {
+    const query = this.collectionFailureQuery(filter);
+    const items = this.db.prepare(`SELECT h.session_id AS sessionId, h.status, h.error_code AS errorCode
+      ${query.from} ORDER BY s.id LIMIT ? OFFSET ?`).all(...query.parameters, pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as Array<{ sessionId: string; status: string; errorCode: string | null }>;
+    return pageResult(items, this.collectionFailureCount(filter), pagination);
   }
 
   finishMaintenance(sessionId: number): void {
@@ -256,6 +284,8 @@ export class HostUsageCollector {
     this.db.transaction(() => {
       this.db.prepare("DELETE FROM agent_usage_harvests WHERE namespace = ? AND session_id = ?").run(this.namespace, String(sessionId));
       this.runtimeCapabilities.deleteSession(this.namespace, String(sessionId));
+      this.contentBackfill.deleteSession(String(sessionId));
+      this.conversationContent.deleteSession(String(sessionId));
       this.sources.revokeSubject(this.namespace, String(sessionId));
     })();
     this.observer?.revokeSession(sessionId);

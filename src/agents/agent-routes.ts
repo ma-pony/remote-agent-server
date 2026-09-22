@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { paginationQuerySchema, isPagedQuery, pageResult } from "../pagination.js";
 
 import { AgentManager, AgentManagerError } from "./agent-manager.js";
 import { agentModelPolicySchema } from "./model-policy.js";
@@ -97,7 +98,14 @@ export const registerAgentRoutes = (
   runRepository: RunRepository,
   providerExtensionManager: ProviderExtensionManager
 ): void => {
-  app.get("/agents", () => agentManager.list());
+  app.get("/agents", (request, reply) => {
+    if (!isPagedQuery(request.query)) return agentManager.list();
+    const parsed = paginationQuerySchema.extend({
+      enabled: z.enum(["true", "false"]).transform(value => value === "true").optional(),
+      provider: z.enum(["codex", "claude_code", "hermes"]).optional()
+    }).strict().safeParse(request.query);
+    return parsed.success ? agentManager.listPage(parsed.data) : badRequest(reply, "Invalid Agent pagination");
+  });
 
   app.get<{ Params: { id: string } }>("/agents/:id", (request, reply) => {
     const id = parseId(request.params.id);
@@ -165,9 +173,16 @@ export const registerAgentRoutes = (
   app.get<{ Params: { id: string } }>("/agents/:id/models", async (request, reply) => {
     const id = parseId(request.params.id);
     if (id === undefined) return notFound(reply);
+    const parsed = paginationQuerySchema.strict().safeParse(request.query);
+    if (!parsed.success) return badRequest(reply, "Invalid model pagination");
     try {
-      const catalog = await agentManager.models(id);
-      return catalog === undefined ? notFound(reply) : catalog;
+      const catalog = await agentManager.models(id, isPagedQuery(request.query));
+      if (catalog === undefined) return notFound(reply);
+      if (!isPagedQuery(request.query)) return catalog;
+      const matches = catalog.availableModels.filter(model => model.toLowerCase().includes(parsed.data.query?.toLowerCase() ?? ""));
+      const offset = (parsed.data.page - 1) * parsed.data.pageSize;
+      return {supported: catalog.supported, currentModel: catalog.currentModel,
+        ...pageResult(matches.slice(offset, offset + parsed.data.pageSize), matches.length, parsed.data)};
     } catch (error) {
       return handleAgentError(reply, error);
     }
@@ -182,14 +197,18 @@ export const registerAgentRoutes = (
   app.get<{ Params: { id: string } }>("/agents/:id/skills", (request, reply) => {
     const id = parseId(request.params.id);
     if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
-    try { return skillManager.list(id); }
+    const parsed = paginationQuerySchema.strict().safeParse(request.query);
+    if (!parsed.success) return badRequest(reply, "Invalid Skill pagination");
+    try { return isPagedQuery(request.query) ? skillManager.listPage(id, parsed.data) : skillManager.list(id); }
     catch (error) { return handleSkillError(reply, error); }
   });
 
   app.get<{ Params: { id: string } }>("/agents/:id/extensions", (request, reply) => {
     const id = parseId(request.params.id);
     if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
-    return providerExtensionManager.list(id);
+    const parsed = paginationQuerySchema.strict().safeParse(request.query);
+    if (!parsed.success) return badRequest(reply, "Invalid extension pagination");
+    return isPagedQuery(request.query) ? providerExtensionManager.listPage(id, parsed.data) : providerExtensionManager.list(id);
   });
 
   app.put<{ Params: { id: string; extensionId: string } }>(

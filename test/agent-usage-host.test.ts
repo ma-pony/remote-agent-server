@@ -14,6 +14,25 @@ const setup = () => {
 };
 
 describe("host usage integration", () => {
+  it("starts bounded content replay automatically without native-log or HTTP capture configuration", async () => {
+    const { host, db, runId, session } = setup();
+    db.prepare("UPDATE runs SET status = 'succeeded' WHERE id = ?").run(runId);
+    db.prepare("INSERT INTO events (run_id, seq, type, content_json, created_at) VALUES (?, 1, 'tool', ?, ?)")
+      .run(runId, JSON.stringify({ toolCallId: "retained", kind: "read", status: "completed", rawOutput: "hello world" }), "2026-09-21T12:00:00.000Z");
+    expect(host.contentBackfill.status().status).toBe("pending");
+    host.startRecovery();
+    try {
+      await vi.waitFor(() => expect(host.contentBackfill.status().status).toBe("completed"));
+      expect(host.attribution.rankings({ namespace: host.namespace }, "builtin_tool")).toEqual([
+        expect.objectContaining({ calls: 1, observedResultTokens: 3, totalInputTokens: null })
+      ]);
+    } finally { await host.stopRecovery(); }
+    const restarted = new HostUsageCollector(db);
+    expect(restarted.contentBackfill.status()).toMatchObject({ status: "completed", processedEvents: 1 });
+    restarted.deleteSession(session.id);
+    expect(restarted.contentBackfill.status()).toMatchObject({ status: "completed", processedEvents: 0 });
+  });
+
   it("reuses a ready maintenance barrier without rediscovering potentially purged files", async () => {
     const { db, session } = setup();
     const discover = vi.fn(async () => undefined);

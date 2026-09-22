@@ -2,7 +2,7 @@
 
 import "@testing-library/jest-dom/vitest";
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 
 import { App } from "../src/web/app.js";
@@ -22,14 +22,14 @@ const session = {
   id: 1, agentId: agent.id, title: "租户 A", status: "idle", providerSessionId: null,
   workspacePath: "/workspace", projectEnvironmentRevisionId: 1, createdAt: now, updatedAt: now
 };
-const response = (value: unknown, status = 200): Response => new Response(JSON.stringify(value), {
+const response = (value: unknown, status = 200): Response => new Response(JSON.stringify(Array.isArray(value) ? sessionPage(value) : typeof value === "object" && value !== null && "tools" in value && Array.isArray(value.tools) ? { ...value, snapshotId: "snapshot", tools: sessionPage(value.tools) } : value), {
   status, headers: { "content-type": "application/json" }
 });
 const sessionPage = (
   items: unknown[],
   overrides: Partial<{ page: number; pageSize: number; total: number; totalPages: number }> = {}
 ) => ({
-  items, page: 1, pageSize: 100, total: items.length, totalPages: items.length === 0 ? 0 : 1, ...overrides
+  items, page: 1, pageSize: 20, total: items.length, totalPages: items.length === 0 ? 0 : 1, ...overrides
 });
 
 // Transform the real lazy routes before starting interaction assertion deadlines.
@@ -56,22 +56,23 @@ it("Agent MCP 独立页面展示服务器和连接检查", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) {
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) {
       return response(sessionPage([session]));
     }
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
-    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([{
       id: 1, agentId: agent.id, key: "tenant", label: "租户", description: null,
       required: true, secret: false, createdAt: now, updatedAt: now
     }]);
-    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check?page=1&pageSize=20` && init?.method === "POST") {
       return response({ status: "passed", toolCount: 4, message: "4 tools available" });
     }
     if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/enabled` && init?.method === "PATCH") {
       enabledBody = JSON.parse(String(init.body));
       return response({ ...server, enabled: false });
     }
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -98,15 +99,16 @@ it("MCP 列表可选择只删除当前配置或整个共享组", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([]));
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response(servers);
-    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) return response(sessionPage([]));
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response(servers);
+    if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     if (url.startsWith(`/api/agents/${agent.id}/mcp-servers/${server.id}?scope=`) && init?.method === "DELETE") {
       deletedScopes.push(new URL(url, "http://localhost").searchParams.get("scope")!);
       servers = [];
       return new Response(null, { status: 204 });
     }
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -125,14 +127,15 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([session]));
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
-    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
-    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) return response(sessionPage([session]));
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check?page=1&pageSize=20` && init?.method === "POST") {
       checkBody = JSON.parse(String(init.body));
       return response({ status: "passed", toolCount: 2, message: "2 tools available" });
     }
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -144,29 +147,33 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
   await waitFor(() => expect(checkBody).toEqual({ sessionId: session.id }));
 });
 
-it("MCP 检查选择器加载 Agent 的全部有效 Session", async () => {
+it("MCP 检查选择器按需分页加载有效 Session", async () => {
   const olderSession = { ...session, id: 101, title: "第二页租户" };
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) {
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) {
       return response(sessionPage([session], { total: 101, totalPages: 2 }));
     }
-    if (url === `/api/sessions?page=2&pageSize=100&agentId=${agent.id}`) {
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=2&pageSize=20`) {
       return response(sessionPage([olderSession], { page: 2, total: 101, totalPages: 2 }));
     }
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
-    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
 
   render(<App />);
 
+  await screen.findByRole("option", { name: session.title });
+  expect(screen.queryByRole("option", { name: olderSession.title })).not.toBeInTheDocument();
+  fireEvent.click(within(screen.getByLabelText("检查使用的会话").parentElement!.parentElement!).getByRole("button", { name: "下一页" }));
   expect(await screen.findByRole("option", { name: olderSession.title })).toBeInTheDocument();
   expect(fetchMock).toHaveBeenCalledWith(
-    `/api/sessions?page=2&pageSize=100&agentId=${agent.id}`,
+    `/api/sessions?agentId=${agent.id}&storage=active&page=2&pageSize=20`,
     expect.objectContaining({ signal: expect.any(AbortSignal) })
   );
 });
@@ -176,16 +183,17 @@ it("点击工具数量后实时检查并展示全部工具", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([session]));
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([checkedServer]);
-    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
-    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) return response(sessionPage([session]));
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([checkedServer]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check?page=1&pageSize=20` && init?.method === "POST") {
       return response({
         status: "passed", toolCount: 2, message: "2 tools available",
         tools: [{ name: "ticket_get", description: "读取工单详情" }, { name: "ticket_pause", description: null }]
       });
     }
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -206,11 +214,11 @@ it("工具说明默认单行折叠，并可独立展开和收起", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([session]));
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([checkedServer]);
-    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
-    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) return response(sessionPage([session]));
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([checkedServer]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check?page=1&pageSize=20` && init?.method === "POST") {
       return response({
         status: "passed", toolCount: 2, message: "2 tools available",
         tools: [
@@ -219,6 +227,7 @@ it("工具说明默认单行折叠，并可独立展开和收起", async () => {
         ]
       });
     }
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -248,11 +257,11 @@ it("可在工具列表中选择当前 Agent 暴露的 MCP 工具", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([session]));
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([currentServer]);
-    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
-    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check` && init?.method === "POST") {
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) return response(sessionPage([session]));
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([currentServer]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check?page=1&pageSize=20` && init?.method === "POST") {
       return response({
         status: "passed", toolCount: 2, message: "2 tools available",
         tools: [{ name: "ticket_get", description: "读取工单详情" }, { name: "ticket_pause", description: null }]
@@ -263,6 +272,7 @@ it("可在工具列表中选择当前 Agent 暴露的 MCP 工具", async () => {
       currentServer = { ...currentServer, allowedTools: (toolsBody as { allowedTools: string[] }).allowedTools };
       return response(currentServer);
     }
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -273,11 +283,39 @@ it("可在工具列表中选择当前 Agent 暴露的 MCP 工具", async () => {
   await screen.findByRole("heading", { name: "example_mcp 的工具" });
   expect(screen.getByText(/保存后当前运行不受影响，下一次运行会自动刷新执行器会话并生效。/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("radio", { name: "仅所选工具" }));
-  fireEvent.click(screen.getByRole("checkbox", { name: "ticket_pause" }));
+  fireEvent.click(screen.getByRole("checkbox", { name: "ticket_get" }));
   fireEvent.click(screen.getByRole("button", { name: "保存工具权限" }));
 
   await waitFor(() => expect(toolsBody).toEqual({ allowedTools: ["ticket_get"] }));
   expect(await screen.findByText("已选择 1 个工具")).toBeInTheDocument();
+});
+
+it("工具翻页保留页外白名单，保存不会重复发现或丢失选择", async () => {
+  let saved: unknown;
+  let checks = 0;
+  const selectedServer = { ...server, allowedTools: ["off_page_tool"] };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([selectedServer]);
+    if (url.includes("mcp-catalog?page=")) return response([]);
+    if (url.startsWith("/api/sessions?")) return response(sessionPage([]));
+    if (url.endsWith("/check?page=1&pageSize=20")) {
+      checks++;
+      return response({ status: "passed", toolCount: 21, message: "21 tools", snapshotId: "snapshot", tools: sessionPage([{ name: "first_tool", description: null }], { total: 21, totalPages: 2 }) });
+    }
+    if (url.includes("/tools?page=2")) return response(sessionPage([{ name: "off_page_tool", description: null }], { page: 2, total: 21, totalPages: 2 }));
+    if (url.endsWith("/tools") && init?.method === "PATCH") { saved = JSON.parse(String(init.body)); return response(selectedServer); }
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "设置 example_mcp 的工具范围" }));
+  fireEvent.click(await screen.findByRole("checkbox", { name: "first_tool" }));
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "下一页" }));
+  expect(await screen.findByRole("checkbox", { name: "off_page_tool" })).toBeChecked();
+  fireEvent.click(screen.getByRole("button", { name: "保存工具权限" }));
+  await waitFor(() => expect(saved).toEqual({ allowedTools: ["off_page_tool", "first_tool"] }));
+  expect(checks).toBe(1);
 });
 
 it("从共享 MCP 区域一键添加并启用", async () => {
@@ -289,14 +327,15 @@ it("从共享 MCP 区域一键添加并启用", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([]));
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response(installed ? [{ ...server, id: 9, name: shared.name }] : []);
-    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response(installed ? [] : [shared]);
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) return response(sessionPage([]));
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response(installed ? [{ ...server, id: 9, name: shared.name }] : []);
+    if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response(installed ? [] : [shared]);
     if (url === `/api/agents/${agent.id}/mcp-catalog/${shared.id}/install` && init?.method === "POST") {
       installed = true;
       return response({ ...server, id: 9, name: shared.name }, 201);
     }
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -327,16 +366,17 @@ it("从当前 Provider 的系统配置中发现并导入 MCP", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([]));
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([]);
-    if (url === `/api/agents/${agent.id}/mcp-catalog`) return response([]);
-    if (url === `/api/agents/${agent.id}/system-mcp-catalog`) {
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) return response(sessionPage([]));
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20`) {
       return response([{ ...systemMcp, installed }]);
     }
     if (url === `/api/agents/${agent.id}/system-mcp-catalog/${systemMcp.id}/install` && init?.method === "POST") {
       installed = true;
       return response({ ...server, id: 7, name: systemMcp.name, transport: "stdio" }, 201);
     }
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -355,7 +395,7 @@ it("从独立页面创建带敏感 Header 的 HTTP MCP", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
     if (url === `/api/agents/${agent.id}/mcp-servers` && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       expect(body).toMatchObject({
@@ -364,7 +404,8 @@ it("从独立页面创建带敏感 Header 的 HTTP MCP", async () => {
       });
       return response({ ...server, url: "https://example.test/mcp", headers: [] }, 201);
     }
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([server]);
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -386,7 +427,7 @@ it("HTTP Header 可引用 Session 参数", async () => {
   window.history.replaceState({}, "", `/agents/${agent.id}/mcp/new`);
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([{
       id: 1, agentId: agent.id, key: "tenant_token", label: "租户 Token",
       description: null, required: true, secret: true, createdAt: now, updatedAt: now
     }]);
@@ -397,7 +438,8 @@ it("HTTP Header 可引用 Session 参数", async () => {
       return response({ ...server, url: "https://example.test/mcp", headers: [] }, 201);
     }
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([server]);
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -408,6 +450,7 @@ it("HTTP Header 可引用 Session 参数", async () => {
   fireEvent.click(screen.getByRole("button", { name: "添加请求头" }));
   fireEvent.change(screen.getByLabelText("请求头名称 1"), { target: { value: "X-Tenant-Token" } });
   fireEvent.change(screen.getByLabelText("请求头来源 1"), { target: { value: "session_parameter" } });
+  await screen.findByRole("option", { name: "租户 Token (tenant_token)" });
   fireEvent.change(screen.getByLabelText("请求头会话参数 1"), { target: { value: "tenant_token" } });
   fireEvent.click(screen.getByRole("button", { name: "创建 MCP" }));
 
@@ -418,7 +461,7 @@ it("stdio Argument 和 Environment 支持 runtime 与 Session 参数", async () 
   window.history.replaceState({}, "", `/agents/${agent.id}/mcp/new`);
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([{
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([{
       id: 1, agentId: agent.id, key: "tenant", label: "租户",
       description: null, required: true, secret: false, createdAt: now, updatedAt: now
     }]);
@@ -431,7 +474,8 @@ it("stdio Argument 和 Environment 支持 runtime 与 Session 参数", async () 
       return response({ ...server, transport: "stdio", command: "npx", arguments: [], environment: [] }, 201);
     }
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([server]);
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -446,6 +490,7 @@ it("stdio Argument 和 Environment 支持 runtime 与 Session 参数", async () 
   fireEvent.click(screen.getByRole("button", { name: "添加环境变量" }));
   fireEvent.change(screen.getByLabelText("环境变量名称 1"), { target: { value: "TENANT" } });
   fireEvent.change(screen.getByLabelText("环境变量来源 1"), { target: { value: "session_parameter" } });
+  await screen.findByRole("option", { name: "租户 (tenant)" });
   fireEvent.change(screen.getByLabelText("环境变量会话参数 1"), { target: { value: "tenant" } });
   fireEvent.click(screen.getByRole("button", { name: "创建 MCP" }));
 
@@ -456,8 +501,9 @@ it("新建 stdio MCP 时空命令不能提交", async () => {
   window.history.replaceState({}, "", `/agents/${agent.id}/mcp/new`);
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
     if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: GET ${url}`);
   }));
 
@@ -473,7 +519,7 @@ it("编辑时可保留未回显的敏感值", async () => {
   window.history.replaceState({}, "", `/agents/${agent.id}/mcp/${server.id}`);
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
     if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}` && (init?.method ?? "GET") === "GET") {
       return response({ ...server, url: "https://example.test/mcp", headers: [{
         id: "89a3e131-449d-4dfa-b927-a019db9ca014", name: "Authorization", source: "fixed",
@@ -489,8 +535,9 @@ it("编辑时可保留未回显的敏感值", async () => {
       return response({ ...server, url: "https://example.test/mcp", headers: [] });
     }
     if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/sessions?page=1&pageSize=100&agentId=${agent.id}`) return response(sessionPage([]));
-    if (url === `/api/agents/${agent.id}/mcp-servers`) return response([server]);
+    if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) return response(sessionPage([]));
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([server]);
+    if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);

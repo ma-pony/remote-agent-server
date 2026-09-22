@@ -15,7 +15,7 @@ import { SessionDeleteDialog } from "./session-pages.js";
 import { useI18n } from "@/i18n";
 import { AttachmentPicker, MessageAttachments, useAttachmentDraft } from "@/components/message-attachments";
 
-type RunView = { run: Run; events: RunEvent[]; historyError: string | null };
+type RunView = { run: Run; events: RunEvent[]; historyError: string | null; historyCursor: number; hasMoreEvents: boolean; loadingEvents?: boolean };
 const activeStatuses = new Set<RunStatus>(["queued", "running"]);
 const terminalStatuses = new Set<RunStatus>(["succeeded", "failed", "cancelled"]);
 const streamRetryDelays = [500, 1_000, 2_000, 4_000, 5_000] as const;
@@ -53,6 +53,7 @@ const mergeEvent = (views: RunView[], runId: number, item: RunEvent, applyStatus
   if (lastEvent?.seq === item.seq || (lastEvent !== undefined && item.seq < lastEvent.seq && view.events.some((event) => event.seq === item.seq))) return view;
   const status = applyStatus ? eventStatus(item) : undefined;
   return {
+    ...view,
     run: !applyStatus
       ? view.run
       : status === undefined
@@ -91,24 +92,22 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     setSession(null);
     setAgentName("");
     setViews([]);
-    void Promise.all([
-      api<SessionDetail>(`/sessions/${sessionId}`, { signal: controller.signal }),
-      api<Agent[]>("/agents", { signal: controller.signal })
-    ]).then(async ([detail, agents]) => {
+    void api<SessionDetail>(`/sessions/${sessionId}?includeParameters=false`, { signal: controller.signal }).then(async detail => {
+      const agent = await api<Agent>(`/agents/${detail.agentId}`, {signal: controller.signal});
       const histories = await Promise.allSettled(detail.runs.map((run) =>
-        api<RunEvent[]>(`/runs/${run.id}/events?afterSeq=0`, { signal: controller.signal })
+        api<RunEvent[]>(`/runs/${run.id}/events?afterSeq=0&limit=100`, { signal: controller.signal })
       ));
       if (controller.signal.aborted || generation !== loadGeneration.current) return;
       setSession(detail);
-      setAgentName(agents.find((agent) => agent.id === detail.agentId)?.name ?? String(detail.agentId));
+      setAgentName(agent.name);
       setViews(detail.runs.map((run, index) => {
         const history = histories[index];
         if (history?.status === "fulfilled") {
-          return { run: foldHistoricalStatus(run, history.value), events: history.value, historyError: null };
+          return { run: foldHistoricalStatus(run, history.value), events: history.value, historyError: null, historyCursor: history.value.at(-1)?.seq ?? 0, hasMoreEvents: history.value.length === 100 };
         }
         return {
           run,
-          events: [],
+          events: [], historyCursor: 0, hasMoreEvents: true,
           historyError: text(`历史加载失败：${errorMessage(history?.reason)}`, `Failed to load history: ${errorMessage(history?.reason)}`)
         };
       }));
@@ -124,7 +123,6 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
 
   const activeRunId = useMemo(() => views.findLast((view) => activeStatuses.has(view.run.status))?.run.id ?? null, [views]);
   const mcpParametersValid = session?.mcpParametersValid ?? true;
-  const missingMcpParameters = session?.missingMcpParameters ?? [];
 
   useEffect(() => {
     if (activeRunId === null) return;
@@ -156,7 +154,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
           if (terminalStatuses.has(canonical.status)) {
             let detail: SessionDetail | null = null;
             try {
-              detail = await api<SessionDetail>(`/sessions/${sessionId}`, { signal: controller.signal });
+              detail = await api<SessionDetail>(`/sessions/${sessionId}?includeParameters=false`, { signal: controller.signal });
             } catch (_error) {
               if (controller.signal.aborted) return true;
             }
@@ -165,7 +163,8 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
             if (detail !== null) setSession(detail);
             setViews((current) => current.map((view) => ({
               ...view,
-              run: view.run.id === canonical.id ? canonical : runsById.get(view.run.id) ?? view.run
+              run: view.run.id === canonical.id ? canonical : runsById.get(view.run.id) ?? view.run,
+              hasMoreEvents: view.run.id === canonical.id ? true : view.hasMoreEvents
             })));
             finishTerminal();
             return true;
@@ -199,7 +198,8 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
           setStreamError("");
           const status = eventStatus(item);
           const terminal = status !== undefined && terminalStatuses.has(status);
-          setViews((current) => mergeEvent(current, activeRunId, item, !terminal));
+          setViews(current => mergeEvent(current, activeRunId, item, !terminal).map(view =>
+            view.run.id === activeRunId ? {...view, historyCursor: Math.max(view.historyCursor, item.seq)} : view));
           if (terminal) {
             clearCanonicalPoll();
             void refreshCanonicalRun().then((terminal) => {
@@ -247,7 +247,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
         method: "POST",
         body: JSON.stringify({ input: text, ...(attachmentDraft.attachments.length === 0 ? {} : { attachments: attachmentDraft.attachments }) })
       });
-      setViews((current) => [...current, { run, events: [], historyError: null }]);
+      setViews((current) => [...current, { run, events: [], historyError: null, historyCursor: 0, hasMoreEvents: false }]);
       setInput("");
       attachmentDraft.reset();
     } catch (reason) {
@@ -275,15 +275,15 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     setError("");
     try {
       const page = await api<{ items: Run[]; hasMore: boolean }>(`/sessions/${sessionId}/runs?beforeId=${beforeId}&limit=20`);
-      const histories = await Promise.allSettled(page.items.map((run) => api<RunEvent[]>(`/runs/${run.id}/events?afterSeq=0`)));
+      const histories = await Promise.allSettled(page.items.map((run) => api<RunEvent[]>(`/runs/${run.id}/events?afterSeq=0&limit=100`)));
       const olderViews = page.items.map((run, index): RunView => {
         const history = histories[index];
         if (history?.status === "fulfilled") {
-          return { run: foldHistoricalStatus(run, history.value), events: history.value, historyError: null };
+          return { run: foldHistoricalStatus(run, history.value), events: history.value, historyError: null, historyCursor: history.value.at(-1)?.seq ?? 0, hasMoreEvents: history.value.length === 100 };
         }
         return {
           run,
-          events: [],
+          events: [], historyCursor: 0, hasMoreEvents: true,
           historyError: text(`历史加载失败：${errorMessage(history?.reason)}`, `Failed to load history: ${errorMessage(history?.reason)}`)
         };
       });
@@ -297,6 +297,26 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       setError(errorMessage(reason));
     } finally {
       setLoadingOlder(false);
+    }
+  };
+
+  const loadMoreEvents = async (runId: number) => {
+    const view = views.find(item => item.run.id === runId);
+    if (view === undefined || view.loadingEvents) return;
+    const generation = loadGeneration.current;
+    setViews(current => current.map(item => item.run.id === runId ? {...item, loadingEvents: true, historyError: null} : item));
+    try {
+      const events = await api<RunEvent[]>(`/runs/${runId}/events?afterSeq=${view.historyCursor}&limit=100`);
+      if (generation !== loadGeneration.current) return;
+      setViews(current => {
+        let merged = current;
+        for (const event of events) merged = mergeEvent(merged, runId, event, false);
+        return merged.map(item => item.run.id === runId ? {...item, loadingEvents: false,
+          historyCursor: Math.max(item.historyCursor, events.at(-1)?.seq ?? view.historyCursor), hasMoreEvents: events.length === 100} : item);
+      });
+    } catch (reason) {
+      if (generation === loadGeneration.current) setViews(current => current.map(item => item.run.id === runId
+        ? {...item, loadingEvents: false, historyError: errorMessage(reason)} : item));
     }
   };
 
@@ -315,9 +335,9 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       </div>
       <section className="mt-6 flex flex-col gap-5" aria-label={text("运行历史", "Run history")} aria-live="polite">
         {session?.hasOlderRuns ? <Button className="self-center" variant="outline" type="button" disabled={loadingOlder} onClick={() => void loadOlderRuns()}>{loadingOlder ? text("加载中…", "Loading…") : text("加载更早记录", "Load earlier runs")}</Button> : null}
-        {views.length === 0 && session !== null ? <EmptyState icon={MessageSquare} title={session.storageCleanedAt == null ? text("还没有运行记录", "No runs yet") : text("没有可展示的记录", "No run history available")} description={session.storageCleanedAt == null ? text("在下方输入任务，开始这个会话的第一轮运行。", "Enter a task below to start the first run in this session.") : text("该会话的磁盘内容已清理，历史统计仍会保留。", "The on-disk content was cleaned while historical statistics remain available.")} /> : <div className="surface-list contents">{views.map((view) => <RunBlock key={view.run.id} view={view} />)}</div>}
+        {views.length === 0 && session !== null ? <EmptyState icon={MessageSquare} title={session.storageCleanedAt == null ? text("还没有运行记录", "No runs yet") : text("没有可展示的记录", "No run history available")} description={session.storageCleanedAt == null ? text("在下方输入任务，开始这个会话的第一轮运行。", "Enter a task below to start the first run in this session.") : text("该会话的磁盘内容已清理，历史统计仍会保留。", "The on-disk content was cleaned while historical statistics remain available.")} /> : <div className="surface-list contents">{views.map((view) => <RunBlock key={view.run.id} view={view} onLoadMore={() => void loadMoreEvents(view.run.id)} />)}</div>}
       </section>
-      {session !== null && !mcpParametersValid ? <Alert className="mt-6"><XCircle /><AlertTitle>{text("缺少 MCP 参数", "Missing MCP parameters")}</AlertTitle><AlertDescription>{text("请先在", "Complete these in")} <Link className="underline" to={`/sessions/${session.id}/settings`}>{text("会话设置", "session settings")}</Link>{text(` 中填写：${missingMcpParameters.join("、")}`, `: ${missingMcpParameters.join(", ")}`)}</AlertDescription></Alert> : null}
+      {session !== null && !mcpParametersValid ? <Alert className="mt-6"><XCircle /><AlertTitle>{text("缺少 MCP 参数", "Missing MCP parameters")}</AlertTitle><AlertDescription>{text("请先在", "Complete these in")} <Link className="underline" to={`/sessions/${session.id}/settings`}>{text("会话设置", "session settings")}</Link>{text(" 中补全必填参数。", " to provide the required parameters.")}</AlertDescription></Alert> : null}
       <Card className="sticky bottom-3 z-10 mt-6 border-primary/20 bg-card/95 shadow-xl backdrop-blur"><CardContent className="p-4"><form className="flex flex-col gap-3" onSubmit={send} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDrop={(event) => attachmentDraft.drop(event, composerDisabled)}>
         <Field data-disabled={composerDisabled || undefined}><FieldLabel htmlFor="run-input">{text("发送给智能体", "Send to agent")}</FieldLabel><Textarea onPaste={(event) => attachmentDraft.paste(event, composerDisabled)} id="run-input" rows={3} value={input} onChange={(event) => setInput(event.target.value)} disabled={composerDisabled} placeholder={session !== null && session.storageCleanedAt != null ? text("会话存储已清理，无法继续发送", "Session storage was cleaned; no further runs are available") : activeRunId === null ? text("描述下一步任务…", "Describe the next task…") : text("当前运行结束后可继续输入", "Continue after the current run finishes")} /></Field>
         <AttachmentPicker draft={attachmentDraft} disabled={composerDisabled} />
@@ -330,7 +350,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
   );
 };
 
-const RunBlock = ({ view }: { view: RunView }) => {
+const RunBlock = ({ view, onLoadMore }: { view: RunView; onLoadMore(): void }) => {
   const { text } = useI18n();
   const [detailsOpen, setDetailsOpen] = useState(false);
   const { output, details } = useMemo(() => {
@@ -345,10 +365,10 @@ const RunBlock = ({ view }: { view: RunView }) => {
       }
     }
     return {
-      output: outputParts.length === 0 && view.run.result !== null ? view.run.result : outputParts.join(""),
+      output: view.run.result !== null && ((terminalStatuses.has(view.run.status) && view.hasMoreEvents) || outputParts.length === 0) ? view.run.result : outputParts.join(""),
       details: nextDetails
     };
-  }, [view.events, view.run.result]);
+  }, [view.events, view.run.result, view.run.status, view.hasMoreEvents]);
 
   return <article className="flex flex-col gap-3">
     <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-foreground px-4 py-3 text-background"><span className="mb-1 block text-xs font-semibold uppercase tracking-wide opacity-70">{text("你", "You")}</span><p className="whitespace-pre-wrap">{view.run.input}</p><MessageAttachments attachments={view.run.attachments} pathPrefix={`/runs/${view.run.id}/attachments`} /></div>
@@ -356,6 +376,7 @@ const RunBlock = ({ view }: { view: RunView }) => {
       <div className="mb-4 flex items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><span className="text-sm font-semibold">{text("智能体", "Agent")}</span>{view.run.resolvedModel === null || view.run.resolvedModel === undefined ? null : <Badge className="max-w-64 truncate font-mono font-normal" variant="outline" title={view.run.resolvedModel}>{view.run.resolvedModel}</Badge>}</div><Badge variant={view.run.status === "failed" ? "destructive" : view.run.status === "succeeded" ? "default" : "secondary"}>{({ queued: text("排队中", "Queued"), running: text("运行中", "Running"), succeeded: text("已完成", "Completed"), failed: text("失败", "Failed"), cancelled: text("已取消", "Cancelled") } satisfies Record<RunStatus, string>)[view.run.status]}</Badge></div>
       {output !== "" ? <p className="whitespace-pre-wrap leading-7">{output}</p> : activeStatuses.has(view.run.status) ? <p className="text-muted-foreground">{text("等待智能体输出…", "Waiting for agent output…")}</p> : null}
       {view.historyError !== null ? <div className="mt-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">{view.historyError}</div> : null}
+      {view.hasMoreEvents || view.historyError !== null ? <Button className="mt-4" type="button" variant="outline" disabled={view.loadingEvents} onClick={onLoadMore}>{view.loadingEvents ? text("加载中…", "Loading…") : text("加载更多事件", "Load more events")}</Button> : null}
       {view.run.error !== null && !details.some((item) => item.type === "error") ? <div className="mt-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive" role="alert">{view.run.error}</div> : null}
       {details.length > 0 ? <details className="group mt-5 rounded-lg border bg-muted/30">
         <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-medium" onClick={() => setDetailsOpen((current) => !current)}><span>{text(`执行轨迹 · ${details.length} 条`, `Execution trace · ${details.length}`)}</span><ChevronDown className="size-4 transition-transform group-open:rotate-180" /></summary>

@@ -128,7 +128,10 @@ export class RunExecutor {
       if (batch === undefined) return;
       messageBatch = undefined;
       clearMessageFlushTimer();
-      this.eventStore.append(run.id, "message", { stream: batch.stream, text: batch.text });
+      const content = { stream: batch.stream, text: batch.text };
+      const event = this.eventStore.append(run.id, "message", content);
+      try { this.usageCollector.conversationContent.recordMessage(run.id, content, { sequence: event.seq, occurredAt: event.createdAt }); }
+      catch { console.error(`runtime_content_persistence_failed runId=${run.id}`); }
     };
     const startMessageFlushTimer = (): void => {
       messageFlushSignal = new Promise<TurnRace>((resolve) => {
@@ -194,6 +197,11 @@ export class RunExecutor {
       }
       const { memory, revision: skillsRevision, projectedSkills } = this.skillProjector.prepare(agent, session);
       this.runRepository.setSkillsRevision(run.id, skillsRevision);
+      try {
+        this.usageCollector.runtimeCapabilities.recordRun(run.id);
+      } catch {
+        console.error(`runtime_capability_run_failed runId=${run.id}`);
+      }
       if (projectedSkills !== undefined) {
         try {
           this.usageCollector.runtimeCapabilities.recordProjection(run.id, projectedSkills);
@@ -205,6 +213,8 @@ export class RunExecutor {
       const extensionsRevision = this.providerExtensionManager.revision(agent.id);
       const resolvedModel = resolveModelPolicy(agent.modelPolicy, new Date()) ?? agent.providerDefaultModel ?? undefined;
       this.runRepository.setResolvedModel(run.id, resolvedModel ?? null);
+      try { this.usageCollector.conversationContent.recordRun(run.id); }
+      catch { console.error(`runtime_content_persistence_failed runId=${run.id}`); }
       const runtimeSessionPromise = this.runtime.ensureSession({
         sessionId: session.id,
         agentId: agent.id,

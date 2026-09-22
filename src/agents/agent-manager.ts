@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type Database from "better-sqlite3";
 
+import { pageResult, type PaginationQuery } from "../pagination.js";
 import type { Agent, Provider } from "../domain.js";
 import { insertedId } from "../db.js";
 import { ProjectEnvironmentStore } from "../project-environments/project-environment-store.js";
@@ -86,6 +87,7 @@ export class AgentManager {
   private readonly dataDir: string;
   private readonly runtime: AgentRuntime;
   private readonly projectEnvironmentStore: ProjectEnvironmentStore;
+  private readonly modelSnapshots = new Map<number, {key: string; expiresAt: number; catalog: Promise<RuntimeModelCatalog>}>();
   private readonly concurrencySettingsStore: ConcurrencySettingsStore;
 
   constructor({ db, dataDir, runtime, projectEnvironmentStore, concurrencySettingsStore }: AgentManagerDependencies) {
@@ -294,6 +296,22 @@ export class AgentManager {
     return rows.map((row) => toAgent(row, globalRunConcurrency));
   }
 
+  listPage(input: PaginationQuery & { enabled?: boolean; provider?: Provider }) {
+    const clauses: string[] = [];
+    const params: Array<string | number> = [];
+    if (input.query) { clauses.push("instr(lower(a.name), lower(?)) > 0"); params.push(input.query); }
+    if (input.enabled !== undefined) { clauses.push("a.enabled = ?"); params.push(Number(input.enabled)); }
+    if (input.provider !== undefined) { clauses.push("a.provider = ?"); params.push(input.provider); }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const total = (this.db.prepare(`SELECT COUNT(*) AS total FROM agents a ${where}`).get(...params) as {total: number}).total;
+    const rows = this.db.prepare(`SELECT a.*, e.name AS project_environment_name FROM agents a
+      LEFT JOIN project_environments e ON e.id = a.project_environment_id ${where}
+      ORDER BY a.created_at ASC, a.id ASC LIMIT ? OFFSET ?`)
+      .all(...params, input.pageSize, (input.page - 1) * input.pageSize) as Array<AgentRow & {project_environment_name: string | null}>;
+    const concurrency = this.concurrencySettingsStore.get().globalRunConcurrency;
+    return pageResult(rows.map(row => ({...toAgent(row, concurrency), projectEnvironmentName: row.project_environment_name})), total, input);
+  }
+
   get(id: number): Agent | undefined {
     const row = this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as AgentRow | undefined;
     return row === undefined
@@ -371,10 +389,23 @@ export class AgentManager {
   }
 
   /** Reads the model selector advertised by the Agent Core through ACP. */
-  async models(id: number): Promise<RuntimeModelCatalog | undefined> {
+  async models(id: number, useSnapshot = false): Promise<RuntimeModelCatalog | undefined> {
     const agent = this.get(id);
     if (agent === undefined) return undefined;
-    const catalog = await this.discoverModels(agent);
+    const key = JSON.stringify([agent.provider, agent.instructions, agent.projectEnvironmentId,
+      agent.projectEnvironmentId === null ? null : this.projectEnvironmentStore.getCurrentRevision(agent.projectEnvironmentId)?.id]);
+    let snapshot = this.modelSnapshots.get(id);
+    if (!useSnapshot || snapshot?.key !== key || snapshot.expiresAt <= Date.now()) {
+      const catalog = this.discoverModels(agent);
+      snapshot = {key, expiresAt: Date.now() + 30_000, catalog};
+      if (useSnapshot) {
+        this.modelSnapshots.delete(id);
+        while (this.modelSnapshots.size >= 16) this.modelSnapshots.delete(this.modelSnapshots.keys().next().value!);
+        this.modelSnapshots.set(id, snapshot);
+        void catalog.catch(() => {if (this.modelSnapshots.get(id)?.catalog === catalog) this.modelSnapshots.delete(id);});
+      }
+    }
+    const catalog = await snapshot.catalog;
     const providerDefaultModel = selectableDefaultModel(catalog);
     if (providerDefaultModel !== agent.providerDefaultModel) {
       this.db.prepare("UPDATE agents SET provider_default_model = ? WHERE id = ?")
@@ -391,6 +422,7 @@ export class AgentManager {
     if (endpoint !== undefined) throw new AgentManagerError("agent_has_integration_endpoints");
 
     this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
+    this.modelSnapshots.delete(id);
     rmSync(join(this.dataDir, "agents", String(id)), { recursive: true, force: true });
     return "deleted";
   }

@@ -168,7 +168,7 @@ Agent 的 `modelPolicy` 有三种格式：
 
 相同 Conversation 的 Task 严格串行，避免多个 Run 并发修改同一个 Workspace 或 Provider 上下文。
 
-Webhook 投递列表的 `latest` 摘要从当前端点的订阅出发，利用 `webhook_deliveries(subscription_id, created_at DESC, id DESC)` 覆盖索引为每个订阅定位一条记录，再按主键读取详情。无投递的订阅不返回摘要，列表筛选和分页不影响摘要。避免从历史投递逐行执行相关子查询和排序，防止同步 SQLite 查询长时间占用事件循环。启动迁移为新库和旧库幂等创建此索引。
+Webhook 投递列表的 `latest` 摘要从当前端点的当前订阅页出发，利用 `webhook_deliveries(subscription_id, created_at DESC, id DESC)` 覆盖索引为每个订阅定位一条记录，再按主键读取详情。无投递的订阅不返回摘要，列表筛选和分页不影响摘要。避免从历史投递逐行执行相关子查询和排序，防止同步 SQLite 查询长时间占用事件循环。启动迁移为新库和旧库幂等创建此索引。
 
 ### 6.4 原生 Webhook 入库
 
@@ -293,9 +293,15 @@ Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace �
 
 ## 用量账本与能力归因
 
+管理台资源列表采用统一的 `Page<T>`（items、page、pageSize、total、totalPages）或显式事件游标。数据库资源先过滤和计数再 `LIMIT/OFFSET`；Runtime／文件系统目录分页读取有限生命周期的发现快照，MCP 工具翻页复用检查快照，避免再次建立子进程。仅用于名称的引用查询读取详情摘要，不携带全部子资源。分页编辑保留页外状态，原子配置的完整提交与资源浏览分页分开处理。管理 Run 事件接口默认 100 条、最大 500 条，按 `afterSeq` 继续；SSE 使用既有有界历史回放和背压机制。
+
+运行对话内容以 Run 和事件序号作幂等键，只保存计数和估算来源；实时路径与历史回补共享同一投影。`user_prompt`、`configured_instructions`、`system_prompt`、`assistant_output`、`assistant_thought` 作为五个独立能力维度，与工具统一筛选、排序和分页。配置指令每 Run 计一次，消息按已持久化片段计量，使用 `contentObservations` 而非工具 `calls`。模型请求保留 system/developer、user、assistant 角色，分别归入系统提示词、用户提示词和模型回复；同一能力行同时承载内容观测及真实模型输入证据，两套数值独立于彼此及 Provider 上报账本。运行内容证据按时间和稳定身份游标分页，详情不返回正文。
+
 `src/agent-usage/core` 和 SQLite 投影使用通用字符串身份；`HostUsageCollector` 负责转换业务 Agent／Session／Run、维护 epoch 和校验宿主映射。来源观察、去重及选定的账本投影保存在现有数据库中，采集记录按最多 100 条分批，事件、上下文派生数据和批次末 checkpoint 在一个事务中提交；读取失败可提交此前已验证的批次，取消后不继续提交。Provider 的缓存字段作为输入子集；未知 scope／semantics 和旧 Session／Run 快照保留证据，不进入可累加总量。父范围汇总与明细按指标选择非重叠会计基础。
 
-MCP 包装器通过私有 Unix socket 发送无正文元数据，由宿主统一写库；调用开始时冻结 Run 归属，缺少显式执行身份时标为推断。Runtime 结构化工具事件补充 CLI、Skill 读取／脚本及插件归属，目录投影不计为调用。通用上下文快照导入模型可见定义、参数和结果，使用 `@huggingface/tokenizers` 按实际模型匹配本地词表估算每次暴露，实际执行与模型输入证据无法明确关联时保持分离。Skill、插件等维度是重叠视角，不构成可相加账单。
+MCP 包装器就地提取可见文本并估算参数／结果，通过私有 Unix socket 仅发送计数、字节、部分计量标记与缺口原因，由宿主统一写库；调用开始时冻结 Run 归属，缺少显式执行身份时标为推断。Runtime 工具事件按 Run 模型匹配本地词表，补充 CLI、Skill 读取／脚本及插件归属，目录投影不计为调用。默认内容排名以调用为单位，只计一次参数和结果；通用上下文快照与 HTTP 采集另行计量定义、首次／重复结果输入。两者分别保存在 invocation payload 与 context exposure 投影，不能混同，也不能加进 Provider 账单。Skill、插件等维度是重叠视角，不构成可相加账单。
+
+后台恢复从已终止 Run 的保留 events 回补内容估算，按最新 Run 优先、每批最多 100 条事件和 4 MiB 正文（最多 16 MiB 的单事件可独占一批）。回调写入与游标原子提交，重启续做；坏记录记为脱敏缺口，后续记录继续。Run 的 epoch 固定，原始事件时间用于日期归属；未知开始时间的完成事件可按结束时间筛选，不伪造耗时。历史 MCP 只向同 Run、明确 Server/Tool 且时间唯一匹配的包装器调用补充估算，含糊匹配不双计。原事件和 Skill 投影不存在时不能重建正文或归属。回补只增加无正文元数据，Session 删除同时清除进度并阻止重放。
 
 自动模型请求采集使用独立于业务表的 loopback HTTP/SSE 转发层，由宿主适配器绑定 Session generation、epoch 和请求开始时的 Run。它与手动快照共用规范化和归因逻辑，识别 Responses、Chat Completions、Anthropic Messages。`USAGE_CAPTURE_UPSTREAMS` 显式选择 API-key 上游；子进程只拿本地凭据，服务端注入指定环境变量的上游 key。原始正文只在有界内存中解析，数据库保存采集意图／状态与无正文投影。实际请求中逐次命中已投影 Skill 路径的调用才增加 Skill／插件标签。
 
@@ -311,7 +317,7 @@ Reset／cleanup 在停止生产者后排空已接纳的请求采集，再冻结�
 
 路由负责校验、调用和响应投影；`UsageAnalysis` 统一汇总与趋势的计量逻辑，查询内按 Session／epoch／execution 索引父子范围和缓存明细小计，避免全量扫描的平方增长。一次趋势查询只读取一次账本并复用时区格式化器，不保留跨查询历史缓存。管理来源接口使用 `UsageError.code` 区分业务错误与未预期内部错误，后者返回脱敏的 500。
 
-HTTP 中已知 Provider 工具名通过显式适配映射到与 Runtime 事件相同的内置工具／CLI 身份；MCP 映射优先，任意未知名称不猜测。CLI 只识别结构化的外层 executable，不解析 Shell 字符串。逐调用缓存固定首次确认的 Skill／插件归属及版本，包括无归属状态；后续 Run 的配置只影响新的调用。
+HTTP 中已知 Provider 工具名通过显式适配映射到与 Runtime 事件相同的内置工具／CLI 身份；MCP 映射优先，任意未知名称不猜测。共享的有界 Shell 解析器只识别单条字面命令、参数数组与常见包装，不执行命令、不展开变量、不拆分管道或组合语句。明确的 cat／head／tail／sed 文件操作和解释器脚本路径可关联已投影 Skill。逐调用缓存固定首次确认的 Skill／插件归属及版本，包括无归属状态；后续 Run 的配置只影响新的调用。
 
 来源注册、快照合同、限制及用户操作见[用量分析指南](agent-usage.md)。核心与宿主分层支持将来提取，但当前仍在单进程内运行。
 
@@ -319,7 +325,7 @@ HTTP 中已知 Provider 工具名通过显式适配映射到与 Runtime 事件�
 
 分词 profile 由 `USAGE_TOKENIZERS` 显式配置，精确匹配模型及可选 Provider 身份，启动时验证本地文件大小与 SHA-256。未知模型自动使用带版本的 Unicode 字符加权兜底估算；上报用量独立计量。每次暴露保存引擎、词表内容指纹、模型与缺口原因，相同词表指纹复用一个引擎和纯计数缓存；profile／Provider 身份仍分别投影。估算元数据字典去重，暴露保存字典引用，读取仍返回完整来源元数据。旧估算迁移为 `legacy_reference`，多个模型／词表及兜底估算可汇成近似 token 小计用于排名，同时保留各口径分项。估算覆盖完整只表示每项有数值，不表示准确度一致。模型缺失和分词失败不等于未采集输入，前端同时提供字节排名。
 
-托管 JSONL 使用字节游标、行号、行内观测序号与无正文解析状态恢复，包括 Codex 累计基线。固定 64 KiB 缓冲区校验完整旧前缀，仅保留新增尾部；没有换行但完整的 JSON 可处理，半行或半个 UTF-8 字符不会跨过 checkpoint，采集保持失败待重试。快照文件继续按修订对账。HTTP 调用缓存只增量写入变化及淘汰项，内存状态在事务成功后更新；MCP ticket 按会话索引，在维护收尾／删除或下一 Run 移除服务器时释放。
+托管 JSONL 使用字节游标、行号、行内观测序号与无正文解析状态恢复，包括 Codex 累计基线。固定 64 KiB 缓冲区校验完整旧前缀，随后流式解析新增行；整文件不受 16 MiB 限制，最多保留一行（16 MiB），快照仍有整文件上限。没有换行但完整的 JSON 可处理，半行或半个 UTF-8 字符不会跨过 checkpoint，采集保持失败待重试。工具内容超过词表处理上限时使用有界 Unicode 采样估算并标注 partial／size_limit，图片等二进制不按 base64 文本计量。HTTP 调用缓存只增量写入变化及淘汰项，内存状态在事务成功后更新；MCP ticket 按会话索引，在维护收尾／删除或下一 Run 移除服务器时释放。
 
 ## 10. 安全边界
 

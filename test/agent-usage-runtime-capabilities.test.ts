@@ -39,7 +39,215 @@ const projectedSkill = (sessionId: number, overrides: Partial<ProjectedSkill> = 
 const ranks = (collector: HostUsageCollector, kind: "builtin_tool" | "cli" | "skill" | "plugin" | "unknown") =>
   collector.attribution.rankings({ namespace: collector.namespace }, kind);
 
+const wrapperCall = (h: ReturnType<typeof harness>, id: string, serverId = "7") => {
+  h.collector.attribution.observeInvocation(h.collector.binding(h.sessionId), {
+    invocationId: id, providerEpochId: h.collector.epoch(h.sessionId), executionId: String(h.runId),
+    capability: { id: `mcp:${serverId}:search`, kind: "mcp_tool", serverId, name: "search" },
+    startedAt: "2026-09-21T01:00:00.100Z", endedAt: "2026-09-21T01:00:01.000Z",
+    status: "succeeded", sourceId: `mcp-observer:${serverId}`, revision: 2, rawResultBytes: 10
+  });
+};
+
 describe("Runtime capability evidence", () => {
+  it("excludes live MCP mirrors with Unicode and spaces in their structured names", () => {
+    const h = harness();
+    h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId: "unicode-live", kind: "execute", status: "completed",
+      rawInput: { server: "项目 工具", tool: "搜索 内容", arguments: {} }, rawOutput: "结果" });
+    expect(h.collector.attribution.invocations()).toEqual([]);
+  });
+
+  it("restores historical MCP names containing Unicode and spaces without changing their identity", () => {
+    const h = harness();
+    h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId: "unicode-history", kind: "execute", status: "completed",
+      rawInput: { server: "项目 工具", tool: "搜索 内容", arguments: {} }, rawOutput: "结果" },
+    { eventId: 45, sequence: 45, occurredAt: "2026-09-21T01:00:01.000Z" });
+    expect(h.collector.attribution.invocations()).toEqual([expect.objectContaining({
+      capability: { id: "mcp:runtime:项目 工具:搜索 内容", kind: "mcp_tool", name: "搜索 内容", serverId: "runtime:项目 工具" }
+    })]);
+  });
+  it.each(["full", "sparse"])("waits for terminal MCP output and retains pending estimates across restart (%s)", mode => {
+    const h = harness();
+    wrapperCall(h, "streamed-wrapper");
+    h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId: "streamed", kind: "execute", status: "in_progress",
+      rawInput: { server: "7", tool: "search", arguments: {} }, rawOutput: "private stream chunk" },
+    { eventId: 41, sequence: 41, occurredAt: "2026-09-21T01:00:00.200Z" });
+    expect(h.collector.attribution.invocations()[0]?.resultEstimate).toBeNull();
+    const restarted = new HostUsageCollector(h.db);
+    restarted.runtimeCapabilities.recordTool(h.runId, { toolCallId: "streamed", status: "completed",
+      ...(mode === "full" ? { rawOutput: "complete result" } : {}) },
+    { eventId: 42, sequence: 42, occurredAt: "2026-09-21T01:00:01.000Z" });
+    expect(restarted.attribution.invocations()[0]?.resultEstimate?.byteLength).toBe(mode === "full" ? 15 : 20);
+    const metadata = JSON.stringify(h.db.prepare("SELECT * FROM agent_usage_runtime_mcp_mirrors").all());
+    expect(metadata).not.toContain('"complete result"');
+    expect(metadata).not.toContain("private stream chunk");
+  });
+
+  it.each(["recreated", "renamed"])("does not duplicate a historical wrapper after its server was %s", change => {
+    const h = harness();
+    wrapperCall(h, "old-server-wrapper");
+    const binding = h.collector.binding(h.sessionId);
+    h.db.prepare(`INSERT INTO agent_mcp_servers (id,agent_id,name,transport,enabled,created_at,updated_at)
+      VALUES (?,?,?,'stdio',1,'2026-09-22T00:00:00Z','2026-09-22T00:00:00Z')`)
+      .run(change === "recreated" ? 8 : 7, binding.agentId, change === "recreated" ? "project-tools" : "renamed-tools");
+    h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId: "old-name", status: "completed",
+      rawInput: { server: "project-tools", tool: "search", arguments: {} }, rawOutput: "unknown owner" },
+    { eventId: 43, sequence: 43, occurredAt: "2026-09-21T01:00:01.000Z" });
+    expect(h.collector.attribution.invocations()).toEqual([expect.objectContaining({ invocationId: "old-server-wrapper", resultEstimate: null })]);
+  });
+
+  it("does not treat current server configuration as confirmed historical identity without wrapper evidence", () => {
+    const h = harness();
+    h.db.prepare(`INSERT INTO agent_mcp_servers (id,agent_id,name,transport,enabled,created_at,updated_at)
+      VALUES (8,?,'project-tools','stdio',1,'2026-09-22T00:00:00Z','2026-09-22T00:00:00Z')`)
+      .run(h.collector.binding(h.sessionId).agentId);
+    h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId: "unknown-history", status: "completed",
+      rawInput: { server: "project-tools", tool: "search", arguments: {} }, rawOutput: "old result" },
+    { eventId: 44, sequence: 44, occurredAt: "2026-09-21T01:00:01.000Z" });
+    expect(h.collector.attribution.invocations()[0]?.capability.serverId).toBe("runtime:project-tools");
+  });
+
+  it("does not serialize a live MCP mirror output that is excluded from Runtime accounting", () => {
+    const h = harness();
+    let serialized = 0;
+    h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId: "unmeasured", status: "completed",
+      rawInput: { server: "7", tool: "search", arguments: {} },
+      rawOutput: { toJSON: () => { serialized++; return "large output"; } } });
+    expect(serialized).toBe(0);
+    expect(h.collector.attribution.invocations()).toEqual([]);
+  });
+  it("freezes a Run before its first tool event and does not move established timestamps on replay", () => {
+    const h = harness();
+    h.collector.runtimeCapabilities.recordRun(h.runId);
+    h.db.prepare("UPDATE agent_usage_subjects SET epoch = epoch + 1 WHERE kind = 'session'").run();
+    h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId: "frozen", kind: "read", status: "completed", rawOutput: "final result" },
+      { eventId: 20, sequence: 20, occurredAt: "2026-09-21T01:00:01.000Z" });
+    h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId: "frozen", kind: "read", status: "in_progress",
+      rawInput: { path: "README.md" }, rawOutput: "partial" },
+    { eventId: 19, sequence: 19, occurredAt: "2026-09-21T01:00:00.000Z" });
+    expect(h.collector.attribution.invocations()[0]).toMatchObject({ providerEpochId: `session:${h.sessionId}:epoch:1`,
+      startedAt: "2026-09-21T01:00:00.000Z", endedAt: "2026-09-21T01:00:01.000Z", status: "succeeded",
+      rawResultBytes: 12, resultEstimate: expect.objectContaining({ byteLength: 12 }) });
+  });
+
+  it("recovers a legacy Run epoch from existing invocations without the new Run binding table", () => {
+    const h = harness();
+    wrapperCall(h, "legacy-wrapper");
+    h.db.prepare("UPDATE agent_usage_subjects SET epoch = epoch + 1 WHERE kind = 'session'").run();
+    const restarted = new HostUsageCollector(h.db);
+    restarted.runtimeCapabilities.recordTool(h.runId, { toolCallId: "legacy-read", kind: "read", status: "completed" },
+      { eventId: 21, sequence: 21, occurredAt: "2026-09-21T01:00:01.000Z" });
+    expect(restarted.attribution.invocations().every(row => row.providerEpochId === `session:${h.sessionId}:epoch:1`)).toBe(true);
+  });
+
+  it("does not pair a mirror with a different-time wrapper or reuse an already claimed wrapper", () => {
+    const h = harness();
+    wrapperCall(h, "single-wrapper");
+    for (const [toolCallId, occurredAt] of [["far", "2026-09-21T02:00:00.000Z"],
+      ["near", "2026-09-21T01:00:01.000Z"], ["second-near", "2026-09-21T01:00:01.000Z"]]) {
+      h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId, kind: "execute", status: "completed",
+        rawInput: { server: "7", tool: "search", arguments: {} }, rawOutput: toolCallId },
+      { eventId: 22, sequence: 22, occurredAt: occurredAt! });
+    }
+    expect(h.collector.attribution.rankings({}, "mcp_tool")[0]).toMatchObject({ calls: 1, observedResultCalls: 1 });
+    expect(h.collector.attribution.invocations()[0]?.resultEstimate?.byteLength).toBe(4);
+  });
+  it("enriches one original MCP wrapper across live mirror, sparse historical replay and restart", () => {
+    const h = harness();
+    wrapperCall(h, "wrapper-one");
+    const start = { toolCallId: "native-one", kind: "execute", status: "in_progress",
+      rawInput: { server: "7", tool: "search", arguments: { query: "private query" } } };
+    h.collector.runtimeCapabilities.recordTool(h.runId, start);
+    expect(h.collector.attribution.rankings({}, "mcp_tool")[0]).toMatchObject({ calls: 1, observedArgumentCalls: 0 });
+    h.collector.runtimeCapabilities.recordTool(h.runId, start,
+      { eventId: 1, sequence: 1, occurredAt: "2026-09-21T01:00:00.000Z" });
+    const restarted = new HostUsageCollector(h.db);
+    const terminal = { toolCallId: "native-one", status: "completed", rawOutput: "private result" };
+    const event = { eventId: 2, sequence: 2, occurredAt: "2026-09-21T01:00:01.100Z" };
+    restarted.runtimeCapabilities.recordTool(h.runId, terminal, event);
+    restarted.runtimeCapabilities.recordTool(h.runId, terminal, event);
+    expect(restarted.attribution.rankings({}, "mcp_tool")[0]).toMatchObject({ calls: 1, successes: 1,
+      observedArgumentCalls: 1, observedResultCalls: 1 });
+    expect(restarted.attribution.invocations()).toEqual([expect.objectContaining({ invocationId: "wrapper-one",
+      startedAt: "2026-09-21T01:00:00.100Z", endedAt: "2026-09-21T01:00:01.000Z" })]);
+    const metadata = JSON.stringify(h.db.prepare("SELECT * FROM agent_usage_runtime_mcp_mirrors").all());
+    expect(metadata).not.toContain("private query");
+    expect(metadata).not.toContain("private result");
+  });
+
+  it("restores historical MCP calls without wrapper evidence using original date and stable epoch", () => {
+    const h = harness();
+    const content = { toolCallId: "legacy-mcp", kind: "execute", status: "completed",
+      rawInput: { server: "docs", tool: "search", arguments: { query: "history" } }, rawOutput: "found" };
+    const event = { eventId: 3, sequence: 3, occurredAt: "2026-09-21T01:00:01.000Z" };
+    h.collector.runtimeCapabilities.recordTool(h.runId, content, event);
+    h.db.prepare("UPDATE agent_usage_subjects SET epoch = epoch + 1 WHERE kind = 'session'").run();
+    const restarted = new HostUsageCollector(h.db);
+    restarted.runtimeCapabilities.recordTool(h.runId, content, event);
+    expect(restarted.attribution.rankings({ from: "2026-09-21T00:00:00Z", to: "2026-09-22T00:00:00Z" }, "mcp_tool"))
+      .toEqual([expect.objectContaining({ calls: 1, observedArgumentCalls: 1, observedResultCalls: 1 })]);
+    expect(restarted.attribution.invocations()[0]).toMatchObject({ providerEpochId: `session:${h.sessionId}:run:${h.runId}`,
+      endedAt: "2026-09-21T01:00:01.000Z", sourceId: "runtime_capabilities" });
+  });
+
+  it("does not assign concurrent ambiguous MCP output or create a duplicate fallback", () => {
+    const h = harness();
+    wrapperCall(h, "wrapper-one"); wrapperCall(h, "wrapper-two");
+    h.collector.runtimeCapabilities.recordTool(h.runId, { toolCallId: "ambiguous", kind: "execute", status: "completed",
+      rawInput: { server: "7", tool: "search", arguments: { query: "unknown owner" } }, rawOutput: "ambiguous output" },
+    { eventId: 4, sequence: 4, occurredAt: "2026-09-21T01:00:01.100Z" });
+    expect(h.collector.attribution.rankings({}, "mcp_tool")).toEqual([expect.objectContaining({ calls: 2,
+      observedArgumentCalls: 0, observedResultCalls: 0 })]);
+  });
+  it("attributes shell reads, reference reads and interpreter scripts to Skill and plugin", () => {
+    const h = harness();
+    const skill = projectedSkill(h.sessionId, { pluginId: "example@marketplace", pluginName: "Example" });
+    h.collector.runtimeCapabilities.recordProjection(h.runId, [skill]);
+    const commands = [
+      `rtk cat '${skill.directoryAliases[0]}/SKILL.md'`,
+      `head -n 20 ${skill.directoryAliases[0]}/references/check.md`,
+      `python3 ${skill.directoryAliases[0]}/scripts/check.py`
+    ];
+    commands.forEach((command, index) => h.collector.runtimeCapabilities.recordTool(h.runId, {
+      toolCallId: `shell-${index}`, kind: "execute", status: "completed", rawInput: { command }, rawOutput: "ok"
+    }));
+    expect(ranks(h.collector, "skill")[0]).toMatchObject({ calls: 3, successes: 3, observedResultCalls: 3 });
+    expect(ranks(h.collector, "plugin")[0]).toMatchObject({ calls: 3 });
+    expect(h.collector.runtimeCapabilities.stageCounts({})).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stage: "body_read", count: 1 }),
+      expect.objectContaining({ stage: "reference_read", count: 1 }),
+      expect.objectContaining({ stage: "script_executed", count: 1 })
+    ]));
+  });
+
+  it("replays terminal shell history on its original epoch and dates after reset and restart", () => {
+    const h = harness();
+    const skill = projectedSkill(h.sessionId);
+    h.collector.runtimeCapabilities.recordProjection(h.runId, [skill]);
+    h.collector.runtimeCapabilities.recordTool(h.runId, {
+      toolCallId: "old", kind: "execute", status: "completed", rawInput: { command: "unknown && compound" }
+    });
+    h.db.prepare("UPDATE agent_usage_invocations SET ended_at = '2026-09-21T01:00:01.000Z'").run();
+    h.db.prepare("UPDATE agent_usage_subjects SET epoch = epoch + 1 WHERE kind = 'session'").run();
+    const restarted = new HostUsageCollector(h.db);
+    const replay = () => {
+      restarted.runtimeCapabilities.recordTool(h.runId, {
+        toolCallId: "old", kind: "execute", status: "in_progress", rawInput: { command: `cat ${skill.skillMdPath}` }
+      }, { eventId: 101, sequence: 1, occurredAt: "2026-09-21T01:00:00.000Z" });
+      restarted.runtimeCapabilities.recordTool(h.runId, {
+        toolCallId: "old", status: "completed", rawOutput: "historical body"
+      }, { eventId: 102, sequence: 2, occurredAt: "2026-09-21T01:00:01.000Z" });
+    };
+    replay(); replay();
+    expect(ranks(restarted, "cli")).toEqual([expect.objectContaining({
+      capability: expect.objectContaining({ name: "cat" }), calls: 1, successes: 1,
+      observedArgumentCalls: 1, observedResultCalls: 1
+    })]);
+    const cli = restarted.attribution.invocations().find(row => row.capability.kind === "cli");
+    expect(cli).toMatchObject({ providerEpochId: `session:${h.sessionId}:epoch:1`,
+      startedAt: "2026-09-21T01:00:00.000Z", endedAt: "2026-09-21T01:00:01.000Z" });
+    expect(restarted.runtimeCapabilities.stageCounts({ from: "2026-09-21T00:00:00.000Z", to: "2026-09-22T00:00:00.000Z" }))
+      .toContainEqual(expect.objectContaining({ stage: "body_read", count: 1 }));
+  });
   it("does not count structured MCP execute events or sparse updates as CLI", () => {
     const h = harness();
     h.collector.runtimeCapabilities.recordTool(h.runId, {

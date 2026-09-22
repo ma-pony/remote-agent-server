@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { pagedManagementResponse } from "./paged-management-response.js";
 
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -44,12 +45,12 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/sessions");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/sessions?page=1&pageSize=20") return response(page([session]));
-    if (url === "/api/sessions?page=1&pageSize=20&query=ticket-2084") return response(page([session]));
-    if (url === "/api/sessions?page=1&pageSize=20&query=ticket-9999") return response(page([]));
-    if (url === `/api/sessions?page=1&pageSize=20&agentId=${agent.id}`) return response(page([session]));
-    if (url === `/api/sessions?page=1&pageSize=20&agentId=${agent.id}&status=running`) return response(page([]));
-    if (url === "/api/agents") return response([agent]);
+    if (url === "/api/sessions?page=1&pageSize=20") return pagedManagementResponse(url, page([session]));
+    if (url === "/api/sessions?page=1&pageSize=20&query=ticket-2084") return pagedManagementResponse(url, page([session]));
+    if (url === "/api/sessions?page=1&pageSize=20&query=ticket-9999") return pagedManagementResponse(url, page([]));
+    if (url === `/api/sessions?page=1&pageSize=20&agentId=${agent.id}`) return pagedManagementResponse(url, page([session]));
+    if (url === `/api/sessions?page=1&pageSize=20&agentId=${agent.id}&status=running`) return pagedManagementResponse(url, page([]));
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
     throw new Error(`Unexpected request: ${url}`);
   }));
 });
@@ -104,22 +105,22 @@ it("列表支持翻页并把搜索交给服务端", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === "/api/sessions?page=1&pageSize=20") {
-      return response(page([session], { total: 21, totalPages: 2 }));
+      return pagedManagementResponse(url, page([session], { total: 21, totalPages: 2 }));
     }
     if (url === "/api/sessions?page=2&pageSize=20") {
-      return response(page([older], { page: 2, total: 21, totalPages: 2 }));
+      return pagedManagementResponse(url, page([older], { page: 2, total: 21, totalPages: 2 }));
     }
     if (url === "/api/sessions?page=1&pageSize=20&query=ticket-2084") {
-      return response(page([session]));
+      return pagedManagementResponse(url, page([session]));
     }
-    if (url === "/api/agents") return response([agent]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
     throw new Error(`Unexpected request: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
   render(<App />);
 
-  expect(await screen.findByText("第 1 / 2 页")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  expect(await screen.findByText(/第 1 \/ 2 页/)).toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole("button", { name: "下一页" }).find(button => !(button as HTMLButtonElement).disabled)!);
   expect(await screen.findByRole("link", { name: "第二页会话" })).toBeInTheDocument();
 
   fireEvent.change(screen.getByLabelText("搜索会话"), { target: { value: "ticket-2084" } });
@@ -131,9 +132,10 @@ it("列表支持翻页并把搜索交给服务端", async () => {
 it("列表二次确认后永久删除空闲 Session 并原地移除", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/sessions?page=1&pageSize=20" && (init?.method ?? "GET") === "GET") return response(page([session]));
-    if (url === "/api/agents") return response([agent]);
-    if (url === `/api/sessions/${session.id}` && init?.method === "DELETE") return new Response(null, { status: 204 });
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (url === "/api/sessions?page=1&pageSize=20" && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, page([session]));
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+    if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}` && init?.method === "DELETE") return new Response(null, { status: 204 });
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -154,8 +156,8 @@ it("运行中的 Session 禁止删除", async () => {
   const running = { ...session, status: "running" };
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/sessions?page=1&pageSize=20") return response(page([running]));
-    if (url === "/api/agents") return response([agent]);
+    if (url === "/api/sessions?page=1&pageSize=20") return pagedManagementResponse(url, page([running]));
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(<App />);
@@ -167,16 +169,17 @@ it("已清理存储的 Session 仍可查看统计但不能继续发送", async (
   const cleaned = { ...session, storageCleanedAt: "2026-08-24T00:00:00.000Z" };
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/sessions?page=1&pageSize=20") return response(page([cleaned]));
-    if (url === `/api/sessions/${session.id}`) {
-      return response({
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (url === "/api/sessions?page=1&pageSize=20") return pagedManagementResponse(url, page([cleaned]));
+    if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) {
+      return pagedManagementResponse(url, {
         ...cleaned,
         runs: [],
         hasOlderRuns: false,
         usageSummary: { sessionCount: 1, measuredSessionCount: 1, usage: cleaned.usage }
       });
     }
-    if (url === "/api/agents") return response([agent]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
     throw new Error(`Unexpected request: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -193,10 +196,11 @@ it("详情页删除成功后返回 Session 列表", async () => {
   window.history.replaceState({}, "", `/sessions/${session.id}`);
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/sessions/${session.id}` && (init?.method ?? "GET") === "GET") return response({ ...session, runs: [] });
-    if (url === "/api/agents") return response([agent]);
-    if (url === `/api/sessions/${session.id}` && init?.method === "DELETE") return new Response(null, { status: 204 });
-    if (url === "/api/sessions?page=1&pageSize=20") return response(page([]));
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}` && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, { ...session, runs: [] });
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+    if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}` && init?.method === "DELETE") return new Response(null, { status: 204 });
+    if (url === "/api/sessions?page=1&pageSize=20") return pagedManagementResponse(url, page([]));
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);

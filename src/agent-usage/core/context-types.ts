@@ -1,8 +1,8 @@
 import type { UsageBinding, UsageFilter } from "./types.js";
 
-export const capabilityKinds = ["mcp_tool", "builtin_tool", "cli", "skill", "plugin", "hook", "unknown"] as const;
+export const capabilityKinds = ["mcp_tool", "builtin_tool", "cli", "skill", "plugin", "hook", "user_prompt", "configured_instructions", "system_prompt", "assistant_output", "assistant_thought", "unknown"] as const;
 export type CapabilityKind = typeof capabilityKinds[number];
-export type RankingDimension = CapabilityKind;
+export type RankingDimension = CapabilityKind | "all";
 export type AttributionEvidence = "direct" | "matched" | "inferred";
 export type ContextCoverage = "full" | "partial" | "opaque" | "none";
 
@@ -12,6 +12,26 @@ export type Capability = {
   name: string;
   serverId?: string;
   version?: string;
+};
+
+/** Stable content identities join once-observed Runtime text with captured model-input exposures. */
+export const contentCapability = (category: string): Capability | undefined => {
+  if (category === "configured_instructions") {
+    return { kind: "configured_instructions", id: "configured_instructions", name: "Configured instructions" };
+  }
+  if (category === "system_prompt") {
+    return { kind: "system_prompt", id: "system_prompt", name: "Model-request system prompts" };
+  }
+  if (category === "user_prompt" || category === "user_message") {
+    return { kind: "user_prompt", id: "user_prompt", name: "User prompts" };
+  }
+  if (category === "assistant_output" || category === "assistant_message") {
+    return { kind: "assistant_output", id: "assistant_output", name: "Assistant output" };
+  }
+  if (category === "assistant_thought") {
+    return { kind: "assistant_thought", id: "assistant_thought", name: "Observed reasoning" };
+  }
+  return undefined;
 };
 
 export type CapabilityReference = {
@@ -25,7 +45,7 @@ export type ContextContent =
 
 export type ContextBlock = {
   position: number;
-  kind: "definition" | "arguments" | "result" | "skill" | "other";
+  kind: "definition" | "arguments" | "result" | "skill" | "system_prompt" | "user_message" | "assistant_message" | "other";
   toolInvocationId?: string;
   content: ContextContent;
   capabilities: CapabilityReference[];
@@ -63,6 +83,8 @@ export type InvocationInput = {
   sourceId: string;
   revision: number;
   rawResultBytes: number | null;
+  argumentEstimate?: ToolContentEstimate;
+  resultEstimate?: ToolContentEstimate;
 };
 
 export type TokenEstimate = {
@@ -85,6 +107,14 @@ export type TokenEstimateSummary = TokenEstimate & {
   totalInputTokens: number | null;
 };
 
+/** Content observed at a tool boundary, counted once; not model-request exposure or billing. */
+export type ToolContentEstimate = {
+  tokens: number | null;
+  byteLength: number;
+  estimate: TokenEstimate;
+  partial: boolean;
+};
+
 export type CoverageCounts = Record<ContextCoverage, number>;
 
 export type AttributionRankRow = {
@@ -94,6 +124,13 @@ export type AttributionRankRow = {
   inputBytes: number | null;
   capability: Capability;
   calls: number;
+  contentObservations: number;
+  observedArgumentTokens: number | null;
+  observedResultTokens: number | null;
+  observedTotalTokens: number | null;
+  observedArgumentCalls: number;
+  observedResultCalls: number;
+  payloadEstimates: TokenEstimate[];
   contextOnlyCalls: number;
   successes: number;
   failures: number;
@@ -133,6 +170,8 @@ export type AttributionInvocation = UsageBinding & {
   sourceId: string;
   revision: number;
   rawResultBytes: number | null;
+  argumentEstimate: ToolContentEstimate | null;
+  resultEstimate: ToolContentEstimate | null;
 };
 
 export type ResultFirstUse = "first" | "repeat" | "unknown";

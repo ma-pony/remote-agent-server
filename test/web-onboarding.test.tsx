@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { pagedManagementResponse } from "./paged-management-response.js";
 
 import "@testing-library/jest-dom/vitest";
 
@@ -32,7 +33,7 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/agents");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/agents" || url === "/api/project-environments") return response([]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents" || new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, []);
     throw new Error(`Unexpected request: ${url}`);
   }));
 });
@@ -54,8 +55,8 @@ it("first-use Agent list directs users to create an environment before an Agent"
 it("first-use Agent list sends users to an unready environment instead of the Agent form", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/agents") return response([]);
-    if (url === "/api/project-environments") return response([preparingEnvironment]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, []);
+    if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [preparingEnvironment]);
     throw new Error(`Unexpected request: ${url}`);
   }));
 
@@ -70,7 +71,7 @@ it("Agent creation distinguishes an unavailable environment from a loaded empty 
   window.history.replaceState({}, "", "/agents/new");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/project-environments") return response([preparingEnvironment]);
+    if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [preparingEnvironment]);
     throw new Error(`Unexpected request: ${url}`);
   }));
 
@@ -101,8 +102,8 @@ it("Session creation distinguishes no enabled Agents and requires a nonblank tit
   window.history.replaceState({}, "", "/sessions/new");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/agents") return response([agent]);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/session-parameters`) return pagedManagementResponse(url, []);
     throw new Error(`Unexpected request: ${url}`);
   }));
 
@@ -117,11 +118,11 @@ it("Session creation distinguishes no enabled Agents and requires a nonblank tit
   window.history.replaceState({}, "", "/sessions/new");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/agents") return response([]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, []);
     throw new Error(`Unexpected request: ${url}`);
   }));
   render(<App />);
-  expect(await screen.findByText(/暂无已启用的智能体/)).toBeInTheDocument();
+  expect(await screen.findByText(/没有匹配资源/)).toBeInTheDocument();
   expect(screen.getByLabelText("选择智能体")).toBeDisabled();
   expect(screen.getByRole("link", { name: "前往智能体" })).toHaveAttribute("href", "/agents");
 });
@@ -133,11 +134,11 @@ it("Session creation keeps Agent loading and request failures distinct", async (
 
   render(<App />);
 
-  expect(screen.getByText("正在加载已启用的智能体。")).toBeInTheDocument();
+  expect(screen.getByRole("status")).toBeInTheDocument();
   expect(screen.getByLabelText("选择智能体")).toBeDisabled();
 
   rejectRequest(new Error("agent service unavailable"));
-  expect(await screen.findByText("无法加载智能体，请检查服务后重试。")).toBeInTheDocument();
+  expect(await screen.findByText("agent service unavailable")).toBeInTheDocument();
   expect(screen.getByRole("alert")).toBeInTheDocument();
   expect(screen.getByLabelText("选择智能体")).toBeDisabled();
 });

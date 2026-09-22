@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { ArrowLeft, BarChart3, Bot, Cable, CheckCircle2, Copy, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, ShieldCheck, Trash2, Upload, XCircle } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams } from "react-router";
 
@@ -23,10 +23,12 @@ import { EmptyState, PageContainer, PageHeader } from "@/components/page-header"
 import { TokenUsageSummaryCard } from "@/components/token-usage";
 import {
   api, errorMessage, type Agent, type AgentDoctorResult, type AgentModelCatalog, type AgentModelPolicy,
-  type AgentSkill, type IntegrationEndpointSummary,
+  type AgentSkill, type IntegrationEndpointSummary, type Page,
   type ProjectEnvironment, type Provider, type TokenUsageSummary
 } from "@/api";
 import { useI18n } from "@/i18n";
+import { ListPagination } from "@/components/list-pagination";
+import { PagedResourceSelect } from "@/components/paged-resource-select";
 import { SkillRevisionDialog, SkillSourcesDialog } from "@/components/skill-dialogs";
 
 const providerNames: Record<Provider, string> = {
@@ -152,39 +154,44 @@ const ModelWeekdayPicker = ({ value, onChange }: {
 
 export const AgentListPage = () => {
   const { text } = useI18n();
-  const [agents, setAgents] = useState<Agent[] | null>(null);
+  const [agentPage, setAgentPage] = useState<Page<Agent & {projectEnvironmentName: string | null}> | null>(null);
+  const agents = agentPage?.items ?? null;
+  const [page, setPage] = useState(1);
   const [environments, setEnvironments] = useState<ProjectEnvironment[] | null>(null);
+  const [hasReadyEnvironment, setHasReadyEnvironment] = useState(false);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
+    setAgentPage(null); setError("");
+    void api<Page<Agent & {projectEnvironmentName: string | null}>>(`/agents?page=${page}&pageSize=20&query=${encodeURIComponent(query)}`, {signal: controller.signal})
+      .then(setAgentPage).catch(reason => {if (!controller.signal.aborted) setError(errorMessage(reason));});
+    return () => controller.abort();
+  }, [page, query]);
+  useEffect(() => {
+    const controller = new AbortController();
     void Promise.all([
-      api<Agent[]>("/agents", { signal: controller.signal }),
-      api<ProjectEnvironment[]>("/project-environments", { signal: controller.signal })
-    ]).then(([items, projects]) => {
-      setAgents(items);
-      setEnvironments(projects);
-    }).catch((reason: unknown) => {
-      if (!controller.signal.aborted) setError(errorMessage(reason));
-    });
+      api<Page<ProjectEnvironment>>("/project-environments?page=1&pageSize=20", {signal: controller.signal}),
+      api<Page<ProjectEnvironment>>("/project-environments?ready=true&page=1&pageSize=1", {signal: controller.signal})
+    ]).then(([projects, ready]) => {setEnvironments(projects.items); setHasReadyEnvironment(ready.total > 0);})
+      .catch(reason => {if (!controller.signal.aborted) setError(errorMessage(reason));});
     return () => controller.abort();
   }, []);
 
-  const environmentNames = useMemo(() => new Map((environments ?? []).map((item) => [item.id, item.name])), [environments]);
-  const visible = (agents ?? []).filter((agent) => agent.name.toLowerCase().includes(query.trim().toLowerCase()));
-  const readyEnvironments = (environments ?? []).filter((item) => item.currentRevisionId !== null);
-  const noAgents = agents !== null && agents.length === 0;
+
+  const visible = agents ?? [];
+  const noAgents = agentPage !== null && agentPage.total === 0 && query === "";
   const hasPreparingEnvironment = (environments ?? []).some((item) => item.latestRevision?.status === "preparing");
   const hasFailedEnvironment = (environments ?? []).some((item) => item.latestRevision?.status === "failed");
   const environmentAction = environments !== null && environments.length === 0
     ? <Button asChild><Link to="/project-environments/new"><Plus />{text("新建项目环境", "New environment")}</Link></Button>
     : <Button asChild><Link to="/project-environments">{text("查看项目环境", "View environments")}</Link></Button>;
   const createAgentAction = <Button asChild><Link to="/agents/new"><Plus />{text("新建智能体", "New agent")}</Link></Button>;
-  const primaryAction = noAgents && readyEnvironments.length === 0 ? environmentAction : createAgentAction;
+  const primaryAction = noAgents && !hasReadyEnvironment ? environmentAction : createAgentAction;
   const firstUseDescription = environments === null
     ? text("正在检查项目环境。完成顺序是：项目环境 → 智能体 → 会话。", "Checking project environments. The setup order is: environment → agent → session.")
-    : readyEnvironments.length > 0
+    : hasReadyEnvironment
       ? text("完成顺序是：项目环境 → 智能体 → 会话。已有可用环境，现在创建智能体。", "The setup order is: environment → agent → session. A ready environment is available, so create an agent now.")
       : environments.length === 0
         ? text("完成顺序是：项目环境 → 智能体 → 会话。先创建项目环境并添加 Git 项目，准备完成后再创建智能体。", "The setup order is: environment → agent → session. Create an environment and add a Git project before creating an agent.")
@@ -200,11 +207,11 @@ export const AgentListPage = () => {
     <ErrorAlert message={error} />
     <div className="mb-5 flex max-w-md items-center gap-2 rounded-xl border bg-card px-3 shadow-sm">
       <Search className="size-4 text-muted-foreground" aria-hidden="true" />
-      <Input type="search" name="agent-search" aria-label={text("搜索智能体", "Search agents")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("按名称搜索", "Search by name")} value={query} onChange={(event) => setQuery(event.target.value)} />
-      {agents === null ? null : <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground" aria-live="polite">{visible.length}</span>}
+      <Input type="search" name="agent-search" aria-label={text("搜索智能体", "Search agents")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("按名称搜索", "Search by name")} value={query} onChange={(event) => { setPage(1); setQuery(event.target.value); }} />
+      {agents === null ? null : <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground" aria-live="polite">{agentPage?.total}</span>}
     </div>
     {agents === null ? <div className="resource-grid">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-44" />)}</div>
-      : visible.length === 0 ? <EmptyState icon={Bot} title={agents.length === 0 ? text("还没有智能体", "No agents yet") : text("没有匹配结果", "No matching results")} description={agents.length === 0 ? firstUseDescription : text("调整搜索词，或清除搜索查看全部智能体。", "Change the search term or clear it to see every agent.")} action={agents.length === 0 ? primaryAction : <Button variant="outline" onClick={() => setQuery("")}>{text("清除搜索", "Clear search")}</Button>} />
+      : visible.length === 0 ? <EmptyState icon={Bot} title={noAgents ? text("还没有智能体", "No agents yet") : text("没有匹配结果", "No matching results")} description={noAgents ? firstUseDescription : text("调整搜索词，或清除搜索查看全部智能体。", "Change the search term or clear it to see every agent.")} action={noAgents ? primaryAction : <Button variant="outline" onClick={() => setQuery("")}>{text("清除搜索", "Clear search")}</Button>} />
       : <div className="resource-grid">{visible.map((agent) => <Card key={agent.id} className="h-full transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40">
         <CardHeader>
           <div className="flex items-start justify-between gap-4">
@@ -212,8 +219,9 @@ export const AgentListPage = () => {
             <Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge>
           </div>
         </CardHeader>
-        <CardContent className="flex items-center justify-between gap-3 text-sm text-muted-foreground"><p className="min-w-0 truncate"><span className="font-medium text-foreground">{text("项目环境：", "Project environment: ")}</span>{agent.projectEnvironmentId === null ? text("未绑定", "Not assigned") : environmentNames.get(agent.projectEnvironmentId) ?? text("环境不可用", "Environment unavailable")}</p><AgentCloneDialog key={agent.id} agent={agent} /></CardContent>
+        <CardContent className="flex items-center justify-between gap-3 text-sm text-muted-foreground"><p className="min-w-0 truncate"><span className="font-medium text-foreground">{text("项目环境：", "Project environment: ")}</span>{agent.projectEnvironmentId === null ? text("未绑定", "Not assigned") : agent.projectEnvironmentName ?? text("环境不可用", "Environment unavailable")}</p><AgentCloneDialog key={agent.id} agent={agent} /></CardContent>
       </Card>)}</div>}
+    {agentPage === null ? null : <ListPagination {...agentPage} onPageChange={setPage} />}
   </PageContainer>;
 };
 
@@ -231,17 +239,15 @@ export const AgentCreatePage = () => {
 
   useEffect(() => {
     const controller = new AbortController();
-    void api<ProjectEnvironment[]>("/project-environments", { signal: controller.signal }).then((items) => {
-      const ready = items.filter((item) => item.currentRevisionId !== null);
-      setEnvironments(items);
-      setProjectEnvironmentId(ready[0] === undefined ? "" : String(ready[0].id));
+    void api<Page<ProjectEnvironment>>("/project-environments?page=1&pageSize=20", { signal: controller.signal }).then((result) => {
+      setEnvironments(result.items);
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setEnvironmentError(errorMessage(reason)); });
     return () => controller.abort();
   }, []);
 
   const readyEnvironments = (environments ?? []).filter((item) => item.currentRevisionId !== null);
   const environmentLoading = environments === null && environmentError === "";
-  const environmentUnavailable = environmentLoading || environmentError !== "" || readyEnvironments.length === 0;
+  const environmentUnavailable = projectEnvironmentId === "";
   const hasPreparingEnvironment = (environments ?? []).some((item) => item.latestRevision?.status === "preparing");
   const hasFailedEnvironment = (environments ?? []).some((item) => item.latestRevision?.status === "failed");
   const environmentDescription = environmentLoading
@@ -286,7 +292,7 @@ export const AgentCreatePage = () => {
         <Field data-disabled={provider === "hermes" || undefined}><FieldLabel htmlFor="agent-instructions">{text("智能体指令", "Agent instructions")}</FieldLabel><Textarea id="agent-instructions" name="agent-instructions" rows={6} value={instructions} disabled={provider === "hermes"} placeholder={text("说明这个智能体长期遵循的角色、边界和工作方式", "Describe the agent's persistent role, boundaries, and working style")} onChange={(event) => setInstructions(event.target.value)} />
           <FieldDescription>{provider === "hermes" ? text("Hermes 当前不支持智能体指令", "Hermes does not currently support agent instructions") : text("创建会话时保存快照；之后修改只影响新会话。", "Instructions are snapshotted when a session is created; later edits affect new sessions only.")}</FieldDescription>
         </Field>
-        <Field data-disabled={environmentUnavailable || undefined}><FieldLabel htmlFor="agent-environment">{text("项目环境", "Project environment")}</FieldLabel><NativeSelect id="agent-environment" name="agent-environment" className="w-full" value={projectEnvironmentId} disabled={environmentUnavailable} onChange={(event) => setProjectEnvironmentId(event.target.value)}><NativeSelectOption value="" disabled>{text("请选择可用环境", "Select a ready environment")}</NativeSelectOption>{readyEnvironments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect><FieldDescription>{environmentDescription}</FieldDescription></Field>
+        <Field data-disabled={environmentUnavailable || undefined}><FieldLabel htmlFor="agent-environment">{text("项目环境", "Project environment")}</FieldLabel><PagedResourceSelect<ProjectEnvironment> id="agent-environment" name="agent-environment" endpoint="/project-environments?ready=true" value={projectEnvironmentId} onValueChange={setProjectEnvironmentId} getOption={item => ({value: String(item.id), label: item.name})} autoSelectFirst emptyLabel={text("请选择可用环境", "Select a ready environment")} /><FieldDescription>{environmentDescription}</FieldDescription></Field>
         <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" asChild><Link to="/agents">{text("取消", "Cancel")}</Link></Button><Button type="submit" disabled={busy || name.trim() === "" || environmentUnavailable || projectEnvironmentId === ""}>{busy ? text("创建中…", "Creating…") : text("创建智能体", "Create agent")}</Button></div>
       </FieldGroup></form></CardContent>
     </Card>
@@ -362,7 +368,9 @@ export const AgentOverviewPage = () => {
   const { text } = useI18n();
   const { agent, setAgent } = useAgentDetail();
   const [doctor, setDoctor] = useState<AgentDoctorResult | null>(null);
-  const [endpoints, setEndpoints] = useState<IntegrationEndpointSummary[] | null>(null);
+  const [endpointResult, setEndpointResult] = useState<Page<IntegrationEndpointSummary> | null>(null);
+  const endpoints = endpointResult?.items ?? null;
+  const [endpointPage, setEndpointPage] = useState(1);
   const [endpointsError, setEndpointsError] = useState("");
   const [usage, setUsage] = useState<TokenUsageSummary | null>(null);
   const [usageError, setUsageError] = useState("");
@@ -370,18 +378,18 @@ export const AgentOverviewPage = () => {
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    setEndpoints(null);
+    setEndpointResult(null);
     setEndpointsError("");
     setUsage(null);
     setUsageError("");
-    void api<IntegrationEndpointSummary[]>("/integration-endpoints", { signal: controller.signal })
-      .then((items) => setEndpoints(items.filter((item) => item.agentId === agent.id)))
+    void api<Page<IntegrationEndpointSummary>>(`/integration-endpoints?agentId=${agent.id}&page=${endpointPage}&pageSize=20`, { signal: controller.signal })
+      .then(setEndpointResult)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setEndpointsError(errorMessage(reason)); });
     void api<TokenUsageSummary>(`/agents/${agent.id}/usage`, { signal: controller.signal })
       .then(setUsage)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setUsageError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [agent.id]);
+  }, [agent.id, endpointPage]);
   const toggle = async () => {
     setBusy("toggle"); setError("");
     try { setAgent(await api<Agent>(`/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({ enabled: !agent.enabled }) })); }
@@ -412,6 +420,7 @@ export const AgentOverviewPage = () => {
         : endpoints === null ? <Skeleton className="h-32" />
           : endpoints.length === 0 ? <Card className="border-dashed"><CardContent className="flex flex-col items-center gap-3 py-10 text-center"><span className="grid size-10 place-items-center rounded-full bg-muted"><Cable className="size-5 text-muted-foreground" /></span><div><p className="font-medium">{text("尚未配置外部调用入口", "No external entry point")}</p><p className="mt-1 text-sm text-muted-foreground">{text("智能体不能被外部系统直接调用，需要先创建接入端点。", "Agents cannot be called directly by external systems. Create an integration endpoint first.")}</p></div><Button asChild><Link to={`/integration-endpoints/new?agentId=${agent.id}`}><Plus />{text("创建接入端点", "Create endpoint")}</Link></Button></CardContent></Card>
             : <div className="divide-y rounded-xl border bg-card">{endpoints.map((endpoint) => <div key={endpoint.id} className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex items-center gap-2"><p className="truncate font-medium">{endpoint.name}</p><Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div><p className="mt-1 font-mono text-sm text-muted-foreground">/{endpoint.slug}</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button size="sm" variant="ghost" asChild><Link to={`/integration-endpoints/${endpoint.id}/usage`}>{text("调用说明", "Usage")}</Link></Button><Button size="sm" variant="outline" asChild><Link to={`/integration-endpoints/${endpoint.id}`}>{text("管理端点", "Manage endpoint")}</Link></Button></div></div>)}</div>}
+      {endpointResult === null ? null : <ListPagination {...endpointResult} onPageChange={setEndpointPage} />}
     </section>
     <section aria-labelledby="agent-token-usage-title">
       <h2 id="agent-token-usage-title" className="mb-3 font-heading text-lg font-medium">{text("Token 用量", "Token usage")}</h2>
@@ -425,24 +434,26 @@ export const AgentOverviewPage = () => {
 export const AgentSkillsPage = () => {
   const { text } = useI18n();
   const { agent } = useAgentDetail();
-  const [skills, setSkills] = useState<AgentSkill[] | null>(null);
+  const [result, setResult] = useState<Page<AgentSkill> | null>(null);
+  const skills = result?.items ?? null;
+  const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const reload = async () => setSkills(await api<AgentSkill[]>(`/agents/${agent.id}/skills`));
+  const endpoint = `/agents/${agent.id}/skills?page=${page}&pageSize=20&query=${encodeURIComponent(query)}`;
+  const reload = async () => setResult(await api<Page<AgentSkill>>(endpoint));
   useEffect(() => {
     const controller = new AbortController();
-    void api<AgentSkill[]>(`/agents/${agent.id}/skills`, { signal: controller.signal }).then(setSkills).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    setResult(null); setError("");
+    void api<Page<AgentSkill>>(endpoint, { signal: controller.signal }).then(setResult).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [agent.id]);
-  const visible = (skills ?? [])
-    .filter((skill) => `${skill.name} ${skill.description}`.toLowerCase().includes(query.trim().toLowerCase()))
-    .toSorted((left, right) => Number(right.enabled) - Number(left.enabled));
+  }, [endpoint]);
+  const visible = skills ?? [];
   const toggle = async (skill: AgentSkill) => {
     setBusy(skill.id); setError("");
     try {
       const updated = await api<AgentSkill>(`/agents/${agent.id}/skills/${skill.id}`, { method: "PUT", body: JSON.stringify({ enabled: !skill.enabled }) });
-      setSkills((current) => (current ?? []).map((item) => item.id === updated.id ? updated : item));
+      setResult(current => current === null ? null : {...current, items: current.items.map(item => item.id === updated.id ? updated : item)});
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
   const remove = async (skill: AgentSkill, scope: "current" | "all") => {
@@ -463,11 +474,12 @@ export const AgentSkillsPage = () => {
   };
   return <div className="flex flex-col gap-5"><ErrorAlert message={error} />
     <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-      <div className="relative max-w-sm flex-1"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label={text("搜索技能", "Search skills")} className="pl-9" placeholder={text("搜索名称或说明", "Search name or description")} value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+      <div className="relative max-w-sm flex-1"><Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" /><Input aria-label={text("搜索技能", "Search skills")} className="pl-9" placeholder={text("搜索名称或说明", "Search name or description")} value={query} onChange={(event) => { setPage(1); setQuery(event.target.value); }} /></div>
       <div className="flex flex-wrap gap-2"><SkillSourcesDialog disabled={busy !== ""} onChanged={reload} /><Button variant="outline" asChild><label><Upload />{busy === "upload" ? text("上传中…", "Uploading…") : text("上传 ZIP 到共享库", "Upload ZIP to shared library")}<input className="sr-only" type="file" accept=".zip,application/zip" disabled={busy !== ""} onChange={(event) => void upload(event.target.files?.[0], event.currentTarget)} /></label></Button></div>
     </div>
-    <p className="text-sm text-muted-foreground">{text(`已启用 ${(skills ?? []).filter((item) => item.enabled).length} / ${(skills ?? []).length}。配置会在下一次运行生效。`, `${(skills ?? []).filter((item) => item.enabled).length} / ${(skills ?? []).length} enabled. Changes apply to the next run.`)}</p>
+    <p className="text-sm text-muted-foreground">{text(`本页已启用 ${(skills ?? []).filter((item) => item.enabled).length} / ${(skills ?? []).length}。配置会在下一次运行生效。`, `${(skills ?? []).filter((item) => item.enabled).length} / ${(skills ?? []).length} enabled on this page. Changes apply to the next run.`)}</p>
     {skills === null ? <Skeleton className="h-64" /> : visible.length === 0 ? <EmptyState icon={Search} title={query.trim() === "" ? text("还没有可用技能", "No skills available") : text("没有匹配的技能", "No matching skills")} description={query.trim() === "" ? text("从执行器目录发现技能，上传 ZIP 或添加 Git 来源。", "Discover skills, upload a ZIP, or add a Git source.") : text("尝试更短的关键词，或清除搜索条件。", "Try a shorter keyword or clear the search.")} action={query.trim() === "" ? undefined : <Button type="button" variant="outline" onClick={() => setQuery("")}>{text("清除搜索", "Clear search")}</Button>} /> : <div className="surface-list divide-y rounded-xl border bg-card">{visible.map((skill) => { const source = ({ codex: "Codex", agents: text("共享目录", "Shared directory"), claude: "Claude", plugin: text("插件", "Plugin"), upload: text("已上传", "Uploaded"), git: "Git", missing: text("来源已移除", "Source removed") } satisfies Record<AgentSkill["source"], string>)[skill.source]; return <div key={skill.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{skill.name}</p><Badge variant="outline">{source}</Badge>{skill.updateAvailable ? <Badge>{text("有更新", "Update available")}</Badge> : null}{skill.locallyModified ? <Badge variant="destructive">{text("本地已修改", "Locally modified")}</Badge> : null}{!skill.available ? <Badge variant="destructive">{text("不可用", "Unavailable")}</Badge> : null}</div><p className="mt-1 line-clamp-1 text-sm text-muted-foreground" title={skill.description || text("暂无说明", "No description")}>{skill.description || text("暂无说明", "No description")}</p></div><div className="flex shrink-0 flex-wrap gap-2"><Button size="sm" variant={skill.enabled ? "outline" : "default"} disabled={busy !== "" || (!skill.available && !skill.enabled)} onClick={() => void toggle(skill)}>{skill.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button><SkillRevisionDialog agentId={agent.id} skill={skill} disabled={busy !== ""} onApplied={reload} />{skill.source === "upload" ? <Button size="sm" variant="outline" asChild><label><Upload />{text("上传新版本", "Upload new version")}<input className="sr-only" type="file" accept=".zip,application/zip" aria-label={text(`为 ${skill.name} 上传新版本`, `Upload a new version of ${skill.name}`)} disabled={busy !== ""} onChange={(event) => void upload(event.target.files?.[0], event.currentTarget, skill)} /></label></Button> : null}{skill.enabled || skill.source === "upload" ? <AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="ghost" disabled={busy !== ""} aria-label={text(`删除 ${skill.name}`, `Delete ${skill.name}`)}><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${skill.name}”？`, `Delete “${skill.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("仅删除当前副本只影响当前智能体；从所有智能体删除会同时删除共享上传源和全部副本。", "Deleting only the current copy affects this agent. Deleting from all agents also removes the shared upload and every copy.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel>{skill.enabled ? <AlertDialogAction variant="outline" onClick={() => void remove(skill, "current")}>{text("仅删除当前", "Current agent only")}</AlertDialogAction> : null}{skill.source === "upload" ? <AlertDialogAction variant="destructive" onClick={() => void remove(skill, "all")}>{text("从所有智能体删除", "Delete from all agents")}</AlertDialogAction> : null}</AlertDialogFooter></AlertDialogContent></AlertDialog> : null}</div></div>; })}</div>}
+    {result === null ? null : <ListPagination {...result} onPageChange={setPage} disabled={busy !== ""} />}
   </div>;
 };
 
@@ -475,32 +487,32 @@ export const AgentSettingsPage = () => {
   const { text } = useI18n();
   const { agent, setAgent } = useAgentDetail();
   const navigate = useNavigate();
-  const [environments, setEnvironments] = useState<ProjectEnvironment[]>([]);
+  const [environmentName, setEnvironmentName] = useState("");
   const [name, setName] = useState(agent.name);
   const [instructions, setInstructions] = useState(agent.instructions);
-  const [projectEnvironmentId, setProjectEnvironmentId] = useState(agent.projectEnvironmentId ?? "");
+  const [projectEnvironmentId, setProjectEnvironmentId] = useState(String(agent.projectEnvironmentId ?? ""));
   const [concurrencyMode, setConcurrencyMode] = useState(agent.maxConcurrentRuns == null ? "inherit" : "custom");
   const [maxConcurrentRuns, setMaxConcurrentRuns] = useState(String(agent.maxConcurrentRuns ?? agent.effectiveMaxConcurrentRuns ?? ""));
-  const [modelCatalog, setModelCatalog] = useState<AgentModelCatalog | null>(null);
+  const [modelCatalog, setModelCatalog] = useState<(Page<string> & Omit<AgentModelCatalog, "availableModels">) | null>(null);
   const [modelCatalogError, setModelCatalogError] = useState("");
   const [modelPolicy, setModelPolicy] = useState<AgentModelPolicy>(agent.modelPolicy ?? { mode: "provider_default" });
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    void api<ProjectEnvironment[]>("/project-environments", { signal: controller.signal }).then((items) => setEnvironments(items.filter((item) => item.currentRevisionId !== null))).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
-    void api<AgentModelCatalog>(`/agents/${agent.id}/models`, { signal: controller.signal })
+    if (agent.projectEnvironmentId !== null) void api<ProjectEnvironment>(`/project-environments/${agent.projectEnvironmentId}/summary`, {signal: controller.signal}).then(item => setEnvironmentName(item.name)).catch(() => undefined);
+    void api<Page<string> & Omit<AgentModelCatalog, "availableModels">>(`/agents/${agent.id}/models?page=1&pageSize=20`, { signal: controller.signal })
       .then(setModelCatalog)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setModelCatalogError(errorMessage(reason)); });
     return () => controller.abort();
   }, [agent.id]);
-  const availableModels = modelCatalog?.availableModels ?? [];
-  const selectableModels = modelCatalog?.supported === true && availableModels.length > 0;
+  const availableModels = modelCatalog?.items ?? [];
+  const selectableModels = modelCatalog?.supported === true && modelCatalog.total > 0;
   const selectedPolicyModels = modelPolicy.mode === "provider_default" ? [] : modelPolicy.mode === "fixed"
     ? [modelPolicy.model]
     : [modelPolicy.defaultModel, ...modelPolicy.windows.map((window) => window.model)];
   const policyModelsAvailable = modelPolicy.mode === "provider_default"
-    || (selectableModels && selectedPolicyModels.every((model) => availableModels.includes(model)));
+    || (selectableModels && selectedPolicyModels.every((model) => model.trim() !== ""));
   const scheduleGroups = modelPolicy.mode === "schedule" ? scheduleWindowsToGroups(modelPolicy.windows) : [];
   const scheduleValid = modelPolicy.mode !== "schedule" || (modelPolicy.windows.length > 0
     && modelPolicy.windows.every((window) => time24Pattern.test(window.start) && time24Pattern.test(window.end)
@@ -519,7 +531,6 @@ export const AgentSettingsPage = () => {
       return;
     }
     const defaultModel = modelCatalog?.currentModel !== null && modelCatalog?.currentModel !== undefined
-      && availableModels.includes(modelCatalog.currentModel)
       ? modelCatalog.currentModel
       : availableModels[0];
     if (defaultModel === undefined) return;
@@ -535,7 +546,7 @@ export const AgentSettingsPage = () => {
     if (name.trim() === "" || projectEnvironmentId === "" || !modelPolicyValid || (concurrencyMode === "custom" && (!Number.isInteger(customLimit) || customLimit < 1 || customLimit > 64))) return;
     setBusy("save"); setError("");
     try { setAgent(await api<Agent>(`/agents/${agent.id}`, { method: "PATCH", body: JSON.stringify({
-      name: name.trim(), projectEnvironmentId,
+      name: name.trim(), projectEnvironmentId: Number(projectEnvironmentId),
       instructions: agent.provider === "hermes" ? "" : instructions,
       maxConcurrentRuns: concurrencyMode === "inherit" ? null : customLimit,
       modelPolicy
@@ -551,7 +562,7 @@ export const AgentSettingsPage = () => {
     <Card><CardHeader><CardTitle>{text("智能体设置", "Agent settings")}</CardTitle><CardDescription>{text("执行器是运行身份，创建后不允许修改。", "The provider is the execution identity and cannot be changed after creation.")}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-5" onSubmit={save}><FieldGroup>
       <Field><FieldLabel htmlFor="settings-agent-name">{text("名称", "Name")}</FieldLabel><Input id="settings-agent-name" value={name} onChange={(event) => setName(event.target.value)} /></Field>
       <Field data-disabled><FieldLabel htmlFor="settings-provider">{text("执行器", "Provider")}</FieldLabel><Input id="settings-provider" value={providerNames[agent.provider]} disabled /></Field>
-      <Field><FieldLabel htmlFor="settings-environment">{text("项目环境", "Project environment")}</FieldLabel><NativeSelect id="settings-environment" className="w-full" value={projectEnvironmentId} onChange={(event) => setProjectEnvironmentId(event.target.value)}>{environments.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></Field>
+      <Field><FieldLabel htmlFor="settings-environment">{text("项目环境", "Project environment")}</FieldLabel><PagedResourceSelect<ProjectEnvironment> id="settings-environment" endpoint="/project-environments?ready=true" value={projectEnvironmentId} selectedLabel={environmentName} onValueChange={setProjectEnvironmentId} getOption={item => ({value: String(item.id), label: item.name})} /></Field>
       <Field><FieldLabel htmlFor="settings-concurrency-mode">{text("运行并发策略", "Run concurrency policy")}</FieldLabel><NativeSelect id="settings-concurrency-mode" className="w-full" value={concurrencyMode} onChange={(event) => setConcurrencyMode(event.target.value)}><NativeSelectOption value="inherit">{text("继承系统上限", "Inherit system limit")}</NativeSelectOption><NativeSelectOption value="custom">{text("自定义上限", "Custom limit")}</NativeSelectOption></NativeSelect><FieldDescription>{text(`当前有效上限：${agent.effectiveMaxConcurrentRuns}`, `Current effective limit: ${agent.effectiveMaxConcurrentRuns}`)}</FieldDescription></Field>
       {concurrencyMode === "custom" ? <Field><FieldLabel htmlFor="settings-max-concurrent-runs">{text("自定义 Run 并发上限", "Custom run concurrency limit")}</FieldLabel><Input id="settings-max-concurrent-runs" type="number" min={1} max={64} step={1} value={maxConcurrentRuns} onChange={(event) => setMaxConcurrentRuns(event.target.value)} /><FieldDescription>{text("最终有效值不会超过系统的全局 Run 并发上限。", "The effective value never exceeds the global run concurrency limit.")}</FieldDescription></Field> : null}
       <div className="rounded-xl border bg-muted/20 p-4 sm:p-5">
@@ -568,11 +579,11 @@ export const AgentSettingsPage = () => {
           {modelCatalog === null && modelCatalogError === "" ? <FieldDescription>{text("正在读取 Agent Core 模型…", "Loading models from Agent Core…")}</FieldDescription>
             : modelCatalogError !== "" ? <FieldDescription className="text-destructive">{text(`Agent Core 模型读取失败：${modelCatalogError}`, `Failed to read Agent Core models: ${modelCatalogError}`)}</FieldDescription>
             : !selectableModels ? <FieldDescription>{text("当前 Agent Core 没有暴露可选模型，因此不支持固定模型或定时切换。", "This Agent Core does not expose selectable models, so fixed and scheduled selection are unavailable.")}</FieldDescription>
-            : <FieldDescription>{text(`Core 默认：${modelCatalog.currentModel ?? "未知"}；可选 ${availableModels.length} 个模型。`, `Core default: ${modelCatalog.currentModel ?? "unknown"}; ${availableModels.length} models available.`)}</FieldDescription>}
+            : <FieldDescription>{text(`Core 默认：${modelCatalog.currentModel ?? "未知"}；可选 ${modelCatalog.total} 个模型。`, `Core default: ${modelCatalog.currentModel ?? "unknown"}; ${modelCatalog.total} models available.`)}</FieldDescription>}
           </Field>
-          {modelPolicy.mode === "fixed" ? <Field><FieldLabel htmlFor="settings-fixed-model">{text("模型", "Model")}</FieldLabel><NativeSelect id="settings-fixed-model" className="w-full" value={modelPolicy.model} onChange={(event) => setModelPolicy({ mode: "fixed", model: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field> : null}
+          {modelPolicy.mode === "fixed" ? <Field><FieldLabel htmlFor="settings-fixed-model">{text("模型", "Model")}</FieldLabel><PagedResourceSelect<string> id="settings-fixed-model" endpoint={`/agents/${agent.id}/models`} value={modelPolicy.model} selectedLabel={modelPolicy.model} onValueChange={value => setModelPolicy({mode: "fixed", model: value})} getOption={model => ({value: model, label: model})} /></Field> : null}
           {modelPolicy.mode === "schedule" ? <div className="flex flex-col gap-4">
-            <Field><FieldLabel htmlFor="settings-default-model">{text("其他时间使用", "Model outside windows")}</FieldLabel><NativeSelect id="settings-default-model" className="w-full" value={modelPolicy.defaultModel} onChange={(event) => setModelPolicy({ ...modelPolicy, defaultModel: event.target.value })}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
+            <Field><FieldLabel htmlFor="settings-default-model">{text("其他时间使用", "Model outside windows")}</FieldLabel><PagedResourceSelect<string> id="settings-default-model" endpoint={`/agents/${agent.id}/models`} value={modelPolicy.defaultModel} selectedLabel={modelPolicy.defaultModel} onValueChange={value => setModelPolicy({...modelPolicy, defaultModel: value})} getOption={model => ({value: model, label: model})} /></Field>
             <div className="flex flex-col gap-3"><div className="flex flex-wrap items-start justify-between gap-3"><div><div className="flex items-center gap-2"><p className="text-sm font-medium">{text("UTC 规则组", "UTC rule groups")}</p><Badge variant="outline">{text(`${scheduleGroups.length} 组`, `${scheduleGroups.length} groups`)}</Badge></div><p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">{text("每组统一设置生效日、模型和 Run 并发，并可添加多个时间段。结束早于开始时跨到下一 UTC 日；规则组重叠时上方优先。", "Each group shares active days, model, and run concurrency across multiple time windows. An end earlier than its start crosses into the next UTC day; earlier groups take priority when they overlap.")}</p></div><Button type="button" size="sm" variant="outline" disabled={modelPolicy.windows.length >= 16} onClick={() => updateScheduleGroups((groups) => {
               const previous = groups.at(-1);
               const nextModel = availableModels.find((model) => model !== previous?.model) ?? previous?.model ?? modelPolicy.defaultModel;
@@ -595,7 +606,7 @@ export const AgentSettingsPage = () => {
                   <div className="flex min-w-0 flex-col gap-4">
                     <ModelWeekdayPicker value={group.days} onChange={(days) => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, days } : item))} />
                     <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(150px,0.55fr)]">
-                      <Field><FieldLabel htmlFor={`settings-group-model-${groupIndex}`}>{text("模型", "Model")}</FieldLabel><NativeSelect id={`settings-group-model-${groupIndex}`} className="w-full" value={group.model} onChange={(event) => updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? { ...item, model: event.target.value } : item))}>{availableModels.map((model) => <NativeSelectOption key={model} value={model}>{model}</NativeSelectOption>)}</NativeSelect></Field>
+                      <Field><FieldLabel htmlFor={`settings-group-model-${groupIndex}`}>{text("模型", "Model")}</FieldLabel><PagedResourceSelect<string> id={`settings-group-model-${groupIndex}`} endpoint={`/agents/${agent.id}/models`} value={group.model} selectedLabel={group.model} onValueChange={value => updateScheduleGroups(groups => groups.map((item, itemIndex) => itemIndex === groupIndex ? {...item, model: value} : item))} getOption={model => ({value: model, label: model})} /></Field>
                       <Field><FieldLabel htmlFor={`settings-group-concurrency-${groupIndex}`}>{text("Run 并发上限", "Run concurrency limit")}</FieldLabel><Input id={`settings-group-concurrency-${groupIndex}`} type="number" min={1} max={64} step={1} placeholder={text("继承默认", "Use default")} value={group.maxConcurrentRuns ?? ""} onChange={(event) => {
                         const value = event.target.value;
                         updateScheduleGroups((groups) => groups.map((item, itemIndex) => itemIndex === groupIndex ? {

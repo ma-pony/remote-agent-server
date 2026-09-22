@@ -71,9 +71,9 @@ export class WebhookIngress {
     return { ...result, matched: !ping && result.matched, reason: ping ? "ping" : result.matched ? "filter_matched" : "filter_not_matched" };
   }
 
-  receipts(endpointId: number) {
+  receipts(endpointId: number, pagination?: { page: number; pageSize: number }) {
     this.requireEndpoint(endpointId);
-    return this.dependencies.store.listWebhookReceipts(endpointId);
+    return pagination ? this.dependencies.store.listWebhookReceiptsPage(endpointId, pagination) : this.dependencies.store.listWebhookReceipts(endpointId);
   }
 
   async receive(slug: string, headers: IncomingHttpHeaders, body: Buffer): Promise<

@@ -1,3 +1,5 @@
+import { ListPagination } from "@/components/list-pagination";
+import { PagedResourceSelect } from "@/components/paged-resource-select";
 import { FormEvent, useEffect, useState } from "react";
 import { ArrowLeft, CheckCircle2, ChevronDown, Download, Pencil, Plus, RefreshCw, Server, SlidersHorizontal, Trash2, XCircle } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router";
@@ -29,28 +31,15 @@ const ErrorAlert = ({ message }: { message: string }) => { const { text } = useI
 
 type McpToolSummary = { name: string; description: string | null };
 type McpCheckResponse =
-  | { status: "passed"; toolCount: number; message: string; tools?: McpToolSummary[] }
+  | { status: "passed"; toolCount: number; message: string; tools: Page<McpToolSummary>; snapshotId: string }
   | { status: "failed"; message: string };
 type ToolDialogState = {
   serverId: number;
   serverName: string;
-  tools: McpToolSummary[];
+  tools: Page<McpToolSummary>;
+  snapshotId: string;
   accessMode: "all" | "selected";
   selectedTools: string[];
-};
-
-const listAgentSessions = async (agentId: string, signal?: AbortSignal): Promise<Session[]> => {
-  const sessions: Session[] = [];
-  let page = 1;
-  while (true) {
-    const result = await api<Page<Session>>(
-      `/sessions?page=${page}&pageSize=100&agentId=${agentId}`,
-      signal === undefined ? undefined : { signal }
-    );
-    sessions.push(...result.items.filter((item) => item.storageCleanedAt == null));
-    if (page >= result.totalPages) return sessions;
-    page += 1;
-  }
 };
 
 const McpToolRow = ({ tool, checked, disabled, onCheckedChange }: {
@@ -92,40 +81,48 @@ export const AgentMcpPage = () => {
   const [servers, setServers] = useState<AgentMcpServerSummary[] | null>(null);
   const [catalog, setCatalog] = useState<SharedMcpServerSummary[] | null>(null);
   const [systemCatalog, setSystemCatalog] = useState<ProviderMcpCatalogItem[] | null>(null);
-  const [sessions, setSessions] = useState<Session[]>([]);
+  const [serverPage, setServerPage] = useState(1);
+  const [catalogPage, setCatalogPage] = useState(1);
+  const [systemPage, setSystemPage] = useState(1);
+  const [serverResult, setServerResult] = useState<Page<AgentMcpServerSummary> | null>(null);
+  const [catalogResult, setCatalogResult] = useState<Page<SharedMcpServerSummary> | null>(null);
+  const [systemResult, setSystemResult] = useState<Page<ProviderMcpCatalogItem> | null>(null);
   const [checkSessionId, setCheckSessionId] = useState("");
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [toolDialog, setToolDialog] = useState<ToolDialogState | null>(null);
 
-  const load = () => Promise.all([
-    api<AgentMcpServerSummary[]>(`/agents/${id}/mcp-servers`),
-    api<SharedMcpServerSummary[]>(`/agents/${id}/mcp-catalog`),
-    listAgentSessions(id)
-  ]).then(([serverItems, catalogItems, sessionItems]) => {
-    setServers(serverItems); setCatalog(catalogItems);
-    setSessions(sessionItems);
-  });
+  const load = async (signal?: AbortSignal) => {
+    const [serverItems, catalogItems, systemItems] = await Promise.all([
+      api<Page<AgentMcpServerSummary>>(`/agents/${id}/mcp-servers?page=${serverPage}&pageSize=20`, { signal }),
+      api<Page<SharedMcpServerSummary>>(`/agents/${id}/mcp-catalog?page=${catalogPage}&pageSize=20`, { signal }),
+      api<Page<ProviderMcpCatalogItem>>(`/agents/${id}/system-mcp-catalog?page=${systemPage}&pageSize=20`, { signal })
+    ]);
+    if (signal?.aborted) return;
+    setServers(serverItems.items); setServerResult(serverItems);
+    setCatalog(catalogItems.items); setCatalogResult(catalogItems);
+    setSystemCatalog(systemItems.items); setSystemResult(systemItems);
+    if (serverPage > Math.max(1, serverItems.totalPages)) setServerPage(Math.max(1, serverItems.totalPages));
+    if (catalogPage > Math.max(1, catalogItems.totalPages)) setCatalogPage(Math.max(1, catalogItems.totalPages));
+  };
   useEffect(() => {
-    const controller = new AbortController();
-    void Promise.all([
-      api<AgentMcpServerSummary[]>(`/agents/${id}/mcp-servers`, { signal: controller.signal }),
-      api<SharedMcpServerSummary[]>(`/agents/${id}/mcp-catalog`, { signal: controller.signal }),
-      listAgentSessions(id, controller.signal)
-    ]).then(([serverItems, catalogItems, sessionItems]) => {
-      setServers(serverItems); setCatalog(catalogItems);
-      setSessions(sessionItems);
-    })
-      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
-    void api<ProviderMcpCatalogItem[]>(`/agents/${id}/system-mcp-catalog`, { signal: controller.signal })
-      .then(setSystemCatalog)
-      .catch(() => { if (!controller.signal.aborted) setSystemCatalog([]); });
+    const controller = new AbortController(); setError("");
+    setServers(null); setCatalog(null); setSystemCatalog(null);
+    void load(controller.signal).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [id]);
+  }, [id, serverPage, catalogPage, systemPage]);
+  const loadToolPage = async (page: number) => {
+    if (toolDialog === null) return;
+    setBusy("tool-page");
+    try {
+      const tools = await api<Page<McpToolSummary>>(`/agents/${id}/mcp-servers/${toolDialog.serverId}/tools?page=${page}&pageSize=20&snapshotId=${encodeURIComponent(toolDialog.snapshotId)}`);
+      setToolDialog((current) => current?.snapshotId === toolDialog.snapshotId ? { ...current, tools } : current);
+    } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
+  };
 
   const probe = (server: AgentMcpServerSummary) => api<McpCheckResponse>(
-    `/agents/${id}/mcp-servers/${server.id}/check`, {
+    `/agents/${id}/mcp-servers/${server.id}/check?page=1&pageSize=20`, {
       method: "POST", body: checkSessionId === "" ? undefined : JSON.stringify({ sessionId: Number(checkSessionId) })
     }
   );
@@ -142,13 +139,14 @@ export const AgentMcpPage = () => {
     try {
       const result = await probe(server);
       if (result.status === "failed") { setError(result.message); return; }
-      const tools = result.tools ?? [];
+      const tools = result.tools;
       setToolDialog({
         serverId: server.id,
         serverName: server.name,
         tools,
+        snapshotId: result.snapshotId,
         accessMode: server.allowedTools === null ? "all" : "selected",
-        selectedTools: server.allowedTools ?? tools.map((tool) => tool.name)
+        selectedTools: server.allowedTools ?? []
       });
       await load();
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
@@ -163,14 +161,11 @@ export const AgentMcpPage = () => {
   const installSystemMcp = async (server: ProviderMcpCatalogItem) => {
     setBusy(`system-install-${server.id}`); setError("");
     try {
-      const created = await api<AgentMcpServerSummary>(
+      await api<AgentMcpServerSummary>(
         `/agents/${id}/system-mcp-catalog/${encodeURIComponent(server.id)}/install`,
         { method: "POST" }
       );
-      setServers((items) => [...(items ?? []), created]);
-      setSystemCatalog((items) => (items ?? []).map((item) => item.id === server.id
-        ? { ...item, installed: true }
-        : item));
+      await load();
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
   const toggle = async (server: AgentMcpServerSummary) => {
@@ -222,7 +217,7 @@ export const AgentMcpPage = () => {
             <label className="flex cursor-pointer items-start gap-3"><input type="radio" name="mcp-tool-access" className="mt-1" aria-label={text("全部工具", "All tools")} checked={toolDialog.accessMode === "all"} onChange={() => setToolDialog({ ...toolDialog, accessMode: "all" })} /><span><span className="block font-medium">{text("全部工具", "All tools")}</span><span className="text-sm text-muted-foreground">{text("自动包含以后新增的工具。", "Automatically include tools added later.")}</span></span></label>
             <label className="flex cursor-pointer items-start gap-3"><input type="radio" name="mcp-tool-access" className="mt-1" aria-label={text("仅所选工具", "Selected tools only")} checked={toolDialog.accessMode === "selected"} onChange={() => setToolDialog({ ...toolDialog, accessMode: "selected" })} /><span><span className="block font-medium">{text("仅所选工具", "Selected tools only")}</span><span className="text-sm text-muted-foreground">{text("未选择的工具不会暴露给模型。", "Unselected tools are hidden from the model.")}</span></span></label>
           </div>
-          {toolDialog.tools.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{text("当前没有可用工具。", "No tools are currently available.")}</p> : <div className="divide-y rounded-lg border">{toolDialog.tools.map((tool) => {
+          {toolDialog.tools.items.length === 0 ? <p className="py-6 text-sm text-muted-foreground">{text("当前没有可用工具。", "No tools are currently available.")}</p> : <div className="divide-y rounded-lg border">{toolDialog.tools.items.map((tool) => {
             const checked = toolDialog.accessMode === "all" || toolDialog.selectedTools.includes(tool.name);
             return <McpToolRow key={tool.name} tool={tool} disabled={toolDialog.accessMode === "all"} checked={checked} onCheckedChange={(toolChecked) => setToolDialog({
               ...toolDialog,
@@ -231,16 +226,17 @@ export const AgentMcpPage = () => {
                 : toolDialog.selectedTools.filter((name) => name !== tool.name)
             })} />;
           })}</div>}
+          <ListPagination {...toolDialog.tools} onPageChange={(page) => void loadToolPage(page)} disabled={busy !== ""} />
           <div className="flex justify-end"><Button disabled={busy !== ""} onClick={() => void saveToolAccess()}>{text("保存工具权限", "Save tool access")}</Button></div>
         </>}
       </DialogContent>
     </Dialog>
     {notice === "" ? null : <Alert><CheckCircle2 /><AlertTitle>{text("连接正常", "Connection healthy")}</AlertTitle><AlertDescription>{notice}</AlertDescription></Alert>}
     <Card><CardHeader className="flex-row items-start justify-between gap-4"><div><CardTitle>{text("MCP 服务器", "MCP servers")}</CardTitle><CardDescription className="mt-2">{text("所有已启用的 MCP 都会在运行前检查并注入智能体；任一连接失败都会阻止本次运行。", "All enabled MCP servers are checked and injected before a run. Any connection failure blocks that run.")}</CardDescription></div><Button asChild><Link to={`/agents/${id}/mcp/new`}><Plus />{text("新建 MCP", "New MCP server")}</Link></Button></CardHeader>
-      <CardContent className="flex flex-col gap-4"><Field><FieldLabel htmlFor="check-session">{text("检查使用的会话", "Session used for checks")}</FieldLabel><NativeSelect id="check-session" name="check-session" className="max-w-sm" value={checkSessionId} onChange={(event) => setCheckSessionId(event.target.value)}><NativeSelectOption value="">{text("不使用会话参数", "Do not use session parameters")}</NativeSelectOption>{sessions.map((session) => <NativeSelectOption key={session.id} value={session.id}>{session.title}</NativeSelectOption>)}</NativeSelect><FieldDescription>{text("只有 MCP 引用了会话参数时才需要选择。", "Select a session only when the MCP configuration references session parameters.")}</FieldDescription></Field>{servers === null ? <Skeleton className="h-36" /> : servers.length === 0 ? <EmptyState icon={Server} className="min-h-48" title={text("还没有 MCP 服务器", "No MCP servers yet")} description={text("创建远程 HTTP 服务或本机 stdio 服务，并按需限制暴露给模型的工具。", "Add a remote HTTP or local stdio server and choose which tools the model can access.")} action={<Button asChild><Link to={`/agents/${id}/mcp/new`}><Plus />{text("新建 MCP", "New MCP server")}</Link></Button>} /> : <div className="surface-list divide-y rounded-lg border">{servers.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><Link className="font-medium hover:underline" to={`/agents/${id}/mcp/${server.id}`}>{server.name}</Link><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant={server.enabled ? "default" : "secondary"}>{server.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge><Badge variant="outline">{server.allowedTools === null ? text("全部工具", "All tools") : text(`已选择 ${server.allowedTools.length} 个工具`, `${server.allowedTools.length} selected tools`)}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{server.lastCheckStatus === null ? text("尚未检查", "Not checked") : server.lastCheckStatus === "passed" ? <>{text("最近检查通过 · ", "Last check passed · ")}<Button type="button" size="xs" variant="link" className="h-auto p-0 align-baseline" aria-label={text(`查看 ${server.lastToolCount ?? 0} 个工具`, `View ${server.lastToolCount ?? 0} tools`)} disabled={busy !== ""} onClick={() => void showTools(server)}>{text(`${server.lastToolCount ?? 0} 个工具`, `${server.lastToolCount ?? 0} tools`)}</Button></> : text("最近检查失败", "Last check failed")}</p></div><div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy !== ""} aria-label={text(`设置 ${server.name} 的工具范围`, `Set tool scope for ${server.name}`)} onClick={() => void showTools(server)}><SlidersHorizontal />{text("工具范围", "Tool scope")}</Button><Button variant="outline" size="sm" asChild><Link aria-label={text(`编辑 ${server.name}`, `Edit ${server.name}`)} to={`/agents/${id}/mcp/${server.id}`}><Pencil />{text("编辑", "Edit")}</Link></Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void toggle(server)}>{server.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void check(server)}><RefreshCw className={busy === `check-${server.id}` ? "animate-spin" : ""} />{text("检查连接", "Check connection")}</Button><AlertDialog><AlertDialogTrigger asChild><Button variant="ghost" size="sm" disabled={busy !== ""} aria-label={text(`删除 ${server.name}`, `Delete ${server.name}`)}><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${server.name}”？`, `Delete “${server.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("仅删除当前配置只影响当前智能体；从所有智能体删除会同时删除共享源和全部副本。", "Deleting only the current configuration affects this agent. Deleting from all agents also removes the shared source and every copy.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="outline" onClick={() => void remove(server, "current")}>{text("仅删除当前", "Current agent only")}</AlertDialogAction><AlertDialogAction variant="destructive" onClick={() => void remove(server, "all")}>{text("从所有智能体删除", "Delete from all agents")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></div>)}</div>}</CardContent>
+      <CardContent className="flex flex-col gap-4"><Field><FieldLabel htmlFor="check-session">{text("检查使用的会话", "Session used for checks")}</FieldLabel><PagedResourceSelect<Session> id="check-session" name="check-session" endpoint={`/sessions?agentId=${id}&storage=active`} value={checkSessionId} onValueChange={setCheckSessionId} getOption={(session) => ({ value: String(session.id), label: session.title })} emptyLabel={text("不使用会话参数", "Do not use session parameters")} /><FieldDescription>{text("只有 MCP 引用了会话参数时才需要选择。", "Select a session only when the MCP configuration references session parameters.")}</FieldDescription></Field>{servers === null ? <Skeleton className="h-36" /> : servers.length === 0 ? <EmptyState icon={Server} className="min-h-48" title={text("还没有 MCP 服务器", "No MCP servers yet")} description={text("创建远程 HTTP 服务或本机 stdio 服务，并按需限制暴露给模型的工具。", "Add a remote HTTP or local stdio server and choose which tools the model can access.")} action={<Button asChild><Link to={`/agents/${id}/mcp/new`}><Plus />{text("新建 MCP", "New MCP server")}</Link></Button>} /> : <div className="surface-list divide-y rounded-lg border">{servers.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><Link className="font-medium hover:underline" to={`/agents/${id}/mcp/${server.id}`}>{server.name}</Link><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant={server.enabled ? "default" : "secondary"}>{server.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge><Badge variant="outline">{server.allowedTools === null ? text("全部工具", "All tools") : text(`已选择 ${server.allowedTools.length} 个工具`, `${server.allowedTools.length} selected tools`)}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{server.lastCheckStatus === null ? text("尚未检查", "Not checked") : server.lastCheckStatus === "passed" ? <>{text("最近检查通过 · ", "Last check passed · ")}<Button type="button" size="xs" variant="link" className="h-auto p-0 align-baseline" aria-label={text(`查看 ${server.lastToolCount ?? 0} 个工具`, `View ${server.lastToolCount ?? 0} tools`)} disabled={busy !== ""} onClick={() => void showTools(server)}>{text(`${server.lastToolCount ?? 0} 个工具`, `${server.lastToolCount ?? 0} tools`)}</Button></> : text("最近检查失败", "Last check failed")}</p></div><div className="flex flex-wrap gap-2"><Button size="sm" disabled={busy !== ""} aria-label={text(`设置 ${server.name} 的工具范围`, `Set tool scope for ${server.name}`)} onClick={() => void showTools(server)}><SlidersHorizontal />{text("工具范围", "Tool scope")}</Button><Button variant="outline" size="sm" asChild><Link aria-label={text(`编辑 ${server.name}`, `Edit ${server.name}`)} to={`/agents/${id}/mcp/${server.id}`}><Pencil />{text("编辑", "Edit")}</Link></Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void toggle(server)}>{server.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button><Button variant="outline" size="sm" disabled={busy !== ""} onClick={() => void check(server)}><RefreshCw className={busy === `check-${server.id}` ? "animate-spin" : ""} />{text("检查连接", "Check connection")}</Button><AlertDialog><AlertDialogTrigger asChild><Button variant="ghost" size="sm" disabled={busy !== ""} aria-label={text(`删除 ${server.name}`, `Delete ${server.name}`)}><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${server.name}”？`, `Delete “${server.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("仅删除当前配置只影响当前智能体；从所有智能体删除会同时删除共享源和全部副本。", "Deleting only the current configuration affects this agent. Deleting from all agents also removes the shared source and every copy.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="outline" onClick={() => void remove(server, "current")}>{text("仅删除当前", "Current agent only")}</AlertDialogAction><AlertDialogAction variant="destructive" onClick={() => void remove(server, "all")}>{text("从所有智能体删除", "Delete from all agents")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></div>)}</div>}{serverResult === null ? null : <ListPagination {...serverResult} onPageChange={setServerPage} disabled={busy !== "" || servers === null} />}</CardContent>
     </Card>
-    <Card><CardHeader><CardTitle>{text("可添加的 MCP", "Available MCP servers")}</CardTitle><CardDescription>{text("其他智能体创建的 MCP。添加后配置独立，可单独编辑或停用。", "MCP servers created by other agents. Installed copies can be edited or disabled independently.")}</CardDescription></CardHeader><CardContent>{catalog === null ? <Skeleton className="h-24" /> : catalog.length === 0 ? <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">{text("所有共享 MCP 均已添加。", "All shared MCP servers are installed.")}</div> : <div className="divide-y rounded-lg border">{catalog.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2"><p className="font-medium">{server.name}</p><Badge variant="outline">{server.transport.toUpperCase()}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{text(`来自 ${server.sourceAgentName}`, `From ${server.sourceAgentName}`)}</p></div><Button size="sm" disabled={busy !== ""} aria-label={text(`添加并启用 ${server.name}`, `Install and enable ${server.name}`)} onClick={() => void install(server)}><Plus />{text("添加并启用", "Install and enable")}</Button></div>)}</div>}</CardContent></Card>
-    <Card><CardHeader><CardTitle>{text("系统配置中的 MCP", "MCP from system configuration")}</CardTitle><CardDescription>{text("从当前执行器的全局配置中发现。导入后成为当前智能体的独立 MCP 配置，运行时不会直接继承系统配置。", "Discovered from the current provider's global configuration. Imported servers become independent Agent MCP configurations; system configuration is never inherited directly at runtime.")}</CardDescription></CardHeader><CardContent>{systemCatalog === null ? <Skeleton className="h-24" /> : systemCatalog.length === 0 ? <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">{text("当前执行器没有可导入的系统 MCP。", "This provider has no system MCP servers to import.")}</div> : <div className="divide-y rounded-lg border">{systemCatalog.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{server.name}</p><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant="secondary">{server.provider === "codex" ? "Codex" : "Claude Code"}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{text(`来自 ${server.provider === "codex" ? "Codex" : "Claude Code"} 系统配置`, `From ${server.provider === "codex" ? "Codex" : "Claude Code"} system configuration`)}</p></div>{server.installed ? <Badge className="self-start sm:self-center" variant="secondary">{text("已导入", "Imported")}</Badge> : <Button size="sm" disabled={busy !== ""} aria-label={text(`导入并启用 ${server.name}`, `Import and enable ${server.name}`)} onClick={() => void installSystemMcp(server)}><Download />{text("导入并启用", "Import and enable")}</Button>}</div>)}</div>}</CardContent></Card>
+    <Card><CardHeader><CardTitle>{text("可添加的 MCP", "Available MCP servers")}</CardTitle><CardDescription>{text("其他智能体创建的 MCP。添加后配置独立，可单独编辑或停用。", "MCP servers created by other agents. Installed copies can be edited or disabled independently.")}</CardDescription></CardHeader><CardContent>{catalog === null ? <Skeleton className="h-24" /> : catalog.length === 0 ? <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">{text("所有共享 MCP 均已添加。", "All shared MCP servers are installed.")}</div> : <div className="divide-y rounded-lg border">{catalog.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex items-center gap-2"><p className="font-medium">{server.name}</p><Badge variant="outline">{server.transport.toUpperCase()}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{text(`来自 ${server.sourceAgentName}`, `From ${server.sourceAgentName}`)}</p></div><Button size="sm" disabled={busy !== ""} aria-label={text(`添加并启用 ${server.name}`, `Install and enable ${server.name}`)} onClick={() => void install(server)}><Plus />{text("添加并启用", "Install and enable")}</Button></div>)}</div>}{catalogResult === null ? null : <ListPagination {...catalogResult} onPageChange={setCatalogPage} disabled={busy !== "" || catalog === null} />}</CardContent></Card>
+    <Card><CardHeader><CardTitle>{text("系统配置中的 MCP", "MCP from system configuration")}</CardTitle><CardDescription>{text("从当前执行器的全局配置中发现。导入后成为当前智能体的独立 MCP 配置，运行时不会直接继承系统配置。", "Discovered from the current provider's global configuration. Imported servers become independent Agent MCP configurations; system configuration is never inherited directly at runtime.")}</CardDescription></CardHeader><CardContent>{systemCatalog === null ? <Skeleton className="h-24" /> : systemCatalog.length === 0 ? <div className="rounded-lg border border-dashed py-8 text-center text-sm text-muted-foreground">{text("当前执行器没有可导入的系统 MCP。", "This provider has no system MCP servers to import.")}</div> : <div className="divide-y rounded-lg border">{systemCatalog.map((server) => <div key={server.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div><div className="flex flex-wrap items-center gap-2"><p className="font-medium">{server.name}</p><Badge variant="outline">{server.transport.toUpperCase()}</Badge><Badge variant="secondary">{server.provider === "codex" ? "Codex" : "Claude Code"}</Badge></div><p className="mt-1 text-sm text-muted-foreground">{text(`来自 ${server.provider === "codex" ? "Codex" : "Claude Code"} 系统配置`, `From ${server.provider === "codex" ? "Codex" : "Claude Code"} system configuration`)}</p></div>{server.installed ? <Badge className="self-start sm:self-center" variant="secondary">{text("已导入", "Imported")}</Badge> : <Button size="sm" disabled={busy !== ""} aria-label={text(`导入并启用 ${server.name}`, `Import and enable ${server.name}`)} onClick={() => void installSystemMcp(server)}><Download />{text("导入并启用", "Import and enable")}</Button>}</div>)}</div>}{systemResult === null ? null : <ListPagination {...systemResult} onPageChange={setSystemPage} disabled={busy !== "" || systemCatalog === null} />}</CardContent></Card>
   </div>;
 };
 
@@ -267,11 +263,11 @@ const toInput = (item: ValueDraft) => ({
       : { source: "runtime" as const, runtimeKey: item.runtimeKey })
 });
 
-const ValueRows = ({ label, named, values, parameters, onChange }: {
+const ValueRows = ({ label, named, values, agentId, onChange }: {
   label: "Header" | "Argument" | "Environment";
   named: boolean;
   values: ValueDraft[];
-  parameters: AgentSessionParameter[];
+  agentId: string;
   onChange: (values: ValueDraft[]) => void;
 }) => {
   const { text } = useI18n();
@@ -286,7 +282,7 @@ const ValueRows = ({ label, named, values, parameters, onChange }: {
   return <div className="flex flex-col gap-3">{values.map((item, index) => <div key={item.id ?? index} className="grid gap-3 rounded-lg border p-3 md:grid-cols-2">
     {named ? <Field><FieldLabel htmlFor={`${label}-name-${index}`}>{text(`${displayLabel}名称 ${index + 1}`, `${displayLabel} name ${index + 1}`)}</FieldLabel><Input id={`${label}-name-${index}`} value={item.name ?? ""} onChange={(event) => update(index, { name: event.target.value })} /></Field> : null}
     <Field><FieldLabel htmlFor={`${label}-source-${index}`}>{text(`${displayLabel}来源 ${index + 1}`, `${displayLabel} source ${index + 1}`)}</FieldLabel><NativeSelect id={`${label}-source-${index}`} className="w-full" value={item.source} onChange={(event) => update(index, { source: event.target.value as ValueSource })}><NativeSelectOption value="fixed">{text("固定值", "Fixed value")}</NativeSelectOption><NativeSelectOption value="session_parameter">{text("会话参数", "Session parameter")}</NativeSelectOption><NativeSelectOption value="runtime">{text("运行参数", "Runtime value")}</NativeSelectOption></NativeSelect></Field>
-    {item.source === "fixed" ? <Field><FieldLabel htmlFor={`${label}-value-${index}`}>{text(`${displayLabel}值 ${index + 1}`, `${displayLabel} value ${index + 1}`)}</FieldLabel><Input id={`${label}-value-${index}`} type={item.secret ? "password" : "text"} value={item.value} placeholder={item.id === undefined ? "" : text("留空保持原敏感值", "Leave blank to keep the current secret")} onChange={(event) => update(index, { value: event.target.value })} /></Field> : item.source === "session_parameter" ? <Field><FieldLabel htmlFor={`${label}-parameter-${index}`}>{text(`${displayLabel}会话参数 ${index + 1}`, `${displayLabel} session parameter ${index + 1}`)}</FieldLabel><NativeSelect id={`${label}-parameter-${index}`} className="w-full" value={item.parameterKey} onChange={(event) => update(index, { parameterKey: event.target.value })}><NativeSelectOption value="">{text("请选择", "Select")}</NativeSelectOption>{parameters.map((parameter) => <NativeSelectOption key={parameter.id} value={parameter.key}>{parameter.label} ({parameter.key})</NativeSelectOption>)}</NativeSelect></Field> : <Field><FieldLabel htmlFor={`${label}-runtime-${index}`}>{text(`${displayLabel}运行参数 ${index + 1}`, `${displayLabel} runtime value ${index + 1}`)}</FieldLabel><NativeSelect id={`${label}-runtime-${index}`} className="w-full" value={item.runtimeKey} onChange={(event) => update(index, { runtimeKey: event.target.value as ValueDraft["runtimeKey"] })}>{runtimeOptions.map((option) => <NativeSelectOption key={option.key} value={option.key}>{option.label}</NativeSelectOption>)}</NativeSelect></Field>}
+    {item.source === "fixed" ? <Field><FieldLabel htmlFor={`${label}-value-${index}`}>{text(`${displayLabel}值 ${index + 1}`, `${displayLabel} value ${index + 1}`)}</FieldLabel><Input id={`${label}-value-${index}`} type={item.secret ? "password" : "text"} value={item.value} placeholder={item.id === undefined ? "" : text("留空保持原敏感值", "Leave blank to keep the current secret")} onChange={(event) => update(index, { value: event.target.value })} /></Field> : item.source === "session_parameter" ? <Field><FieldLabel htmlFor={`${label}-parameter-${index}`}>{text(`${displayLabel}会话参数 ${index + 1}`, `${displayLabel} session parameter ${index + 1}`)}</FieldLabel><PagedResourceSelect<AgentSessionParameter> id={`${label}-parameter-${index}`} endpoint={`/agents/${agentId}/session-parameters`} value={item.parameterKey} selectedLabel={item.parameterKey} onValueChange={(value) => update(index, { parameterKey: value })} getOption={(parameter) => ({ value: parameter.key, label: `${parameter.label} (${parameter.key})` })} /></Field> : <Field><FieldLabel htmlFor={`${label}-runtime-${index}`}>{text(`${displayLabel}运行参数 ${index + 1}`, `${displayLabel} runtime value ${index + 1}`)}</FieldLabel><NativeSelect id={`${label}-runtime-${index}`} className="w-full" value={item.runtimeKey} onChange={(event) => update(index, { runtimeKey: event.target.value as ValueDraft["runtimeKey"] })}>{runtimeOptions.map((option) => <NativeSelectOption key={option.key} value={option.key}>{option.label}</NativeSelectOption>)}</NativeSelect></Field>}
     <div className="flex items-end justify-between gap-3">{item.source === "fixed" ? <label className="flex items-center gap-2 pb-2 text-sm"><input aria-label={text(`${displayLabel} 敏感值 ${index + 1}`, `${displayLabel} secret ${index + 1}`)} type="checkbox" checked={item.secret} onChange={(event) => update(index, { secret: event.target.checked })} />{text("敏感值", "Secret")}</label> : <span />}<Button type="button" variant="ghost" size="icon-sm" aria-label={text(`删除 ${displayLabel} ${index + 1}`, `Delete ${displayLabel} ${index + 1}`)} onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}><Trash2 /></Button></div>
   </div>)}<Button type="button" variant="outline" onClick={() => onChange([...values, emptyValue(named)])}><Plus />{text(`添加${displayLabel}`, `Add ${displayLabel.toLowerCase()}`)}</Button></div>;
 };
@@ -303,7 +299,6 @@ export const AgentMcpEditorPage = () => {
   const [headers, setHeaders] = useState<ValueDraft[]>([]);
   const [argumentsList, setArgumentsList] = useState<ValueDraft[]>([]);
   const [environment, setEnvironment] = useState<ValueDraft[]>([]);
-  const [parameters, setParameters] = useState<AgentSessionParameter[]>([]);
   const [timeout, setTimeoutValue] = useState("30");
   const [enabled, setEnabled] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -311,8 +306,6 @@ export const AgentMcpEditorPage = () => {
 
   useEffect(() => {
     const controller = new AbortController();
-    void api<AgentSessionParameter[]>(`/agents/${id}/session-parameters`, { signal: controller.signal })
-      .then(setParameters).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     if (!editing) return () => controller.abort();
     void api<AgentMcpServerDetail>(`/agents/${id}/mcp-servers/${mcpServerId}`, { signal: controller.signal }).then((server) => {
       setName(server.name); setTransport(server.transport); setTimeoutValue(String(server.checkTimeoutSeconds)); setEnabled(server.enabled);
@@ -356,7 +349,7 @@ export const AgentMcpEditorPage = () => {
   return <PageContainer width="form" className="max-w-3xl"><Button variant="ghost" asChild className="mb-4"><Link to={`/agents/${id}/mcp`}><ArrowLeft />{text("返回 MCP", "Back to MCP")}</Link></Button><PageHeader eyebrow={text("模型上下文协议", "MODEL CONTEXT PROTOCOL")} title={editing ? text("编辑 MCP", "Edit MCP server") : text("新建 MCP", "New MCP server")} description={text("HTTP 用于远程服务；stdio 用于服务器本机命令。", "Use HTTP for remote services and stdio for commands on this server.")} /><ErrorAlert message={error} /><Card><CardHeader><CardTitle>{text("连接配置", "Connection configuration")}</CardTitle></CardHeader><CardContent><form onSubmit={submit}><FieldGroup>
     <Field><FieldLabel htmlFor="mcp-name">{text("MCP 名称", "MCP name")}</FieldLabel><Input id="mcp-name" value={name} onChange={(event) => setName(event.target.value)} /></Field>
     <Field><FieldLabel htmlFor="mcp-transport">{text("传输方式", "Transport")}</FieldLabel><NativeSelect id="mcp-transport" className="w-full" value={transport} disabled={editing} onChange={(event) => setTransport(event.target.value as "http" | "stdio")}><NativeSelectOption value="http">HTTP</NativeSelectOption><NativeSelectOption value="stdio">stdio</NativeSelectOption></NativeSelect></Field>
-    {transport === "http" ? <><Field><FieldLabel htmlFor="mcp-url">{text("HTTP 地址", "HTTP URL")}</FieldLabel><Input id="mcp-url" value={url} onChange={(event) => setUrl(event.target.value)} /></Field><ValueRows label="Header" named values={headers} parameters={parameters} onChange={setHeaders} /></> : <><Field><FieldLabel htmlFor="mcp-command">{text("命令", "Command")}</FieldLabel><Input id="mcp-command" value={command} required onChange={(event) => setCommand(event.target.value)} /></Field><ValueRows label="Argument" named={false} values={argumentsList} parameters={parameters} onChange={setArgumentsList} /><ValueRows label="Environment" named values={environment} parameters={parameters} onChange={setEnvironment} /></>}
+    {transport === "http" ? <><Field><FieldLabel htmlFor="mcp-url">{text("HTTP 地址", "HTTP URL")}</FieldLabel><Input id="mcp-url" value={url} onChange={(event) => setUrl(event.target.value)} /></Field><ValueRows label="Header" named values={headers} agentId={id} onChange={setHeaders} /></> : <><Field><FieldLabel htmlFor="mcp-command">{text("命令", "Command")}</FieldLabel><Input id="mcp-command" value={command} required onChange={(event) => setCommand(event.target.value)} /></Field><ValueRows label="Argument" named={false} values={argumentsList} agentId={id} onChange={setArgumentsList} /><ValueRows label="Environment" named values={environment} agentId={id} onChange={setEnvironment} /></>}
     <Field><FieldLabel htmlFor="mcp-timeout">{text("检查超时（秒）", "Check timeout (seconds)")}</FieldLabel><Input id="mcp-timeout" type="number" min="1" max="300" value={timeout} onChange={(event) => setTimeoutValue(event.target.value)} /></Field><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{text("启用 MCP", "Enable MCP")}</label><div className="flex justify-between"><div>{editing ? <Button type="button" variant="destructive" disabled={busy} onClick={() => void remove()}><Trash2 />{text("删除", "Delete")}</Button> : null}</div><div className="flex gap-2"><Button type="button" variant="outline" asChild><Link to={`/agents/${id}/mcp`}>{text("取消", "Cancel")}</Link></Button><Button type="submit" disabled={busy || name.trim() === "" || (transport === "stdio" && command.trim() === "")}>{editing ? text("保存 MCP", "Save MCP") : text("创建 MCP", "Create MCP")}</Button></div></div>
   </FieldGroup></form></CardContent></Card></PageContainer>;
 };

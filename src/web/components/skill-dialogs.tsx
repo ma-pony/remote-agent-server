@@ -1,6 +1,6 @@
 import { type FormEvent, useEffect, useState } from "react";
 import { GitBranch, Loader2, Plus, RefreshCw } from "lucide-react";
-import { api, errorMessage, type AgentSkill, type SkillDiff, type SkillRevisionHistory, type SkillSource } from "@/api";
+import { api, errorMessage, type AgentSkill, type SkillDiff, type SkillRevisionHistory, type SkillSource, type Page } from "@/api";
 import { useI18n } from "@/i18n";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -12,9 +12,15 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { NativeSelect, NativeSelectOption } from "@/components/ui/native-select";
+import { ListPagination } from "@/components/list-pagination";
+import { PagedResourceSelect } from "@/components/paged-resource-select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { SkillFileDiff } from "@/components/skill-file-diff";
+
+type SourceSummary = Omit<SkillSource, "warnings"> & {warningCount: number};
+
+type RevisionPage = Page<SkillRevisionHistory["revisions"][number]> & Omit<SkillRevisionHistory, "revisions">;
+type DiffPage = Page<SkillDiff["files"][number]> & Omit<SkillDiff, "files">;
 
 const SkillError = ({ message }: { message: string }) => {
   const { text } = useI18n();
@@ -26,22 +32,26 @@ const SkillError = ({ message }: { message: string }) => {
 export const SkillSourcesDialog = ({ onChanged, disabled }: { onChanged: () => Promise<void>; disabled: boolean }) => {
   const { text } = useI18n();
   const [open, setOpen] = useState(false);
-  const [sources, setSources] = useState<SkillSource[] | null>(null);
+  const [result, setResult] = useState<Page<SourceSummary> | null>(null);
+  const sources = result?.items ?? null;
+  const [page, setPage] = useState(1);
+  const [query, setQuery] = useState("");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [ref, setRef] = useState("");
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
-  const reload = async () => setSources(await api<SkillSource[]>("/skill-sources"));
+  const endpoint = `/skill-sources?page=${page}&pageSize=20&query=${encodeURIComponent(query)}`;
+  const reload = async () => setResult(await api<Page<SourceSummary>>(endpoint));
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
-    setSources(null); setError("");
-    void api<SkillSource[]>("/skill-sources", { signal: controller.signal }).then(setSources)
+    setResult(null); setError("");
+    void api<Page<SourceSummary>>(endpoint, { signal: controller.signal }).then(setResult)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [open]);
+  }, [open, endpoint]);
   const operate = async (key: string, operation: () => Promise<void>) => {
     setBusy(key); setError("");
     try { await operation(); }
@@ -79,6 +89,7 @@ export const SkillSourcesDialog = ({ onChanged, disabled }: { onChanged: () => P
         <div className="mt-4 flex justify-end"><Button type="submit" disabled={pending || !name.trim() || !url.trim()}>{busy === "add" ? <Loader2 className="animate-spin" /> : <Plus />}{text("添加来源", "Add source")}</Button></div>
       </form>
       <div className="flex justify-end"><Button variant="ghost" size="sm" disabled={busy !== ""} onClick={() => { void reload().catch((reason: unknown) => setError(errorMessage(reason))); }}>{text("重新加载列表", "Reload list")}</Button></div>
+      <Input aria-label={text("搜索 Git 来源", "Search Git sources")} value={query} onChange={event => {setPage(1); setQuery(event.target.value);}} />
       {sources === null ? (error === "" ? <Skeleton className="h-24" /> : null) : sources.length === 0
         ? <p className="text-sm text-muted-foreground">{text("尚未添加 Git 来源。", "No Git sources yet.")}</p>
         : <div className="divide-y rounded-lg border">{sources.map((source) => <div key={source.id} className="flex flex-col gap-3 p-3">
@@ -98,18 +109,37 @@ export const SkillSourcesDialog = ({ onChanged, disabled }: { onChanged: () => P
           <p className="break-all font-mono text-xs text-muted-foreground">{source.url}{source.ref ? `#${source.ref}` : ""}{source.path ? ` · ${source.path}` : ""}</p>
           <p className="text-xs text-muted-foreground">{text(`${source.skillCount} 个 Skill`, `${source.skillCount} Skills`)}</p>
           {source.error ? <p className="text-xs text-destructive">{source.error}</p> : null}
-          {source.warnings.map((warning) => <p key={warning} className="text-xs text-muted-foreground">{warning}</p>)}
+          {source.warningCount > 0 ? <SkillSourceWarnings source={source} /> : null}
         </div>)}</div>}
+      {result === null ? null : <ListPagination {...result} onPageChange={setPage} disabled={pending} />}
     </DialogContent>
   </Dialog>;
+};
+
+const SkillSourceWarnings = ({source}: {source: SourceSummary}) => {
+  const {text} = useI18n();
+  const [open, setOpen] = useState(false);
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState<Page<string> | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    const controller = new AbortController();
+    setResult(null); setError("");
+    void api<Page<string>>(`/skill-sources/${encodeURIComponent(source.id)}/warnings?page=${page}&pageSize=20`, {signal: controller.signal})
+      .then(setResult).catch(reason => {if (!controller.signal.aborted) setError(errorMessage(reason));});
+    return () => controller.abort();
+  }, [source.id, open, page]);
+  return <div><Button type="button" size="sm" variant="ghost" onClick={() => setOpen(value => !value)} aria-expanded={open}>{text(`${source.warningCount} 条提示`, `${source.warningCount} warnings`)}</Button>
+    {open ? <><SkillError message={error} />{result === null ? <Skeleton className="h-12" /> : result.items.map((warning, index) => <p key={index} className="text-xs text-muted-foreground">{warning}</p>)}{result === null ? null : <ListPagination {...result} onPageChange={setPage} />}</> : null}</div>;
 };
 
 export const SkillRevisionDialog = ({ agentId, skill, onApplied, disabled }: { agentId: number; skill: AgentSkill; onApplied: () => Promise<void>; disabled: boolean }) => {
   const { text } = useI18n();
   const [open, setOpen] = useState(false);
-  const [history, setHistory] = useState<SkillRevisionHistory | null>(null);
+  const [history, setHistory] = useState<RevisionPage | null>(null);
   const [revision, setRevision] = useState("");
-  const [diff, setDiff] = useState<SkillDiff | null>(null);
+  const [diff, setDiff] = useState<DiffPage | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const base = `/agents/${agentId}/skills/${encodeURIComponent(skill.id)}`;
@@ -117,15 +147,15 @@ export const SkillRevisionDialog = ({ agentId, skill, onApplied, disabled }: { a
     if (!open) return;
     const controller = new AbortController();
     setHistory(null); setDiff(null); setRevision(""); setError("");
-    void api<SkillRevisionHistory>(`${base}/revisions`, { signal: controller.signal }).then((next) => {
+    void api<RevisionPage>(`${base}/revisions?page=1&pageSize=20`, { signal: controller.signal }).then((next) => {
       setHistory(next); setRevision(next.latestRevision ?? next.currentRevision ?? "");
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [open, base]);
-  const preview = async () => {
+  const preview = async (page = 1) => {
     if (!revision) return;
     setBusy("preview"); setError(""); setDiff(null);
-    try { setDiff(await api<SkillDiff>(`${base}/diff?revision=${encodeURIComponent(revision)}`)); }
+    try { setDiff(await api<DiffPage>(`${base}/diff?revision=${encodeURIComponent(revision)}&page=${page}&pageSize=20`)); }
     catch (reason) { setError(errorMessage(reason)); }
     finally { setBusy(""); }
   };
@@ -138,7 +168,7 @@ export const SkillRevisionDialog = ({ agentId, skill, onApplied, disabled }: { a
     } catch (reason) { setError(errorMessage(reason)); setDiff(null); }
     finally { setBusy(""); }
   };
-  const target = history?.revisions.find((item) => item.revision === revision);
+  const target = history?.items.find((item) => item.revision === revision);
   return <Dialog open={open} onOpenChange={(next) => { if (busy === "") setOpen(next); }}>
     <DialogTrigger asChild><Button size="sm" variant="outline" disabled={disabled || !skill.enabled || skill.currentRevision === undefined}>{skill.updateAvailable ? text("查看更新", "View update") : text("版本", "Versions")}</Button></DialogTrigger>
     <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
@@ -147,21 +177,19 @@ export const SkillRevisionDialog = ({ agentId, skill, onApplied, disabled }: { a
       {history === null ? (error === "" ? <Skeleton className="h-28" /> : null) : <>
         <Field>
           <FieldLabel htmlFor={`skill-revision-${skill.id}`}>{text("目标版本", "Target version")}</FieldLabel>
-          <NativeSelect id={`skill-revision-${skill.id}`} value={revision} disabled={busy !== ""} onChange={(event) => { setRevision(event.target.value); setDiff(null); }}>
-            <NativeSelectOption value="">{text("选择版本", "Choose a version")}</NativeSelectOption>
-            {history.revisions.map((item) => <NativeSelectOption key={item.revision} value={item.revision}>{item.revision.slice(0, 12)}{item.revision === history.currentRevision ? ` · ${text("当前", "current")}` : ""}{item.revision === history.latestRevision ? ` · ${text("最新", "latest")}` : ""}</NativeSelectOption>)}
-          </NativeSelect>
+          <PagedResourceSelect<SkillRevisionHistory["revisions"][number]> id={`skill-revision-${skill.id}`} endpoint={`${base}/revisions`} value={revision} selectedLabel={revision.slice(0, 12)} disabled={busy !== ""} onValueChange={value => {setRevision(value); setDiff(null);}} getOption={item => ({value: item.revision, label: `${item.revision.slice(0, 12)}${item.revision === history.currentRevision ? ` · ${text("当前", "current")}` : ""}${item.revision === history.latestRevision ? ` · ${text("最新", "latest")}` : ""}`})} />
           {target?.repositoryUrl ? <FieldDescription className="break-all">{target.repositoryUrl}{target.commit ? ` · ${target.commit.slice(0, 12)}` : ""}</FieldDescription> : null}
         </Field>
         <div className="flex justify-end"><Button variant="outline" disabled={!revision || busy !== ""} onClick={() => void preview()}>{busy === "preview" ? <Loader2 className="animate-spin" /> : null}{text("预览变更", "Preview changes")}</Button></div>
         {diff === null ? null : <>
           <Alert variant={diff.locallyModified ? "destructive" : "default"}>
             <AlertTitle>{diff.locallyModified ? text("检测到本地修改", "Local modifications detected") : text("版本比较", "Revision comparison")}</AlertTitle>
-            <AlertDescription>{diff.locallyModified ? text("为保护本地内容，无法覆盖。请先保存本地修改，再恢复原内容或停用后重新启用。", "Applying is blocked to protect local content. Save your edits, then restore the original files or disable and enable the Skill.") : text(`${diff.files.length} 个文件发生变化。`, `${diff.files.length} files changed.`)}</AlertDescription>
+            <AlertDescription>{diff.locallyModified ? text("为保护本地内容，无法覆盖。请先保存本地修改，再恢复原内容或停用后重新启用。", "Applying is blocked to protect local content. Save your edits, then restore the original files or disable and enable the Skill.") : text(`${diff.total} 个文件发生变化。`, `${diff.total} files changed.`)}</AlertDescription>
           </Alert>
-          {diff.files.length === 0 ? <p className="text-sm text-muted-foreground">{text("文件内容和权限没有变化。", "File contents and permissions are unchanged.")}</p> : <div className="max-h-[55vh] divide-y overflow-y-auto rounded-lg border">{diff.files.map((file) =>
-            <SkillFileDiff key={`${diff.revision}:${diff.baseRevision}:${file.path}`} base={base} diff={diff} file={file} />
+          {diff.total === 0 ? <p className="text-sm text-muted-foreground">{text("文件内容和权限没有变化。", "File contents and permissions are unchanged.")}</p> : <div className="max-h-[55vh] divide-y overflow-y-auto rounded-lg border">{diff.items.map((file) =>
+            <SkillFileDiff key={`${diff.revision}:${diff.baseRevision}:${file.path}`} base={base} diff={{...diff, files: diff.items}} file={file} />
           )}</div>}
+          <ListPagination {...diff} onPageChange={page => void preview(page)} disabled={busy !== ""} />
           <DialogFooter>
             <Button variant="outline" disabled={busy !== ""} onClick={() => setOpen(false)}>{text("取消", "Cancel")}</Button>
             <Button disabled={disabled || diff.locallyModified || busy !== "" || diff.revision !== revision || diff.revision === history.currentRevision} onClick={() => void apply()}>{busy === "apply" ? <Loader2 className="animate-spin" /> : null}{diff.revision === history.latestRevision ? text("应用此版本", "Apply this version") : text("回滚到此版本", "Roll back to this version")}</Button>

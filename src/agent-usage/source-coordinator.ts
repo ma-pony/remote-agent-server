@@ -1,3 +1,4 @@
+import { pageResult, type PaginationQuery } from "../pagination.js";
 import { createHash, randomUUID } from "node:crypto";
 import { UsageError } from "./core/errors.js";
 import type { UsageBinding, UsageObservation } from "./core/types.js";
@@ -177,7 +178,19 @@ export class UsageSourceCoordinator {
     return this.project(row);
   }
 
-  listSources(namespace: string, filter: SourceFilter = {}): SourceRecord[] {
+  listSourcesPage(namespace: string, filter: SourceFilter, pagination: Pick<PaginationQuery, "page" | "pageSize">) {
+    const scope = this.sourceWhere(namespace, filter);
+    const total = (this.store.db.prepare(`SELECT COUNT(*) AS total FROM agent_usage_sources s WHERE ${scope.where}`).get(...scope.params) as { total: number }).total;
+    return pageResult(this.listSources(namespace, filter, pagination), total, pagination);
+  }
+
+  sourceStatusCounts(namespace: string, filter: SourceFilter = {}): Record<string, number> {
+    const scope = this.sourceWhere(namespace, filter);
+    const rows = this.store.db.prepare(`SELECT s.status, COUNT(*) AS count FROM agent_usage_sources s WHERE ${scope.where} GROUP BY s.status`).all(...scope.params) as Array<{ status: string; count: number }>;
+    return Object.fromEntries(rows.map(({ status, count }) => [status, count]));
+  }
+
+  private sourceWhere(namespace: string, filter: SourceFilter): { where: string; params: string[] } {
     const clauses = ["s.namespace = ?"];
     const params = [namespace];
     for (const [field, column] of [["id", "id"], ["sourceKey", "source_key"]] as const) {
@@ -194,13 +207,18 @@ export class UsageSourceCoordinator {
     }
     if (mappings.length > 1) clauses.push(`EXISTS (SELECT 1 FROM agent_usage_source_mappings m WHERE ${mappings.join(" AND ")})`);
     const where = clauses.join(" AND ");
-    const rows = this.store.db.prepare(`SELECT s.* FROM agent_usage_sources s WHERE ${where} ORDER BY s.source_key`)
-      .all(...params) as SourceRow[];
+    return { where, params };
+  }
+
+  listSources(namespace: string, filter: SourceFilter = {}, pagination?: Pick<PaginationQuery, "page" | "pageSize">): SourceRecord[] {
+    const { where, params } = this.sourceWhere(namespace, filter);
+    const rows = this.store.db.prepare(`SELECT s.* FROM agent_usage_sources s WHERE ${where} ORDER BY s.source_key, s.id ${pagination ? "LIMIT ? OFFSET ?" : ""}`)
+      .all(...params, ...(pagination ? [pagination.pageSize, (pagination.page - 1) * pagination.pageSize] : [])) as SourceRow[];
     if (rows.length === 0) return [];
     // Load every mapping of selected sources together; filtering must not truncate a source's public mappings.
     const mappingRows = this.store.db.prepare(`SELECT mapping.* FROM agent_usage_source_mappings mapping
-      JOIN agent_usage_sources s ON s.id = mapping.source_id WHERE ${where}`)
-      .all(...params) as Array<MappingRow & { source_id: string }>;
+      ${pagination ? `WHERE mapping.source_id IN (${rows.map(() => "?").join(",")})` : `JOIN agent_usage_sources s ON s.id = mapping.source_id WHERE ${where}`}`)
+      .all(...(pagination ? rows.map((row) => row.id) : params)) as Array<MappingRow & { source_id: string }>;
     const bySource = new Map<string, MappingRow[]>();
     for (const row of mappingRows) {
       const group = bySource.get(row.source_id) ?? [];

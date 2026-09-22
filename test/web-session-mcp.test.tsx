@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { pagedManagementResponse } from "./paged-management-response.js";
 
 import "@testing-library/jest-dom/vitest";
 
@@ -24,13 +25,13 @@ it("创建 Session 时加载所选 Agent 的 MCP 参数", async () => {
   window.history.replaceState({}, "", "/sessions/new");
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/agents") return response([agent]);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response(definitions);
-    if (url === "/api/sessions" && init?.method === "POST") {
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/session-parameters`) return pagedManagementResponse(url, definitions);
+    if (new URL(url, "http://localhost").pathname === "/api/sessions" && init?.method === "POST") {
       expect(JSON.parse(String(init.body))).toEqual({
         title: "租户工单", agentId: agent.id, mcpParameters: { access_token: "session-secret" }
       });
-      return response({ id: 1 }, 201);
+      return pagedManagementResponse(url, { id: 1 }, 201);
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
@@ -55,10 +56,11 @@ it("Session 设置页修改参数，缺少必填参数时对话页禁止发送",
   };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/sessions/1" && (init?.method ?? "GET") === "GET") return response(detail);
-    if (url === "/api/sessions/1/mcp-parameters" && init?.method === "PATCH") {
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/1/mcp-parameters" && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, detail.mcpParameters);
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/1" && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, detail);
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/1/mcp-parameters" && init?.method === "PATCH") {
       expect(JSON.parse(String(init.body))).toEqual({ values: { access_token: "new-secret" } });
-      return response({ ...detail, mcpParametersValid: true, missingMcpParameters: [], mcpParameters: [{ ...detail.mcpParameters[0], configured: true }] });
+      return pagedManagementResponse(url, { ...detail, mcpParametersValid: true, missingMcpParameters: [], mcpParameters: [{ ...detail.mcpParameters[0], configured: true }] });
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
@@ -82,8 +84,9 @@ it("空闲 Session 确认后重建执行器会话并说明保留的数据", asyn
   const resetResponse = new Promise<Response>((resolve) => { resolveReset = resolve; });
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/sessions/1" && (init?.method ?? "GET") === "GET") return response(detail);
-    if (url === "/api/sessions/1/reset" && init?.method === "POST") {
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/1/mcp-parameters" && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, detail.mcpParameters);
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/1" && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, detail);
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/1/reset" && init?.method === "POST") {
       return resetResponse;
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
@@ -102,7 +105,7 @@ it("空闲 Session 确认后重建执行器会话并说明保留的数据", asyn
   expect(await screen.findByText("执行器会话已重建；下一轮将创建新执行器会话并重新注入 MCP。"))
     .toBeInTheDocument();
   expect(fetchMock.mock.calls.some(([input, init]) =>
-    input === "/api/sessions/1/reset" && init?.method === "POST"
+    input === "/api/sessions/1/reset?includeParameters=false" && init?.method === "POST"
   )).toBe(true);
 });
 
@@ -113,9 +116,10 @@ it("运行中的 Session 禁止重建执行器会话", async () => {
     workspacePath: "/tmp/session-1", projectEnvironmentRevisionId: 1, createdAt: now, updatedAt: now,
     mcpParametersValid: true, missingMcpParameters: [], mcpParameters: [], runs: []
   };
-  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/sessions/1") return response(detail);
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/1/mcp-parameters" && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, detail.mcpParameters);
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/1") return pagedManagementResponse(url, detail);
     throw new Error(`Unexpected request: ${url}`);
   }));
 

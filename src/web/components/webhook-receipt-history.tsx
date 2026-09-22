@@ -2,13 +2,14 @@ import { useEffect, useState } from "react";
 import { RefreshCw, Webhook, XCircle } from "lucide-react";
 import { Link } from "react-router";
 
-import { errorMessage, integrationApi, type WebhookReceiptDetail } from "@/api";
+import { api, errorMessage, type Page, type WebhookReceiptDetail } from "@/api";
 import { useI18n } from "@/i18n";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ListPagination } from "@/components/list-pagination";
 import { EmptyState } from "@/components/page-header";
 
 export const WebhookReceiptHistory = ({ endpointId }: { endpointId: number }) => {
@@ -17,21 +18,23 @@ export const WebhookReceiptHistory = ({ endpointId }: { endpointId: number }) =>
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [reload, setReload] = useState(0);
+  const [page, setPage] = useState(1);
+  const [paging, setPaging] = useState<Page<WebhookReceiptDetail> | null>(null);
   useEffect(() => {
     if (reload === 0) return;
     const controller = new AbortController();
     setBusy(true); setError("");
-    void integrationApi.listWebhookReceipts(endpointId, controller.signal).then((value) => {
-      if (!controller.signal.aborted) setReceipts(value);
+    void api<Page<WebhookReceiptDetail>>(`/integration-endpoints/${endpointId}/webhook-receiver/receipts?page=${page}&pageSize=20`, { signal: controller.signal }).then((value) => {
+      if (!controller.signal.aborted) { setReceipts(value.items); setPaging(value); }
     }).catch((reason: unknown) => {
       if (!controller.signal.aborted) setError(errorMessage(reason));
     }).finally(() => { if (!controller.signal.aborted) setBusy(false); });
     return () => controller.abort();
-  }, [endpointId, reload]);
+  }, [endpointId, reload, page]);
   return <Card>
     <CardHeader>
       <CardTitle>{text("最近接收记录", "Recent receipts")}</CardTitle>
-      <CardDescription>{text("查看最近 30 个投递的筛选决定与规则版本；重复投递复用原记录。", "View filter decisions and rule versions for the latest 30 deliveries. Retries reuse the original receipt.")}</CardDescription>
+      <CardDescription>{text("分页查看投递的筛选决定与规则版本；重复投递复用原记录。", "Browse filter decisions and rule versions for deliveries. Retries reuse the original receipt.")}</CardDescription>
     </CardHeader>
     <CardContent className="flex flex-col gap-4">
       <Button type="button" variant="outline" className="self-start" disabled={busy} onClick={() => setReload((value) => value + 1)}>
@@ -55,6 +58,7 @@ export const WebhookReceiptHistory = ({ endpointId }: { endpointId: number }) =>
                 : receipt.decision === "accepted" ? <span className="text-sm text-muted-foreground">{text("尚未入队，等待平台重试", "Not queued; awaiting platform retry")}</span> : null}</div>
           </div>)}</div>}
 
+      {paging && <ListPagination {...paging} onPageChange={setPage} disabled={busy} />}
     </CardContent>
   </Card>;
 };

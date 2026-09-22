@@ -96,6 +96,37 @@ afterEach(async () => {
 });
 
 describe("Agent API", () => {
+  it("pages and searches Agents before mapping results, and preserves the legacy inventory", async () => {
+    const { app, projectEnvironmentId } = await createTestApp();
+    for (let i = 0; i < 5; i++) await app.inject({ method: "POST", url: "/api/agents", headers: authHeaders(),
+      payload: { name: `Paged ${i}`, provider: "codex", projectEnvironmentId } });
+    const response = await app.inject({ url: "/api/agents?page=2&pageSize=2&query=Paged&enabled=true", headers: authHeaders() });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ page: 2, pageSize: 2, total: 5, totalPages: 3 });
+    expect(response.json().items.map((item: {name: string}) => item.name)).toEqual(["Paged 2", "Paged 3"]);
+    expect(response.json().items[0].projectEnvironmentName).toBeTypeOf("string");
+    expect((await app.inject({ url: "/api/agents?page=1&pageSize=101", headers: authHeaders() })).statusCode).toBe(400);
+    expect((await app.inject({ url: "/api/agents", headers: authHeaders() })).json()).toBeInstanceOf(Array);
+  });
+
+  it("reuses a model discovery snapshot across paged selectors", async () => {
+    const runtime = createFakeRuntime();
+    let discoveries = 0;
+    const discover = runtime.listModels!;
+    runtime.listModels = async input => {discoveries++; return discover(input);};
+    const {app} = await createTestApp(runtime);
+    const agent = (await app.inject({url: "/api/agents", headers: authHeaders()})).json()[0];
+    await Promise.all([1, 2].map(page => app.inject({url: `/api/agents/${agent.id}/models?page=${page}&pageSize=1`, headers: authHeaders()})));
+    expect(discoveries).toBe(1);
+  });
+
+  it("pages the advertised model catalog without dropping catalog metadata", async () => {
+    const { app } = await createTestApp();
+    const agents = (await app.inject({url: "/api/agents", headers: authHeaders()})).json();
+    const response = await app.inject({url: `/api/agents/${agents[0].id}/models?page=1&pageSize=1&query=glm`, headers: authHeaders()});
+    expect(response.json()).toEqual({supported: true, currentModel: "deepseek-v4-flash", items: ["glm-4.5"], page: 1, pageSize: 1, total: 1, totalPages: 1});
+  });
+
   it("reads selectable models from Agent Core and only saves advertised model policies", async () => {
     const { app, projectEnvironmentId, concurrencySettingsStore } = await createTestApp();
     const created = await app.inject({

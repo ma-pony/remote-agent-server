@@ -1,3 +1,4 @@
+import { paginationQuerySchema } from "../pagination.js";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
@@ -5,6 +6,8 @@ import type { RunRepository } from "../runs/run-repository.js";
 import { McpManagerError } from "../mcp/mcp-manager.js";
 import { WorkspaceCreateError } from "../workspaces/workspace-manager.js";
 import { SessionManager, SessionManagerError } from "./session-manager.js";
+
+const parameterDetailQuerySchema = z.object({ includeParameters: z.enum(["true", "false"]).default("true") }).strict();
 
 const createSessionSchema = z.object({
   agentId: z.number().int().positive(),
@@ -27,7 +30,8 @@ const sessionListQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
   query: z.string().trim().max(200).optional(),
   agentId: z.coerce.number().int().positive().optional(),
-  status: z.enum(["idle", "running"]).optional()
+  status: z.enum(["idle", "running"]).optional(),
+  storage: z.literal("active").optional()
 });
 
 const sendError = (reply: FastifyReply, statusCode: number, code: string, message: string) =>
@@ -76,7 +80,7 @@ export const registerSessionRoutes = (
   sessionManager: SessionManager,
   runRepository: RunRepository
 ): void => {
-  app.get<{ Querystring: { page?: string; pageSize?: string; query?: string; agentId?: string; status?: string } }>(
+  app.get<{ Querystring: { page?: string; pageSize?: string; query?: string; agentId?: string; status?: string; storage?: string } }>(
     "/sessions",
     (request, reply) => {
       const parsed = sessionListQuerySchema.safeParse(request.query);
@@ -99,7 +103,9 @@ export const registerSessionRoutes = (
 
   app.get<{ Params: { id: string } }>("/sessions/:id", (request, reply) => {
     const id = parseId(request.params.id);
-    const session = id === undefined ? undefined : sessionManager.get(id);
+    const query = parameterDetailQuerySchema.safeParse(request.query);
+    if (!query.success) return sendError(reply, 400, "invalid_request", "Invalid Session detail query");
+    const session = id === undefined ? undefined : query.data.includeParameters === "false" ? sessionManager.getSummary(id) : sessionManager.get(id);
     return session === undefined
       ? sendError(reply, 404, "not_found", "Session not found")
       : (() => {
@@ -126,23 +132,35 @@ export const registerSessionRoutes = (
     }
   );
 
+  app.get<{ Params: { id: string } }>("/sessions/:id/mcp-parameters", (request, reply) => {
+    const parsed = paginationQuerySchema.strict().safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Session parameter pagination");
+    const id = parseId(request.params.id);
+    const page = id === undefined ? undefined : sessionManager.parameterPage(id, parsed.data);
+    return page ?? sendError(reply, 404, "not_found", "Session not found");
+  });
+
   app.patch<{ Params: { id: string } }>("/sessions/:id/mcp-parameters", (request, reply) => {
+    const query = parameterDetailQuerySchema.safeParse(request.query);
+    if (!query.success) return sendError(reply, 400, "invalid_request", "Invalid Session detail query");
     const parsed = updateMcpParametersSchema.safeParse(request.body);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Session MCP parameters");
     try {
       const id = parseId(request.params.id);
       if (id === undefined) return sendError(reply, 404, "not_found", "Session not found");
-      return sessionManager.updateMcpParameters(id, parsed.data.values);
+      return sessionManager.updateMcpParameters(id, parsed.data.values, query.data.includeParameters !== "false");
     } catch (error) {
       return handleError(reply, error);
     }
   });
 
   app.post<{ Params: { id: string } }>("/sessions/:id/reset", async (request, reply) => {
+    const query = parameterDetailQuerySchema.safeParse(request.query);
+    if (!query.success) return sendError(reply, 400, "invalid_request", "Invalid Session detail query");
     try {
       const id = parseId(request.params.id);
       if (id === undefined) return sendError(reply, 404, "not_found", "Session not found");
-      return await sessionManager.resetProviderSession(id);
+      return await sessionManager.resetProviderSession(id, query.data.includeParameters !== "false");
     } catch (error) {
       return handleError(reply, error);
     }

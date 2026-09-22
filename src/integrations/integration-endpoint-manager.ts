@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 
 import type Database from "better-sqlite3";
+import { pageResult } from "../pagination.js";
+import type { AgentSessionParameter } from "../mcp/mcp-types.js";
 
 import { constantTimeTokenEqual } from "../auth.js";
 import type { SecretStore } from "../mcp/secret-store.js";
@@ -71,9 +73,34 @@ export class IntegrationEndpointManager {
     }));
   }
 
-  get(id: number): IntegrationEndpointDetail | undefined {
+  listPage(input: { page: number; pageSize: number; query?: string; agentId?: number }) {
+    const page = this.store.listEndpointsPage(input);
+    return { ...page, items: page.items.map(({ id, name, slug, agentId, enabled, createdAt, updatedAt }) => ({
+      id, name, slug, agentId, enabled, createdAt, updatedAt
+    })) };
+  }
+
+  get(id: number, includeMappings = true): IntegrationEndpointDetail | undefined {
+    if (!includeMappings) return this.store.getEndpointWithoutMappings(id);
     const endpoint = this.store.getEndpoint(id);
     return endpoint === undefined ? undefined : this.toDetail(endpoint);
+  }
+
+  parametersPage(id: number, input: { page: number; pageSize: number }) {
+    const endpoint = this.get(id, false);
+    if (!endpoint) throw new IntegrationEndpointManagerError("endpoint_not_found");
+    const total = (this.db.prepare("SELECT COUNT(*) AS total FROM agent_session_parameters WHERE agent_id=?").get(endpoint.agentId) as { total: number }).total;
+    const rows = this.db.prepare(`SELECT p.id,p.agent_id AS agentId,p.key,p.label,p.description,p.required,p.secret,
+      p.created_at AS createdAt,p.updated_at AS updatedAt,m.value AS mapping
+      FROM agent_session_parameters p JOIN integration_endpoints e ON e.agent_id=p.agent_id AND e.id=?
+      LEFT JOIN json_each(e.parameter_mappings_json) m ON json_extract(m.value,'$.parameterKey')=p.key
+      ORDER BY p.id LIMIT ? OFFSET ?`).all(id, input.pageSize, (input.page - 1) * input.pageSize) as Array<Omit<AgentSessionParameter,"required"|"secret"> & { required: number; secret: number; mapping: string | null }>;
+    const values = this.fixedValues(id);
+    return pageResult(rows.map((row) => {
+      const mapping = row.mapping === null ? null : JSON.parse(row.mapping) as ParameterMapping;
+      return { ...row, required: Boolean(row.required), secret: Boolean(row.secret), mapping: mapping?.source === "fixed"
+        ? { ...mapping, configured: typeof values[mapping.parameterKey] === "string" && values[mapping.parameterKey]!.trim() !== "" } : mapping };
+    }), total, input);
   }
 
   create(input: CreateIntegrationEndpointInput): { endpoint: IntegrationEndpointDetail; token: string } {
@@ -89,6 +116,11 @@ export class IntegrationEndpointManager {
   update(id: number, input: UpdateIntegrationEndpointInput): IntegrationEndpointDetail {
     const existing = this.store.getEndpoint(id);
     if (existing === undefined) throw new IntegrationEndpointManagerError("endpoint_not_found");
+    if (input.parameterMappingKeys !== undefined) {
+      const keys = new Set(input.parameterMappingKeys);
+      if (input.parameterMappings === undefined || input.parameterMappings.some((mapping) => !keys.has(mapping.parameterKey))) throw new IntegrationEndpointManagerError("invalid_endpoint");
+      input = { ...input, parameterMappings: [...existing.parameterMappings.filter((mapping) => !keys.has(mapping.parameterKey)), ...input.parameterMappings] };
+    }
     const conflictingEndpoint = this.store.getEndpointBySlug((input.slug ?? existing.slug).trim());
     if (conflictingEndpoint !== undefined && conflictingEndpoint.id !== id) {
       throw new IntegrationEndpointManagerError("slug_conflict");

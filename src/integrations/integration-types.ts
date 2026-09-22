@@ -47,6 +47,7 @@ export type CreateIntegrationEndpointInput = {
 
 export type UpdateIntegrationEndpointInput = Omit<Partial<CreateIntegrationEndpointInput>, "parameterMappings"> & {
   parameterMappings?: ParameterMappingUpdateInput[];
+  parameterMappingKeys?: string[];
 };
 export type ResolvedIntegrationParameters = Record<string, string | null>;
 

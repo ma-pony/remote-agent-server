@@ -105,11 +105,16 @@ export class UsageStore {
     })();
   }
 
-  records(filter: UsageFilter = {}): UsageRecord[] {
+  records(filter: UsageFilter = {}, invocationIds?: readonly string[]): UsageRecord[] {
+    if (invocationIds?.length === 0) return [];
     const clauses: string[] = [];
     const params: string[] = [];
     for (const [field, column] of [["namespace", "namespace"], ["agentId", "agent_id"], ["sessionId", "session_id"]] as const) {
       if (filter[field] !== undefined) { clauses.push(`${column} = ?`); params.push(filter[field]); }
+    }
+    if (invocationIds !== undefined) {
+      clauses.push(`json_extract(payload_json, '$.invocationId') IN (${invocationIds.map(() => "?").join(",")})`);
+      params.push(...invocationIds);
     }
     const rows = this.db.prepare(`SELECT payload_json FROM agent_usage_ledger ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}`)
       .all(...params) as Array<{ payload_json: string }>;

@@ -1,20 +1,25 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { BrowserRouter } from "react-router";
 import { I18nProvider } from "../src/web/i18n.js";
 import { AgentUsagePage } from "../src/web/pages/agent-usage-page.js";
 
-const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
+const response = (value: unknown, status = 200) => new Response(JSON.stringify(Array.isArray(value) ? { items: value, total: value.length, page: 1, pageSize: 20, totalPages: Math.ceil(value.length / 20) } : value), { status, headers: { "content-type": "application/json" } });
 const usage = { inputTotalTokens: 3000, outputTotalTokens: 300, totalTokens: 3300, cacheReadTokens: 1000 };
 const summary = { usage, locatedUsage: usage, unplacedUsage: { totalTokens: 200 }, completeness: "partial", accountingBasis: "model_requests",
   observedModelRequests: 4, requestsWithCompleteUsage: 3, requestsWithMissingUsage: 1, requestsWithPartialUsage: 0,
   unverifiedObservations: 0, conflictingRanges: 0, asOf: "2026-09-21T01:00:00Z", analysisStatus: "ready" };
+const payloadEstimate = { measurement: "estimated", method: "text_heuristic", model: "closed-model", modelProvider: null,
+  tokenizer: null, tokenizerVersion: null, tokenizerId: null, tokenizerRevision: null, encoding: null,
+  heuristicVersion: "unicode-weighted-v1", reason: "model_unmapped" };
 const ranks = [{ capability: { id: "search", name: "search", serverId: "7", kind: "mcp_tool" }, calls: 2, failures: 1,
+  observedArgumentTokens: 12, observedResultTokens: 350, observedTotalTokens: 362, observedArgumentCalls: 2, observedResultCalls: 1, payloadEstimates: [payloadEstimate],
   definitionInputTokens: 20, firstResultInputTokens: 300, repeatedResultInputTokens: 300, totalInputTokens: 620, exposureCount: 3,
   measurement: "estimated", tokenizationStatus: "single", inputBytes: 100, tokenEstimates: [], estimateCompleteness: "partial", missingExposureCount: 1, contextCoverage: { full: 2, partial: 1, opaque: 0, none: 0 } },
 { capability: { id: "read", name: "read", serverId: "8", kind: "mcp_tool" }, calls: 1, failures: 0, totalInputTokens: null,
+  observedArgumentTokens: null, observedResultTokens: null, observedTotalTokens: null, observedArgumentCalls: 0, observedResultCalls: 0, payloadEstimates: [],
   definitionInputTokens: null, firstResultInputTokens: null, repeatedResultInputTokens: null, exposureCount: 0,
   measurement: "estimated", tokenizationStatus: "single", inputBytes: 100, tokenEstimates: [], estimateCompleteness: "none", missingExposureCount: 0, contextCoverage: { full: 0, partial: 0, opaque: 0, none: 0 } }];
 beforeEach(() => {
@@ -23,7 +28,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/api/agents") return response([{ id: 1, name: "Example Agent" }]);
-    if (url.pathname === "/api/sessions") return response({ items: [{ id: 2, title: "Example Session", agentId: 1 }] });
+    if (url.pathname === "/api/sessions") return response({ items: [{ id: 2, title: "Example Session", agentId: 1 }], total: 1, page: 1, pageSize: 20, totalPages: 1 });
     if (url.pathname === "/api/usage/summary") return response(summary);
     if (url.pathname === "/api/usage/capabilities") return response({ items: ranks, total: ranks.length });
     if (url.pathname === "/api/usage/timeseries") return response({ items: [{ period: "2026-09-21", usage }] });
@@ -43,6 +48,119 @@ beforeEach(() => {
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 const mount = () => render(<I18nProvider><BrowserRouter><AgentUsagePage /></BrowserRouter></I18nProvider>);
 
+it("keeps polling a collecting source outside the visible source page", async () => {
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  let summaries = 0;
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary") ? response(++summaries === 1
+    ? { ...summary, analysisStatus: "collecting", sourceCounts: { completed: 20, collecting: 1 } }
+    : { ...summary, sourceCounts: { completed: 21 }, usage: { ...usage, totalTokens: 9100 } }) : original(input, init));
+  mount(); expect(await screen.findByText("9,100", {}, { timeout: 2000 })).toBeInTheDocument();
+});
+
+it("returns to an available ranking page when the current offset no longer exists", async () => {
+  window.history.replaceState({}, "", "/usage?offset=100&stageOffset=40");
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => {
+    const url = new URL(String(input), "http://localhost");
+    return url.pathname === "/api/usage/capabilities" ? response({ items: Number(url.searchParams.get("offset")) > 0 ? [] : ranks, total: 2, stages: [], stageTotal: 0 }) : original(input, init);
+  });
+  mount(); await screen.findByRole("button", { name: "查看 search 的调用" });
+  expect(new URLSearchParams(window.location.search).get("offset")).toBe("0");
+  expect(new URLSearchParams(window.location.search).get("stageOffset")).toBe("0");
+});
+
+it("loads source and exposure pages on demand instead of downloading every row", async () => {
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/usage/sources") {
+      const page = Number(url.searchParams.get("page"));
+      return response({ page, pageSize: 20, total: 21, totalPages: 2,
+        items: [{ id: String(page), sourceKey: `Source page ${page}`, kind: "codex_log", status: "completed", lastSuccessAt: null, rejectedRecords: 0, errorCode: null }] });
+    }
+    if (url.pathname === "/api/usage/invocations/call-1") return response({ invocation: { status: "succeeded", origin: "execution", executionId: "1", executionEvidence: "direct" },
+      exposureTotal: 51, subsequentModelInvocationIds: [], exposures: [{ ...payloadEstimate, modelInvocationId: `model-${url.searchParams.get("offset")}`, position: 0, tokens: 12, kind: "result", resultFirstUse: "repeat" }] });
+    return original(input, init);
+  });
+  mount(); await screen.findByText("Source page 1");
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("page=2"))).toBe(false);
+  fireEvent.click(within(screen.getByRole("region", { name: "数据来源分页" })).getByRole("button", { name: "下一页" }));
+  await screen.findByText("Source page 2");
+  expect(screen.queryByText("Source page 1")).not.toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "查看 search 的调用" }));
+  fireEvent.click(await screen.findByRole("button", { name: "打开调用 call-1" }));
+  const evidence = await screen.findByText("model-0");
+  fireEvent.click(within(evidence.closest('[data-slot="card"]') as HTMLElement).getByRole("button", { name: "下一页" }));
+  expect(await screen.findByText("model-50")).toBeInTheDocument();
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("invocations/call-1?limit=50&offset=50"))).toBe(true);
+});
+
+it("analyzes prompt and conversation as dimensions with content evidence and preserved scope", async () => {
+  window.history.replaceState({}, "", "/usage?range=7d&agentId=1&sessionId=2");
+  const prompt = { ...ranks[0], capability: { kind: "user_prompt", id: "user_prompt", name: "user_prompt" },
+    calls: 0, failures: 0, contentObservations: 2, observedArgumentTokens: 123, observedResultTokens: null,
+    observedTotalTokens: 123, observedArgumentCalls: 0, observedResultCalls: 0 };
+  const conversation = { ...prompt, capability: { kind: "assistant_output", id: "assistant_output", name: "assistant_output" },
+    contentObservations: 3, observedArgumentTokens: null, observedResultTokens: 321, observedTotalTokens: 321 };
+  const evidence = { id: "content-1", runId: 12, sessionId: "2", category: "user_prompt", capability: prompt.capability,
+    occurredAt: "2026-09-21T01:00:00Z", tokens: 123, byteLength: 400, partial: true, estimate: payloadEstimate };
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/usage/capabilities") return response({ total: 2, items: url.searchParams.get("dimension") === "assistant_output" ? [conversation] : [prompt, conversation] });
+    if (url.pathname === "/api/usage/content-evidence") return response({ items: [{ ...evidence, id: url.searchParams.has("cursor") ? "content-2" : "content-1" }], nextCursor: url.searchParams.has("cursor") ? null : "content-next" });
+    if (url.pathname === "/api/usage/content-evidence/content-1") return response(evidence);
+    return original(input, init);
+  });
+  mount();
+  const promptRow = (await screen.findByRole("button", { name: "查看 用户提示词 的内容证据" })).closest("tr")!;
+  expect(within(promptRow).getByText("2 次内容观测")).toBeInTheDocument();
+  expect(within(promptRow).queryByText("0 / 0")).not.toBeInTheDocument();
+  expect(within(promptRow).queryByText(/次调用/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看 模型回复 的内容证据" })).toBeInTheDocument();
+  expect(screen.queryByText("提示词与对话内容构成")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("能力维度")).toHaveValue("all");
+  for (const value of ["user_prompt", "configured_instructions", "system_prompt", "assistant_output", "assistant_thought"]) expect(within(screen.getByLabelText("能力维度")).getAllByRole("option").some((option) => (option as HTMLOptionElement).value === value)).toBe(true);
+  expect(screen.getByRole("columnheader", { name: "输入内容估算 Token" })).toBeInTheDocument();
+  fireEvent.click(within(promptRow).getByRole("button", { name: "查看 用户提示词 的内容证据" }));
+  fireEvent.click(await screen.findByRole("button", { name: "打开内容证据 content-1" }));
+  expect(await screen.findByText("123 估算 Token · 400 字节")).toBeInTheDocument();
+  expect(screen.getByText("仅含部分内容")).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "内容观测" })).toBeInTheDocument();
+  const sheet = screen.getByRole("dialog");
+  fireEvent.click(within(sheet).getByRole("button", { name: "下一页" }));
+  await screen.findByRole("button", { name: "打开内容证据 content-2" });
+  const contentRequests = fetch.mock.calls.map(([url]) => new URL(String(url), "http://localhost")).filter((url) => url.pathname === "/api/usage/content-evidence");
+  expect(contentRequests.every((url) => url.searchParams.get("capabilityKind") === "user_prompt" && url.searchParams.get("capabilityId") === "user_prompt" && url.searchParams.get("agentId") === "1" && url.searchParams.get("sessionId") === "2" && url.searchParams.has("from"))).toBe(true);
+  expect(contentRequests.at(-1)!.searchParams.get("cursor")).toBe("content-next");
+  fireEvent.click(within(sheet).getByRole("tab", { name: "模型输入证据" }));
+  await screen.findByRole("button", { name: "打开输入证据 evidence-1" });
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("/usage/context-evidence?") && String(url).includes("capabilityKind=user_prompt") && !String(url).includes("cursor="))).toBe(true);
+  fireEvent.click(within(sheet).getByRole("button", { name: "关闭" }));
+  fireEvent.change(screen.getByLabelText("能力维度"), { target: { value: "assistant_output" } });
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes("dimension=assistant_output"))).toBe(true));
+  fireEvent.click(screen.getByRole("tab", { name: "模型输入上下文" }));
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes("dimension=assistant_output") && String(url).includes("sort=totalInputTokens"))).toBe(true));
+  expect(await screen.findByRole("button", { name: "查看 模型回复 的内容证据" })).toBeInTheDocument();
+});
+
+it("opens model-input evidence directly for system prompts without runtime observations", async () => {
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/capabilities") ? response({ total: 1,
+    items: [{ ...ranks[0], capability: { kind: "system_prompt", id: "system_prompt", name: "system_prompt" }, calls: 0,
+      contentObservations: 0, observedArgumentTokens: null, observedResultTokens: null, observedTotalTokens: null }] }) : original(input, init));
+  mount();
+  const button = await screen.findByRole("button", { name: "查看 模型请求中的系统提示词 的内容证据" });
+  expect(within(button.closest("tr")!).getByText("3 次模型输入暴露")).toBeInTheDocument();
+  expect(within(button.closest("tr")!).queryByText("0 次内容观测")).not.toBeInTheDocument();
+  expect(within(button.closest("tr")!).queryByText("内容缺失")).not.toBeInTheDocument();
+  expect(within(button.closest("tr")!).getByText("仅模型输入证据")).toBeInTheDocument();
+  fireEvent.click(button);
+  expect(await screen.findByRole("button", { name: "打开输入证据 evidence-1" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "模型输入证据" })).toHaveAttribute("aria-selected", "true");
+  expect(fetch.mock.calls.some(([url]) => String(url).includes("/usage/content-evidence?"))).toBe(false);
+});
+
 it("无效 URL 时区回退到浏览器时区，不使整页崩溃", async () => {
   window.history.replaceState({}, "", "/usage?timezone=invalid-timezone");
   mount();
@@ -51,6 +169,7 @@ it("无效 URL 时区回退到浏览器时区，不使整页崩溃", async () =>
 });
 
 it("切换排名排序只刷新排名，保留已经加载的汇总和趋势", async () => {
+  window.history.replaceState({}, "", "/usage?range=all&view=context");
   mount(); await screen.findByText("3,300"); await screen.findByRole("button", { name: "查看 search 的调用" });
   const fetch = vi.mocked(globalThis.fetch); fetch.mockClear();
   fireEvent.change(screen.getByLabelText("排序"), { target: { value: "inputBytes" } });
@@ -60,6 +179,7 @@ it("切换排名排序只刷新排名，保留已经加载的汇总和趋势", a
 });
 
 it("展示未知模型兜底估算和混合计量来源，保留可排名的数值", async () => {
+  window.history.replaceState({}, "", "/usage?range=all&view=context");
   const metadata = { measurement: "estimated", method: "model_tokenizer", model: "example-a", modelProvider: null,
     tokenizer: "@huggingface/tokenizers", tokenizerVersion: "0.2.0", tokenizerId: "a", tokenizerRevision: "a".repeat(64), encoding: null, reason: null };
   const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
@@ -90,6 +210,7 @@ it("展示未知模型兜底估算和混合计量来源，保留可排名的数�
 });
 
 it("区分已知模型总量、估算工具输入和未采集状态，并能打开重复输入证据", async () => {
+  window.history.replaceState({}, "", "/usage?range=all&view=context");
   mount();
   expect(await screen.findByRole("heading", { name: "用量分析" })).toBeInTheDocument();
   expect(await screen.findByText("3,300")).toBeInTheDocument();
@@ -152,7 +273,7 @@ it("切换证据后忽略旧详情响应，并从第一页重新打开能力", a
   let finishOld!: (value: Response) => void;
   let detailSignal: AbortSignal | null | undefined;
   fetch.mockImplementation(async (input, init) => {
-    if (String(input).endsWith("/usage/invocations/call-1")) {
+    if (String(input).includes("/usage/invocations/call-1?")) {
       detailSignal = init?.signal;
       return new Promise<Response>((resolve) => { finishOld = resolve; });
     }
@@ -216,6 +337,7 @@ it("加载失败有重试入口，缺少数据有接入指引", async () => {
 });
 
 it("模型台账为空时仍显示执行调用与未知输入", async () => {
+  window.history.replaceState({}, "", "/usage?range=all&view=context");
   const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
   fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary") ? response({ ...summary,
     usage: { totalTokens: null }, completeness: "none", observedModelRequests: 0, analysisStatus: "empty" })
@@ -365,7 +487,7 @@ it("失败来源后台恢复时无需等到 collecting 就刷新指标", async (
   const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
   let gets = 0; let summaries = 0;
   const source = { id: "retry", sourceKey: "retry", kind: "claude_log", status: "failed", errorCode: "usage_collection_failed", mappings: [], rejectedRecords: 0, lastSuccessAt: null };
-  fetch.mockImplementation(async (input, init) => String(input).endsWith("/usage/sources")
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/sources?")
     ? response([{ ...source, status: ++gets === 1 ? "failed" : "completed", errorCode: null }])
     : String(input).includes("/usage/summary") ? response({ ...summary, usage: { ...usage, totalTokens: ++summaries === 1 ? 3300 : 7700 } }) : original(input, init));
   mount(); expect(await screen.findByText("7,700", {}, { timeout: 2000 })).toBeInTheDocument();
@@ -394,4 +516,123 @@ it("等待首次请求达到轮询上限后安静停止，不把正常空闲状�
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "刷新采集状态" })); await vi.advanceTimersByTimeAsync(0); });
     expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/summary")).length).toBeGreaterThan(requests);
   } finally { vi.useRealTimers(); }
+});
+
+
+it("未采集 HTTP 上下文时默认展示工具内容估算和逐侧覆盖率", async () => {
+  mount();
+  expect(await screen.findByText("362")).toBeInTheDocument();
+  expect(screen.getByText("350")).toBeInTheDocument();
+  expect(screen.getByText("12")).toBeInTheDocument();
+  expect(screen.getByText("已计量 2 / 2 次调用")).toBeInTheDocument();
+  expect(screen.getByText("已计量 1 / 2 次调用")).toBeInTheDocument();
+  expect(screen.getAllByText("内容缺失").length).toBeGreaterThan(0);
+  expect(screen.getByText(/closed-model.*兜底估算/)).toBeInTheDocument();
+  expect(screen.queryByRole("columnheader", { name: "重复结果" })).not.toBeInTheDocument();
+  expect(screen.getByLabelText("排序")).toHaveValue("observedTotalTokens");
+  expect(screen.getByText(/技能与插件的关联内容可能重叠/)).toBeInTheDocument();
+  expect(screen.getByText("3,300")).toBeInTheDocument();
+});
+
+it("切换内容与上下文视图保留范围筛选并使用各自排序", async () => {
+  window.history.replaceState({}, "", "/usage?range=30d&agentId=1&sessionId=2&timezone=UTC&dimension=plugin");
+  mount(); await screen.findByText("362");
+  fireEvent.click(screen.getByRole("tab", { name: "模型输入上下文" }));
+  expect(await screen.findByRole("columnheader", { name: "重复结果" })).toBeInTheDocument();
+  expect(screen.getByText("620")).toBeInTheDocument();
+  expect(screen.getByLabelText("排序")).toHaveValue("totalInputTokens");
+  const params = new URLSearchParams(window.location.search);
+  expect(Object.fromEntries(params)).toMatchObject({ view: "context", range: "30d", agentId: "1", sessionId: "2", timezone: "UTC", dimension: "plugin" });
+  expect(vi.mocked(fetch).mock.calls.some(([input]) => {
+    const url = new URL(String(input), "http://localhost");
+    return url.pathname === "/api/usage/capabilities" && url.searchParams.get("sort") === "totalInputTokens"
+      && url.searchParams.get("sessionId") === "2" && url.searchParams.has("from") && url.searchParams.has("to");
+  })).toBe(true);
+  fireEvent.click(screen.getByRole("tab", { name: "观测内容" }));
+  expect(await screen.findByText("362")).toBeInTheDocument();
+  expect(screen.getByLabelText("排序")).toHaveValue("observedTotalTokens");
+});
+
+it("实际调用详情展示内容估算、字节数与部分内容标记", async () => {
+  const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/invocations/call-1?") ? response({
+    invocation: { status: "succeeded", origin: "execution", executionId: "1", executionEvidence: "direct",
+      argumentEstimate: { tokens: 12, byteLength: 48, partial: false, estimate: payloadEstimate },
+      resultEstimate: { tokens: 350, byteLength: 1400, partial: true, estimate: payloadEstimate } },
+    exposures: [], subsequentModelInvocationIds: [], bodyStatus: "not_retained"
+  }) : original(input, init));
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "查看 search 的调用" }));
+  fireEvent.click(await screen.findByRole("button", { name: "打开调用 call-1" }));
+  expect(await screen.findByText("12 估算 Token · 48 字节")).toBeInTheDocument();
+  expect(screen.getByText("350 估算 Token · 1,400 字节")).toBeInTheDocument();
+  expect(screen.getByText("仅含部分内容")).toBeInTheDocument();
+  expect(screen.getByText(/这次实际调用没有关联到持久化的模型输入证据/)).toBeInTheDocument();
+});
+
+it("历史内容回填自动刷新到完成并停止显示进行中状态", async () => {
+  const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
+  let summaryGets = 0;
+  let finishBackfill!: (value: Response) => void;
+  fetch.mockImplementation(async (input, init) => {
+    if (String(input).includes("/usage/summary")) {
+      if (++summaryGets === 1) return response({ ...summary, contentBackfill: { status: "running", processedEvents: 25, errorCode: null } });
+      return new Promise<Response>((resolve) => { finishBackfill = resolve; });
+    }
+    return original(input, init);
+  });
+  mount();
+  expect(await screen.findByText("历史内容回填中")).toBeInTheDocument();
+  expect(screen.getByText(/已处理 25 条事件/)).toBeInTheDocument();
+  await waitFor(() => expect(finishBackfill).toBeTypeOf("function"));
+  await act(async () => finishBackfill(response({ ...summary, contentBackfill: { status: "completed", processedEvents: 50, errorCode: null } })));
+  expect(screen.queryByText("历史内容回填中")).not.toBeInTheDocument();
+});
+
+
+it("仅排名返回回填进度时持续轮询直到完成", async () => {
+  const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
+  let rankingGets = 0;
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/capabilities")
+    ? response({ items: ranks, total: ranks.length, contentBackfill: {
+      status: ++rankingGets < 3 ? "running" : "completed", processedEvents: rankingGets * 25, errorCode: null
+    } }) : original(input, init));
+  mount();
+  expect(await screen.findByText("历史内容回填中")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText("历史内容回填中")).not.toBeInTheDocument(), { timeout: 2500 });
+});
+
+
+it("扫描过无可识别工具的历史事件仍显示空状态与回填提示", async () => {
+  const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary") ? response({ ...summary,
+    usage: { totalTokens: null }, completeness: "none", observedModelRequests: 0, analysisStatus: "collecting",
+    contentBackfill: { status: "running", processedEvents: 25, errorCode: null } })
+    : String(input).includes("/usage/capabilities") ? response({ items: [], total: 0 }) : original(input, init));
+  mount();
+  expect(await screen.findByText("尚无用量记录")).toBeInTheDocument();
+  expect(screen.getByText("历史内容回填中")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "查看接入方法" })).toBeInTheDocument();
+});
+
+it("回填已完成但仅有已扫描事件时显示筛选空状态", async () => {
+  window.history.replaceState({}, "", "/usage?range=7d");
+  const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary") ? response({ ...summary,
+    usage: { totalTokens: null }, completeness: "none", observedModelRequests: 0, analysisStatus: "ready",
+    contentBackfill: { status: "completed", processedEvents: 25, errorCode: null } })
+    : String(input).includes("/usage/capabilities") ? response({ items: [], total: 0 }) : original(input, init));
+  mount();
+  expect(await screen.findByText("当前筛选没有记录")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "清除筛选" })).toBeInTheDocument();
+});
+
+it("其他能力已有记录时不把空的当前维度误报为尚无用量", async () => {
+  const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary") ? response({ ...summary,
+    usage: { totalTokens: null }, completeness: "none", observedModelRequests: 0, hasCapabilityEvidence: true })
+    : String(input).includes("/usage/capabilities") ? response({ items: [], total: 0 }) : original(input, init));
+  mount();
+  expect(await screen.findByText("当前维度没有可排名的能力。")).toBeInTheDocument();
+  expect(screen.queryByText("尚无用量记录")).not.toBeInTheDocument();
 });

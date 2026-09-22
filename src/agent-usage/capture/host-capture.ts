@@ -1,3 +1,4 @@
+import { pageResult, type PaginationQuery } from "../../pagination.js";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, normalize, relative, resolve } from "node:path";
 
@@ -7,7 +8,7 @@ import type { HostUsageCollector } from "../host-collector.js";
 import type { UsageBinding, UsageFilter } from "../core/types.js";
 import type { Capability } from "../core/context-types.js";
 import { MAX_CONTEXT_BLOCKS } from "../core/context.js";
-import { capturedToolCapability, toolInput } from "../core/tool-capabilities.js";
+import { capturedToolCapability, commandFiles, toolInput } from "../core/tool-capabilities.js";
 import { normalizeCanonicalExchanges, type CanonicalCall } from "../adapters/context-snapshot.js";
 import { UsageHttpRelay, type CapturedExchange, type RelayRoute } from "./http-relay.js";
 import { decodeExchange } from "./protocol.js";
@@ -221,26 +222,36 @@ export class HostUsageCapture {
     return [...aliases.values()].filter((entry) => !conflicts.has(entry.runtimeName));
   }
   private skillTags(intent: Intent, name: string, args: unknown): Capability[] {
-    if (!["Read", "read_file"].includes(name)) return [];
     const input = toolInput(args);
     const path = input?.path ?? input?.file_path ?? input?.filePath;
-    if (typeof path !== "string" || path.length > 4096) return [];
-    const target = normalize(isAbsolute(path) ? path : resolve(intent.subject.workspacePath, path));
+    const files = capturedToolCapability(intent.subject.provider, name, args)?.kind === "cli"
+      ? commandFiles(input) : { readPaths: [], scriptPaths: [] };
+    const paths = [
+      ...(["Read", "read_file"].includes(name) && typeof path === "string" && path.length <= 4096 ? [path] : []),
+      ...files.readPaths, ...files.scriptPaths
+    ];
+    if (paths.length === 0) return [];
+    const cwd = "cwd" in files && files.cwd ? resolve(intent.subject.workspacePath, files.cwd) : intent.subject.workspacePath;
+    const targets = paths.map((item) => normalize(isAbsolute(item) ? item : resolve(cwd, item)));
     const projections = this.host.db.prepare(`SELECT capability_json, plugin_json, directory_aliases_json FROM agent_usage_runtime_skill_projections
       WHERE namespace=? AND session_id=? AND provider_epoch_id=? AND execution_id=? LIMIT 512`)
       .all(intent.binding.namespace, intent.binding.sessionId, intent.epoch, String(intent.runId)) as Array<{ capability_json: string; plugin_json: string | null; directory_aliases_json: string }>;
+    const tags = new Map<string, Capability>();
     for (const row of projections) {
       const directories = JSON.parse(row.directory_aliases_json) as string[];
-      const matches = directories.some((directory) => {
+      const matches = targets.some((target) => directories.some((directory) => {
         const rel = relative(normalize(directory), target);
         return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
-      });
-      if (matches) return [JSON.parse(row.capability_json) as Capability, ...(row.plugin_json ? [JSON.parse(row.plugin_json) as Capability] : [])];
+      }));
+      if (matches) for (const capability of [JSON.parse(row.capability_json) as Capability,
+        ...(row.plugin_json ? [JSON.parse(row.plugin_json) as Capability] : [])]) {
+        tags.set(JSON.stringify([capability.kind, capability.id, capability.version]), capability);
+      }
     }
-    return [];
+    return [...tags.values()];
   }
-  health(filter: UsageFilter): CaptureHealth[] {
-    const rows = this.host.db.prepare(`SELECT s.session_id AS sessionId, s.runtime_kind AS runtimeKind,
+  private healthQuery(filter: UsageFilter) {
+    return { sql: `SELECT s.session_id AS sessionId, s.runtime_kind AS runtimeKind,
       CASE WHEN SUM(CASE WHEN c.status='pending' THEN 1 ELSE 0 END)>0 THEN 'pending'
       WHEN SUM(CASE WHEN c.status='incomplete' THEN 1 ELSE 0 END)>0 THEN 'incomplete' ELSE s.status END AS status,
       SUM(CASE WHEN c.status='observed' THEN 1 ELSE 0 END) AS observed,
@@ -248,10 +259,31 @@ export class HostUsageCapture {
       FROM agent_usage_capture_sessions s LEFT JOIN agent_usage_captures c ON c.namespace=s.namespace AND c.session_id=s.session_id AND c.epoch_id=s.epoch_id
       AND (? IS NULL OR c.started_at >= ?) AND (? IS NULL OR c.started_at < ?)
       WHERE s.namespace=? AND (? IS NULL OR s.agent_id=?) AND (? IS NULL OR s.session_id=?) AND (? IS NULL OR s.runtime_kind=?)
-      GROUP BY s.namespace, s.session_id, s.epoch_id`).all(filter.from ?? null, filter.from ?? null, filter.to ?? null, filter.to ?? null,
-        this.host.namespace, filter.agentId ?? null, filter.agentId ?? null, filter.sessionId ?? null, filter.sessionId ?? null, filter.runtimeKind ?? null, filter.runtimeKind ?? null) as CaptureHealth[];
-    return rows;
+      GROUP BY s.namespace, s.session_id, s.epoch_id`, parameters: [filter.from ?? null, filter.from ?? null, filter.to ?? null, filter.to ?? null,
+      this.host.namespace, filter.agentId ?? null, filter.agentId ?? null, filter.sessionId ?? null,
+      filter.sessionId ?? null, filter.runtimeKind ?? null, filter.runtimeKind ?? null] };
   }
+
+  health(filter: UsageFilter): CaptureHealth[] {
+    const query = this.healthQuery(filter);
+    return this.host.db.prepare(query.sql + " ORDER BY s.session_id, s.epoch_id").all(...query.parameters) as CaptureHealth[];
+  }
+
+  healthCounts(filter: UsageFilter): Record<string, number> {
+    const query = this.healthQuery(filter);
+    const rows = this.host.db.prepare(`SELECT status, COUNT(*) AS total FROM (${query.sql}) GROUP BY status`)
+      .all(...query.parameters) as Array<{ status: string; total: number }>;
+    return Object.fromEntries(rows.map((row) => [row.status, row.total]));
+  }
+
+  healthPage(filter: UsageFilter, pagination: Pick<PaginationQuery, "page" | "pageSize">) {
+    const query = this.healthQuery(filter);
+    const items = this.host.db.prepare(query.sql + " ORDER BY s.session_id, s.epoch_id LIMIT ? OFFSET ?")
+      .all(...query.parameters, pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as CaptureHealth[];
+    const total = Object.values(this.healthCounts(filter)).reduce((sum, count) => sum + count, 0);
+    return pageResult(items, total, pagination);
+  }
+
   async release(sessionId: number): Promise<void> {
     const subject = this.subjects.get(sessionId);
     this.subjects.delete(sessionId);

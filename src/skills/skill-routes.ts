@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { paginationQuerySchema, isPagedQuery, pageResult } from "../pagination.js";
 import type { AgentManager } from "../agents/agent-manager.js";
 import { SkillContentError } from "./skill-content.js";
 import { SkillManagerError, type SkillManager } from "./skill-manager.js";
@@ -53,19 +54,35 @@ export const handleSkillError = (reply: FastifyReply, error: unknown) => {
 export const registerSkillRoutes = (
   app: FastifyInstance, agents: AgentManager, skills: SkillManager, sources: SkillSourceManager
 ): void => {
-  app.get("/skill-sources", () => sources.list());
+  app.get("/skill-sources", (request, reply) => {
+    if (!isPagedQuery(request.query)) return sources.list();
+    const parsed = paginationQuerySchema.strict().safeParse(request.query);
+    if (!parsed.success) return invalid(reply);
+    const items = sources.list().filter(item => `${item.name} ${item.url} ${item.path}`.toLowerCase().includes(parsed.data.query?.toLowerCase() ?? ""));
+    const offset = (parsed.data.page - 1) * parsed.data.pageSize;
+    return pageResult(items.slice(offset, offset + parsed.data.pageSize).map(({warnings, ...item}) => ({...item, warningCount: warnings.length})), items.length, parsed.data);
+  });
+  app.get<{Params: {id: string}}>("/skill-sources/:id/warnings", (request, reply) => {
+    const parsed = paginationQuerySchema.strict().safeParse(request.query);
+    if (!parsed.success) return invalid(reply);
+    const source = sources.list().find(item => item.id === request.params.id);
+    if (source === undefined) return reply.code(404).send({error: {code: "not_found", message: "Skill source not found"}});
+    const warnings = source.warnings.filter(item => item.toLowerCase().includes(parsed.data.query?.toLowerCase() ?? ""));
+    const offset = (parsed.data.page - 1) * parsed.data.pageSize;
+    return pageResult(warnings.slice(offset, offset + parsed.data.pageSize), warnings.length, parsed.data);
+  });
   app.post("/skill-sources", async (request, reply) => {
     const input = sourceSchema.safeParse(request.body);
     if (!input.success) return invalid(reply);
-    try { return reply.code(201).send(await sources.add(input.data)); }
+    try { const source = await sources.add(input.data); skills.invalidatePaginationSnapshots(); return reply.code(201).send(source); }
     catch (error) { return handleSkillError(reply, error); }
   });
   app.post<{ Params: { id: string } }>("/skill-sources/:id/refresh", async (request, reply) => {
-    try { return await sources.refresh(request.params.id); }
+    try { const source = await sources.refresh(request.params.id); skills.invalidatePaginationSnapshots(); return source; }
     catch (error) { return handleSkillError(reply, error); }
   });
   app.delete<{ Params: { id: string } }>("/skill-sources/:id", async (request, reply) => {
-    try { await sources.remove(request.params.id); return reply.code(204).send(); }
+    try { await sources.remove(request.params.id); skills.invalidatePaginationSnapshots(); return reply.code(204).send(); }
     catch (error) { return handleSkillError(reply, error); }
   });
 
@@ -80,14 +97,22 @@ export const registerSkillRoutes = (
   };
   app.get<{ Params: Params }>("/agents/:id/skills/:skillId/revisions", (request, reply) => {
     const id = agentId(request.params, reply); if (id === undefined) return reply;
-    try { return skills.revisionHistory(id, request.params.skillId); }
+    const parsed = paginationQuerySchema.strict().safeParse(request.query);
+    if (!parsed.success) return invalid(reply);
+    try {
+      return isPagedQuery(request.query) ? skills.revisionHistoryPage(id, request.params.skillId, parsed.data)
+        : skills.revisionHistory(id, request.params.skillId);
+    }
     catch (error) { return handleSkillError(reply, error); }
   });
   app.get<{ Params: Params }>("/agents/:id/skills/:skillId/diff", (request, reply) => {
     const id = agentId(request.params, reply); if (id === undefined) return reply;
-    const query = z.object({ revision: revisionSchema }).strict().safeParse(request.query);
+    const query = paginationQuerySchema.extend({ revision: revisionSchema }).strict().safeParse(request.query);
     if (!query.success) return invalid(reply);
-    try { return skills.diff(id, request.params.skillId, query.data.revision); }
+    try {
+      return isPagedQuery(request.query) ? skills.diffPage(id, request.params.skillId, query.data.revision, query.data)
+        : skills.diff(id, request.params.skillId, query.data.revision);
+    }
     catch (error) { return handleSkillError(reply, error); }
   });
   app.get<{ Params: Params }>("/agents/:id/skills/:skillId/diff/file", async (request, reply) => {

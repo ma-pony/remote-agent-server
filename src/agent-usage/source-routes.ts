@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { isPagedQuery, paginationQuerySchema } from "../pagination.js";
 import { UsageError, type UsageErrorCode } from "./core/errors.js";
 import type { ManagedUsageSources } from "./managed-sources.js";
 
@@ -14,7 +15,7 @@ const sourceSchema = z.object({
   mappings: z.array(z.object({ sourceSessionKey: z.string().min(1).max(200), sessionId: id,
     providerEpochId: z.string().min(1).max(200) }).strict()).min(1).max(100)
 }).strict();
-const sourceQuerySchema = z.object({ agentId: id.optional(), sessionId: id.optional() }).strict();
+const sourceQuerySchema = paginationQuerySchema.extend({ agentId: id.optional(), sessionId: id.optional() }).strict();
 
 const errorStatuses: Partial<Record<UsageErrorCode, number>> = {
   usage_source_conflict: 409, usage_mapping_conflict: 409, usage_mapping_revoked: 409,
@@ -36,7 +37,8 @@ export const registerUsageSourceRoutes = (app: FastifyInstance, manager: Managed
   app.get("/usage/sources", (request, reply) => {
     const parsed = sourceQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage source query" } });
-    return collector.sources.listSources(collector.namespace, parsed.data);
+    return isPagedQuery(request.query) ? collector.sources.listSourcesPage(collector.namespace, parsed.data, parsed.data)
+      : collector.sources.listSources(collector.namespace, parsed.data);
   });
   app.post("/usage/sources", async (request, reply) => {
     const parsed = sourceSchema.safeParse(request.body);

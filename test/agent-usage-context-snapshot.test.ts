@@ -4,6 +4,20 @@ import { parseContextSnapshot } from "../src/agent-usage/adapters/context-snapsh
 import { snapshotFixture } from "./fixtures/agent-usage/context-snapshot.js";
 
 describe("Canonical context snapshot", () => {
+  it("distinguishes system prompts and conversation roles through flattened content blocks", () => {
+    const snapshot = snapshotFixture();
+    snapshot.requests = [snapshot.requests[0]!];
+    snapshot.requests[0]!.canonical_request_body = JSON.stringify({
+      instructions: "System policy", messages: [
+        { role: "developer", content: "Developer policy" },
+        { role: "user", content: [{ type: "text", text: "User question" }] },
+        { role: "assistant", content: [{ type: "text", text: "Previous answer" }] }
+      ]
+    });
+    const blocks = parseContextSnapshot(JSON.stringify(snapshot))[0]!.context!.blocks;
+    expect(blocks.map((block) => block.kind)).toEqual(["system_prompt", "system_prompt", "user_message", "assistant_message"]);
+    expect(blocks).toHaveLength(4);
+  });
   it("uses the resolved response model rather than a requested alias for tokenizer routing", () => {
     const snapshot = snapshotFixture();
     const response = JSON.parse(snapshot.requests[0]!.canonical_response_body);

@@ -1,6 +1,8 @@
 import type Database from "better-sqlite3";
+import { runtimeContentScope } from "../runtime-content-evidence.js";
 import {
   capabilityKinds,
+  contentCapability,
   type AttributionDetail,
   type AttributionEvidence,
   type AttributionExposure,
@@ -9,6 +11,7 @@ import {
   type AttributionRankRow,
   type Capability,
   type ContextCoverage,
+  type ContextBlock,
   type ContextEvidence,
   type ContextEvidenceDetail,
   type ExecutionEvidence,
@@ -19,6 +22,7 @@ import {
   type RankingDimension,
   type ResultFirstUse,
   type TokenEstimate,
+  type ToolContentEstimate,
 } from "../core/context-types.js";
 import {
   capabilityKey,
@@ -29,6 +33,7 @@ import {
   stableHash
 } from "../core/context.js";
 import { ModelTokenizers } from "../core/tokenizers.js";
+import { measureToolContent } from "../core/tool-content.js";
 import type { UsageBinding } from "../core/types.js";
 import type { UsageStore } from "./usage-store.js";
 import { ResultFirstUseIndex } from "./result-first-use.js";
@@ -61,7 +66,7 @@ type ContextRow = {
 
 type ExposureRow = ContextRow & {
   position: number;
-  block_kind: "definition" | "arguments" | "result" | "skill" | "other";
+  block_kind: ContextBlock["kind"];
   tool_invocation_id: string | null;
   capability_key: string;
   capability_json: string;
@@ -121,13 +126,6 @@ const publicInvocationId = (binding: UsageBinding, epochId: string, invocationId
 const capabilityFrom = (json: string): Capability => JSON.parse(json) as Capability;
 const evidenceRank = (evidence: AttributionEvidence): number => evidence === "direct" ? 3 : evidence === "matched" ? 2 : 1;
 
-const percentiles = (samples: number[]): { p50: number | null; p95: number | null; count: number } => {
-  if (samples.length === 0) return { p50: null, p95: null, count: 0 };
-  const ordered = [...samples].sort((a, b) => a - b);
-  const value = (percentile: number) => ordered[Math.ceil(ordered.length * percentile) - 1]!;
-  return { p50: value(0.5), p95: value(0.95), count: ordered.length };
-};
-
 const coverageCounts = (): AttributionRankRow["contextCoverage"] => ({ full: 0, partial: 0, opaque: 0, none: 0 });
 
 export type AttributionPage = { capabilityId?: string; capabilityServerId?: string; capabilityKind?: Capability["kind"];
@@ -182,6 +180,12 @@ export class AttributionStore {
       if (!columns.some((column) => column.name === "estimate_id")) store.db.exec("ALTER TABLE agent_usage_exposures ADD COLUMN estimate_id INTEGER");
       store.db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_token_estimates (
         id INTEGER PRIMARY KEY, estimate_json TEXT NOT NULL UNIQUE)`);
+      store.db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_invocation_payloads (
+        public_id TEXT NOT NULL REFERENCES agent_usage_invocations(public_id) ON DELETE CASCADE,
+        part TEXT NOT NULL CHECK(part IN ('arguments','result')),
+        byte_length INTEGER NOT NULL, token_count INTEGER, estimate_id INTEGER NOT NULL,
+        partial INTEGER NOT NULL, PRIMARY KEY(public_id, part)
+      )`);
       if (store.db.prepare("SELECT 1 FROM agent_usage_exposures WHERE estimate_id IS NULL LIMIT 1").get()) {
         store.db.prepare(`UPDATE agent_usage_exposures SET estimate_json = json_set(?,
           '$.model', (SELECT model FROM agent_usage_contexts c WHERE c.context_id = agent_usage_exposures.context_id),
@@ -350,12 +354,122 @@ export class AttributionStore {
         input.providerEpochId, input.executionId, capabilityKey(input.capability), JSON.stringify(input.capability),
         startedAt, endedAt, input.status, input.runtimeKind ?? null, executionEvidence, origin,
         input.sourceId, input.revision, input.rawResultBytes);
+      if (input.argumentEstimate) this.savePayload(id, "arguments", input.argumentEstimate);
+      if (input.resultEstimate) this.savePayload(id, "result", input.resultEstimate);
     })();
   }
 
-  rankings(filter: AttributionFilter, dimension: RankingDimension): AttributionRankRow[] {
+  measureContent(value: unknown, part: "arguments" | "result", model: string | null = null): ToolContentEstimate | undefined {
+    return measureToolContent(value, part, this.tokenizers, model);
+  }
+
+  /** Enriches existing execution evidence without changing its count, identity or terminal state. */
+  recordPayload(binding: UsageBinding, id: string, input: Pick<InvocationInput, "argumentEstimate" | "resultEstimate">): void {
+    this.store.db.transaction(() => {
+      this.store.assertBinding(binding);
+      if (!this.store.db.prepare("SELECT 1 FROM agent_usage_invocations WHERE public_id=? AND namespace=? AND session_id=?")
+        .get(id, binding.namespace, binding.sessionId)) return;
+      if (input.argumentEstimate) this.savePayload(id, "arguments", input.argumentEstimate);
+      if (input.resultEstimate) this.savePayload(id, "result", input.resultEstimate);
+    })();
+  }
+
+  private savePayload(id: string, part: "arguments" | "result", value: ToolContentEstimate): void {
+    if (!Number.isSafeInteger(value.byteLength) || value.byteLength < 0
+      || value.tokens !== null && (!Number.isSafeInteger(value.tokens) || value.tokens < 0)) {
+      throw new Error("invalid_tool_content_estimate");
+    }
+    const profile = JSON.stringify(value.estimate);
+    this.store.db.prepare("INSERT OR IGNORE INTO agent_usage_token_estimates(estimate_json) VALUES (?)").run(profile);
+    const estimate = this.store.db.prepare("SELECT id FROM agent_usage_token_estimates WHERE estimate_json=?").get(profile) as { id: number };
+    this.store.db.prepare(`INSERT INTO agent_usage_invocation_payloads VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(public_id,part) DO UPDATE SET byte_length=excluded.byte_length, token_count=excluded.token_count,
+        estimate_id=excluded.estimate_id, partial=excluded.partial`)
+      .run(id, part, value.byteLength, value.tokens, estimate.id, Number(value.partial));
+  }
+
+  private payloads(ids: string[]): Map<string, Pick<AttributionInvocation, "argumentEstimate" | "resultEstimate">> {
+    const result = new Map<string, Pick<AttributionInvocation, "argumentEstimate" | "resultEstimate">>();
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const page = ids.slice(offset, offset + 400);
+      const rows = this.store.db.prepare(`SELECT p.*, t.estimate_json FROM agent_usage_invocation_payloads p
+        JOIN agent_usage_token_estimates t ON t.id=p.estimate_id WHERE p.public_id IN (${page.map(() => "?").join(",")})`)
+        .all(...page) as Array<{ public_id: string; part: string; byte_length: number; token_count: number | null; partial: number; estimate_json: string }>;
+      for (const row of rows) {
+        const payload = result.get(row.public_id) ?? { argumentEstimate: null, resultEstimate: null };
+        payload[row.part === "arguments" ? "argumentEstimate" : "resultEstimate"] = {
+          tokens: row.token_count, byteLength: row.byte_length, partial: Boolean(row.partial), estimate: JSON.parse(row.estimate_json) as TokenEstimate
+        };
+        result.set(row.public_id, payload);
+      }
+    }
+    return result;
+  }
+
+  hasEvidence(filter: AttributionFilter): boolean {
+    const calls = this.invocationWhere(filter, "execution", {});
+    if (this.store.db.prepare(`SELECT 1 FROM agent_usage_invocations i WHERE ${calls.clauses.join(" AND ")} LIMIT 1`)
+      .get(...calls.params)) return true;
+    const contexts = this.contextWhere(filter);
+    if (this.store.db.prepare(`SELECT 1 FROM agent_usage_contexts c
+      ${contexts.clauses.length ? `WHERE ${contexts.clauses.join(" AND ")}` : ""} LIMIT 1`).get(...contexts.params)) return true;
+    const content = runtimeContentScope(this.store.db, filter);
+    return this.store.db.prepare(`WITH scoped AS (${content.sql}) SELECT 1 FROM scoped LIMIT 1`).get(...content.params) !== undefined;
+  }
+
+  rankingsPage(filter: AttributionFilter, dimension: RankingDimension, options: { sort: "observedTotalTokens" | "observedArgumentTokens" | "observedResultTokens" | "totalInputTokens" | "inputBytes" | "calls" | "definitionInputTokens" | "firstResultInputTokens" | "repeatedResultInputTokens" | "failures" | "latencyMsP95"; limit: number; offset: number }): { items: AttributionRankRow[]; total: number } {
+    const context = this.contextWhere(filter);
+    context.clauses.push("1");
+    if (dimension !== "all") { context.clauses.push("json_extract(e.capability_key,'$[0]')=?"); context.params.push(dimension); }
+    const capability = dimension === "all" ? {} : { capabilityKind: dimension };
+    const execution = this.invocationWhere(filter, "execution", capability);
+    const contextCalls = this.invocationWhere(filter, "context", capability);
+    const content = runtimeContentScope(this.store.db, filter, capability);
+    const conditionalSum = (condition: string) => `CASE WHEN SUM(${condition})=0 THEN 0 ELSE SUM(CASE WHEN ${condition} THEN tokens END) END`;
+    const query = `WITH exposed AS (
+      SELECT e.capability_key, e.block_kind, e.token_count AS tokens, e.byte_length, ${ResultFirstUseIndex.classification} AS first_use
+      FROM agent_usage_contexts c JOIN agent_usage_exposures e ON e.context_id=c.context_id ${ResultFirstUseIndex.join}
+      WHERE ${context.clauses.join(" AND ")}),
+      contexts AS (SELECT capability_key, SUM(tokens) AS totalInputTokens, SUM(byte_length) AS inputBytes,
+        ${conditionalSum("block_kind='definition'")} AS definitionInputTokens,
+        ${conditionalSum("block_kind='result' AND first_use='first'")} AS firstResultInputTokens,
+        ${conditionalSum("block_kind='result' AND first_use='repeat'")} AS repeatedResultInputTokens
+        FROM exposed GROUP BY capability_key),
+      executions AS MATERIALIZED (SELECT i.public_id,i.capability_key,i.status,i.started_at,i.ended_at FROM agent_usage_invocations i WHERE ${execution.clauses.join(" AND ")}),
+      calls AS (SELECT capability_key, COUNT(*) AS calls, SUM(status NOT IN ('running','succeeded')) AS failures FROM executions GROUP BY capability_key),
+      context_calls AS (SELECT DISTINCT i.capability_key FROM agent_usage_invocations i WHERE ${contextCalls.clauses.join(" AND ")}),
+      runtime_content AS (${content.sql}),
+      observed_parts AS (SELECT i.capability_key,p.part,p.token_count AS tokens FROM executions i JOIN agent_usage_invocation_payloads p ON p.public_id=i.public_id
+        UNION ALL SELECT capability_key, CASE WHEN category IN ('configured_instructions','user_prompt') THEN 'arguments' ELSE 'result' END,tokens FROM runtime_content),
+      payloads AS (SELECT capability_key, SUM(tokens) AS observedTotalTokens,
+        SUM(CASE WHEN part='arguments' THEN tokens END) AS observedArgumentTokens,
+        SUM(CASE WHEN part='result' THEN tokens END) AS observedResultTokens
+        FROM observed_parts GROUP BY capability_key),
+      elapsed AS (SELECT capability_key, CAST(ROUND((julianday(ended_at)-julianday(started_at))*86400000) AS INTEGER) AS value FROM executions),
+      latency_ranks AS (SELECT capability_key,value, ROW_NUMBER() OVER (PARTITION BY capability_key ORDER BY value) AS ordinal,
+        COUNT(*) OVER (PARTITION BY capability_key) AS count FROM elapsed WHERE value>=0),
+      latency AS (SELECT capability_key, MAX(CASE WHEN ordinal=(count*95+99)/100 THEN value END) AS latencyMsP95 FROM latency_ranks GROUP BY capability_key),
+      keys AS (SELECT capability_key FROM contexts UNION SELECT capability_key FROM calls UNION SELECT capability_key FROM context_calls UNION SELECT capability_key FROM runtime_content),
+      ranked AS (SELECT keys.capability_key, contexts.totalInputTokens,contexts.inputBytes,contexts.definitionInputTokens,
+        contexts.firstResultInputTokens,contexts.repeatedResultInputTokens, COALESCE(calls.calls,0) AS calls, COALESCE(calls.failures,0) AS failures,
+        payloads.observedTotalTokens,payloads.observedArgumentTokens,payloads.observedResultTokens,latency.latencyMsP95
+        FROM keys LEFT JOIN contexts USING(capability_key) LEFT JOIN calls USING(capability_key)
+        LEFT JOIN payloads USING(capability_key) LEFT JOIN latency USING(capability_key))`;
+    const params = [filter.runtimeKind === undefined ? "" : JSON.stringify(filter.runtimeKind), ...context.params, ...execution.params, ...contextCalls.params, ...content.params];
+    const total = (this.store.db.prepare(`${query} SELECT COUNT(*) AS total FROM keys`).get(...params) as { total: number }).total;
+    const keys = (this.store.db.prepare(`${query} SELECT capability_key FROM ranked
+      ORDER BY ${options.sort} DESC NULLS LAST, json_extract(capability_key,'$[2]'), capability_key LIMIT ? OFFSET ?`)
+      .all(...params, options.limit, options.offset) as Array<{ capability_key: string }>).map((row) => row.capability_key);
+    const rows = new Map(this.rankings(filter, dimension, keys).map((row) => [capabilityKey(row.capability), row]));
+    return { total, items: keys.map((key) => rows.get(key)!) };
+  }
+
+  rankings(filter: AttributionFilter, dimension: RankingDimension, keys?: string[]): AttributionRankRow[] {
+    if (keys?.length === 0) return [];
     const { clauses, params } = this.contextWhere(filter);
-    clauses.push("json_extract(e.capability_key, '$[0]') = ?"); params.push(dimension);
+    clauses.push("1");
+    if (dimension !== "all") { clauses.push("json_extract(e.capability_key, '$[0]') = ?"); params.push(dimension); }
+    if (keys) { clauses.push(`e.capability_key IN (${keys.map(() => "?").join(",")})`); params.push(...keys); }
     const from = `FROM agent_usage_contexts c JOIN agent_usage_exposures e ON e.context_id=c.context_id
       WHERE ${clauses.join(" AND ")}`;
     const sum = (predicate: string) => `CASE WHEN SUM(CASE WHEN ${predicate} THEN 1 ELSE 0 END)=0 THEN 0
@@ -395,6 +509,8 @@ export class AttributionStore {
     const groups = new Map<string, AttributionRankRow>();
     const empty = (capability: Capability): AttributionRankRow => ({
       measurement: "estimated", tokenizationStatus: "unavailable", tokenEstimates: [], capability,
+      observedArgumentTokens: null, observedResultTokens: null, observedTotalTokens: null,
+      observedArgumentCalls: 0, observedResultCalls: 0, contentObservations: 0, payloadEstimates: [],
       inputBytes: null, calls: 0, contextOnlyCalls: 0, successes: 0, failures: 0, unfinished: 0,
       definitionInputTokens: null, argumentInputTokens: null, firstResultInputTokens: null,
       repeatedResultInputTokens: null, unknownFirstResultInputTokens: null, totalInputTokens: null,
@@ -437,57 +553,110 @@ export class AttributionStore {
       row.tokenEstimates.push({ ...estimateFrom({ ...item, token_count: item.totalInputTokens }),
         exposureCount: item.exposureCount, knownExposureCount: item.knownExposureCount, totalInputTokens: item.totalInputTokens });
     }
-    const samples = new Map<string, { bytes: number[]; latencies: number[] }>();
+    const scopeFor = (origin: InvocationOrigin) => {
+      const scope = this.invocationWhere(filter, origin, dimension === "all" ? {} : { capabilityKind: dimension });
+      if (keys) { scope.clauses.push(`i.capability_key IN (${keys.map(() => "?").join(",")})`); scope.params.push(...keys); }
+      return scope;
+    };
     for (const origin of ["execution", "context"] as const) {
-      for (const call of this.invocationRows(filter, origin, { capabilityKind: dimension })) {
+      const scope = scopeFor(origin);
+      const calls = this.store.db.prepare(`WITH scoped AS (
+        SELECT i.*, ROW_NUMBER() OVER (PARTITION BY i.capability_key ORDER BY COALESCE(i.started_at,'') DESC, i.public_id) AS ordinal
+        FROM agent_usage_invocations i WHERE ${scope.clauses.join(" AND ")})
+        SELECT capability_key, MAX(CASE WHEN ordinal=1 THEN capability_json END) AS capability_json,
+          COUNT(*) AS calls, SUM(status='running') AS unfinished, SUM(status='succeeded') AS successes,
+          SUM(status NOT IN ('running','succeeded')) AS failures FROM scoped GROUP BY capability_key`)
+        .all(...scope.params) as Array<{ capability_key: string; capability_json: string; calls: number; unfinished: number; successes: number; failures: number }>;
+      for (const call of calls) {
         const row = groups.get(call.capability_key) ?? empty(capabilityFrom(call.capability_json));
         groups.set(call.capability_key, row);
-        if (origin === "context") { row.contextOnlyCalls++; continue; }
-        row.calls++;
-        if (call.status === "running") row.unfinished++;
-        else if (call.status === "succeeded") row.successes++;
-        else row.failures++;
-        const sample = samples.get(call.capability_key) ?? { bytes: [], latencies: [] };
-        samples.set(call.capability_key, sample);
-        if (call.raw_result_bytes !== null) sample.bytes.push(call.raw_result_bytes);
-        if (call.started_at !== null && call.ended_at !== null) {
-          const elapsed = Date.parse(call.ended_at) - Date.parse(call.started_at);
-          if (elapsed >= 0) sample.latencies.push(elapsed);
-        }
+        if (origin === "context") row.contextOnlyCalls = call.calls;
+        else { row.calls = call.calls; row.unfinished = call.unfinished; row.successes = call.successes; row.failures = call.failures; }
       }
     }
-    for (const [key, row] of groups) {
+    const payloadScope = scopeFor("execution");
+    // Window ranks calculate nearest-rank percentiles inside SQLite; only one row per capability leaves the database.
+    const sampleScope = payloadScope.clauses.join(" AND ");
+    const sample = (expression: string) => this.store.db.prepare(`WITH values_per_call AS (
+      SELECT i.capability_key, ${expression} AS value FROM agent_usage_invocations i WHERE ${sampleScope}),
+      ordered AS (SELECT capability_key,value, ROW_NUMBER() OVER (PARTITION BY capability_key ORDER BY value) AS ordinal,
+        COUNT(*) OVER (PARTITION BY capability_key) AS count FROM values_per_call WHERE value >= 0)
+      SELECT capability_key, SUM(value) AS total, MAX(count) AS count,
+        MAX(CASE WHEN ordinal=(count+1)/2 THEN value END) AS p50,
+        MAX(CASE WHEN ordinal=(count*95+99)/100 THEN value END) AS p95
+        FROM ordered GROUP BY capability_key`).all(...payloadScope.params) as Array<{ capability_key: string; total: number; count: number; p50: number; p95: number }>;
+    for (const item of sample("i.raw_result_bytes")) {
+      const row = groups.get(item.capability_key)!;
+      row.rawResultBytes = item.total; row.rawResultBytesP50 = item.p50; row.rawResultBytesP95 = item.p95; row.rawResultBytesSampleCount = item.count;
+    }
+    for (const item of sample("CAST(ROUND((julianday(i.ended_at)-julianday(i.started_at))*86400000) AS INTEGER)")) {
+      const row = groups.get(item.capability_key)!;
+      row.latencyMsP50 = item.p50; row.latencyMsP95 = item.p95; row.latencySampleCount = item.count;
+    }
+    const payloadGroups = this.store.db.prepare(`SELECT i.capability_key, p.part, SUM(p.token_count) AS tokens,
+      COUNT(p.token_count) AS calls, t.estimate_json FROM agent_usage_invocations i
+      JOIN agent_usage_invocation_payloads p ON p.public_id=i.public_id
+      JOIN agent_usage_token_estimates t ON t.id=p.estimate_id
+      WHERE ${payloadScope.clauses.join(" AND ")} GROUP BY i.capability_key,p.part,p.estimate_id`)
+      .all(...payloadScope.params) as Array<{ capability_key: string; part: string; tokens: number | null; calls: number; estimate_json: string }>;
+    const profiles = new Map<string, Set<string>>();
+    for (const payload of payloadGroups) {
+      const row = groups.get(payload.capability_key);
+      if (!row) continue;
+      const field = payload.part === "arguments" ? "observedArgumentTokens" : "observedResultTokens";
+      const count = payload.part === "arguments" ? "observedArgumentCalls" : "observedResultCalls";
+      if (payload.tokens !== null) row[field] = (row[field] ?? 0) + payload.tokens;
+      row[count] += payload.calls;
+      const known = profiles.get(payload.capability_key) ?? new Set<string>();
+      if (!known.has(payload.estimate_json)) row.payloadEstimates.push(JSON.parse(payload.estimate_json) as TokenEstimate);
+      known.add(payload.estimate_json); profiles.set(payload.capability_key, known);
+    }
+    const contentScope = runtimeContentScope(this.store.db, filter, { ...(dimension === "all" ? {} : { capabilityKind: dimension }), keys });
+    const contentGroups = this.store.db.prepare(`WITH scoped AS (${contentScope.sql}) SELECT capability_key,category,estimate_json,
+      SUM(tokens) AS tokens,COUNT(*) AS observations FROM scoped GROUP BY capability_key,category,estimate_json`)
+      .all(...contentScope.params) as Array<{ capability_key: string; category: string; estimate_json: string; tokens: number | null; observations: number }>;
+    for (const content of contentGroups) {
+      const row = groups.get(content.capability_key) ?? empty(contentCapability(content.category)!);
+      groups.set(content.capability_key, row);
+      row.contentObservations += content.observations;
+      const field = ["configured_instructions", "user_prompt"].includes(content.category) ? "observedArgumentTokens" : "observedResultTokens";
+      if (content.tokens !== null) row[field] = (row[field] ?? 0) + content.tokens;
+      const known = profiles.get(content.capability_key) ?? new Set<string>();
+      if (!known.has(content.estimate_json)) row.payloadEstimates.push(JSON.parse(content.estimate_json) as TokenEstimate);
+      known.add(content.estimate_json); profiles.set(content.capability_key, known);
+    }
+    for (const row of groups.values()) {
+      if (row.observedArgumentTokens !== null || row.observedResultTokens !== null) {
+        row.observedTotalTokens = (row.observedArgumentTokens ?? 0) + (row.observedResultTokens ?? 0);
+      }
       const known = row.tokenEstimates.filter((item) => item.knownExposureCount > 0).length;
       row.tokenizationStatus = known > 1 ? "mixed" : known === 1 ? "single" : "unavailable";
-      const sample = samples.get(key);
-      if (!sample) continue;
-      const bytes = percentiles(sample.bytes), latency = percentiles(sample.latencies);
-      row.rawResultBytes = sample.bytes.length ? sample.bytes.reduce((sum, value) => sum + value, 0) : null;
-      row.rawResultBytesP50 = bytes.p50; row.rawResultBytesP95 = bytes.p95; row.rawResultBytesSampleCount = bytes.count;
-      row.latencyMsP50 = latency.p50; row.latencyMsP95 = latency.p95; row.latencySampleCount = latency.count;
+
     }
     return [...groups.values()].sort((a, b) => (b.totalInputTokens ?? -1) - (a.totalInputTokens ?? -1)
       || b.calls - a.calls || a.capability.name.localeCompare(b.capability.name));
   }
 
   invocations(filter: AttributionFilter = {}, origin: InvocationQueryOrigin = "counted", options: AttributionPage = {}): AttributionInvocation[] {
-    return this.invocationRows(filter, origin === "counted" ? "execution" : origin, options).map((row) => this.toInvocation(row));
+    const rows = this.invocationRows(filter, origin === "counted" ? "execution" : origin, options);
+    const payloads = this.payloads(rows.map((row) => row.public_id));
+    return rows.map((row) => this.toInvocation(row, payloads.get(row.public_id)));
   }
 
   invocation(namespace: string, id: string): AttributionInvocation | null {
     const row = this.store.db.prepare("SELECT * FROM agent_usage_invocations WHERE namespace = ? AND public_id = ?")
       .get(namespace, id) as InvocationRow | undefined;
-    return row ? this.toInvocation(row) : null;
+    return row ? this.toInvocation(row, this.payloads([id]).get(id)) : null;
   }
 
-  detail(namespace: string, id: string): AttributionDetail | null {
+  detail(namespace: string, id: string, options: { limit?: number; offset?: number } = {}): (AttributionDetail & { exposureTotal: number }) | null {
     const row = this.store.db.prepare("SELECT * FROM agent_usage_invocations WHERE namespace = ? AND public_id = ?")
       .get(namespace, id) as InvocationRow | undefined;
     if (row === undefined) return null;
     const capability = capabilityFrom(row.capability_json);
     const all = this.exposureRows({ namespace, sessionId: row.session_id },
       ["c.provider_epoch_id=?", "e.tool_invocation_id=?", "e.capability_key=?"],
-      [row.provider_epoch_id, row.invocation_id, row.capability_key]);
+      [row.provider_epoch_id, row.invocation_id, row.capability_key], options);
     const exposures: AttributionExposure[] = all.map((exposure) => ({
       ...estimateFrom(exposure), modelInvocationId: exposure.invocation_id,
       providerEpochId: exposure.provider_epoch_id, occurredAt: exposure.occurred_at,
@@ -497,8 +666,9 @@ export class AttributionStore {
       resultFirstUse: exposure.first_use
     }));
     return {
-      invocation: { ...this.toInvocation(row), capability },
+      invocation: { ...this.toInvocation(row, this.payloads([id]).get(id)), capability },
       exposures,
+      exposureTotal: this.exposureCount({ namespace, sessionId: row.session_id }, ["c.provider_epoch_id=?", "e.tool_invocation_id=?", "e.capability_key=?"], [row.provider_epoch_id, row.invocation_id, row.capability_key]),
       subsequentModelInvocationIds: [...new Set(exposures.map((exposure) => exposure.modelInvocationId))]
     };
   }
@@ -533,7 +703,7 @@ export class AttributionStore {
     return rows.map((row) => ({ ...this.toContextEvidence(row), exposureCount: row.exposure_count }));
   }
 
-  contextEvidenceDetail(namespace: string, id: string): ContextEvidenceDetail | null {
+  contextEvidenceDetail(namespace: string, id: string, options: { limit?: number; offset?: number } = {}): (ContextEvidenceDetail & { exposureTotal: number }) | null {
     if (!/^[A-Za-z0-9_-]{43}\.[A-Za-z0-9_-]{43}$/.test(id)) return null;
     const [contextId, capabilityHash] = id.split(".").map((part) => Buffer.from(part, "base64url").toString("hex"));
     const context = this.store.db.prepare("SELECT * FROM agent_usage_contexts WHERE namespace = ? AND context_id = ?")
@@ -543,9 +713,11 @@ export class AttributionStore {
       .all(contextId) as Array<{ capability_key: string }>;
     const key = candidates.find((row) => stableHash(row.capability_key) === capabilityHash)?.capability_key;
     if (!key) return null;
-    const selected = this.exposureRows({ namespace }, ["c.context_id=?", "e.capability_key=?"], [contextId!, key]);
-    if (!selected.length) return null;
-    return { context: { ...this.toContextEvidence(selected[0]!), exposureCount: selected.length },
+    const selected = this.exposureRows({ namespace }, ["c.context_id=?", "e.capability_key=?"], [contextId!, key], options);
+    const first = selected[0] ?? this.exposureRows({ namespace }, ["c.context_id=?", "e.capability_key=?"], [contextId!, key], { limit: 1 })[0];
+    if (!first) return null;
+    const exposureTotal = this.exposureCount({ namespace }, ["c.context_id=?", "e.capability_key=?"], [contextId!, key]);
+    return { exposureTotal, context: { ...this.toContextEvidence(first), exposureCount: exposureTotal },
       exposures: selected.map((row) => ({ ...estimateFrom(row),
         modelInvocationId: row.invocation_id, toolInvocationId: row.tool_invocation_id,
         providerEpochId: row.provider_epoch_id, occurredAt: row.occurred_at, position: row.position,
@@ -563,6 +735,8 @@ export class AttributionStore {
 
   deleteSession(namespace: string, sessionId: string): void {
     this.store.db.transaction(() => {
+      this.store.db.prepare(`DELETE FROM agent_usage_invocation_payloads WHERE public_id IN
+        (SELECT public_id FROM agent_usage_invocations WHERE namespace=? AND session_id=?)`).run(namespace, sessionId);
       this.store.db.prepare("DELETE FROM agent_usage_result_first WHERE namespace=? AND session_id=?").run(namespace, sessionId);
       this.store.db.prepare(`DELETE FROM agent_usage_exposures WHERE context_id IN
         (SELECT context_id FROM agent_usage_contexts WHERE namespace = ? AND session_id = ?)`)
@@ -579,6 +753,13 @@ export class AttributionStore {
   }
 
   private invocationRows(filter: AttributionFilter, origin: InvocationOrigin, options: AttributionPage = {}): InvocationRow[] {
+    const { clauses, params } = this.invocationWhere(filter, origin, options);
+    return this.store.db.prepare(`SELECT i.* FROM agent_usage_invocations i WHERE ${clauses.join(" AND ")}
+      ORDER BY COALESCE(i.started_at,'') DESC, i.public_id ${options.limit === undefined ? "" : "LIMIT ?"}`)
+      .all(...params, ...(options.limit === undefined ? [] : [options.limit])) as InvocationRow[];
+  }
+
+  private invocationWhere(filter: AttributionFilter, origin: InvocationOrigin, options: AttributionPage): { clauses: string[]; params: string[] } {
     const clauses = ["i.origin=?"], params: string[] = [origin];
     for (const [field, column] of [["namespace", "namespace"], ["agentId", "agent_id"], ["sessionId", "session_id"], ["runtimeKind", "runtime_kind"]] as const) {
       if (filter[field] !== undefined) { clauses.push(`i.${column}=?`); params.push(filter[field]); }
@@ -592,16 +773,14 @@ export class AttributionStore {
           AND ${context.clauses.join(" AND ")})`);
       params.push(...context.params);
     } else {
-      if (filter.from !== undefined) { clauses.push("i.started_at>=?"); params.push(new Date(filter.from).toISOString()); }
-      if (filter.to !== undefined) { clauses.push("i.started_at<?"); params.push(new Date(filter.to).toISOString()); }
+      if (filter.from !== undefined) { clauses.push("COALESCE(i.started_at,i.ended_at)>=?"); params.push(new Date(filter.from).toISOString()); }
+      if (filter.to !== undefined) { clauses.push("COALESCE(i.started_at,i.ended_at)<?"); params.push(new Date(filter.to).toISOString()); }
     }
     if (options.cursor) {
       clauses.push("(COALESCE(i.started_at,'') < ? OR (COALESCE(i.started_at,'') = ? AND i.public_id > ?))");
       params.push(options.cursor.t, options.cursor.t, options.cursor.id);
     }
-    return this.store.db.prepare(`SELECT i.* FROM agent_usage_invocations i WHERE ${clauses.join(" AND ")}
-      ORDER BY COALESCE(i.started_at,'') DESC, i.public_id ${options.limit === undefined ? "" : "LIMIT ?"}`)
-      .all(...params, ...(options.limit === undefined ? [] : [options.limit])) as InvocationRow[];
+    return { clauses, params };
   }
 
   private contextWhere(filter: AttributionFilter): { clauses: string[]; params: string[] } {
@@ -614,18 +793,24 @@ export class AttributionStore {
     return { clauses, params };
   }
 
-  private exposureRows(filter: AttributionFilter, extra: string[] = [], values: string[] = []): ExposureRow[] {
+  private exposureCount(filter: AttributionFilter, extra: string[], values: string[]): number {
+    const scope = this.contextWhere(filter);
+    return (this.store.db.prepare(`SELECT COUNT(*) AS count FROM agent_usage_contexts c JOIN agent_usage_exposures e ON e.context_id=c.context_id WHERE ${[...scope.clauses, ...extra].join(" AND ")}`).get(...scope.params, ...values) as { count: number }).count;
+  }
+
+  private exposureRows(filter: AttributionFilter, extra: string[] = [], values: string[] = [], options: { limit?: number; offset?: number } = {}): ExposureRow[] {
     const { clauses, params } = this.contextWhere(filter);
     clauses.push(...extra); params.push(...values);
     return this.store.db.prepare(`SELECT c.*, e.*, t.estimate_json, ${ResultFirstUseIndex.classification} AS first_use
       FROM agent_usage_contexts c JOIN agent_usage_exposures e ON e.context_id=c.context_id
       JOIN agent_usage_token_estimates t ON t.id=e.estimate_id ${ResultFirstUseIndex.join}
       ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}
-      ORDER BY c.occurred_at IS NULL, c.occurred_at, c.context_id, e.position, e.capability_key`)
-      .all(filter.runtimeKind === undefined ? "" : JSON.stringify(filter.runtimeKind), ...params) as ExposureRow[];
+      ORDER BY c.occurred_at IS NULL, c.occurred_at, c.context_id, e.position, e.capability_key
+      ${options.limit === undefined ? "" : "LIMIT ? OFFSET ?"}`)
+      .all(filter.runtimeKind === undefined ? "" : JSON.stringify(filter.runtimeKind), ...params, ...(options.limit === undefined ? [] : [options.limit, options.offset ?? 0])) as ExposureRow[];
   }
 
-  private toInvocation(row: InvocationRow): AttributionInvocation {
+  private toInvocation(row: InvocationRow, payload?: Pick<AttributionInvocation, "argumentEstimate" | "resultEstimate">): AttributionInvocation {
     return {
       id: row.public_id,
       namespace: row.namespace,
@@ -644,7 +829,9 @@ export class AttributionStore {
       origin: row.origin,
       sourceId: row.source_id,
       revision: row.revision,
-      rawResultBytes: row.raw_result_bytes
+      rawResultBytes: row.raw_result_bytes,
+      argumentEstimate: payload?.argumentEstimate ?? null,
+      resultEstimate: payload?.resultEstimate ?? null
     };
   }
 

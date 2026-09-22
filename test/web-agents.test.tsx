@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { pagedManagementResponse } from "./paged-management-response.js";
 
 import "@testing-library/jest-dom/vitest";
 
@@ -38,8 +39,8 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/agents");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/agents") return response([agent]);
-    if (url === "/api/project-environments") return response([environment]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+    if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [environment]);
     throw new Error(`Unexpected request: ${url}`);
   }));
 });
@@ -67,15 +68,15 @@ it("在 Agent 列表页直接复制创建", async () => {
   let cloneBody: unknown;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/agents" && (init?.method ?? "GET") === "GET") return response([agent]);
-    if (url === "/api/project-environments") return response([environment]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents" && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, [agent]);
+    if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [environment]);
     if (url === `/api/agents/${agent.id}/clone` && init?.method === "POST") {
       cloneBody = JSON.parse(String(init.body));
-      return response(cloned);
+      return pagedManagementResponse(url, cloned);
     }
-    if (url === `/api/agents/${cloned.id}`) return response(cloned);
-    if (url === `/api/agents/${cloned.id}/usage`) return response(usageSummary);
-    if (url === "/api/integration-endpoints") return response([]);
+    if (url === `/api/agents/${cloned.id}`) return pagedManagementResponse(url, cloned);
+    if (url === `/api/agents/${cloned.id}/usage`) return pagedManagementResponse(url, usageSummary);
+    if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, []);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   }));
 
@@ -95,15 +96,15 @@ it("在 Agent 详情页输入新名称并快捷复制配置", async () => {
   let cloneBody: unknown;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}` && (init?.method ?? "GET") === "GET") return response(agent);
-    if (url === `/api/agents/${agent.id}/usage`) return response(usageSummary);
-    if (url === "/api/integration-endpoints") return response([]);
+    if (url === `/api/agents/${agent.id}` && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, agent);
+    if (url === `/api/agents/${agent.id}/usage`) return pagedManagementResponse(url, usageSummary);
+    if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, []);
     if (url === `/api/agents/${agent.id}/clone` && init?.method === "POST") {
       cloneBody = JSON.parse(String(init.body));
-      return response(cloned);
+      return pagedManagementResponse(url, cloned);
     }
-    if (url === `/api/agents/${cloned.id}` && (init?.method ?? "GET") === "GET") return response(cloned);
-    if (url === `/api/agents/${cloned.id}/usage`) return response(usageSummary);
+    if (url === `/api/agents/${cloned.id}` && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, cloned);
+    if (url === `/api/agents/${cloned.id}/usage`) return pagedManagementResponse(url, usageSummary);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   }));
 
@@ -122,9 +123,9 @@ it("Agent 概览集中展示绑定的外部调用入口", async () => {
   window.history.replaceState({}, "", `/agents/${agent.id}`);
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/usage`) return response(usageSummary);
-    if (url === "/api/integration-endpoints") return response([endpoint]);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (url === `/api/agents/${agent.id}/usage`) return pagedManagementResponse(url, usageSummary);
+    if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, [endpoint]);
     throw new Error(`Unexpected request: GET ${url}`);
   }));
 
@@ -149,11 +150,11 @@ it("Agent 没有调用入口时可创建并在新建页自动选中当前 Agent"
   const otherAgent = { ...agent, id: 2, name: "其他智能体" };
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/usage`) return response(usageSummary);
-    if (url === "/api/integration-endpoints") return response([]);
-    if (url === "/api/agents") return response([otherAgent, agent]);
-    if (url === `/api/agents/${agent.id}/session-parameters`) return response([]);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (url === `/api/agents/${agent.id}/usage`) return pagedManagementResponse(url, usageSummary);
+    if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, []);
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [otherAgent, agent]);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/session-parameters`) return pagedManagementResponse(url, []);
     throw new Error(`Unexpected request: GET ${url}`);
   }));
 
@@ -174,12 +175,12 @@ it("在 Agent 独立 Skills 页面搜索并启用 Skill", async () => {
   }];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills` && (init?.method ?? "GET") === "GET") return response(skills);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills` && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, skills);
     if (url === `/api/agents/${agent.id}/skills/skill-review` && init?.method === "PUT") {
       expect(JSON.parse(String(init.body))).toEqual({ enabled: true });
       skills[0] = { ...skills[0]!, enabled: true };
-      return response(skills[0]);
+      return pagedManagementResponse(url, skills[0]);
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   }));
@@ -187,9 +188,9 @@ it("在 Agent 独立 Skills 页面搜索并启用 Skill", async () => {
   render(<App />);
 
   expect(await screen.findByText("code-review")).toBeInTheDocument();
-  expect(screen.getByText("已启用 0 / 1。配置会在下一次运行生效。")).toBeInTheDocument();
+  expect(screen.getByText("本页已启用 0 / 1。配置会在下一次运行生效。")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "启用" }));
-  expect(await screen.findByText("已启用 1 / 1。配置会在下一次运行生效。")).toBeInTheDocument();
+  expect(await screen.findByText("本页已启用 1 / 1。配置会在下一次运行生效。")).toBeInTheDocument();
 });
 
 it("Skills 已启用项排在前面且描述单行省略并悬浮显示全文", async () => {
@@ -201,8 +202,8 @@ it("Skills 已启用项排在前面且描述单行省略并悬浮显示全文", 
   ];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills`) return response(skills);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, skills);
     throw new Error(`Unexpected request: GET ${url}`);
   }));
 
@@ -226,8 +227,8 @@ it("Skills 列表可选择只删除当前副本或删除所有上传副本", asy
   const deletedScopes: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills` && (init?.method ?? "GET") === "GET") return response(skills);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills` && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, skills);
     if (url.startsWith(`/api/agents/${agent.id}/skills/${uploaded.id}?scope=`) && init?.method === "DELETE") {
       const scope = new URL(url, "http://localhost").searchParams.get("scope")!;
       deletedScopes.push(scope);
@@ -256,10 +257,10 @@ it("新建支持的 Agent 时提交智能体指令，Hermes 明确禁用该配�
   const requests: unknown[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/project-environments") return response([environment]);
-    if (url === "/api/agents" && init?.method === "POST") {
+    if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [environment]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents" && init?.method === "POST") {
       requests.push(JSON.parse(String(init.body)));
-      return response(agent);
+      return pagedManagementResponse(url, agent);
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   }));
@@ -290,11 +291,11 @@ it("在设置页修改 Codex 智能体指令", async () => {
   let patchBody: unknown;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}` && (init?.method ?? "GET") === "GET") return response(agent);
-    if (url === "/api/project-environments") return response([environment]);
+    if (url === `/api/agents/${agent.id}` && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [environment]);
     if (url === `/api/agents/${agent.id}` && init?.method === "PATCH") {
       patchBody = JSON.parse(String(init.body));
-      return response({ ...agent, ...(patchBody as object) });
+      return pagedManagementResponse(url, { ...agent, ...(patchBody as object) });
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   }));

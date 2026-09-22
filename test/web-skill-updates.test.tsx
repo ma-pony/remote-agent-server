@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { pagedManagementResponse } from "./paged-management-response.js";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
@@ -21,10 +22,10 @@ afterEach(() => { cleanup(); sessionStorage.clear(); localStorage.clear(); vi.un
 it("刷新来源只重新发现目录，不会应用版本", async () => {
   const calls: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { const url = String(input); calls.push(`${init?.method ?? "GET"} ${url}`);
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills`) return response([skill]);
-    if (url === "/api/skill-sources") return response([{ id: "team", name: "Team", url: "https://example.test/skills.git", ref: null, path: "", status: "ready", lastSyncedAt: null, error: null, skillCount: 1, warnings: [] }]);
-    if (url === "/api/skill-sources/team/refresh" && init?.method === "POST") return response({});
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [skill]);
+    if (new URL(url, "http://localhost").pathname === "/api/skill-sources") return pagedManagementResponse(url, [{ id: "team", name: "Team", url: "https://example.test/skills.git", ref: null, path: "", status: "ready", lastSyncedAt: null, error: null, skillCount: 1, warnings: [] }]);
+    if (url === "/api/skill-sources/team/refresh" && init?.method === "POST") return pagedManagementResponse(url, {});
     throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
   }));
   render(<App />); fireEvent.click(await screen.findByRole("button", { name: "管理 Git 来源" }));
@@ -36,11 +37,11 @@ it("刷新来源只重新发现目录，不会应用版本", async () => {
 it("选择版本后必须预览，才用 expectedRevision 明确应用或回滚", async () => {
   const bodies: unknown[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { const url = String(input);
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills`) return response([skill]);
-    if (url.endsWith("/revisions")) return response(revisions);
-    if (url.includes("/diff?revision=")) return response({ revision: latest, expectedRevision: current, baseRevision: current, previewLimitBytes: 1024 * 1024, locallyModified: false, files: [{ path: "SKILL.md", status: "modified", beforeBytes: 3, afterBytes: 3, preview: "text", beforeMode: 420, afterMode: 420 }] });
-    if (url.endsWith("/revision") && init?.method === "POST") { bodies.push(JSON.parse(String(init.body))); return response({ ...skill, currentRevision: latest }); }
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [skill]);
+    if (new URL(url, "http://localhost").pathname.endsWith("/revisions")) return pagedManagementResponse(url, revisions);
+    if (url.includes("/diff?revision=")) return pagedManagementResponse(url, { revision: latest, expectedRevision: current, baseRevision: current, previewLimitBytes: 1024 * 1024, locallyModified: false, files: [{ path: "SKILL.md", status: "modified", beforeBytes: 3, afterBytes: 3, preview: "text", beforeMode: 420, afterMode: 420 }] });
+    if (url.endsWith("/revision") && init?.method === "POST") { bodies.push(JSON.parse(String(init.body))); return pagedManagementResponse(url, { ...skill, currentRevision: latest }); }
     throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
   }));
   render(<App />); fireEvent.click(await screen.findByRole("button", { name: "查看更新" }));
@@ -51,10 +52,10 @@ it("选择版本后必须预览，才用 expectedRevision 明确应用或回滚"
 
 it("本地修改时显示恢复指引，并且不提交应用", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => { const url = String(input);
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills`) return response([{ ...skill, locallyModified: true }]);
-    if (url.endsWith("/revisions")) return response(revisions);
-    if (url.includes("/diff?revision=")) return response({ revision: latest, expectedRevision: current, locallyModified: true, files: [] });
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [{ ...skill, locallyModified: true }]);
+    if (new URL(url, "http://localhost").pathname.endsWith("/revisions")) return pagedManagementResponse(url, revisions);
+    if (url.includes("/diff?revision=")) return pagedManagementResponse(url, { revision: latest, expectedRevision: current, locallyModified: true, files: [] });
     throw new Error(`unexpected ${url}`);
   }));
   render(<App />); fireEvent.click(await screen.findByRole("button", { name: "查看更新" })); fireEvent.click(await screen.findByRole("button", { name: "预览变更" }));
@@ -64,24 +65,25 @@ it("本地修改时显示恢复指引，并且不提交应用", async () => {
 it("选择历史版本时以同一预览流程明确回滚", async () => {
   const bodies: unknown[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { const url = String(input);
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills`) return response([skill]);
-    if (url.endsWith("/revisions")) return response(revisions);
-    if (url.includes(`/diff?revision=${older}`)) return response({ revision: older, expectedRevision: current, baseRevision: current, previewLimitBytes: 1024 * 1024, locallyModified: false, files: [{ path: "SKILL.md", status: "modified", beforeBytes: 3, afterBytes: 3, preview: "text", beforeMode: 420, afterMode: 420 }] });
-    if (url.endsWith("/revision") && init?.method === "POST") { bodies.push(JSON.parse(String(init.body))); return response({ ...skill, currentRevision: older }); }
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [skill]);
+    if (new URL(url, "http://localhost").pathname.endsWith("/revisions")) return pagedManagementResponse(url, revisions);
+    if (url.includes(`/diff?revision=${older}`)) return pagedManagementResponse(url, { revision: older, expectedRevision: current, baseRevision: current, previewLimitBytes: 1024 * 1024, locallyModified: false, files: [{ path: "SKILL.md", status: "modified", beforeBytes: 3, afterBytes: 3, preview: "text", beforeMode: 420, afterMode: 420 }] });
+    if (url.endsWith("/revision") && init?.method === "POST") { bodies.push(JSON.parse(String(init.body))); return pagedManagementResponse(url, { ...skill, currentRevision: older }); }
     throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
   }));
   render(<App />); fireEvent.click(await screen.findByRole("button", { name: "查看更新" }));
-  fireEvent.change(await screen.findByLabelText("目标版本"), { target: { value: older } }); fireEvent.click(screen.getByRole("button", { name: "预览变更" }));
+  await waitFor(() => expect(screen.getByLabelText("目标版本")).not.toBeDisabled());
+  fireEvent.change(screen.getByLabelText("目标版本"), { target: { value: older } }); fireEvent.click(screen.getByRole("button", { name: "预览变更" }));
   fireEvent.click(await screen.findByRole("button", { name: "回滚到此版本" })); await waitFor(() => expect(bodies).toEqual([{ revision: older, expectedRevision: current }]));
 });
 
 it("预览请求失败会显示错误，并在忙碌时禁用重复预览", async () => {
   let rejectDiff: ((reason: Error) => void) | undefined;
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => { const url = String(input);
-    if (url === `/api/agents/${agent.id}`) return Promise.resolve(response(agent));
-    if (url === `/api/agents/${agent.id}/skills`) return Promise.resolve(response([skill]));
-    if (url.endsWith("/revisions")) return Promise.resolve(response(revisions));
+    if (url === `/api/agents/${agent.id}`) return Promise.resolve(pagedManagementResponse(url, agent));
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return Promise.resolve(pagedManagementResponse(url, [skill]));
+    if (new URL(url, "http://localhost").pathname.endsWith("/revisions")) return Promise.resolve(pagedManagementResponse(url, revisions));
     if (url.includes("/diff?revision=")) return new Promise<Response>((_resolve, reject) => { rejectDiff = reject; });
     throw new Error(`unexpected ${url}`);
   }));
@@ -94,9 +96,9 @@ it("从上传 Skill 行发布新 ZIP，不会自动应用到 Agent", async () =>
   const writes: { url: string; body: unknown }[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills`) return response([{ ...skill, source: "upload" }]);
-    if (init?.method === "POST") { writes.push({ url, body: JSON.parse(String(init.body)) }); return response(skill); }
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [{ ...skill, source: "upload" }]);
+    if (init?.method === "POST") { writes.push({ url, body: JSON.parse(String(init.body)) }); return pagedManagementResponse(url, skill); }
     throw new Error(`unexpected ${url}`);
   }));
   render(<App />);
@@ -109,11 +111,11 @@ it("Git 来源表单允许 SSH scp 地址", async () => {
   const writes: unknown[] = [];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills`) return response([skill]);
-    if (url === "/api/skill-sources") {
-      if (init?.method === "POST") { writes.push(JSON.parse(String(init.body))); return response({}); }
-      return response([]);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [skill]);
+    if (new URL(url, "http://localhost").pathname === "/api/skill-sources") {
+      if (init?.method === "POST") { writes.push(JSON.parse(String(init.body))); return pagedManagementResponse(url, {}); }
+      return pagedManagementResponse(url, []);
     }
     throw new Error(`unexpected ${url}`);
   }));
@@ -129,10 +131,10 @@ it("Git 来源表单允许 SSH scp 地址", async () => {
 it("重新打开版本弹窗会清除旧预览", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/skills`) return response([skill]);
-    if (url.endsWith("/revisions")) return response(revisions);
-    if (url.includes("/diff?revision=")) return response({ revision: latest, expectedRevision: current, locallyModified: false, files: [] });
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [skill]);
+    if (new URL(url, "http://localhost").pathname.endsWith("/revisions")) return pagedManagementResponse(url, revisions);
+    if (url.includes("/diff?revision=")) return pagedManagementResponse(url, { revision: latest, expectedRevision: current, locallyModified: false, files: [] });
     throw new Error(`unexpected ${url}`);
   }));
   render(<App />); fireEvent.click(await screen.findByRole("button", { name: "查看更新" }));
@@ -154,10 +156,10 @@ const fileDiff = { revision: latest, expectedRevision: current, baseRevision: cu
 const setupFilePreview = async (preview: (url: string, init?: RequestInit) => Promise<Response>, english = false) => {
   vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
-    if (url === `/api/agents/${agent.id}`) return Promise.resolve(response(agent));
-    if (url === `/api/agents/${agent.id}/skills`) return Promise.resolve(response([skill]));
-    if (url.endsWith("/revisions")) return Promise.resolve(response(revisions));
-    if (url.includes("/diff?revision=")) return Promise.resolve(response({ ...fileDiff, revision: new URL(url, "http://localhost").searchParams.get("revision") }));
+    if (url === `/api/agents/${agent.id}`) return Promise.resolve(pagedManagementResponse(url, agent));
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return Promise.resolve(pagedManagementResponse(url, [skill]));
+    if (new URL(url, "http://localhost").pathname.endsWith("/revisions")) return Promise.resolve(pagedManagementResponse(url, revisions));
+    if (url.includes("/diff?revision=")) return Promise.resolve(pagedManagementResponse(url, { ...fileDiff, revision: new URL(url, "http://localhost").searchParams.get("revision") }));
     if (url.includes("/diff/file?")) return preview(url, init);
     throw new Error(`unexpected ${url}`);
   }));

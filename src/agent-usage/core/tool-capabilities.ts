@@ -1,5 +1,7 @@
 import { basename } from "node:path";
 import type { Capability } from "./context-types.js";
+import { literalCommand } from "./shell-command.js";
+export { commandFiles } from "./shell-command.js";
 
 type ToolInput = Record<string, unknown>;
 export type StructuredExecutable = { name?: string; path: string };
@@ -16,9 +18,8 @@ export const toolInput = (value: unknown): ToolInput | undefined => {
 
 export const structuredExecutable = (kind: string, input: ToolInput | undefined): StructuredExecutable | undefined => {
   if (kind !== "execute" || input === undefined) return undefined;
-  const path = [input.executable, input.program, Array.isArray(input.argv) ? input.argv[0] : undefined]
-    .find((value): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096);
-  if (path === undefined) return undefined;
+  const path = literalCommand(input)?.[0];
+  if (path === undefined || path.length > 4096) return undefined;
   const name = basename(path);
   return { path, name: /^[a-zA-Z0-9._+-]{1,128}$/.test(name) ? name : undefined };
 };
@@ -38,7 +39,8 @@ const cliCapability = (runtimeKind: string, executable?: StructuredExecutable): 
 export const runtimeToolCapability = (runtimeKind: string, kind: string, input?: ToolInput): Capability => {
   const executable = structuredExecutable(kind, input);
   if (kind === "execute" && (executable !== undefined
-    || typeof input?.command === "string" || typeof input?.cmd === "string")) {
+    || input?.command !== undefined || input?.cmd !== undefined || input?.argv !== undefined
+    || input?.executable !== undefined || input?.program !== undefined)) {
     return cliCapability(runtimeKind, executable);
   }
   if (Object.hasOwn(builtinNames, kind)) {
@@ -64,7 +66,7 @@ export const capturedToolCapability = (runtimeKind: string, name: string, args?:
   if (!tools || !Object.hasOwn(tools, name)) return undefined;
   const kind = tools[name]!;
   const input = toolInput(args);
-  // Shell definitions and unstructured command strings have no individual executable identity.
+  // Shell definitions without a concrete command keep the generic shell identity.
   return kind === "execute" ? cliCapability(runtimeKind, structuredExecutable(kind, input))
     : runtimeToolCapability(runtimeKind, kind, input);
 };

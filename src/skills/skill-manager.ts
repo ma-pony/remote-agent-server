@@ -1,3 +1,4 @@
+import { pageResult, type PaginationQuery } from "../pagination.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   cpSync,
@@ -106,6 +107,8 @@ export class SkillManager {
   private readonly roots: SkillRoot[];
   private readonly revisions: SkillRevisions;
   private readonly sourceCatalog: () => AvailableSkill[];
+  private readonly paginationSnapshots = new Map<string, {expiresAt: number; value: unknown}>();
+  private readonly metadataCache = new Map<string, {stamp: string; value: {name: string; description: string}}>();
   private hostSnapshot: { files: string[]; catalog: AvailableSkill[]; capturedAt: number } | undefined;
 
   constructor({ dataDir, roots = defaultRoots(), sourceCatalog = () => [] }: SkillManagerOptions) {
@@ -116,10 +119,10 @@ export class SkillManager {
     this.recoverInstallations();
   }
 
-  list(agentId: number): SkillCatalogItem[] {
+  list(agentId: number, selectedIds?: Set<string>): SkillCatalogItem[] {
     const catalog = this.availableCatalog();
     const availableIds = new Set(catalog.map((skill) => skill.id));
-    const result: SkillCatalogItem[] = catalog.map((skill) => {
+    const result: SkillCatalogItem[] = catalog.filter(skill => selectedIds === undefined || selectedIds.has(skill.id)).map((skill) => {
       const current = this.current(agentId, skill.id);
       const selected = current === undefined ? skill : this.selectedMetadata(agentId, skill.id);
       const latestRevision = current === undefined && skill.source !== "git"
@@ -136,13 +139,58 @@ export class SkillManager {
         })
       };
     });
-    for (const installed of this.installed(agentId)) {
+    for (const installed of this.installed(agentId, selectedIds)) {
       if (!availableIds.has(installed.id)) result.push(installed);
     }
     return result.sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
   }
 
+  listPage(agentId: number, input: PaginationQuery) {
+    const candidates = new Map(this.availableCatalog().map(skill => [skill.id, {id: skill.id, name: skill.name, description: skill.description}]));
+    const enabledIds = new Set<string>();
+    const installedRoot = join(this.dataDir, "agents", String(agentId), "skills");
+    if (existsSync(installedRoot)) for (const entry of readdirSync(installedRoot, {withFileTypes: true})) {
+      if (entry.name.startsWith(".") || (!entry.isDirectory() && !entry.isSymbolicLink())) continue;
+      try { candidates.set(entry.name, {id: entry.name, ...this.selectedMetadata(agentId, entry.name)}); enabledIds.add(entry.name); } catch { /* Broken installations are not catalog entries. */ }
+    }
+    const matches = [...candidates.values()].filter(item => `${item.name} ${item.description}`.toLowerCase().includes(input.query?.toLowerCase() ?? ""))
+      .sort((a, b) => Number(enabledIds.has(b.id)) - Number(enabledIds.has(a.id)) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
+    const offset = (input.page - 1) * input.pageSize;
+    const ids = new Set(matches.slice(offset, offset + input.pageSize).map(item => item.id));
+    const order = [...ids];
+    return pageResult(this.list(agentId, ids).sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)), matches.length, input);
+  }
+
+  invalidatePaginationSnapshots(): void { this.paginationSnapshots.clear(); }
+
+  private paginationSnapshot<T>(key: string, read: () => T): T {
+    const cached = this.paginationSnapshots.get(key);
+    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.value as T;
+    const value = read();
+    // Snapshots contain metadata, never file bodies. Application revalidates the actual installed tree.
+    this.paginationSnapshots.delete(key);
+    while (this.paginationSnapshots.size >= 16) this.paginationSnapshots.delete(this.paginationSnapshots.keys().next().value!);
+    this.paginationSnapshots.set(key, {value, expiresAt: Date.now() + 30_000});
+    return value;
+  }
+
+  revisionHistoryPage(agentId: number, id: string, input: PaginationQuery) {
+    const history = this.paginationSnapshot(`history:${agentId}:${id}`, () => this.revisionHistory(agentId, id));
+    const items = history.revisions.filter(item => `${item.revision} ${item.name} ${item.description} ${item.commit ?? ""}`.toLowerCase().includes(input.query?.toLowerCase() ?? ""));
+    const offset = (input.page - 1) * input.pageSize;
+    return {currentRevision: history.currentRevision, latestRevision: history.latestRevision,
+      ...pageResult(items.slice(offset, offset + input.pageSize), items.length, input)};
+  }
+
+  diffPage(agentId: number, id: string, revision: string, input: PaginationQuery) {
+    const {files, ...metadata} = this.paginationSnapshot(`diff:${agentId}:${id}:${revision}`, () => this.diff(agentId, id, revision));
+    const items = files.filter(item => item.path.toLowerCase().includes(input.query?.toLowerCase() ?? ""));
+    const offset = (input.page - 1) * input.pageSize;
+    return {...metadata, ...pageResult(items.slice(offset, offset + input.pageSize), items.length, input)};
+  }
+
   setEnabled(agentId: number, id: string, enabled: boolean): SkillCatalogItem | undefined {
+    this.invalidatePaginationSnapshots();
     const available = this.availableCatalog().find((skill) => skill.id === id);
     const current = this.list(agentId).find((skill) => skill.id === id);
     if (enabled) {
@@ -208,6 +256,7 @@ export class SkillManager {
   }
 
   applyRevision(agentId: number, id: string, revision: string, expectedRevision: string): SkillCatalogItem {
+    this.invalidatePaginationSnapshots();
     const current = this.current(agentId, id);
     if (current === undefined) throw new SkillManagerError("skill_not_enabled");
     if (current.locallyModified) throw new SkillManagerError("skill_locally_modified");
@@ -254,9 +303,20 @@ export class SkillManager {
     }
   }
 
+  private cachedMetadata(directory: string) {
+    const file = join(directory, "SKILL.md");
+    const stat = statSync(file);
+    const stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    const cached = this.metadataCache.get(directory);
+    if (cached?.stamp === stamp) return cached.value;
+    const value = metadata(directory);
+    this.metadataCache.set(directory, {stamp, value});
+    return value;
+  }
+
   private selectedMetadata(agentId: number, id: string): { name: string; description: string } {
     const directory = this.destination(agentId, id);
-    try { return metadata(installedSkillDirectory(directory)); }
+    try { return this.cachedMetadata(installedSkillDirectory(directory)); }
     catch (error) {
       const record = readInstallation(directory);
       if (record === undefined) throw error;
@@ -265,6 +325,7 @@ export class SkillManager {
   }
 
   remove(agentId: number, id: string, scope: SkillRemoveScope): SkillRemoveResult {
+    this.invalidatePaginationSnapshots();
     const current = this.list(agentId).find((skill) => skill.id === id);
     if (current === undefined) return "not_found";
     if (scope === "current") {
@@ -286,6 +347,7 @@ export class SkillManager {
   }
 
   upload(agentId: number, fileName: string, archive: Uint8Array, replaceId?: string): SkillCatalogItem {
+    this.invalidatePaginationSnapshots();
     if (!fileName.toLowerCase().endsWith(".zip")) throw new SkillManagerError("invalid_skill_archive");
     if (archive.byteLength > maxArchiveBytes) throw new SkillManagerError("skill_archive_too_large");
     let extractedBytes = 0;
@@ -432,7 +494,7 @@ export class SkillManager {
         try {
           found.set(entry.name, {
             id: entry.name,
-            ...metadata(directory),
+            ...this.cachedMetadata(directory),
             source: "upload",
             enabled: false,
             available: true,
@@ -446,11 +508,12 @@ export class SkillManager {
     return [...found.values()];
   }
 
-  private installed(agentId: number): SkillCatalogItem[] {
+  private installed(agentId: number, selectedIds?: Set<string>): SkillCatalogItem[] {
     const root = join(this.dataDir, "agents", String(agentId), "skills");
     if (!existsSync(root)) return [];
     return readdirSync(root, { withFileTypes: true })
       .filter((entry) => (entry.isDirectory() || entry.isSymbolicLink()) && !entry.name.startsWith("."))
+      .filter(entry => selectedIds === undefined || selectedIds.has(entry.name))
       .flatMap((entry) => {
         const directory = join(root, entry.name);
         try {

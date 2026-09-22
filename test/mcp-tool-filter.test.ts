@@ -17,6 +17,9 @@ import {
 import { SdkMcpChecker } from "../src/mcp/mcp-checker.js";
 import { createMcpToolFilterServer } from "../src/mcp/mcp-tool-filter-process.js";
 import { ManagedStdioClientTransport } from "../src/mcp/managed-stdio-client-transport.js";
+import { HostUsageCollector } from "../src/agent-usage/host-collector.js";
+import { McpUsageObserver } from "../src/agent-usage/mcp-observer.js";
+import { createTestDatabase } from "./helpers.js";
 
 const closeCallbacks: Array<() => Promise<void>> = [];
 afterEach(async () => Promise.all(closeCallbacks.splice(0).map((close) => close())));
@@ -38,6 +41,65 @@ const waitForProcessExit = async (pid: number, timeoutMs = 3_000): Promise<void>
 };
 
 describe("MCP tool filter", () => {
+  it.runIf(process.env.REMOTE_AGENT_MCP_PROCESS_TEST === "1")(
+    "measures real wrapper calls over the observer socket without retaining tool bodies",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "remote-agent-mcp-content-wire-")), pidFile = join(root, "pids.json");
+      const { db, seed } = createTestDatabase(), session = seed.session();
+      seed.run(session.id, "running");
+      const host = new HostUsageCollector(db), observer = new McpUsageObserver(host);
+      const client = new Client({ name: "content-wire-test", version: "1.0.0" });
+      let pids: { upstream: number; descendant: number } | undefined, wrapperPid: number | null = null;
+      closeCallbacks.push(async () => {
+        await client.close().catch(() => undefined);
+        await observer.close(); await host.sources.close();
+        pids ??= await readFile(pidFile, "utf8").then((value) => JSON.parse(value)).catch(() => undefined);
+        for (const pid of [pids?.descendant, pids?.upstream, wrapperPid]) {
+          if (pid && processExists(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} }
+        }
+        db.close(); await rm(root, { recursive: true, force: true });
+      });
+      const observerConfig = await observer.configuration(session.id, 7);
+      const wrapped = wrapMcpServerWithToolFilter({
+        type: "stdio", name: "content-wire-fixture", command: process.execPath,
+        args: [fileURLToPath(new URL("./fixtures/mcp-filter-upstream.mjs", import.meta.url))],
+        env: [{ name: "MCP_TEST_PID_FILE", value: pidFile }, { name: "MCP_TEST_RESULT_TEXT", value: "private IPC result" }]
+      }, ["allowed_tool"], 30, observerConfig);
+      expect(wrapped.type).toBe("stdio");
+      if (wrapped.type !== "stdio") return;
+      const transport = new StdioClientTransport({ command: wrapped.command, args: wrapped.args, cwd: tmpdir(),
+        env: { ...getDefaultEnvironment(), ...Object.fromEntries(wrapped.env.map(({ name, value }) => [name, value])) }, stderr: "pipe" });
+      await client.connect(transport); wrapperPid = transport.pid;
+      pids = JSON.parse(await readFile(pidFile, "utf8")) as { upstream: number; descendant: number };
+      for (const pid of [wrapperPid, pids.upstream, pids.descendant]) expect(pid !== null && processExists(pid)).toBe(true);
+
+      expect(await client.callTool({ name: "allowed_tool", arguments: { query: "private IPC arguments" } }))
+        .toMatchObject({ content: [{ type: "text", text: "private IPC result" }] });
+      await vi.waitFor(() => expect(host.attribution.rankings({ sessionId: String(session.id) }, "mcp_tool"))
+        .toEqual([expect.objectContaining({ capability: expect.objectContaining({ id: "mcp:7:allowed_tool" }),
+          calls: 1, successes: 1, observedArgumentCalls: 1, observedResultCalls: 1,
+          observedArgumentTokens: 10, observedResultTokens: 5, observedTotalTokens: 15, totalInputTokens: null })]));
+      expect(host.attribution.invocations({ sessionId: String(session.id) })).toEqual([expect.objectContaining({
+        sourceId: "mcp-observer:7", status: "succeeded",
+        argumentEstimate: expect.objectContaining({ tokens: 10, byteLength: 33, partial: false }),
+        resultEstimate: expect.objectContaining({ tokens: 5, byteLength: 18, partial: false })
+      })]);
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'agent_usage_%'")
+        .all() as Array<{ name: string }>;
+      for (const { name } of tables) {
+        const stored = JSON.stringify(db.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}"`).all());
+        expect(stored, name).not.toContain("private IPC arguments");
+        expect(stored, name).not.toContain("private IPC result");
+      }
+      await client.close();
+      await Promise.all([wrapperPid!, pids.upstream, pids.descendant].map((pid) => waitForProcessExit(pid)));
+      for (const pid of [wrapperPid!, pids.upstream, pids.descendant]) expect(processExists(pid)).toBe(false);
+      await observer.close();
+      await expect(readFile(observerConfig.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+    },
+    15_000
+  );
+
   it.runIf(process.env.REMOTE_AGENT_MCP_PROCESS_TEST === "1")(
     "stdio MCP 预检结束后回收完整进程树",
     async () => {
@@ -329,6 +391,8 @@ describe("MCP tool filter", () => {
       { phase: "start", status: undefined }, { phase: "end", status: "tool_error" }
     ]);
     expect(observations[0]!.invocationId).toBe(observations[1]!.invocationId);
+    expect(observations[0]).toMatchObject({ argumentContent: { tokens: expect.any(Number), partial: false } });
+    expect(observations[1]).toMatchObject({ resultContent: { tokens: 5, byteLength: 19, partial: false } });
     expect(JSON.stringify(observations)).not.toContain("private");
   });
 

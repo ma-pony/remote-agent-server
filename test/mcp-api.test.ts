@@ -59,6 +59,40 @@ afterEach(async () => {
 });
 
 describe("Agent MCP API", () => {
+  it("pages MCP servers and parameters with scoped totals and rejects invalid limits", async () => {
+    const { app, agentId } = await createTestApp();
+    for (let index = 0; index < 3; index++) {
+      await app.inject({ method: "POST", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders(), payload: {
+        name: `tools_${index}`, transport: "http", enabled: true, url: "https://example.test/mcp", checkTimeoutSeconds: 20, headers: []
+      } });
+      await app.inject({ method: "POST", url: `/api/agents/${agentId}/session-parameters`, headers: authHeaders(), payload: {
+        key: `key_${index}`, label: `Parameter ${index}`, description: null, required: false, secret: false
+      } });
+    }
+    for (const resource of ["mcp-servers", "session-parameters"]) {
+      const result = await app.inject({ url: `/api/agents/${agentId}/${resource}?page=2&pageSize=2`, headers: authHeaders() });
+      expect(result.json()).toMatchObject({ page: 2, pageSize: 2, total: 3, totalPages: 2, items: [expect.objectContaining({})] });
+      expect(result.json().items).toHaveLength(1);
+      expect((await app.inject({ url: `/api/agents/${agentId}/${resource}?page=1&query=_2`, headers: authHeaders() })).json().total).toBe(1);
+      expect((await app.inject({ url: `/api/agents/${agentId}/${resource}?pageSize=101`, headers: authHeaders() })).statusCode).toBe(400);
+    }
+  });
+
+  it("pages checked tool snapshots without repeating discovery", async () => {
+    const { app, agentId, check } = await createTestApp();
+    const created = await app.inject({ method: "POST", url: `/api/agents/${agentId}/mcp-servers`, headers: authHeaders(), payload: {
+      name: "tools", transport: "http", enabled: true, url: "https://example.test/mcp", checkTimeoutSeconds: 20, headers: []
+    } });
+    const endpoint = `/api/agents/${agentId}/mcp-servers/${created.json().id}`;
+    const checked = (await app.inject({ method: "POST", url: `${endpoint}/check?page=1&pageSize=1`, headers: authHeaders() })).json();
+    expect(checked.tools).toMatchObject({ total: 2, page: 1, items: [{ name: "ticket_get" }] });
+    expect(checked.snapshotId).toEqual(expect.any(String));
+    const second = (await app.inject({ url: `${endpoint}/tools?page=2&pageSize=1&snapshotId=${checked.snapshotId}`, headers: authHeaders() })).json();
+    expect(second).toMatchObject({ total: 2, page: 2, items: [{ name: "ticket_pause" }] });
+    expect(check).toHaveBeenCalledOnce();
+    expect((await app.inject({ url: `${endpoint}/tools?page=1&snapshotId=missing`, headers: authHeaders() })).statusCode).toBe(404);
+  });
+
   it("MCP 接口不区分优先级", async () => {
     const { app, agentId } = await createTestApp();
     const created = await app.inject({

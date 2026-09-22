@@ -222,6 +222,17 @@ describe("EventStore", () => {
 });
 
 describe("Event API", () => {
+  it("管理台事件分页在 SQL 层限量并能从上一页继续", async () => {
+    const { app, eventStore, runId } = await createEventApp();
+    for (let index = 0; index < 6; index++) eventStore.append(runId, "message", { index });
+    const unbounded = vi.spyOn(eventStore, "list");
+    const read = (afterSeq: number) => app.inject({ method: "GET", url: `/api/runs/${runId}/events?afterSeq=${afterSeq}&limit=2`, headers: authHeaders() });
+    expect((await read(0)).json().map((event: { seq: number }) => event.seq)).toEqual([1, 2]);
+    expect((await read(2)).json().map((event: { seq: number }) => event.seq)).toEqual([3, 4]);
+    expect(unbounded).not.toHaveBeenCalled();
+    expect((await app.inject({ method: "GET", url: `/api/runs/${runId}/events?limit=501`, headers: authHeaders() })).statusCode).toBe(400);
+  });
+
   it("afterSeq 只返回游标后的持久化事件", async () => {
     const { app, eventStore, runId } = await createEventApp();
     eventStore.append(runId, "status", { text: "one" });

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type Database from "better-sqlite3";
+import { pageResult, type PaginationQuery } from "../pagination.js";
 import { insertedId } from "../db.js";
 
 import type {
@@ -113,6 +114,45 @@ export class ProjectEnvironmentStore {
   list(): ProjectEnvironmentDetail[] {
     const rows = this.db.prepare("SELECT * FROM project_environments ORDER BY created_at ASC, id ASC").all() as EnvironmentRow[];
     return rows.map((row) => this.detail(toEnvironment(row)));
+  }
+
+  listPage(pagination: PaginationQuery & { ready?: boolean }) {
+    const where = `instr(lower(name), lower(?)) > 0${pagination.ready ? " AND EXISTS (SELECT 1 FROM project_environment_revisions r WHERE r.id = project_environments.current_revision_id AND r.status = 'ready' AND r.workspace_path IS NOT NULL)" : ""}`;
+    const total = (this.db.prepare(`SELECT count(*) AS total FROM project_environments WHERE ${where}`).get(pagination.query ?? "") as { total: number }).total;
+    const rows = this.db.prepare(`SELECT * FROM project_environments WHERE ${where} ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`)
+      .all(pagination.query ?? "", pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as EnvironmentRow[];
+    return pageResult(rows.map((row) => this.summary(toEnvironment(row))), total, pagination);
+  }
+
+  getSummary(id: number) {
+    const row = this.environmentRow(id);
+    return row === undefined ? undefined : this.summary(toEnvironment(row));
+  }
+
+  listRepositoriesPage(id: number, pagination: PaginationQuery) {
+    const where = "project_environment_id = ? AND instr(lower(name), lower(?)) > 0";
+    const total = (this.db.prepare(`SELECT count(*) AS total FROM environment_repositories WHERE ${where}`).get(id, pagination.query ?? "") as { total: number }).total;
+    const rows = this.db.prepare(`SELECT * FROM environment_repositories WHERE ${where} ORDER BY name ASC, id ASC LIMIT ? OFFSET ?`)
+      .all(id, pagination.query ?? "", pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as RepositoryRow[];
+    return pageResult(rows.map(toRepository), total, pagination);
+  }
+
+  listRevisionsPage(id: number, pagination: PaginationQuery) {
+    const where = "project_environment_id = ? AND (instr(lower(status), lower(?)) > 0 OR instr(CAST(id AS TEXT), ?) > 0)";
+    const query = pagination.query ?? "";
+    const total = (this.db.prepare(`SELECT count(*) AS total FROM project_environment_revisions WHERE ${where}`).get(id, query, query) as { total: number }).total;
+    const rows = this.db.prepare(`SELECT * FROM project_environment_revisions WHERE ${where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+      .all(id, query, query, pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as RevisionRow[];
+    return pageResult(rows.map(toRevision), total, pagination);
+  }
+
+  private summary(environment: ProjectEnvironment) {
+    const latest = this.db.prepare("SELECT * FROM project_environment_revisions WHERE project_environment_id = ? ORDER BY created_at DESC, id DESC LIMIT 1")
+      .get(environment.id) as RevisionRow | undefined;
+    const repositoryCount = (this.db.prepare("SELECT count(*) AS total FROM environment_repositories WHERE project_environment_id = ?").get(environment.id) as { total: number }).total;
+    return { ...environment, repositoryCount,
+      currentRevision: environment.currentRevisionId === null ? null : this.getRevision(environment.currentRevisionId) ?? null,
+      latestRevision: latest === undefined ? null : toRevision(latest) };
   }
 
   get(id: number): ProjectEnvironmentDetail | undefined {
@@ -295,12 +335,12 @@ export class ProjectEnvironmentStore {
   }
 
   private detail(environment: ProjectEnvironment): ProjectEnvironmentDetail {
-    const revisions = this.listRevisions(environment.id);
+    const summary = this.summary(environment);
     return {
       ...environment,
       repositories: this.listRepositories(environment.id),
       currentRevision: environment.currentRevisionId === null ? null : this.getRevision(environment.currentRevisionId) ?? null,
-      latestRevision: revisions[0] ?? null
+      latestRevision: summary.latestRevision
     };
   }
 

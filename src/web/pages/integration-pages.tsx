@@ -1,7 +1,7 @@
 import { AttachmentPicker, MessageAttachments, useAttachmentDraft } from "@/components/message-attachments";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, BookOpenText, Cable, Check, ChevronLeft, ChevronRight, Clipboard, KeyRound, Pencil, Play, Plus,
+  ArrowLeft, BookOpenText, Cable, Check, Clipboard, KeyRound, Pencil, Play, Plus,
   RefreshCw, RotateCcw, Search, Settings2, Trash2, Webhook, XCircle
 } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from "react-router";
@@ -30,9 +30,11 @@ import {
   type IntegrationConversation, type IntegrationEndpoint, type IntegrationEndpointSummary,
   type IntegrationParameterMappingInput, type IntegrationParameterMappingUpdateInput, type IntegrationTask, type IntegrationTaskStatus,
   type IntegrationWebhook, type IntegrationWebhookInput, type RunEvent, type WebhookDelivery, type WebhookDeliveryPage,
-  type WebhookEventType
+  type WebhookEventType, type Page
 } from "@/api";
 import { useI18n } from "@/i18n";
+import { ListPagination } from "@/components/list-pagination";
+import { PagedResourceSelect } from "@/components/paged-resource-select";
 
 const StatusBadge = ({ status }: { status: IntegrationTaskStatus }) => { const { text } = useI18n(); const labels: Record<IntegrationTaskStatus, string> = {
   queued: text("排队中", "Queued"), running: text("运行中", "Running"), succeeded: text("已完成", "Completed"), failed: text("失败", "Failed"), cancelled: text("已取消", "Cancelled")
@@ -81,14 +83,19 @@ export const IntegrationEndpointListPage = () => {
   const { text } = useI18n();
   const [endpoints, setEndpoints] = useState<IntegrationEndpointSummary[] | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [page, setPage] = useState(1);
+  const [paging, setPaging] = useState<Page<IntegrationEndpointSummary> | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    const controller = new AbortController();
-    void Promise.all([integrationApi.listEndpoints(controller.signal), api<Agent[]>("/agents", { signal: controller.signal })])
-      .then(([items, agentItems]) => { setEndpoints(items); setAgents(agentItems); })
-      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    const controller = new AbortController(); setEndpoints(null); setError("");
+    void api<Page<IntegrationEndpointSummary>>(`/integration-endpoints?page=${page}&pageSize=20`, { signal: controller.signal })
+      .then(async (result) => {
+        const agentItems = await Promise.all([...new Set(result.items.map(({ agentId }) => agentId))]
+          .map((id) => api<Agent>(`/agents/${id}`, { signal: controller.signal })));
+        if (!controller.signal.aborted) { setEndpoints(result.items); setPaging(result); setAgents(agentItems); }
+      }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, []);
+  }, [page]);
   const agentNames = useMemo(() => new Map(agents.map((item) => [item.id, item.name])), [agents]);
   return <PageContainer width="wide">
     <PageHeader title={text("接入端点", "Integration endpoints")} description={text("为外部系统提供稳定的智能体调用入口，调用方无需了解内部执行器、智能体会话和单次执行。", "Provide stable agent entry points to external systems without exposing providers, sessions, or runs.")} action={<Button asChild><Link to="/integration-endpoints/new"><Plus />{text("新建接入端点", "New endpoint")}</Link></Button>} />
@@ -96,6 +103,7 @@ export const IntegrationEndpointListPage = () => {
     {endpoints === null ? <div className="resource-grid">{[0, 1].map((item) => <Skeleton key={item} className="h-52" />)}</div>
       : endpoints.length === 0 ? <EmptyState icon={Cable} title={text("还没有接入端点", "No integration endpoints yet")} description={text("创建一个稳定入口，让外部系统安全提交任务并接收事件。", "Create a stable entry point for external systems to submit tasks and receive events.")} action={<Button asChild><Link to="/integration-endpoints/new"><Plus />{text("新建接入端点", "New endpoint")}</Link></Button>} />
         : <div className="resource-grid">{endpoints.map((endpoint) => <Card key={endpoint.id} className="h-full overflow-hidden transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40"><CardHeader className="border-b bg-muted/20"><div className="flex items-start justify-between gap-4"><div><CardTitle><Link className="hover:underline" to={`/integration-endpoints/${endpoint.id}`}>{endpoint.name}</Link></CardTitle><CardDescription className="mt-2 font-mono">/{endpoint.slug}</CardDescription></div><Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div></CardHeader><CardContent className="grid gap-4 p-5 sm:grid-cols-3"><div><p className="text-xs text-muted-foreground">{text("智能体", "Agent")}</p><p className="mt-1 truncate text-sm font-medium">{agentNames.get(endpoint.agentId) ?? endpoint.agentId}</p></div><div><p className="text-xs text-muted-foreground">{text("接续中的业务对话", "Active conversations")}</p><p className="mt-1 font-mono text-xl tabular-nums">{endpoint.activeConversationCount}</p></div><div><p className="text-xs text-muted-foreground">{text("排队 / 运行", "Queued / running")}</p><p className="mt-1 font-mono text-xl tabular-nums">{endpoint.queuedTaskCount} / {endpoint.runningTaskCount}</p></div><div className="sm:col-span-3"><p className="text-xs text-muted-foreground">{text("最近任务", "Latest task")}</p>{endpoint.latestTask === null ? <p className="mt-1 text-sm">{text("尚无调用", "No calls yet")}</p> : <div className="mt-1 flex items-center justify-between gap-3"><Link className="truncate text-sm font-medium hover:underline" to={`/integration-tasks/${endpoint.latestTask.id}`}>{endpoint.latestTask.requestId}</Link><StatusBadge status={endpoint.latestTask.status} /></div>}</div></CardContent></Card>)}</div>}
+    {paging && <ListPagination pageSize={paging.pageSize} page={paging.page} totalPages={paging.totalPages} total={paging.total} onPageChange={setPage} />}
   </PageContainer>;
 };
 
@@ -123,53 +131,65 @@ const mappingPayload = (parameters: AgentSessionParameter[], drafts: Record<stri
   return [{ parameterKey: parameter.key, source: "fixed" as const, ...(preserve && draft.configured && draft.value === "" ? {} : { value: draft.value }) }];
 });
 
+type EndpointParameter = AgentSessionParameter & { mapping: IntegrationEndpoint["parameterMappings"][number] | null };
+const useEndpointParameters = (endpointId: number) => {
+  const [page, setPage] = useState(1);
+  const [result, setResult] = useState<Page<EndpointParameter> | null>(null);
+  const [loaded, setLoaded] = useState<Record<string, EndpointParameter>>({});
+  const [error, setError] = useState("");
+  useEffect(() => { setPage(1); setResult(null); setLoaded({}); }, [endpointId]);
+  useEffect(() => {
+    const controller = new AbortController(); setResult(null); setError("");
+    void api<Page<EndpointParameter>>(`/integration-endpoints/${endpointId}/parameters?page=${page}&pageSize=20`, { signal: controller.signal })
+      .then((value) => { if (!controller.signal.aborted) { setResult(value); setLoaded((current) => ({ ...current, ...Object.fromEntries(value.items.map((item) => [item.key, item])) })); } })
+      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    return () => controller.abort();
+  }, [endpointId, page]);
+  return { page, setPage, result, loaded, error };
+};
+
 export const IntegrationEndpointCreatePage = () => {
   const { text } = useI18n();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const requestedAgentId = searchParams.get("agentId");
-  const [agents, setAgents] = useState<Agent[]>([]);
   const [parameters, setParameters] = useState<AgentSessionParameter[]>([]);
+  const [parameterPage, setParameterPage] = useState(1);
+  const [parameterPaging, setParameterPaging] = useState<Page<AgentSessionParameter> | null>(null);
+  const [loadedParameters, setLoadedParameters] = useState<Record<string, AgentSessionParameter>>({});
   const [drafts, setDrafts] = useState<Record<string, MappingDraft>>({});
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
-  const [agentId, setAgentId] = useState("");
+  const [agentId, setAgentId] = useState(requestedAgentId ?? "");
   const [enabled, setEnabled] = useState(true);
   const [promptPrefix, setPromptPrefix] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => {
-    const controller = new AbortController();
-    void api<Agent[]>("/agents", { signal: controller.signal }).then((items) => {
-      const active = items.filter((item) => item.enabled);
-      const requested = requestedAgentId !== null && active.some((item) => String(item.id) === requestedAgentId)
-        ? requestedAgentId
-        : undefined;
-      setAgents(active); setAgentId(requested ?? (active[0] === undefined ? "" : String(active[0].id)));
-    }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
-    return () => controller.abort();
-  }, [requestedAgentId]);
+  useEffect(() => { setParameterPage(1); setParameters([]); setLoadedParameters({}); setDrafts({}); setParameterPaging(null); }, [agentId]);
   useEffect(() => {
     if (agentId === "") { setParameters([]); setDrafts({}); return; }
-    const controller = new AbortController();
-    void api<AgentSessionParameter[]>(`/agents/${agentId}/session-parameters`, { signal: controller.signal }).then((items) => {
-      setParameters(items); setDrafts(initialMappingDrafts(items));
+    const controller = new AbortController(); setParameterPaging(null); setParameters([]);
+    void api<Page<AgentSessionParameter>>(`/agents/${agentId}/session-parameters?page=${parameterPage}&pageSize=20`, { signal: controller.signal }).then((items) => {
+      setParameters(items.items); setParameterPaging(items);
+      setLoadedParameters((current) => ({ ...current, ...Object.fromEntries(items.items.map((item) => [item.key, item])) }));
+      setDrafts((current) => ({ ...initialMappingDrafts(items.items), ...current }));
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [agentId]);
+  }, [agentId, parameterPage]);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError("");
     try {
       const created = await integrationApi.createEndpoint({
         name: name.trim(), slug: slug.trim(), agentId: Number(agentId), enabled, promptPrefix,
-        parameterMappings: mappingPayload(parameters, drafts).map((mapping): IntegrationParameterMappingInput =>
+        parameterMappings: mappingPayload(Object.values(loadedParameters), drafts).map((mapping): IntegrationParameterMappingInput =>
           mapping.source === "request" ? mapping : { ...mapping, value: mapping.value ?? "" }
         )
       });
       navigate(`/integration-endpoints/${created.endpoint.id}`, { state: { oneTimeToken: created.token } });
     } catch (reason) { setError(errorMessage(reason)); setBusy(false); }
   };
-  return <PageContainer width="form"><Button variant="ghost" asChild className="mb-4"><Link to="/integration-endpoints"><ArrowLeft />{text("返回接入端点", "Back to endpoints")}</Link></Button><PageHeader title={text("新建接入端点", "New integration endpoint")} description={text("端点绑定一个智能体。外部调用方只能提交消息和声明过的请求参数。", "An endpoint binds one agent. External callers can submit only messages and declared request parameters.")} /><ErrorAlert message={error} /><form className="flex flex-col gap-5" onSubmit={submit}><Card><CardHeader><CardTitle>{text("基础信息", "Basic information")}</CardTitle><CardDescription>{text("路径标识会成为外部系统使用的稳定网址标识。", "The slug becomes the stable URL identifier used by external systems.")}</CardDescription></CardHeader><CardContent><FieldGroup><Field><FieldLabel htmlFor="endpoint-name">{text("端点名称", "Endpoint name")}</FieldLabel><Input id="endpoint-name" name="endpoint-name" required value={name} onChange={(event) => setName(event.target.value)} /></Field><Field><FieldLabel htmlFor="endpoint-slug">{text("路径标识", "Slug")}</FieldLabel><Input id="endpoint-slug" name="endpoint-slug" required pattern="[a-z0-9][a-z0-9-]{0,63}" value={slug} onChange={(event) => setSlug(event.target.value)} /></Field><Field><FieldLabel htmlFor="endpoint-agent">{text("智能体", "Agent")}</FieldLabel><NativeSelect id="endpoint-agent" name="endpoint-agent" value={agentId} onChange={(event) => setAgentId(event.target.value)}><NativeSelectOption value="" disabled>{text("请选择智能体", "Select an agent")}</NativeSelectOption>{agents.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></Field><label className="flex min-h-10 items-center gap-2 text-sm font-medium"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{text("创建后立即启用", "Enable after creation")}</label></FieldGroup></CardContent></Card><Card><CardHeader><CardTitle>{text("固定提示", "Fixed prompt")}</CardTitle><CardDescription>{text("每个任务的用户消息前都会加入这段提示。", "This prompt is prepended to every task message.")}</CardDescription></CardHeader><CardContent><Field><FieldLabel htmlFor="prompt-prefix">{text("提示内容", "Prompt")}</FieldLabel><Textarea id="prompt-prefix" name="prompt-prefix" value={promptPrefix} onChange={(event) => setPromptPrefix(event.target.value)} placeholder={text("可留空", "Optional")} /></Field></CardContent></Card><Card><CardHeader><CardTitle>{text("参数映射", "Parameter mappings")}</CardTitle><CardDescription>{text("将外部请求参数或固定值映射到智能体的工具服务会话参数。", "Map external request parameters or fixed values to the agent's MCP session parameters.")}</CardDescription></CardHeader><CardContent><MappingFields parameters={parameters} drafts={drafts} onChange={(key, value) => setDrafts((current) => ({ ...current, [key]: value }))} /></CardContent></Card><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" asChild><Link to="/integration-endpoints">{text("取消", "Cancel")}</Link></Button><Button type="submit" disabled={busy || agentId === ""}>{busy ? text("创建中…", "Creating…") : text("创建接入端点", "Create endpoint")}</Button></div></form></PageContainer>;
+  return <PageContainer width="form"><Button variant="ghost" asChild className="mb-4"><Link to="/integration-endpoints"><ArrowLeft />{text("返回接入端点", "Back to endpoints")}</Link></Button><PageHeader title={text("新建接入端点", "New integration endpoint")} description={text("端点绑定一个智能体。外部调用方只能提交消息和声明过的请求参数。", "An endpoint binds one agent. External callers can submit only messages and declared request parameters.")} /><ErrorAlert message={error} /><form className="flex flex-col gap-5" onSubmit={submit}><Card><CardHeader><CardTitle>{text("基础信息", "Basic information")}</CardTitle><CardDescription>{text("路径标识会成为外部系统使用的稳定网址标识。", "The slug becomes the stable URL identifier used by external systems.")}</CardDescription></CardHeader><CardContent><FieldGroup><Field><FieldLabel htmlFor="endpoint-name">{text("端点名称", "Endpoint name")}</FieldLabel><Input id="endpoint-name" name="endpoint-name" required value={name} onChange={(event) => setName(event.target.value)} /></Field><Field><FieldLabel htmlFor="endpoint-slug">{text("路径标识", "Slug")}</FieldLabel><Input id="endpoint-slug" name="endpoint-slug" required pattern="[a-z0-9][a-z0-9-]{0,63}" value={slug} onChange={(event) => setSlug(event.target.value)} /></Field><Field><FieldLabel htmlFor="endpoint-agent">{text("智能体", "Agent")}</FieldLabel><PagedResourceSelect<Agent> id="endpoint-agent" endpoint="/agents?enabled=true" value={agentId} onValueChange={setAgentId}
+      getOption={(item) => ({ value: String(item.id), label: item.name })} autoSelectFirst emptyLabel={text("请选择智能体", "Select an agent")} /></Field><label className="flex min-h-10 items-center gap-2 text-sm font-medium"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{text("创建后立即启用", "Enable after creation")}</label></FieldGroup></CardContent></Card><Card><CardHeader><CardTitle>{text("固定提示", "Fixed prompt")}</CardTitle><CardDescription>{text("每个任务的用户消息前都会加入这段提示。", "This prompt is prepended to every task message.")}</CardDescription></CardHeader><CardContent><Field><FieldLabel htmlFor="prompt-prefix">{text("提示内容", "Prompt")}</FieldLabel><Textarea id="prompt-prefix" name="prompt-prefix" value={promptPrefix} onChange={(event) => setPromptPrefix(event.target.value)} placeholder={text("可留空", "Optional")} /></Field></CardContent></Card><Card><CardHeader><CardTitle>{text("参数映射", "Parameter mappings")}</CardTitle><CardDescription>{text("将外部请求参数或固定值映射到智能体的工具服务会话参数。", "Map external request parameters or fixed values to the agent's MCP session parameters.")}</CardDescription></CardHeader><CardContent><MappingFields parameters={parameters} drafts={drafts} onChange={(key, value) => setDrafts((current) => ({ ...current, [key]: value }))} />{parameterPaging && <ListPagination {...parameterPaging} onPageChange={setParameterPage} disabled={busy} />}</CardContent></Card><div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><Button variant="outline" asChild><Link to="/integration-endpoints">{text("取消", "Cancel")}</Link></Button><Button type="submit" disabled={busy || agentId === "" || parameterPaging === null}>{busy ? text("创建中…", "Creating…") : text("创建接入端点", "Create endpoint")}</Button></div></form></PageContainer>;
 };
 
 type EndpointContext = {
@@ -201,8 +221,10 @@ export const IntegrationEndpointDetailLayout = () => {
   }, [location.pathname, location.state]);
   useEffect(() => {
     const controller = new AbortController();
-    void Promise.all([integrationApi.getEndpoint(Number(id), controller.signal), api<Agent[]>("/agents", { signal: controller.signal })])
-      .then(([item, agentItems]) => { setEndpoint(item); setAgents(agentItems); })
+    void api<IntegrationEndpoint>(`/integration-endpoints/${id}?includeMappings=false`, { signal: controller.signal }).then(async (item) => {
+      const agent = await api<Agent>(`/agents/${item.agentId}`, { signal: controller.signal });
+      if (!controller.signal.aborted) { setEndpoint(item); setAgents([agent]); }
+    })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [id]);
@@ -221,8 +243,8 @@ export const IntegrationEndpointOverviewPage = () => {
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
-    void integrationApi.listEndpoints(controller.signal)
-      .then((items) => { setSummary(items.find((item) => item.id === endpoint.id) ?? null); })
+    void api<IntegrationEndpointSummary>(`/integration-endpoints/${endpoint.id}/summary`, { signal: controller.signal })
+      .then(setSummary)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [endpoint.id]);
@@ -234,27 +256,22 @@ export const IntegrationEndpointUsagePage = () => {
   const { text } = useI18n();
   const { endpoint } = useEndpoint();
   const navigate = useNavigate();
-  const [definitions, setDefinitions] = useState<AgentSessionParameter[] | null>(null);
+  const parameterPage = useEndpointParameters(endpoint.id);
+  const definitions = parameterPage.result?.items ?? null;
   const [message, setMessage] = useState("");
   const attachmentDraft = useAttachmentDraft(endpoint.id);
   const [conversationKey, setConversationKey] = useState("");
   const [values, setValues] = useState<Record<string, string>>({});
+  useEffect(() => { setValues({}); }, [endpoint.id]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  useEffect(() => {
-    const controller = new AbortController();
-    void api<AgentSessionParameter[]>(`/agents/${endpoint.agentId}/session-parameters`, { signal: controller.signal })
-      .then(setDefinitions)
-      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
-    return () => controller.abort();
-  }, [endpoint.agentId]);
 
   const definitionByKey = new Map((definitions ?? []).map((item) => [item.key, item]));
-  const requestMappings = endpoint.parameterMappings.filter(
+  const requestMappings = (definitions ?? []).flatMap((item) => item.mapping ? [item.mapping] : []).filter(
     (mapping): mapping is Extract<IntegrationEndpoint["parameterMappings"][number], { source: "request" }> =>
       mapping.source === "request"
   );
-  const fixedMappings = endpoint.parameterMappings.filter((mapping) => mapping.source === "fixed");
+  const fixedMappings = (definitions ?? []).flatMap((item) => item.mapping ? [item.mapping] : []).filter((mapping) => mapping.source === "fixed");
   const exampleParameters = Object.fromEntries(requestMappings.map((mapping) => {
     const definition = definitionByKey.get(mapping.parameterKey);
     return [mapping.requestKey, `<${definition?.label ?? mapping.requestKey}>`];
@@ -279,9 +296,10 @@ export const IntegrationEndpointUsagePage = () => {
     setBusy(true);
     setError("");
     try {
-      const parameters = Object.fromEntries(requestMappings.flatMap((mapping) => {
+      const parameters = Object.fromEntries(Object.values(parameterPage.loaded).flatMap((definition) => {
+        const mapping = definition.mapping;
+        if (mapping?.source !== "request") return [];
         const value = values[mapping.requestKey] ?? "";
-        const definition = definitionByKey.get(mapping.parameterKey);
         return value === "" && !definition?.required ? [] : [[mapping.requestKey, value]];
       }));
       const created = await integrationApi.createTestTask(endpoint.id, {
@@ -308,33 +326,37 @@ export const IntegrationEndpointUsagePage = () => {
       <Card><CardHeader><CardTitle>{text("调用示例", "Request example")}</CardTitle><CardDescription>{text("示例只包含占位符，不会读取或展示真实访问令牌和固定参数。", "Examples contain placeholders only and never expose real access tokens or fixed parameters.")}</CardDescription></CardHeader><CardContent className="flex flex-col gap-4"><CopyableCode title={text("请求内容", "Request body")} value={requestExample} /><CopyableCode title="curl" value={curlExample} /></CardContent></Card>
       <Card><CardHeader><CardTitle>{text("获取执行结果", "Retrieve results")}</CardTitle><CardDescription>{text("先保存提交响应中的任务标识，再查询状态或订阅事件。", "Save the task ID from the submission response, then query status or subscribe to events.")}</CardDescription></CardHeader><CardContent className="space-y-3 text-xs"><code className="block break-all rounded-md border bg-muted/30 p-3">GET /integration/v1/tasks/&lt;{text("任务标识", "task-id")}&gt;</code><code className="block break-all rounded-md border bg-muted/30 p-3">GET /integration/v1/tasks/&lt;{text("任务标识", "task-id")}&gt;/events?afterSeq=0</code><code className="block break-all rounded-md border bg-muted/30 p-3">GET /integration/v1/tasks/&lt;{text("任务标识", "task-id")}&gt;/events/stream?afterSeq=0</code></CardContent></Card>
     </div>
-    <Card className="xl:sticky xl:top-20"><CardHeader><CardTitle className="flex items-center gap-2"><Play className="size-5" />{text("发送测试任务", "Send test task")}</CardTitle><CardDescription>{text("使用当前配置创建真实任务，提交后进入任务详情查看运行过程。", "Create a real task with the current configuration, then inspect its execution on the task page.")}</CardDescription></CardHeader><CardContent><ErrorAlert message={error} />{!endpoint.enabled ? <Alert className="mb-5"><XCircle /><AlertTitle>{text("接入端点未启用", "Endpoint disabled")}</AlertTitle><AlertDescription>{text("请先在设置中启用接入端点，再发送测试任务。", "Enable the endpoint in settings before sending a test task.")}</AlertDescription></Alert> : null}<form className="flex flex-col gap-5" onSubmit={submit} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDrop={(event) => attachmentDraft.drop(event, busy || !endpoint.enabled)}><AttachmentPicker draft={attachmentDraft} disabled={busy || !endpoint.enabled} /><Field><FieldLabel htmlFor="test-task-message">{text("测试消息", "Test message")}</FieldLabel><Textarea onPaste={(event) => attachmentDraft.paste(event, busy || !endpoint.enabled)} id="test-task-message" disabled={busy} required={attachmentDraft.attachments.length === 0} rows={5} value={message} onChange={(event) => setMessage(event.target.value)} placeholder={text("描述希望智能体完成的任务", "Describe the task for the agent")} /></Field><Field><FieldLabel htmlFor="test-conversation-key">{text("对话标识（可选）", "Conversation key (optional)")}</FieldLabel><Input id="test-conversation-key" value={conversationKey} onChange={(event) => setConversationKey(event.target.value)} /><FieldDescription>{text("填写相同标识可以继续上一次业务对话。", "Reuse the same key to continue the previous business conversation.")}</FieldDescription></Field>{definitions === null ? <Skeleton className="h-24" /> : requestMappings.map((mapping) => { const definition = definitionByKey.get(mapping.parameterKey); return <Field key={mapping.parameterKey}><FieldLabel htmlFor={`test-parameter-${mapping.requestKey}`}>{definition?.label ?? mapping.requestKey}</FieldLabel><Input id={`test-parameter-${mapping.requestKey}`} type={definition?.secret ? "password" : "text"} required={definition?.required} value={values[mapping.requestKey] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [mapping.requestKey]: event.target.value }))} />{definition?.description === null || definition?.description === undefined ? null : <FieldDescription>{definition.description}</FieldDescription>}</Field>; })}<Button type="submit" disabled={busy || attachmentDraft.reading || !endpoint.enabled || definitions === null || (message.trim() === "" && attachmentDraft.attachments.length === 0)}>{busy ? text("正在创建任务…", "Creating task…") : text("发送测试任务", "Send test task")}</Button></form></CardContent></Card>
+    <Card className="xl:sticky xl:top-20"><CardHeader><CardTitle className="flex items-center gap-2"><Play className="size-5" />{text("发送测试任务", "Send test task")}</CardTitle><CardDescription>{text("使用当前配置创建真实任务，提交后进入任务详情查看运行过程。", "Create a real task with the current configuration, then inspect its execution on the task page.")}</CardDescription></CardHeader><CardContent><ErrorAlert message={error || parameterPage.error} />{!endpoint.enabled ? <Alert className="mb-5"><XCircle /><AlertTitle>{text("接入端点未启用", "Endpoint disabled")}</AlertTitle><AlertDescription>{text("请先在设置中启用接入端点，再发送测试任务。", "Enable the endpoint in settings before sending a test task.")}</AlertDescription></Alert> : null}<form className="flex flex-col gap-5" onSubmit={submit} onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }} onDrop={(event) => attachmentDraft.drop(event, busy || !endpoint.enabled)}><AttachmentPicker draft={attachmentDraft} disabled={busy || !endpoint.enabled} /><Field><FieldLabel htmlFor="test-task-message">{text("测试消息", "Test message")}</FieldLabel><Textarea onPaste={(event) => attachmentDraft.paste(event, busy || !endpoint.enabled)} id="test-task-message" disabled={busy} required={attachmentDraft.attachments.length === 0} rows={5} value={message} onChange={(event) => setMessage(event.target.value)} placeholder={text("描述希望智能体完成的任务", "Describe the task for the agent")} /></Field><Field><FieldLabel htmlFor="test-conversation-key">{text("对话标识（可选）", "Conversation key (optional)")}</FieldLabel><Input id="test-conversation-key" value={conversationKey} onChange={(event) => setConversationKey(event.target.value)} /><FieldDescription>{text("填写相同标识可以继续上一次业务对话。", "Reuse the same key to continue the previous business conversation.")}</FieldDescription></Field>{definitions === null ? <Skeleton className="h-24" /> : requestMappings.map((mapping) => { const definition = definitionByKey.get(mapping.parameterKey); return <Field key={mapping.parameterKey}><FieldLabel htmlFor={`test-parameter-${mapping.requestKey}`}>{definition?.label ?? mapping.requestKey}</FieldLabel><Input id={`test-parameter-${mapping.requestKey}`} type={definition?.secret ? "password" : "text"} required={definition?.required} value={values[mapping.requestKey] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [mapping.requestKey]: event.target.value }))} />{definition?.description === null || definition?.description === undefined ? null : <FieldDescription>{definition.description}</FieldDescription>}</Field>; })}{parameterPage.result && <ListPagination {...parameterPage.result} onPageChange={parameterPage.setPage} disabled={busy} />}<Button type="submit" disabled={busy || attachmentDraft.reading || !endpoint.enabled || definitions === null || (message.trim() === "" && attachmentDraft.attachments.length === 0)}>{busy ? text("正在创建任务…", "Creating task…") : text("发送测试任务", "Send test task")}</Button></form></CardContent></Card>
   </div>;
 };
 
 export const IntegrationEndpointMappingsPage = () => {
   const { text } = useI18n();
   const { endpoint, setEndpoint } = useEndpoint();
-  const [parameters, setParameters] = useState<AgentSessionParameter[]>([]);
+  const parameterPage = useEndpointParameters(endpoint.id);
+  const parameters = parameterPage.result?.items ?? [];
   const [drafts, setDrafts] = useState<Record<string, MappingDraft>>({});
+  useEffect(() => { setDrafts({}); }, [endpoint.id]);
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
-    const controller = new AbortController();
-    void api<AgentSessionParameter[]>(`/agents/${endpoint.agentId}/session-parameters`, { signal: controller.signal })
-      .then((items) => { setParameters(items); setDrafts(initialMappingDrafts(items, endpoint)); })
-      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
-    return () => controller.abort();
-  }, [endpoint]);
+    if (!parameterPage.result) return;
+    const items = parameterPage.result.items;
+    const mappedEndpoint = { ...endpoint, parameterMappings: items.flatMap((item) => item.mapping ? [item.mapping] : []) };
+    setDrafts((current) => ({ ...initialMappingDrafts(items, mappedEndpoint), ...current }));
+  }, [parameterPage.result]);
+
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setSaved(false); setError("");
     try {
-      const updated = await integrationApi.updateEndpoint(endpoint.id, { parameterMappings: mappingPayload(parameters, drafts, true) });
-      setEndpoint(updated); setDrafts(initialMappingDrafts(parameters, updated)); setSaved(true);
+      const updated = await api<IntegrationEndpoint>(`/integration-endpoints/${endpoint.id}?includeMappings=false`, { method: "PATCH", body: JSON.stringify({
+        parameterMappingKeys: Object.keys(parameterPage.loaded), parameterMappings: mappingPayload(Object.values(parameterPage.loaded), drafts, true)
+      }) });
+      setEndpoint(updated); setDrafts((current) => Object.fromEntries(Object.entries(current).map(([key, draft]) => [key, draft.source === "fixed" ? { ...draft, value: "", configured: draft.configured || draft.value.trim() !== "" } : draft]))); setSaved(true);
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); }
   };
-  return <form className="flex flex-col gap-5" onSubmit={submit}><ErrorAlert message={error} />{saved ? <Alert><Check /><AlertTitle>{text("参数映射已保存", "Parameter mappings saved")}</AlertTitle><AlertDescription>{text("新配置会用于之后创建的任务；已排队任务继续使用自己的参数快照。", "New tasks use this configuration; queued tasks keep their existing parameter snapshot.")}</AlertDescription></Alert> : null}<Card><CardHeader><CardTitle>{text("会话参数映射", "Session parameter mappings")}</CardTitle><CardDescription>{text("固定敏感值只展示配置状态。留空保存会保留原值。", "Fixed secrets show configuration status only. Leave them blank to keep the current value.")}</CardDescription></CardHeader><CardContent><MappingFields parameters={parameters} drafts={drafts} onChange={(key, value) => setDrafts((current) => ({ ...current, [key]: value }))} /></CardContent></Card><div className="flex justify-end"><Button type="submit" disabled={busy}>{busy ? text("保存中…", "Saving…") : text("保存参数映射", "Save mappings")}</Button></div></form>;
+  return <form className="flex flex-col gap-5" onSubmit={submit}><ErrorAlert message={error || parameterPage.error} />{saved ? <Alert><Check /><AlertTitle>{text("参数映射已保存", "Parameter mappings saved")}</AlertTitle><AlertDescription>{text("新配置会用于之后创建的任务；已排队任务继续使用自己的参数快照。", "New tasks use this configuration; queued tasks keep their existing parameter snapshot.")}</AlertDescription></Alert> : null}<Card><CardHeader><CardTitle>{text("会话参数映射", "Session parameter mappings")}</CardTitle><CardDescription>{text("固定敏感值只展示配置状态。留空保存会保留原值。", "Fixed secrets show configuration status only. Leave them blank to keep the current value.")}</CardDescription></CardHeader><CardContent>{parameterPage.result === null ? <Skeleton className="h-24" /> : <MappingFields parameters={parameters} drafts={drafts} onChange={(key, value) => setDrafts((current) => ({ ...current, [key]: value }))} />}{parameterPage.result && <ListPagination {...parameterPage.result} onPageChange={parameterPage.setPage} disabled={busy} />}</CardContent></Card><div className="flex justify-end"><Button type="submit" disabled={busy || parameterPage.result === null}>{busy ? text("保存中…", "Saving…") : text("保存参数映射", "Save mappings")}</Button></div></form>;
 };
 
 const webhookEvents: Array<{ value: WebhookEventType; labels: readonly [string, string] }> = [
@@ -407,6 +429,8 @@ export const IntegrationEndpointWebhooksPage = () => {
   const { text, formatDate } = useI18n();
   const { endpoint } = useEndpoint();
   const [webhooks, setWebhooks] = useState<IntegrationWebhook[] | null>(null);
+  const [subscriptionPage, setSubscriptionPage] = useState(1);
+  const [subscriptionPaging, setSubscriptionPaging] = useState<Page<IntegrationWebhook> | null>(null);
   const [deliveryPage, setDeliveryPage] = useState<WebhookDeliveryPage | null>(null);
   const [deliveryPageNumber, setDeliveryPageNumber] = useState(1);
   const [deliveryQuery, setDeliveryQuery] = useState("");
@@ -425,17 +449,16 @@ export const IntegrationEndpointWebhooksPage = () => {
     const refresh = async () => {
       try {
         const [subscriptions, deliveries] = await Promise.all([
-          integrationApi.listWebhooks(endpoint.id, controller.signal),
-          integrationApi.listDeliveries(endpoint.id, {
-            page: deliveryPageNumber,
-            pageSize: 20,
-            query: deliveryQuery,
-            status: deliveryStatus === "" ? undefined : deliveryStatus as WebhookDelivery["status"],
-            subscriptionId: deliverySubscriptionId === "" ? undefined : Number(deliverySubscriptionId)
-          }, controller.signal)
+          api<Page<IntegrationWebhook>>(`/integration-endpoints/${endpoint.id}/webhooks?page=${subscriptionPage}&pageSize=20`, { signal: controller.signal }),
+          api<WebhookDeliveryPage>(`/integration-endpoints/${endpoint.id}/webhook-deliveries?${new URLSearchParams({
+            page: String(deliveryPageNumber), pageSize: "20", subscriptionPage: String(subscriptionPage), subscriptionPageSize: "20",
+            ...(deliveryQuery ? { query: deliveryQuery } : {}), ...(deliveryStatus ? { status: deliveryStatus } : {}),
+            ...(deliverySubscriptionId ? { subscriptionId: deliverySubscriptionId } : {})
+          })}`, { signal: controller.signal })
         ]);
         if (disposed || controller.signal.aborted) return;
-        setWebhooks(subscriptions);
+        setWebhooks(subscriptions.items);
+        setSubscriptionPaging(subscriptions);
         setDeliveryPage(deliveries);
         if (
           remainingPolls > 0
@@ -455,7 +478,7 @@ export const IntegrationEndpointWebhooksPage = () => {
       controller.abort();
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [deliveryPageNumber, deliveryQuery, deliveryStatus, deliverySubscriptionId, endpoint.id, refreshKey]);
+  }, [subscriptionPage, deliveryPageNumber, deliveryQuery, deliveryStatus, deliverySubscriptionId, endpoint.id, refreshKey]);
   const deliveries = deliveryPage?.items ?? [];
   const latestDeliveries = deliveryPage?.latest ?? [];
   const act = async (id: number, action: () => Promise<unknown>) => {
@@ -471,20 +494,21 @@ export const IntegrationEndpointWebhooksPage = () => {
       setSigningSecret(rotated.signingSecret);
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusyId(null); }
   };
-  return <div className="flex flex-col gap-5"><ErrorAlert message={error} />{signingSecret === "" ? null : <OneTimeSecret title={signingSecretRotated ? text("请立即保存新签名密钥，此后不会再次显示", "Save the new signing secret now. It will not be shown again.") : text("请立即保存签名密钥，此后不会再次显示", "Save the signing secret now. It will not be shown again.")} value={signingSecret} onDismiss={() => setSigningSecret("")} />}<SectionHeader title={text("事件回调订阅", "Webhook subscriptions")} description={text("失败投递会自动重试；已结束的投递可在确认后手动重新发送。", "Failed deliveries retry automatically. Completed deliveries can be resent after confirmation.")} action={<WebhookEditorDialog endpointId={endpoint.id} onError={setError} onSaved={(saved, secret) => { setWebhooks((current) => [...(current ?? []), saved]); if (secret !== undefined) { setSigningSecretRotated(false); setSigningSecret(secret); } }} />} />{webhooks === null ? <Skeleton className="h-40" /> : webhooks.length === 0 ? <EmptyState icon={Webhook} title={text("还没有事件回调", "No webhooks yet")} description={text("添加订阅后，外部系统可以接收任务与工具生命周期事件。", "Add a subscription so external systems can receive task and tool lifecycle events.")} /> : <div className="surface-list flex flex-col gap-4">{webhooks.map((webhook) => {
+  return <div className="flex flex-col gap-5"><ErrorAlert message={error} />{signingSecret === "" ? null : <OneTimeSecret title={signingSecretRotated ? text("请立即保存新签名密钥，此后不会再次显示", "Save the new signing secret now. It will not be shown again.") : text("请立即保存签名密钥，此后不会再次显示", "Save the signing secret now. It will not be shown again.")} value={signingSecret} onDismiss={() => setSigningSecret("")} />}<SectionHeader title={text("事件回调订阅", "Webhook subscriptions")} description={text("失败投递会自动重试；已结束的投递可在确认后手动重新发送。", "Failed deliveries retry automatically. Completed deliveries can be resent after confirmation.")} action={<WebhookEditorDialog endpointId={endpoint.id} onError={setError} onSaved={(_saved, secret) => { setSubscriptionPage(1); setRefreshKey((value) => value + 1); if (secret !== undefined) { setSigningSecretRotated(false); setSigningSecret(secret); } }} />} />{webhooks === null ? <Skeleton className="h-40" /> : webhooks.length === 0 ? <EmptyState icon={Webhook} title={text("还没有事件回调", "No webhooks yet")} description={text("添加订阅后，外部系统可以接收任务与工具生命周期事件。", "Add a subscription so external systems can receive task and tool lifecycle events.")} /> : <div className="surface-list flex flex-col gap-4">{webhooks.map((webhook) => {
     const recent = latestDeliveries.find((item) => item.subscriptionId === webhook.id);
     return <Card key={webhook.id}><CardHeader className="border-b bg-muted/20"><div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between"><div><CardTitle className="flex items-center gap-2"><Webhook className="size-4" />{webhook.name}</CardTitle><CardDescription className="mt-2 break-all">{webhook.url}</CardDescription></div><Badge variant={webhook.enabled ? "default" : "secondary"}>{webhook.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div></CardHeader><CardContent className="flex flex-col gap-4 p-5"><div className="flex flex-wrap gap-1">{webhook.events.map((item) => <Badge key={item} variant="outline" className="font-mono">{item}</Badge>)}</div><div className="grid gap-3 text-sm sm:grid-cols-4"><div><p className="text-xs text-muted-foreground">{text("最近投递", "Latest delivery")}</p><p className="mt-1">{recent === undefined ? text("等待首次投递", "Waiting for first delivery") : <DeliveryBadge status={recent.status} />}</p></div><div><p className="text-xs text-muted-foreground">{text("状态码", "Status code")}</p><p className="mt-1 font-mono">{recent?.lastStatusCode ?? "—"}</p></div><div><p className="text-xs text-muted-foreground">{text("尝试次数", "Attempts")}</p><p className="mt-1 font-mono">{recent?.attemptCount ?? 0}</p></div><div><p className="text-xs text-muted-foreground">{text("时间", "Time")}</p><p className="mt-1">{formatDate(recent?.updatedAt ?? null)}</p></div></div>{recent?.lastError === null || recent === undefined ? null : <Alert variant="destructive"><XCircle /><AlertTitle>{text("最近错误", "Latest error")}</AlertTitle><AlertDescription>{recent.lastError}</AlertDescription></Alert>}<div className="flex flex-wrap gap-2"><WebhookEditorDialog endpointId={endpoint.id} webhook={webhook} onError={setError} onSaved={(saved) => setWebhooks((current) => (current ?? []).map((item) => item.id === saved.id ? saved : item))} /><AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="outline" disabled={busyId === webhook.id} aria-label={text(`轮换 ${webhook.name}的签名密钥`, `Rotate the signing secret for ${webhook.name}`)}><KeyRound />{text("轮换密钥", "Rotate secret")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`轮换“${webhook.name}”的签名密钥？`, `Rotate the signing secret for “${webhook.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("旧签名密钥将立即失效。接收方必须改用新密钥。", "The old signing secret will stop working immediately. The receiver must use the new secret.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={() => void rotateSigningSecret(webhook)}>{text("确认轮换", "Rotate")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog><Button size="sm" variant="outline" disabled={busyId === webhook.id || !webhook.enabled} onClick={() => void act(webhook.id, () => integrationApi.testWebhook(endpoint.id, webhook.id))}><RefreshCw />{text("发送测试", "Send test")}</Button><Button size="sm" variant="outline" disabled={busyId === webhook.id} onClick={() => void act(webhook.id, () => integrationApi.updateWebhook(endpoint.id, webhook.id, { enabled: !webhook.enabled }))}>{webhook.enabled ? text("停用", "Disable") : text("启用", "Enable")}</Button><AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="ghost"><Trash2 />{text("删除", "Delete")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`删除“${webhook.name}”？`, `Delete “${webhook.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("订阅和历史投递记录将被永久删除。", "The subscription and delivery history will be permanently deleted.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void act(webhook.id, () => integrationApi.deleteWebhook(endpoint.id, webhook.id))}>{text("确认删除", "Delete")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div></CardContent></Card>;
   })}</div>}
+  {subscriptionPaging && <ListPagination {...subscriptionPaging} onPageChange={setSubscriptionPage} />}
   <Card>
     <CardHeader><CardTitle>{text("投递记录", "Delivery history")}</CardTitle><CardDescription>{text("按订阅、状态或事件筛选；已结束的记录可以手动重新投递。", "Filter by subscription, status, or event. Completed deliveries can be sent again manually.")}</CardDescription></CardHeader>
     <CardContent className="flex flex-col gap-4">
       <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_12rem_12rem]">
         <div className="flex items-center gap-2 rounded-md border px-3"><Search className="size-4 text-muted-foreground" /><Input aria-label={text("搜索投递记录", "Search deliveries")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("事件类型、事件 ID、请求 ID 或错误", "Event type, event ID, request ID, or error")} value={deliveryQuery} onChange={(event) => { setDeliveryPageNumber(1); setDeliveryQuery(event.target.value); }} /></div>
-        <NativeSelect aria-label={text("按事件回调筛选", "Filter by webhook")} value={deliverySubscriptionId} onChange={(event) => { setDeliveryPageNumber(1); setDeliverySubscriptionId(event.target.value); }}><NativeSelectOption value="">{text("全部事件回调", "All webhooks")}</NativeSelectOption>{(webhooks ?? []).map((webhook) => <NativeSelectOption key={webhook.id} value={webhook.id}>{webhook.name}</NativeSelectOption>)}</NativeSelect>
+        <PagedResourceSelect<IntegrationWebhook> endpoint={`/integration-endpoints/${endpoint.id}/webhooks`} ariaLabel={text("按事件回调筛选", "Filter by webhook")} value={deliverySubscriptionId} onValueChange={(value) => { setDeliveryPageNumber(1); setDeliverySubscriptionId(value); }} getOption={(item) => ({ value: String(item.id), label: item.name })} emptyLabel={text("全部事件回调", "All webhooks")} />
         <NativeSelect aria-label={text("按投递状态筛选", "Filter by delivery status")} value={deliveryStatus} onChange={(event) => { setDeliveryPageNumber(1); setDeliveryStatus(event.target.value); }}><NativeSelectOption value="">{text("全部状态", "All statuses")}</NativeSelectOption><NativeSelectOption value="pending">{text("等待投递", "Pending")}</NativeSelectOption><NativeSelectOption value="delivering">{text("投递中", "Delivering")}</NativeSelectOption><NativeSelectOption value="succeeded">{text("成功", "Succeeded")}</NativeSelectOption><NativeSelectOption value="failed">{text("失败", "Failed")}</NativeSelectOption></NativeSelect>
       </div>
       {deliveryPage === null ? <Skeleton className="h-40" /> : deliveries.length === 0 ? <p className="py-8 text-center text-sm text-muted-foreground">{text("没有匹配的投递记录。", "No matching deliveries.")}</p> : <div className="divide-y rounded-lg border">{deliveries.map((delivery) => <div key={delivery.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex items-center gap-2"><DeliveryBadge status={delivery.status} /><span className="font-mono text-xs">{delivery.eventType}</span></div><p className="mt-2 text-xs text-muted-foreground">HTTP {delivery.lastStatusCode ?? "—"} · {delivery.lastDurationMs ?? "—"} ms · {text(`尝试 ${delivery.attemptCount} 次`, `${delivery.attemptCount} attempts`)} · {formatDate(delivery.updatedAt)}</p>{delivery.lastError === null ? null : <p className="mt-1 truncate text-xs text-destructive">{delivery.lastError}</p>}</div>{delivery.status === "failed" || delivery.status === "succeeded" ? <AlertDialog><AlertDialogTrigger asChild><Button size="sm" variant="outline" disabled={busyId === delivery.id}><RotateCcw />{text("重新投递", "Redeliver")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text("重新投递这条 Webhook？", "Redeliver this webhook?")}</AlertDialogTitle><AlertDialogDescription>{text("系统将使用原事件内容和当前订阅配置再次发送。接收方可能收到重复事件，请确认后继续。", "The original event will be sent again using the current subscription settings. The receiver may process a duplicate event.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={() => void act(delivery.id, () => integrationApi.retryDelivery(delivery.id))}>{text("确认重新投递", "Redeliver")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog> : null}</div>)}</div>}
-      {deliveryPage !== null && deliveryPage.total > 0 ? <div className="flex flex-col gap-3 border-t pt-4 text-sm sm:flex-row sm:items-center sm:justify-between"><span className="text-muted-foreground">{text(`共 ${deliveryPage.total} 条投递记录`, `${deliveryPage.total} deliveries`)}</span><div className="flex items-center justify-between gap-3 sm:justify-end"><Button type="button" size="sm" variant="outline" disabled={deliveryPage.page <= 1} onClick={() => setDeliveryPageNumber((current) => current - 1)}><ChevronLeft />{text("上一页", "Previous")}</Button><span className="min-w-24 text-center font-mono text-xs tabular-nums">{text(`第 ${deliveryPage.page} / ${deliveryPage.totalPages} 页`, `Page ${deliveryPage.page} / ${deliveryPage.totalPages}`)}</span><Button type="button" size="sm" variant="outline" disabled={deliveryPage.page >= deliveryPage.totalPages} onClick={() => setDeliveryPageNumber((current) => current + 1)}>{text("下一页", "Next")}<ChevronRight /></Button></div></div> : null}
+      {deliveryPage && <ListPagination {...deliveryPage} onPageChange={setDeliveryPageNumber} />}
     </CardContent>
   </Card>
   </div>;
@@ -495,8 +519,14 @@ export const IntegrationConversationPage = () => {
   const { endpoint } = useEndpoint();
   const [items, setItems] = useState<IntegrationConversation[] | null>(null);
   const [error, setError] = useState("");
-  useEffect(() => { const controller = new AbortController(); void integrationApi.listConversations(endpoint.id, controller.signal).then(setItems).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); }); return () => controller.abort(); }, [endpoint.id]);
-  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><SectionHeader title={text("业务对话", "Conversations")} description={text("外部对话标识与长期智能体会话之间的接续关系。", "Continuation links between external conversation keys and persistent agent sessions.")} />{items === null ? <Skeleton className="h-40" /> : items.length === 0 ? <EmptyState icon={BookOpenText} title={text("还没有业务对话", "No conversations yet")} description={text("调用方提供对话标识后，这里会展示与智能体会话的接续关系。", "Conversation links appear here after a caller provides a conversation key.")} /> : <div className="surface-list divide-y rounded-xl border bg-card">{items.toReversed().map((item) => <div key={item.id} className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-mono text-sm font-medium">{item.conversationKey}</p><p className="mt-1 text-xs text-muted-foreground">{text(`创建于 ${formatDate(item.createdAt)}`, `Created ${formatDate(item.createdAt)}`)}</p></div><div className="flex flex-wrap items-center gap-3"><Badge variant={item.status === "active" ? "default" : "secondary"}>{item.status === "active" ? text("接续中", "Active") : text("已结束", "Ended")}</Badge><Button size="sm" variant="outline" asChild><Link to={`/sessions/${item.sessionId}`}>{text("进入智能体会话", "Open agent session")}</Link></Button></div></div>)}</div>}</div>;
+  const [page, setPage] = useState(1);
+  const [paging, setPaging] = useState<Page<IntegrationConversation> | null>(null);
+  useEffect(() => { const controller = new AbortController(); setItems(null); setError("");
+    void api<Page<IntegrationConversation>>(`/integration-endpoints/${endpoint.id}/conversations?page=${page}&pageSize=20`, { signal: controller.signal })
+      .then((result) => { setItems(result.items); setPaging(result); }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    return () => controller.abort();
+  }, [endpoint.id, page]);
+  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><SectionHeader title={text("业务对话", "Conversations")} description={text("外部对话标识与长期智能体会话之间的接续关系。", "Continuation links between external conversation keys and persistent agent sessions.")} />{items === null ? <Skeleton className="h-40" /> : items.length === 0 ? <EmptyState icon={BookOpenText} title={text("还没有业务对话", "No conversations yet")} description={text("调用方提供对话标识后，这里会展示与智能体会话的接续关系。", "Conversation links appear here after a caller provides a conversation key.")} /> : <div className="surface-list divide-y rounded-xl border bg-card">{items.map((item) => <div key={item.id} className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between"><div><p className="font-mono text-sm font-medium">{item.conversationKey}</p><p className="mt-1 text-xs text-muted-foreground">{text(`创建于 ${formatDate(item.createdAt)}`, `Created ${formatDate(item.createdAt)}`)}</p></div><div className="flex flex-wrap items-center gap-3"><Badge variant={item.status === "active" ? "default" : "secondary"}>{item.status === "active" ? text("接续中", "Active") : text("已结束", "Ended")}</Badge><Button size="sm" variant="outline" asChild><Link to={`/sessions/${item.sessionId}`}>{text("进入智能体会话", "Open agent session")}</Link></Button></div></div>)}</div>}{paging && <ListPagination pageSize={paging.pageSize} page={paging.page} totalPages={paging.totalPages} total={paging.total} onPageChange={setPage} />}</div>;
 };
 
 export const IntegrationEndpointTasksPage = () => {
@@ -504,8 +534,14 @@ export const IntegrationEndpointTasksPage = () => {
   const { endpoint } = useEndpoint();
   const [items, setItems] = useState<IntegrationTask[] | null>(null);
   const [error, setError] = useState("");
-  useEffect(() => { const controller = new AbortController(); void integrationApi.listTasks(endpoint.id, controller.signal).then(setItems).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); }); return () => controller.abort(); }, [endpoint.id]);
-  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><SectionHeader title={text("任务", "Tasks")} description={text("外部请求的权威状态与最终结果。", "Authoritative status and final results for external requests.")} />{items === null ? <Skeleton className="h-40" /> : items.length === 0 ? <EmptyState icon={Play} title={text("还没有任务", "No tasks yet")} description={text("从调用说明页测试提交，或使用接入端点 API 创建第一项任务。", "Submit a test from Usage or create the first task through the endpoint API.")} /> : <div className="surface-list divide-y rounded-xl border bg-card">{items.toReversed().map((item) => <div key={item.id} className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><Link className="block truncate font-medium hover:underline" to={`/integration-tasks/${item.id}`}>{item.requestId}</Link><p className="mt-1 line-clamp-1 text-sm text-muted-foreground">{item.message}</p></div><div className="flex flex-wrap items-center gap-3"><StatusBadge status={item.status} /><time className="text-xs text-muted-foreground">{formatDate(item.createdAt)}</time></div></div>)}</div>}</div>;
+  const [page, setPage] = useState(1);
+  const [paging, setPaging] = useState<Page<IntegrationTask> | null>(null);
+  useEffect(() => { const controller = new AbortController(); setItems(null); setError("");
+    void api<Page<IntegrationTask>>(`/integration-endpoints/${endpoint.id}/tasks?page=${page}&pageSize=20`, { signal: controller.signal })
+      .then((result) => { setItems(result.items); setPaging(result); }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    return () => controller.abort();
+  }, [endpoint.id, page]);
+  return <div className="flex flex-col gap-5"><ErrorAlert message={error} /><SectionHeader title={text("任务", "Tasks")} description={text("外部请求的权威状态与最终结果。", "Authoritative status and final results for external requests.")} />{items === null ? <Skeleton className="h-40" /> : items.length === 0 ? <EmptyState icon={Play} title={text("还没有任务", "No tasks yet")} description={text("从调用说明页测试提交，或使用接入端点 API 创建第一项任务。", "Submit a test from Usage or create the first task through the endpoint API.")} /> : <div className="surface-list divide-y rounded-xl border bg-card">{items.map((item) => <div key={item.id} className="flex flex-col gap-3 p-5 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><Link className="block truncate font-medium hover:underline" to={`/integration-tasks/${item.id}`}>{item.requestId}</Link><p className="mt-1 line-clamp-1 text-sm text-muted-foreground">{item.message}</p></div><div className="flex flex-wrap items-center gap-3"><StatusBadge status={item.status} /><time className="text-xs text-muted-foreground">{formatDate(item.createdAt)}</time></div></div>)}</div>}{paging && <ListPagination pageSize={paging.pageSize} page={paging.page} totalPages={paging.totalPages} total={paging.total} onPageChange={setPage} />}</div>;
 };
 
 const endpointInUse = (reason: unknown): boolean => typeof reason === "object" && reason !== null
@@ -527,7 +563,8 @@ export const IntegrationEndpointSettingsPage = () => {
   const save = async (event: FormEvent) => { event.preventDefault(); setBusy(true); setError(""); try { const updated = await integrationApi.updateEndpoint(endpoint.id, { name: name.trim(), slug: slug.trim(), agentId: Number(agentId), enabled, promptPrefix }); setEndpoint(updated); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); } };
   const rotate = async () => { setBusy(true); setError(""); try { const rotated = await integrationApi.rotateEndpointToken(endpoint.id); setEndpoint(rotated.endpoint); setToken(rotated.token); } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(false); } };
   const remove = async () => { setBusy(true); setError(""); try { await integrationApi.deleteEndpoint(endpoint.id); navigate("/integration-endpoints"); } catch (reason) { setError(endpointInUse(reason) ? text("已有业务对话或任务，请停用", "This endpoint has conversations or tasks; disable it instead") : errorMessage(reason)); setBusy(false); } };
-  return <div className="flex flex-col gap-5"><ErrorAlert message={error} />{token === "" ? null : <OneTimeSecret title={text("请立即保存，新访问令牌不会再次显示", "Save the new access token now. It will not be shown again.")} value={token} onDismiss={() => setToken("")} />}<Card><CardHeader><CardTitle className="flex items-center gap-2"><Settings2 className="size-5" />{text("基础设置", "Basic settings")}</CardTitle><CardDescription>{text("更换智能体前必须先结束接续中的业务对话。", "End active conversations before changing the agent.")}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-5" onSubmit={save}><FieldGroup><Field><FieldLabel htmlFor="settings-endpoint-name">{text("端点名称", "Endpoint name")}</FieldLabel><Input id="settings-endpoint-name" value={name} onChange={(event) => setName(event.target.value)} /></Field><Field><FieldLabel htmlFor="settings-endpoint-slug">{text("路径标识", "Slug")}</FieldLabel><Input id="settings-endpoint-slug" value={slug} onChange={(event) => setSlug(event.target.value)} /></Field><Field><FieldLabel htmlFor="settings-endpoint-agent">{text("智能体", "Agent")}</FieldLabel><NativeSelect id="settings-endpoint-agent" value={agentId} onChange={(event) => setAgentId(event.target.value)}>{agents.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}</NativeSelect></Field><Field><FieldLabel htmlFor="settings-prompt-prefix">{text("固定提示", "Fixed prompt")}</FieldLabel><Textarea id="settings-prompt-prefix" value={promptPrefix} onChange={(event) => setPromptPrefix(event.target.value)} /></Field><label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{text("启用接入端点", "Enable endpoint")}</label></FieldGroup><div className="flex justify-end"><Button type="submit" disabled={busy}>{busy ? text("保存中…", "Saving…") : text("保存设置", "Save settings")}</Button></div></form></CardContent></Card><Card><CardHeader><CardTitle>{text("访问令牌", "Access token")}</CardTitle><CardDescription>{text("轮换后旧访问令牌立即失效；新访问令牌只展示一次。", "Rotation immediately invalidates the old token. The new token is shown once.")}</CardDescription></CardHeader><CardContent><AlertDialog><AlertDialogTrigger asChild><Button variant="outline"><RefreshCw />{text("轮换访问令牌", "Rotate access token")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text("轮换端点访问令牌？", "Rotate the endpoint access token?")}</AlertDialogTitle><AlertDialogDescription>{text("外部系统必须更新为新访问令牌，旧访问令牌将立即失效。", "External systems must switch to the new token. The old token becomes invalid immediately.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={() => void rotate()}>{text("确认轮换", "Rotate")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></CardContent></Card><Card className="border-destructive/40"><CardHeader><CardTitle className="text-destructive">{text("危险操作", "Danger zone")}</CardTitle><CardDescription>{text("有业务对话或任务历史的端点不能删除，请改为停用。", "Endpoints with conversation or task history cannot be deleted. Disable them instead.")}</CardDescription></CardHeader><CardContent><AlertDialog><AlertDialogTrigger asChild><Button variant="destructive">{text("删除接入端点", "Delete endpoint")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`永久删除“${endpoint.name}”？`, `Permanently delete “${endpoint.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("此操作无法撤销。存在历史数据时系统会拒绝删除。", "This cannot be undone. The server rejects deletion when history exists.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void remove()}>{text("确认删除", "Delete")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></CardContent></Card></div>;
+  return <div className="flex flex-col gap-5"><ErrorAlert message={error} />{token === "" ? null : <OneTimeSecret title={text("请立即保存，新访问令牌不会再次显示", "Save the new access token now. It will not be shown again.")} value={token} onDismiss={() => setToken("")} />}<Card><CardHeader><CardTitle className="flex items-center gap-2"><Settings2 className="size-5" />{text("基础设置", "Basic settings")}</CardTitle><CardDescription>{text("更换智能体前必须先结束接续中的业务对话。", "End active conversations before changing the agent.")}</CardDescription></CardHeader><CardContent><form className="flex flex-col gap-5" onSubmit={save}><FieldGroup><Field><FieldLabel htmlFor="settings-endpoint-name">{text("端点名称", "Endpoint name")}</FieldLabel><Input id="settings-endpoint-name" value={name} onChange={(event) => setName(event.target.value)} /></Field><Field><FieldLabel htmlFor="settings-endpoint-slug">{text("路径标识", "Slug")}</FieldLabel><Input id="settings-endpoint-slug" value={slug} onChange={(event) => setSlug(event.target.value)} /></Field><Field><FieldLabel htmlFor="settings-endpoint-agent">{text("智能体", "Agent")}</FieldLabel><PagedResourceSelect<Agent> id="settings-endpoint-agent" endpoint="/agents" value={agentId} onValueChange={setAgentId}
+      getOption={(item) => ({ value: String(item.id), label: item.name })} selectedLabel={agents.find((item) => String(item.id) === agentId)?.name} /></Field><Field><FieldLabel htmlFor="settings-prompt-prefix">{text("固定提示", "Fixed prompt")}</FieldLabel><Textarea id="settings-prompt-prefix" value={promptPrefix} onChange={(event) => setPromptPrefix(event.target.value)} /></Field><label className="flex items-center gap-2 text-sm font-medium"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} />{text("启用接入端点", "Enable endpoint")}</label></FieldGroup><div className="flex justify-end"><Button type="submit" disabled={busy}>{busy ? text("保存中…", "Saving…") : text("保存设置", "Save settings")}</Button></div></form></CardContent></Card><Card><CardHeader><CardTitle>{text("访问令牌", "Access token")}</CardTitle><CardDescription>{text("轮换后旧访问令牌立即失效；新访问令牌只展示一次。", "Rotation immediately invalidates the old token. The new token is shown once.")}</CardDescription></CardHeader><CardContent><AlertDialog><AlertDialogTrigger asChild><Button variant="outline"><RefreshCw />{text("轮换访问令牌", "Rotate access token")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text("轮换端点访问令牌？", "Rotate the endpoint access token?")}</AlertDialogTitle><AlertDialogDescription>{text("外部系统必须更新为新访问令牌，旧访问令牌将立即失效。", "External systems must switch to the new token. The old token becomes invalid immediately.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={() => void rotate()}>{text("确认轮换", "Rotate")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></CardContent></Card><Card className="border-destructive/40"><CardHeader><CardTitle className="text-destructive">{text("危险操作", "Danger zone")}</CardTitle><CardDescription>{text("有业务对话或任务历史的端点不能删除，请改为停用。", "Endpoints with conversation or task history cannot be deleted. Disable them instead.")}</CardDescription></CardHeader><CardContent><AlertDialog><AlertDialogTrigger asChild><Button variant="destructive">{text("删除接入端点", "Delete endpoint")}</Button></AlertDialogTrigger><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>{text(`永久删除“${endpoint.name}”？`, `Permanently delete “${endpoint.name}”?`)}</AlertDialogTitle><AlertDialogDescription>{text("此操作无法撤销。存在历史数据时系统会拒绝删除。", "This cannot be undone. The server rejects deletion when history exists.")}</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction variant="destructive" onClick={() => void remove()}>{text("确认删除", "Delete")}</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></CardContent></Card></div>;
 };
 
 const eventSummary = (event: RunEvent, messageLabel: string): string => {
@@ -549,7 +586,12 @@ export const IntegrationTaskDetailPage = () => {
   const [endpoint, setEndpoint] = useState<IntegrationEndpoint | null>(null);
   const [conversation, setConversation] = useState<IntegrationConversation | null>(null);
   const [events, setEvents] = useState<RunEvent[]>([]);
-  const [deliveries, setDeliveries] = useState<WebhookDelivery[]>([]);
+  const [deliveryPage, setDeliveryPage] = useState<WebhookDeliveryPage | null>(null);
+  const [deliveryPageNumber, setDeliveryPageNumber] = useState(1);
+  const [moreEvents, setMoreEvents] = useState(false);
+  const [eventsBusy, setEventsBusy] = useState(false);
+  const [eventReload, setEventReload] = useState(0);
+  const eventCursor = useRef<{ runId: number | null; seq: number }>({ runId: null, seq: 0 });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
@@ -562,27 +604,20 @@ export const IntegrationTaskDetailPage = () => {
     setTask(null);
     setEndpoint(null);
     setConversation(null);
-    setEvents([]);
-    setDeliveries([]);
+    setDeliveryPage(null);
     setError("");
     const refresh = async () => {
       try {
         const item = await integrationApi.getTask(Number(id), controller.signal);
         if (disposed || controller.signal.aborted) return;
-        const [endpointItem, conversations, deliveryItems, eventItems] = await Promise.all([
-          integrationApi.getEndpoint(item.endpointId, controller.signal),
-          integrationApi.listConversations(item.endpointId, controller.signal),
-          integrationApi.listDeliveries(item.endpointId, { page: 1, pageSize: 100, taskId: item.id }, controller.signal),
-          item.runId === null
-            ? Promise.resolve([])
-            : api<RunEvent[]>(`/runs/${item.runId}/events?afterSeq=0`, { signal: controller.signal })
+        const [endpointItem, conversationItem] = await Promise.all([
+          api<IntegrationEndpoint>(`/integration-endpoints/${item.endpointId}?includeMappings=false`, { signal: controller.signal }),
+          item.conversationId === null ? Promise.resolve(null) : api<IntegrationConversation>(`/integration-conversations/${item.conversationId}`, { signal: controller.signal })
         ]);
         if (disposed || controller.signal.aborted) return;
         setTask(item);
         setEndpoint(endpointItem);
-        setConversation(conversations.find((value) => value.id === item.conversationId) ?? null);
-        setDeliveries(deliveryItems.items);
-        setEvents(eventItems);
+        setConversation(conversationItem);
         if (item.status === "queued" || item.status === "running") {
           timer = window.setTimeout(() => { void refresh(); }, 1_000);
         }
@@ -598,6 +633,49 @@ export const IntegrationTaskDetailPage = () => {
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [id, refreshKey]);
+  const runId = task?.runId ?? null;
+  const active = task?.status === "queued" || task?.status === "running";
+  useEffect(() => {
+    if (eventCursor.current.runId !== runId) {
+      eventCursor.current = { runId, seq: 0 };
+      setEvents([]);
+      setMoreEvents(false);
+    }
+    if (runId === null) return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const refresh = async () => {
+      setEventsBusy(true);
+      try {
+        const items = await api<RunEvent[]>(`/runs/${runId}/events?afterSeq=${eventCursor.current.seq}&limit=100`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        if (items.length) eventCursor.current.seq = items[items.length - 1]!.seq;
+        setEvents((current) => [...current, ...items]);
+        setMoreEvents(items.length === 100);
+        // Pause at a full batch so long histories remain explicitly user-paged.
+        if (active && items.length < 100) timer = window.setTimeout(() => { void refresh(); }, 1_000);
+      } catch (reason) { if (!controller.signal.aborted) setError(errorMessage(reason)); }
+      finally { if (!controller.signal.aborted) setEventsBusy(false); }
+    };
+    void refresh();
+    return () => { controller.abort(); if (timer !== undefined) window.clearTimeout(timer); };
+  }, [runId, active, eventReload]);
+  useEffect(() => {
+    if (task === null) return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const refresh = async () => {
+      try {
+        const result = await integrationApi.listDeliveries(task.endpointId, { page: deliveryPageNumber, pageSize: 20, taskId: task.id }, controller.signal);
+        if (controller.signal.aborted) return;
+        setDeliveryPage(result);
+        if (active) timer = window.setTimeout(() => { void refresh(); }, 1_000);
+      } catch (reason) { if (!controller.signal.aborted) setError(errorMessage(reason)); }
+    };
+    void refresh();
+    return () => { controller.abort(); if (timer !== undefined) window.clearTimeout(timer); };
+  }, [task?.id, task?.endpointId, active, deliveryPageNumber, refreshKey]);
+  const deliveries = deliveryPage?.items ?? [];
   const cancel = async () => {
     if (task === null) return;
     cancelController.current?.abort();
@@ -636,8 +714,8 @@ export const IntegrationTaskDetailPage = () => {
           <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{text("用户消息", "User message")}</p><p className="mt-2 whitespace-pre-wrap rounded-lg border bg-muted/20 p-4 text-sm">{task.message}</p><MessageAttachments attachments={task.attachments} pathPrefix={`/integration-tasks/${task.id}/attachments`} /></div>
           <div><p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{text("智能体最终回复", "Final agent reply")}</p><p className="mt-2 whitespace-pre-wrap rounded-lg border bg-background p-4 text-sm">{task.result ?? (task.status === "failed" ? task.error ?? text("执行失败", "Execution failed") : text("尚未产生最终回复", "No final reply yet"))}</p></div>
         </CardContent></Card>
-        <Card><CardHeader><CardTitle>{text("执行轨迹", "Execution trace")}</CardTitle><CardDescription>{text("完整对话仍可在关联的智能体会话中查看。", "The full conversation remains available in the linked agent session.")}</CardDescription></CardHeader><CardContent>{events.length === 0 ? <p className="text-sm text-muted-foreground">{text("尚无执行事件。", "No execution events yet.")}</p> : <div className="divide-y rounded-lg border">{events.map((event) => <div key={event.id} className="grid gap-2 p-3 text-sm sm:grid-cols-[3rem_7rem_minmax(0,1fr)] sm:gap-3"><span className="font-mono text-xs text-muted-foreground">#{event.seq}</span><Badge className="w-fit" variant="outline">{event.type}</Badge><span className="min-w-0 break-words">{eventSummary(event, text("消息", "Message"))}</span></div>)}</div>}</CardContent></Card>
-        <Card><CardHeader><CardTitle>{text("事件回调投递", "Webhook deliveries")}</CardTitle></CardHeader><CardContent>{deliveries.length === 0 ? <p className="text-sm text-muted-foreground">{text("没有关联投递。", "No related deliveries.")}</p> : <div className="flex flex-col gap-2">{deliveries.map((delivery) => <div key={delivery.id} className="flex items-center justify-between rounded-lg border p-3"><span className="font-mono text-xs">{delivery.eventType}</span><DeliveryBadge status={delivery.status} /></div>)}</div>}</CardContent></Card>
+        <Card><CardHeader><CardTitle>{text("执行轨迹", "Execution trace")}</CardTitle><CardDescription>{text("完整对话仍可在关联的智能体会话中查看。", "The full conversation remains available in the linked agent session.")}</CardDescription></CardHeader><CardContent>{events.length === 0 ? <p className="text-sm text-muted-foreground">{text("尚无执行事件。", "No execution events yet.")}</p> : <div className="divide-y rounded-lg border">{events.map((event) => <div key={event.id} className="grid gap-2 p-3 text-sm sm:grid-cols-[3rem_7rem_minmax(0,1fr)] sm:gap-3"><span className="font-mono text-xs text-muted-foreground">#{event.seq}</span><Badge className="w-fit" variant="outline">{event.type}</Badge><span className="min-w-0 break-words">{eventSummary(event, text("消息", "Message"))}</span></div>)}</div>}{moreEvents && <Button className="mt-4" variant="outline" disabled={eventsBusy} onClick={() => setEventReload((value) => value + 1)}>{text("加载更多事件", "Load more events")}</Button>}</CardContent></Card>
+        <Card><CardHeader><CardTitle>{text("事件回调投递", "Webhook deliveries")}</CardTitle></CardHeader><CardContent>{deliveries.length === 0 ? <p className="text-sm text-muted-foreground">{text("没有关联投递。", "No related deliveries.")}</p> : <div className="flex flex-col gap-2">{deliveries.map((delivery) => <div key={delivery.id} className="flex items-center justify-between rounded-lg border p-3"><span className="font-mono text-xs">{delivery.eventType}</span><DeliveryBadge status={delivery.status} /></div>)}</div>}{deliveryPage && <ListPagination {...deliveryPage} onPageChange={setDeliveryPageNumber} />}</CardContent></Card>
       </div>
       <aside className="flex flex-col gap-4">
         <Card><CardHeader><CardTitle>{text("关联资源", "Linked resources")}</CardTitle></CardHeader><CardContent className="flex flex-col gap-4 text-sm">

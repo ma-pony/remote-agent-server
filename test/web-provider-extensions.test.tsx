@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { pagedManagementResponse } from "./paged-management-response.js";
 
 import "@testing-library/jest-dom/vitest";
 
@@ -59,14 +60,14 @@ it("按 Provider 展示插件和 Hook，并允许 Agent 显式启用", async () 
   };
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === `/api/agents/${agent.id}/extensions` && init?.method !== "PUT") {
-      return response([{ ...plugin, enabled }, hook]);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/extensions` && init?.method !== "PUT") {
+      return pagedManagementResponse(url, [{ ...plugin, enabled }, hook]);
     }
     if (url === `/api/agents/${agent.id}/extensions/${encodeURIComponent(plugin.id)}` && init?.method === "PUT") {
       enabled = true;
       expect(JSON.parse(String(init.body))).toEqual({ enabled: true });
-      return response({ ...plugin, enabled });
+      return pagedManagementResponse(url, { ...plugin, enabled });
     }
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });

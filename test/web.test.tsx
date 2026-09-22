@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { pagedManagementResponse } from "./paged-management-response.js";
 
 import "@testing-library/jest-dom/vitest";
 
@@ -88,9 +89,9 @@ describe("最小管理界面", () => {
       const url = requestUrl(input);
       if (init?.method === "PUT") {
         savedBodies[url] = String(init.body);
-        return jsonResponse(JSON.parse(savedBodies[url]));
+        return pagedManagementResponse(url, JSON.parse(savedBodies[url]));
       }
-      if (url === "/api/system-settings/concurrency") return jsonResponse({
+      if (url === "/api/system-settings/concurrency") return pagedManagementResponse(url, {
         globalRunConcurrency: 4,
         webhookConcurrency: 3,
         environmentBuildConcurrency: 1,
@@ -103,7 +104,7 @@ describe("最小管理界面", () => {
     render(<App />);
 
     expect(await screen.findByRole("heading", { name: "运行与并发" })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Run 超时（分钟）"), { target: { value: "120" } });
+    fireEvent.change(await screen.findByLabelText("Run 超时（分钟）"), { target: { value: "120" } });
     fireEvent.change(screen.getByLabelText("会话大文件保留（小时）"), { target: { value: "24" } });
     fireEvent.change(screen.getByLabelText("全局 Run 并发"), { target: { value: "8" } });
     fireEvent.change(screen.getByLabelText("Webhook 投递并发"), { target: { value: "6" } });
@@ -143,15 +144,15 @@ describe("最小管理界面", () => {
       const url = requestUrl(input);
       if (url === "/api/agents/3" && init?.method === "PATCH") {
         patchBody = String(init.body);
-        return jsonResponse({ ...currentAgent, ...JSON.parse(patchBody), effectiveMaxConcurrentRuns: 2 });
+        return pagedManagementResponse(url, { ...currentAgent, ...JSON.parse(patchBody), effectiveMaxConcurrentRuns: 2 });
       }
-      if (url === "/api/agents/3") return jsonResponse(currentAgent);
-      if (url === "/api/agents/3/models") return jsonResponse({
+      if (url === "/api/agents/3") return pagedManagementResponse(url, currentAgent);
+      if (new URL(url, "http://localhost").pathname === "/api/agents/3/models") return pagedManagementResponse(url, {
         supported: true,
         currentModel: "deepseek-v4-flash",
         availableModels: ["deepseek-v4-flash", "glm-4.5"]
       });
-      if (url === "/api/project-environments") return jsonResponse([{
+      if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [{
         id: 2,
         name: "Crawler environment",
         currentRevisionId: 7,
@@ -197,15 +198,15 @@ describe("最小管理界面", () => {
       const url = requestUrl(input);
       if (url === "/api/agents/3" && init?.method === "PATCH") {
         patchBody = String(init.body);
-        return jsonResponse({ ...currentAgent, ...JSON.parse(patchBody) });
+        return pagedManagementResponse(url, { ...currentAgent, ...JSON.parse(patchBody) });
       }
-      if (url === "/api/agents/3") return jsonResponse(currentAgent);
-      if (url === "/api/agents/3/models") return jsonResponse({
+      if (url === "/api/agents/3") return pagedManagementResponse(url, currentAgent);
+      if (new URL(url, "http://localhost").pathname === "/api/agents/3/models") return pagedManagementResponse(url, {
         supported: true,
         currentModel: "deepseek-v4-flash",
         availableModels: ["deepseek-v4-flash", "glm-4.5"]
       });
-      if (url === "/api/project-environments") return jsonResponse([{
+      if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [{
         id: 2, name: "Crawler environment", currentRevisionId: 7, lastCheckedAt: now,
         workspacePath: "/workspace", sync: { status: "idle", automatic: true, intervalMs: 1000, nextScheduledAt: now },
         repositories: [], currentRevision: null, latestRevision: null, createdAt: now, updatedAt: now
@@ -224,6 +225,7 @@ describe("最小管理界面", () => {
     expect(screen.getByText("7 天")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "工作日" }));
     expect(screen.getByText("5 天")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("模型")).not.toBeDisabled());
     fireEvent.change(screen.getByLabelText("模型"), { target: { value: "glm-4.5" } });
     fireEvent.change(screen.getByLabelText("Run 并发上限"), { target: { value: "3" } });
     fireEvent.change(screen.getByLabelText("开始（UTC · 24h）"), { target: { value: "20:00" } });
@@ -265,14 +267,14 @@ describe("最小管理界面", () => {
     window.history.replaceState({}, "", "/agents/3/settings");
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/api/agents/3") return jsonResponse({
+      if (url === "/api/agents/3") return pagedManagementResponse(url, {
         id: 3, name: "Crawler Agent", provider: "codex", enabled: true, instructions: "",
         maxConcurrentRuns: null, effectiveMaxConcurrentRuns: 4,
         modelPolicy: { mode: "provider_default" }, providerDefaultModel: null,
         projectEnvironmentId: 2, createdAt: now, updatedAt: now
       });
-      if (url === "/api/agents/3/models") return jsonResponse({ supported: false, currentModel: null, availableModels: [] });
-      if (url === "/api/project-environments") return jsonResponse([{
+      if (new URL(url, "http://localhost").pathname === "/api/agents/3/models") return pagedManagementResponse(url, { supported: false, currentModel: null, availableModels: [] });
+      if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [{
         id: 2, name: "Crawler environment", currentRevisionId: 7, lastCheckedAt: now,
         workspacePath: "/workspace", sync: { status: "idle", automatic: true, intervalMs: 1000, nextScheduledAt: now },
         repositories: [], currentRevision: null, latestRevision: null, createdAt: now, updatedAt: now
@@ -431,9 +433,10 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, status: "running", runs: [staleRun] });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-stale/events?afterSeq=0") return jsonResponse([
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [staleRun] });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-stale/events?afterSeq=0&limit=100") return pagedManagementResponse(url, [
         event("run-stale", 1, "message", { stream: "output", text: "已经完成" }),
         event("run-stale", 2, "status", { status: "succeeded" })
       ]);
@@ -459,13 +462,14 @@ describe("最小管理界面", () => {
     ];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, runs });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-ok/events?afterSeq=0") return jsonResponse([
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, runs });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-ok/events?afterSeq=0&limit=100") return pagedManagementResponse(url, [
         event("run-ok", 1, "message", { stream: "output", text: "日志已读取" })
       ]);
-      if (url === "/api/runs/run-missing/events?afterSeq=0") {
-        return jsonResponse({ error: { code: "history_unavailable", message: "历史服务暂不可用" } }, 503);
+      if (url === "/api/runs/run-missing/events?afterSeq=0&limit=100") {
+        return pagedManagementResponse(url, { error: { code: "history_unavailable", message: "历史服务暂不可用" } }, 503);
       }
       throw new Error(`Unexpected request: ${url}`);
     }));
@@ -487,13 +491,14 @@ describe("最小管理界面", () => {
     let failNew = true;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === "/api/sessions/session-old") return oldResponse.promise;
-      if (url === "/api/sessions/session-new" && failNew) {
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === "/api/sessions/session-old") return oldResponse.promise;
+      if (new URL(url, "http://localhost").pathname === "/api/sessions/session-new" && failNew) {
         failNew = false;
-        return jsonResponse({ error: { code: "load_failed", message: "Session 加载失败" } }, 503);
+        return pagedManagementResponse(url, { error: { code: "load_failed", message: "Session 加载失败" } }, 503);
       }
-      if (url === "/api/sessions/session-new") return jsonResponse(newSession);
-      if (url === "/api/agents") return jsonResponse([agent]);
+      if (new URL(url, "http://localhost").pathname === "/api/sessions/session-new") return pagedManagementResponse(url, newSession);
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
       throw new Error(`Unexpected request: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -535,15 +540,16 @@ describe("最小管理界面", () => {
     let nextRun = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, runs: [oldRun] });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-old/events?afterSeq=0") return jsonResponse([
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, runs: [oldRun] });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-old/events?afterSeq=0&limit=100") return pagedManagementResponse(url, [
         event("run-old", 1, "message", { stream: "output", text: "日志" }),
         event("run-old", 2, "message", { stream: "output", text: "已读取" })
       ]);
       if (url === `/api/sessions/${session.id}/runs` && init?.method === "POST") {
         nextRun += 1;
-        return jsonResponse({
+        return pagedManagementResponse(url, {
           ...oldRun,
           id: `run-${nextRun}`,
           status: "queued",
@@ -554,10 +560,10 @@ describe("最小管理界面", () => {
         }, 201);
       }
       if (url === "/api/runs/run-1/cancel" && init?.method === "POST") {
-        return jsonResponse({ ...oldRun, id: "run-1", status: "running", input: "修复它", result: null, finishedAt: null });
+        return pagedManagementResponse(url, { ...oldRun, id: "run-1", status: "running", input: "修复它", result: null, finishedAt: null });
       }
       if (url === "/api/runs/run-1") {
-        return jsonResponse({ ...oldRun, id: "run-1", status: "succeeded", input: "修复它" });
+        return pagedManagementResponse(url, { ...oldRun, id: "run-1", status: "succeeded", input: "修复它" });
       }
       throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
     }));
@@ -640,13 +646,14 @@ describe("最小管理界面", () => {
     const olderRun = { ...recentRun, id: "run-1", input: "更早任务", result: "更早结果" };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, runs: [recentRun], hasOlderRuns: true });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-21/events?afterSeq=0") return jsonResponse([]);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, runs: [recentRun], hasOlderRuns: true });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-21/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
       if (url === `/api/sessions/${session.id}/runs?beforeId=run-21&limit=20`) {
-        return jsonResponse({ items: [olderRun], hasMore: false });
+        return pagedManagementResponse(url, { items: [olderRun], hasMore: false });
       }
-      if (url === "/api/runs/run-1/events?afterSeq=0") return jsonResponse([]);
+      if (url === "/api/runs/run-1/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
       throw new Error(`Unexpected request: ${url}`);
     }));
 
@@ -675,9 +682,10 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, status: "running", runs: [runningRun] });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-live/events?afterSeq=0") return jsonResponse([]);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-live/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
       throw new Error(`Unexpected request: ${url}`);
     }));
     const signals: AbortSignal[] = [];
@@ -721,10 +729,11 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, status: "running", runs: [runningRun] });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-canonical/events?afterSeq=0") return jsonResponse([]);
-      if (url === "/api/runs/run-canonical") return jsonResponse({ ...runningRun, status: "failed", error: "执行异常", finishedAt: now });
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-canonical/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
+      if (url === "/api/runs/run-canonical") return pagedManagementResponse(url, { ...runningRun, status: "failed", error: "执行异常", finishedAt: now });
       throw new Error(`Unexpected request: ${url}`);
     }));
     fetchEventSourceMock.mockRejectedValue(new Error("connection lost"));
@@ -758,15 +767,16 @@ describe("最小管理界面", () => {
     let canonicalRequests = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, status: "running", runs: [runningRun] });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-open/events?afterSeq=0") return jsonResponse([]);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-open/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
       if (url === "/api/runs/run-open") {
         canonicalRequests += 1;
         if (canonicalRequests === 1) {
-          return jsonResponse({ error: { code: "temporarily_unavailable", message: "暂时不可用" } }, 503);
+          return pagedManagementResponse(url, { error: { code: "temporarily_unavailable", message: "暂时不可用" } }, 503);
         }
-        return jsonResponse({ ...runningRun, status: "succeeded", result: "canonical result", finishedAt: now });
+        return pagedManagementResponse(url, { ...runningRun, status: "succeeded", result: "canonical result", finishedAt: now });
       }
       throw new Error(`Unexpected request: ${url}`);
     }));
@@ -817,10 +827,11 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, status: "running", runs: [runningRun] });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-permanent/events?afterSeq=0") return jsonResponse([]);
-      if (url === "/api/runs/run-permanent") return jsonResponse(runningRun);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-permanent/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
+      if (url === "/api/runs/run-permanent") return pagedManagementResponse(url, runningRun);
       throw new Error(`Unexpected request: ${url}`);
     }));
     fetchEventSourceMock.mockImplementation(async (_url: string, options: {
@@ -863,10 +874,11 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, status: "running", runs: [runningRun] });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-retry/events?afterSeq=0") return jsonResponse([]);
-      if (url === "/api/runs/run-retry") return jsonResponse(runningRun);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-retry/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
+      if (url === "/api/runs/run-retry") return pagedManagementResponse(url, runningRun);
       throw new Error(`Unexpected request: ${url}`);
     }));
     fetchEventSourceMock
@@ -917,10 +929,11 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
-      if (url === `/api/sessions/${session.id}`) return jsonResponse({ ...session, status: "running", runs: [runningRun] });
-      if (url === "/api/agents") return jsonResponse([agent]);
-      if (url === "/api/runs/run-exhausted/events?afterSeq=0") return jsonResponse([]);
-      if (url === "/api/runs/run-exhausted") return jsonResponse(runningRun);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+      if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
+      if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+      if (url === "/api/runs/run-exhausted/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
+      if (url === "/api/runs/run-exhausted") return pagedManagementResponse(url, runningRun);
       throw new Error(`Unexpected request: ${url}`);
     }));
     fetchEventSourceMock.mockRejectedValue(new Error("network unavailable"));

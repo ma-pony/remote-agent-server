@@ -8,13 +8,31 @@ import { UsageError } from "./core/errors.js";
 import type { HostUsageCollector } from "./host-collector.js";
 import type { UsageBinding } from "./core/types.js";
 import { stableHash } from "./core/context.js";
+import type { ToolContentEstimate } from "./core/context-types.js";
+import { ModelTokenizers } from "./core/tokenizers.js";
 
 export type McpObserverConfig = { socketPath: string; token: string };
+type ContentSample = Pick<ToolContentEstimate, "tokens" | "byteLength" | "partial"> & {
+  reason?: "model_missing" | "unsupported_content" | "size_limit" | "tokenization_failed" | null;
+};
 export type McpObservation = { invocationId: string; toolName: string; phase: "start" | "end"; occurredAt: string;
-  status?: "succeeded" | "tool_error" | "transport_error" | "cancelled"; resultBytes?: number };
+  status?: "succeeded" | "tool_error" | "transport_error" | "cancelled"; resultBytes?: number;
+  argumentContent?: ContentSample; resultContent?: ContentSample };
+const contentSchema = z.object({ tokens: z.number().int().nonnegative().safe().nullable(),
+  byteLength: z.number().int().nonnegative().safe(), partial: z.boolean(),
+  reason: z.enum(["model_missing", "unsupported_content", "size_limit", "tokenization_failed"]).nullable().optional() }).strict();
 const observationSchema = z.object({ invocationId: z.string().uuid(), toolName: z.string().min(1).max(512), phase: z.enum(["start", "end"]),
   occurredAt: z.string().datetime({ offset: true }), status: z.enum(["succeeded", "tool_error", "transport_error", "cancelled"]).optional(),
-  resultBytes: z.number().int().nonnegative().safe().optional() }).strict();
+  resultBytes: z.number().int().nonnegative().safe().optional(),
+  argumentContent: contentSchema.optional(), resultContent: contentSchema.optional() }).strict();
+// MCP wrappers measure locally; no tool body or model credential crosses this channel.
+const fallbackEstimate = new ModelTokenizers().describe(null);
+const estimate = (value: ContentSample | undefined): ToolContentEstimate | undefined => {
+  if (value === undefined) return undefined;
+  const { reason, ...content } = value;
+  return { ...content, estimate: { ...fallbackEstimate, method: content.tokens === null ? "unavailable" : "text_heuristic",
+    reason: reason ?? fallbackEstimate.reason } };
+};
 type Ticket = { binding: UsageBinding; epoch: string; serverId: string; runtimeKind: string };
 
 /** Local metadata channel. The host owns SQLite and freezes Run association on call start. */
@@ -62,12 +80,13 @@ export class McpUsageObserver {
         executionId: run ? String(run.id) : null, executionEvidence: run ? "inferred" : "unknown", runtimeKind: ticket.runtimeKind,
         capability: { id: `mcp:${ticket.serverId}:${event.toolName}`, kind: "mcp_tool", name: event.toolName, serverId: ticket.serverId },
         startedAt: event.occurredAt, endedAt: null, status: "running", sourceId: `mcp-observer:${ticket.serverId}`,
-        revision: 1, rawResultBytes: null, origin: "execution" });
+        revision: 1, rawResultBytes: null, origin: "execution", argumentEstimate: estimate(event.argumentContent) });
     } else {
       const previous = this.collector.attribution.invocation(ticket.binding.namespace, id);
       if (!previous || previous.capability.name !== event.toolName || !event.status) throw new UsageError("usage_invocation_not_found");
       this.collector.attribution.observeInvocation(ticket.binding, { ...previous, endedAt: event.occurredAt,
-        status: event.status, revision: 2, rawResultBytes: event.resultBytes ?? null });
+        status: event.status, revision: 2, rawResultBytes: event.resultBytes ?? null,
+        argumentEstimate: previous.argumentEstimate ?? undefined, resultEstimate: estimate(event.resultContent) });
     }
   }
 

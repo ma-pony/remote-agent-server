@@ -98,11 +98,15 @@ it("reports failed capture health through the management summary without persist
   expect(result.captureHealth).toEqual([expect.objectContaining({ status: "incomplete", errorCode: "unsupported_encoding", incomplete: 1 })]);
   expect(result.analysisStatus).toBe("partial"); expect(result.completeness).toBe("partial");
 });
-it("associates confirmed Skill and plugin ownership per Read call, never the definition or unrelated Read", async () => {
+it.each([
+  ["Read", { path: "/workspace/skills/review/SKILL.md" }],
+  ["exec_command", { command: "rtk proxy cat SKILL.md", workdir: "/workspace/skills/review" }],
+  ["exec_command", { command: "python /workspace/skills/review/scripts/check.py" }]
+])("associates confirmed Skill and plugin ownership per %s call, never the definition or unrelated Read", async (toolName, args) => {
   const { host, capture, route, session, run } = await setup(); capture.startRun(session.id, run);
   host.runtimeCapabilities.recordProjection(run, [{ id: "skill1", name: "Review", revision: "1", skillMdPath: "/workspace/skills/review/SKILL.md", directoryAliases: ["/workspace/skills/review"], source: "local", pluginId: "plugin1", pluginName: "Review plugin" }]);
   const body = { model: "fixture-model", tools: [{ type: "function", name: "Read", parameters: {} }], input: [
-    { type: "function_call", call_id: "skill-call", name: "Read", arguments: '{"path":"/workspace/skills/review/SKILL.md"}' },
+    { type: "function_call", call_id: "skill-call", name: toolName, arguments: JSON.stringify(args) },
     { type: "function_call_output", call_id: "skill-call", output: "skill content" },
     { type: "function_call", call_id: "plain-call", name: "Read", arguments: '{"path":"/workspace/README.md"}' },
     { type: "function_call_output", call_id: "plain-call", output: "plain content" }
@@ -278,10 +282,13 @@ it("real aborted Claude transport persists retained usage and identity as interi
   const route = await capture.prepare({ sessionId: session.id, provider: "claude_code", providerSessionId: null, workspacePath: "/workspace", mcpServers: [] }); capture.startRun(session.id, 1);
   const client = request(route!.baseUrl + "/v1/messages", { method: "POST" }); client.on("error", () => {});
   const aborted = new Promise<void>((resolve) => client.on("response", (response) => { response.on("error", () => {}); response.once("data", () => { response.destroy(); resolve(); }); }));
-  client.end('{"messages":[{"role":"user","content":"PRIVATE_ABORTED_REQUEST"}]}'); await aborted;
+  client.end('{"system":"PRIVATE_ABORTED_SYSTEM","messages":[{"role":"user","content":"PRIVATE_ABORTED_REQUEST"}]}'); await aborted;
   await vi.waitFor(() => expect(capture.health({})[0]?.status).toBe("incomplete")); await capture.drain();
   expect(host.store.records()).toEqual([expect.objectContaining({ invocationId: "claude-message:msg-aborted", finality: "interim", metrics: expect.objectContaining({ inputTotalTokens: 20, outputTotalTokens: 3, totalTokens: 23 }), issues: ["downstream_aborted"] })]);
-  expect(host.attribution.rankings({}, "unknown")[0]?.exposureCount).toBeGreaterThan(0);
+  expect(host.attribution.rankings({}, "system_prompt")).toMatchObject([{ capability: { kind: "system_prompt" }, exposureCount: 1 }]);
+  expect(host.attribution.rankings({}, "user_prompt")).toMatchObject([{ capability: { kind: "user_prompt" }, exposureCount: 1 }]);
+  expect(host.attribution.rankings({}, "unknown")).toEqual([]);
   expect(capture.health({})[0]).toMatchObject({ status: "incomplete", incomplete: 1, errorCode: "downstream_aborted" });
   expect(db.serialize().includes(Buffer.from("PRIVATE_ABORTED_REQUEST"))).toBe(false);
+  expect(db.serialize().includes(Buffer.from("PRIVATE_ABORTED_SYSTEM"))).toBe(false);
 });

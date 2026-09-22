@@ -98,6 +98,15 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("records prompt estimates after persisting the resolved model", async () => {
+    const h = setup(createFakeRuntime());
+    h.db.prepare("UPDATE agents SET provider_default_model = 'resolved-fixture-model'").run();
+    try {
+      await h.executor.execute(h.run.id);
+      const row = h.db.prepare("SELECT estimate_json FROM agent_usage_conversation_content WHERE run_id=? AND category='user_prompt'").get(h.run.id) as { estimate_json: string };
+      expect(JSON.parse(row.estimate_json)).toMatchObject({ model: "resolved-fixture-model" });
+    } finally { h.db.close(); }
+  });
   it("persists usage immediately even when the following runtime event fails", async () => {
     const runtime = createFakeRuntime();
     const h = setup(runtime);

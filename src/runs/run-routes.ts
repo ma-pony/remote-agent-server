@@ -300,13 +300,13 @@ export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependenci
   });
 
   app.get<{ Params: { id: string }; Querystring: { afterSeq?: string } }>("/runs/:id/events", (request, reply) => {
-    const parsed = eventQuerySchema.safeParse(request.query);
+    const parsed = eventQuerySchema.extend({ limit: z.coerce.number().int().min(1).max(500).default(100) }).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Event cursor");
     const id = parseId(request.params.id);
     if (id === undefined || deps.runRepository.get(id) === undefined) {
       return sendError(reply, 404, "not_found", "Run not found");
     }
-    return deps.eventStore.list(id, parsed.data.afterSeq);
+    return deps.eventStore.listBatch(id, parsed.data.afterSeq, deps.eventStore.latestSeq(id), parsed.data.limit);
   });
 
   app.get<{ Params: { id: string }; Querystring: { afterSeq?: string } }>("/runs/:id/events/stream", (request, reply) => {

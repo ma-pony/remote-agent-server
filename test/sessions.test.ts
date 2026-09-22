@@ -241,6 +241,10 @@ describe("Session API", () => {
     expect(filtered.statusCode).toBe(200);
     expect(filtered.json()).toMatchObject({ total: 1, items: [{ id: ids[4], status: "running" }] });
 
+    db.prepare("UPDATE sessions SET storage_cleaned_at = ? WHERE id = ?").run("2026-09-01T00:00:00.000Z", ids[22]);
+    const activeStorage = await app.inject({ url: `/api/sessions?page=1&pageSize=2&agentId=${agent.id}&storage=active`, headers: authHeaders() });
+    expect(activeStorage.json()).toMatchObject({ total: 22, items: [{ id: ids[21] }, { id: ids[20] }] });
+
     const invalid = await app.inject({
       method: "GET",
       url: "/api/sessions?status=finished",
@@ -461,6 +465,14 @@ describe("Session API", () => {
     expect(row.plain_value).toBeNull();
     expect(row.encrypted_value).toEqual(expect.any(String));
     expect(row.encrypted_value).not.toContain("session-secret-token");
+    const parameterPage = await app.inject({ url: `/api/sessions/${created.json().id}/mcp-parameters?page=1&query=access_token`, headers: authHeaders() });
+    expect(parameterPage.json()).toMatchObject({ total: 1, items: [{ key: "access_token", secret: true, configured: true }] });
+    expect(parameterPage.json().items[0]).not.toHaveProperty("value");
+    expect(parameterPage.body).not.toContain("session-secret-token");
+    db.prepare("DELETE FROM session_mcp_parameter_values WHERE session_id = ?").run(created.json().id);
+    const summary = await app.inject({ url: `/api/sessions/${created.json().id}?includeParameters=false`, headers: authHeaders() });
+    expect(summary.json()).toMatchObject({ mcpParametersValid: false, missingMcpParameterCount: 1 });
+    expect(summary.json()).not.toHaveProperty("missingMcpParameters");
   });
 
   it("空闲 Session 可局部修改 MCP 参数，活动 Run 期间拒绝", async () => {
@@ -485,6 +497,18 @@ describe("Session API", () => {
       payload: { agentId: agent.id, title: "参数测试", mcpParameters: { tenant: "team-a", note: "old" } }
     });
     const sessionId = (created.json() as { id: number }).id;
+
+    const parameterPage = await app.inject({ url: `/api/sessions/${sessionId}/mcp-parameters?page=2&pageSize=1`, headers: authHeaders() });
+    expect(parameterPage.json()).toMatchObject({ total: 2, page: 2, items: [{ key: "note", value: "old", configured: true }] });
+    const summary = await app.inject({ url: `/api/sessions/${sessionId}?includeParameters=false`, headers: authHeaders() });
+    expect(summary.json()).toMatchObject({ mcpParametersValid: true, missingMcpParameterCount: 0 });
+    expect(summary.json()).not.toHaveProperty("mcpParameters");
+    expect(summary.json()).not.toHaveProperty("missingMcpParameters");
+    const listed = await app.inject({ url: "/api/sessions?page=1", headers: authHeaders() });
+    expect(listed.json().items[0]).not.toHaveProperty("mcpParameters");
+    const partial = await app.inject({ method: "PATCH", url: `/api/sessions/${sessionId}/mcp-parameters?includeParameters=false`, headers: authHeaders(), payload: { values: { note: "updated" } } });
+    expect(partial.json()).not.toHaveProperty("mcpParameters");
+    expect((await app.inject({ url: `/api/sessions/${sessionId}/mcp-parameters?page=1&pageSize=1`, headers: authHeaders() })).json()).toMatchObject({ items: [{ key: "tenant", value: "team-a" }] });
 
     const updated = await app.inject({
       method: "PATCH",

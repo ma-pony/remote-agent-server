@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { isPagedQuery, paginationQuerySchema, pageResult } from "../pagination.js";
+import type { McpToolSummary } from "./mcp-types.js";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 
@@ -83,10 +86,18 @@ export const registerMcpRoutes = (
   app: FastifyInstance,
   { mcpManager, mcpChecker, providerMcpCatalog }: McpRouteDependencies
 ): void => {
+  const toolSnapshots = new Map<string, { agentId: number; serverId: number; expires: number; tools: McpToolSummary[] }>();
+  const toolsPage = (tools: McpToolSummary[], pagination: ReturnType<typeof paginationQuerySchema.parse>) => {
+    const query = pagination.query?.toLowerCase() ?? "";
+    const filtered = tools.filter((tool) => `${tool.name} ${tool.description ?? ""}`.toLowerCase().includes(query));
+    return pageResult(filtered.slice((pagination.page - 1) * pagination.pageSize, pagination.page * pagination.pageSize), filtered.length, pagination);
+  };
   app.get<{ Params: { agentId: string } }>("/agents/:agentId/mcp-servers", (request, reply) => {
     const agentId = parseId(request.params.agentId);
     if (agentId === undefined) return notFound(reply, "Agent not found");
-    try { return mcpManager.listServers(agentId); } catch (error) { return handleMcpError(reply, error); }
+    const pagination = paginationQuerySchema.safeParse(request.query);
+    if (!pagination.success) return invalidRequest(reply, "Invalid pagination");
+    try { return isPagedQuery(request.query) ? mcpManager.listServersPage(agentId, pagination.data) : mcpManager.listServers(agentId); } catch (error) { return handleMcpError(reply, error); }
   });
   app.post<{ Params: { agentId: string } }>("/agents/:agentId/mcp-servers", (request, reply) => {
     const parsed = serverSchema.safeParse(request.body);
@@ -99,7 +110,9 @@ export const registerMcpRoutes = (
   app.get<{ Params: { agentId: string } }>("/agents/:agentId/mcp-catalog", (request, reply) => {
     const agentId = parseId(request.params.agentId);
     if (agentId === undefined) return notFound(reply, "Agent not found");
-    try { return mcpManager.listCatalog(agentId); }
+    const pagination = paginationQuerySchema.safeParse(request.query);
+    if (!pagination.success) return invalidRequest(reply, "Invalid pagination");
+    try { return isPagedQuery(request.query) ? mcpManager.listCatalogPage(agentId, pagination.data) : mcpManager.listCatalog(agentId); }
     catch (error) { return handleMcpError(reply, error); }
   });
   app.post<{ Params: { agentId: string; sourceId: string } }>(
@@ -117,7 +130,14 @@ export const registerMcpRoutes = (
   app.get<{ Params: { agentId: string } }>("/agents/:agentId/system-mcp-catalog", (request, reply) => {
     const agentId = parseId(request.params.agentId);
     if (agentId === undefined) return notFound(reply, "Agent not found");
-    try { return providerMcpCatalog.list(agentId); }
+    const pagination = paginationQuerySchema.safeParse(request.query);
+    if (!pagination.success) return invalidRequest(reply, "Invalid pagination");
+    try {
+      const items = providerMcpCatalog.list(agentId);
+      if (!isPagedQuery(request.query)) return items;
+      const filtered = items.filter((item) => item.name.toLowerCase().includes(pagination.data.query?.toLowerCase() ?? ""));
+      return pageResult(filtered.slice((pagination.data.page - 1) * pagination.data.pageSize, pagination.data.page * pagination.data.pageSize), filtered.length, pagination.data);
+    }
     catch (error) {
       if (error instanceof ProviderMcpCatalogError) return notFound(reply, "Agent not found");
       throw error;
@@ -194,6 +214,8 @@ export const registerMcpRoutes = (
   app.post<{ Params: { agentId: string; id: string } }>(
     "/agents/:agentId/mcp-servers/:id/check",
     async (request, reply) => {
+      const pagination = paginationQuerySchema.safeParse(request.query);
+      if (!pagination.success) return invalidRequest(reply, "Invalid pagination");
       const parsed = checkSchema.safeParse(request.body);
       if (!parsed.success) return invalidRequest(reply, "Invalid MCP check input");
       try {
@@ -204,15 +226,33 @@ export const registerMcpRoutes = (
         if (resolved === undefined) return notFound(reply, "MCP server not found");
         const result = await mcpChecker.check(resolved.server, resolved.checkTimeoutMs);
         mcpManager.recordCheckResult(resolved.id, result);
-        return result;
+        if (!isPagedQuery(request.query) || result.status !== "passed") return result;
+        for (const [key, snapshot] of toolSnapshots) if (snapshot.expires <= Date.now()) toolSnapshots.delete(key);
+        while (toolSnapshots.size >= 20) toolSnapshots.delete(toolSnapshots.keys().next().value!);
+        const snapshotId = randomUUID();
+        toolSnapshots.set(snapshotId, { agentId, serverId: id, expires: Date.now() + 10 * 60_000, tools: result.tools ?? [] });
+        return { ...result, snapshotId, tools: toolsPage(result.tools ?? [], pagination.data) };
       } catch (error) { return handleMcpError(reply, error); }
     }
   );
 
+  app.get<{ Params: { agentId: string; id: string } }>("/agents/:agentId/mcp-servers/:id/tools", (request, reply) => {
+    const pagination = paginationQuerySchema.extend({ snapshotId: z.string().min(1) }).safeParse(request.query);
+    if (!pagination.success) return invalidRequest(reply, "Invalid tool snapshot pagination");
+    const agentId = parseId(request.params.agentId);
+    const serverId = parseId(request.params.id);
+    const snapshot = toolSnapshots.get(pagination.data.snapshotId);
+    if (snapshot === undefined || snapshot.expires <= Date.now() || snapshot.agentId !== agentId || snapshot.serverId !== serverId
+      || mcpManager.getServer(agentId!, serverId!) === undefined) return notFound(reply, "Tool snapshot expired; check MCP again");
+    return toolsPage(snapshot.tools, pagination.data);
+  });
+
   app.get<{ Params: { agentId: string } }>("/agents/:agentId/session-parameters", (request, reply) => {
     const agentId = parseId(request.params.agentId);
     if (agentId === undefined) return notFound(reply, "Agent not found");
-    try { return mcpManager.listParameterDefinitions(agentId); }
+    const pagination = paginationQuerySchema.safeParse(request.query);
+    if (!pagination.success) return invalidRequest(reply, "Invalid pagination");
+    try { return isPagedQuery(request.query) ? mcpManager.listParameterDefinitionsPage(agentId, pagination.data) : mcpManager.listParameterDefinitions(agentId); }
     catch (error) { return handleMcpError(reply, error); }
   });
   app.post<{ Params: { agentId: string } }>("/agents/:agentId/session-parameters", (request, reply) => {

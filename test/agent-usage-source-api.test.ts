@@ -32,6 +32,22 @@ const setup = async (usageTokenizers = [fixtureTokenizerConfig()]) => {
 const register = (app: FastifyInstance, payload: unknown) => app.inject({ method: "POST", url: "/api/usage/sources", headers, payload });
 
 describe("usage source management API", () => {
+  it("does not treat scanned unsupported events as actual usage evidence", async () => {
+    const { app, db, session, manager } = await setup([]);
+    await manager.collector.stopRecovery();
+    const runId = Number(db.prepare("INSERT INTO runs(session_id,status,input,created_at) VALUES (?,'succeeded','test',?)")
+      .run(session.id, "2026-09-21T00:00:00.000Z").lastInsertRowid);
+    db.prepare("INSERT INTO events(run_id,seq,type,content_json,created_at) VALUES (?,1,'tool','{}',?)")
+      .run(runId, "2026-09-21T00:00:00.000Z");
+    while (await manager.collector.contentBackfill.step()) { /* finish retained events */ }
+    const response = await app.inject({ url: `/api/usage/summary?sessionId=${session.id}`, headers });
+    expect(response.json()).toMatchObject({ analysisStatus: "ready", hasCapabilityEvidence: true,
+      contentBackfill: { status: "completed", processedEvents: 1 },
+      usage: { totalTokens: null } });
+    manager.collector.runtimeCapabilities.recordTool(runId, { toolCallId: "read", kind: "read", status: "completed", rawOutput: "result" });
+    expect((await app.inject({ url: `/api/usage/summary?sessionId=${session.id}`, headers })).json())
+      .toMatchObject({ analysisStatus: "ready", hasCapabilityEvidence: true });
+  });
   it("filters source listings by Agent and Session at the API boundary", async () => {
     const { app, manager, registration, session } = await setup();
     const registered = await register(app, registration);

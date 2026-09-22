@@ -1030,6 +1030,70 @@ describe("Native webhook ingress", () => {
 });
 
 describe("Integration endpoint API", () => {
+  it("paginates management resources and resolves linked details outside the current page", async () => {
+    const { app, agentId, db, integrationStore } = await createTestApp();
+    const endpoints: number[] = [];
+    for (let index = 0; index < 23; index++) {
+      const created = await app.inject({ method: "POST", url: "/api/integration-endpoints", headers: authHeaders(), payload: validEndpointInput(agentId, `page-${index}`) });
+      endpoints.push(created.json().endpoint.id);
+    }
+    const endpointId = endpoints[0]!;
+    const sessionId = Number(db.prepare(`INSERT INTO sessions (agent_id,title,status,workspace_path,created_at,updated_at)
+      VALUES (?,'pagination','idle','/unused/pagination','2026-09-22','2026-09-22')`).run(agentId).lastInsertRowid);
+    for (let index = 0; index < 23; index++) {
+      const conversation = integrationStore.createConversation({ endpointId, conversationKey: `conversation-${index}`, sessionId });
+      integrationStore.createTask({ endpointId, conversationId: conversation.id, sessionId, requestId: `task-${index}`,
+        requestFingerprint: String(index), message: "fixture", effectivePrompt: "fixture", encryptedParameters: null });
+      integrationStore.createWebhookReceipt(endpointId, { provider: "github", deliveryId: `receipt-${index}`, eventType: "push", fingerprint: String(index), filterVersion: 1, decision: "ignored", reason: "filter_not_matched" });
+      const subscription = integrationStore.createSubscription({ endpointId, name: `subscription-${index}`, url: "https://example.test/hook", enabled: false,
+        eventsJson: '["task.succeeded"]', encryptedHeaders: null, encryptedSigningSecret: "unused", timeoutSeconds: 10 });
+      integrationStore.createDelivery({ eventId: `page-event-${index}`, eventKey: `page-key-${index}`, sequence: index + 1, subscriptionId: subscription.id, taskId: null, eventType: "task.succeeded", payloadJson: "{}", nextAttemptAt: "2099-01-01T00:00:00.000Z" });
+    }
+    for (const path of ["/integration-endpoints", `/integration-endpoints/${endpointId}/conversations`,
+      `/integration-endpoints/${endpointId}/tasks`, `/integration-endpoints/${endpointId}/webhooks`, `/integration-endpoints/${endpointId}/webhook-receiver/receipts`]) {
+      const response = await app.inject({ url: `/api${path}?page=2&pageSize=20`, headers: authHeaders() });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ page: 2, pageSize: 20, total: 23, totalPages: 2 });
+      expect(response.json().items).toHaveLength(3);
+      expect((await app.inject({ url: `/api${path}?page=1&pageSize=101`, headers: authHeaders() })).statusCode).toBe(400);
+      expect((await app.inject({ url: `/api${path}?page=2&pageSize=20` })).statusCode).toBe(401);
+    }
+    expect((await app.inject({ url: `/api/integration-endpoints?page=1&pageSize=20&agentId=999999`, headers: authHeaders() })).json()).toMatchObject({ total: 0, items: [] });
+    expect((await app.inject({ url: `/api/integration-endpoints?page=1&pageSize=20&agentId=${agentId}&query=page-22`, headers: authHeaders() })).json()).toMatchObject({ total: 1, items: [{ id: endpoints[22] }] });
+    const latest = await app.inject({ url: `/api/integration-endpoints/${endpointId}/webhook-deliveries?page=1&pageSize=20&subscriptionPage=2&subscriptionPageSize=20`, headers: authHeaders() });
+    expect(latest.json().latest).toHaveLength(3);
+    expect(latest.json().total).toBe(23);
+    expect(latest.json().items).toHaveLength(20);
+    const page = (await app.inject({ url: `/api/integration-endpoints/${endpointId}/webhooks?page=2&pageSize=20`, headers: authHeaders() })).json();
+    expect(latest.json().latest.map((item: { subscriptionId: number }) => item.subscriptionId).sort()).toEqual(page.items.map((item: { id: number }) => item.id).sort());
+    const conversation = integrationStore.listConversations(endpointId)[0]!;
+    expect((await app.inject({ url: `/api/integration-conversations/${conversation.id}`, headers: authHeaders() })).json())
+      .toMatchObject({ id: conversation.id, conversationKey: "conversation-0" });
+    expect((await app.inject({ url: `/api/integration-endpoints/${endpointId}/summary`, headers: authHeaders() })).json())
+      .toMatchObject({ id: endpointId, activeConversationCount: 23, queuedTaskCount: 23 });
+  });
+  it("pages endpoint parameters and preserves mappings outside a partial update", async () => {
+    const { app, agentId, db } = await createTestApp();
+    for (let index = 0; index < 23; index++) db.prepare(`INSERT INTO agent_session_parameters (agent_id,key,label,required,secret,created_at,updated_at) VALUES (?,?,?,0,0,?,?)`)
+      .run(agentId, `parameter-${index}`, `Parameter ${index}`, "2026-09-22", "2026-09-22");
+    const mappings = Array.from({ length: 23 }, (_, index) => ({ parameterKey: `parameter-${index}`, source: "request", requestKey: `request-${index}` }));
+    const created = await app.inject({ method: "POST", url: "/api/integration-endpoints", headers: authHeaders(), payload: { ...validEndpointInput(agentId), parameterMappings: mappings } });
+    const endpointId = created.json().endpoint.id;
+    const page = await app.inject({ url: `/api/integration-endpoints/${endpointId}/parameters?page=2&pageSize=20`, headers: authHeaders() });
+    expect(page.statusCode).toBe(200);
+    expect(page.json()).toMatchObject({ total: 23, page: 2, items: [
+      { key: "parameter-20", mapping: { requestKey: "request-20" } }, { key: "parameter-21" }, { key: "parameter-22" }
+    ] });
+    const updated = await app.inject({ method: "PATCH", url: `/api/integration-endpoints/${endpointId}?includeMappings=false`, headers: authHeaders(), payload: {
+      parameterMappingKeys: ["parameter-20", "parameter-21"], parameterMappings: [{ parameterKey: "parameter-20", source: "request", requestKey: "changed" }]
+    } });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json().parameterMappings).toEqual([]);
+    const detail = (await app.inject({ url: `/api/integration-endpoints/${endpointId}`, headers: authHeaders() })).json();
+    expect(detail.parameterMappings).toHaveLength(22);
+    expect(detail.parameterMappings).toEqual(expect.arrayContaining([mappings[0], mappings[22], { parameterKey: "parameter-20", source: "request", requestKey: "changed" }]));
+    expect((await app.inject({ url: `/api/integration-endpoints/${endpointId}?includeMappings=false`, headers: authHeaders() })).json().parameterMappings).toEqual([]);
+  });
   it("管理端创建 Endpoint 且 Token 只返回一次", async () => {
     const { app, agentId } = await createTestApp();
     const unauthenticated = await app.inject({

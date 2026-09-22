@@ -1,3 +1,4 @@
+import { isPagedQuery, paginationQuerySchema } from "../pagination.js";
 import { join } from "node:path";
 
 import type { FastifyInstance, FastifyReply } from "fastify";
@@ -56,7 +57,34 @@ export const registerProjectEnvironmentRoutes = (
     };
   };
 
-  app.get("/project-environments", () => store.list().map(presentEnvironment));
+  const presentSummary = (environment: NonNullable<ReturnType<ProjectEnvironmentStore["getSummary"]>>) => ({
+    ...environment, workspacePath: environment.currentRevision?.workspacePath ?? null, sync: scheduler.getState(environment.id)
+  });
+  app.get("/project-environments", (request, reply) => {
+    const parsed = paginationQuerySchema.extend({ ready: z.enum(["true", "false"]).optional().transform((value) => value === "true") }).safeParse(request.query);
+    if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid pagination");
+    if (!isPagedQuery(request.query)) return store.list().map(presentEnvironment);
+    const page = store.listPage(parsed.data);
+    return { ...page, items: page.items.map(presentSummary) };
+  });
+  app.get<{ Params: { id: string } }>("/project-environments/:id/summary", (request, reply) => {
+    const id = parseId(request.params.id);
+    const environment = id === undefined ? undefined : store.getSummary(id);
+    return environment === undefined ? sendError(reply, 404, "not_found", "Project environment not found") : presentSummary(environment);
+  });
+  for (const resource of ["repositories", "revisions"] as const) {
+    app.get<{ Params: { id: string } }>(`/project-environments/:id/${resource}`, (request, reply) => {
+      const pagination = paginationQuerySchema.safeParse(request.query);
+      if (!pagination.success) return sendError(reply, 400, "invalid_request", "Invalid pagination");
+      const id = parseId(request.params.id);
+      const environment = id === undefined ? undefined : store.getSummary(id);
+      if (environment === undefined) return sendError(reply, 404, "not_found", "Project environment not found");
+      if (resource === "revisions") return store.listRevisionsPage(environment.id, pagination.data);
+      const page = store.listRepositoriesPage(environment.id, pagination.data);
+      const workspacePath = environment.currentRevision?.workspacePath ?? null;
+      return { ...page, items: page.items.map((repository) => ({ ...repository, workspacePath: workspacePath === null ? null : join(workspacePath, repository.name) })) };
+    });
+  }
 
   app.post("/project-environments", (request, reply) => {
     const parsed = environmentSchema.safeParse(request.body);

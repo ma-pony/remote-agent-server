@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { SkillManager } from "../src/skills/skill-manager.js";
 import { SkillSourceManager } from "../src/skills/skill-source-manager.js";
@@ -49,6 +49,28 @@ it("authenticates source management and explicitly applies a previewed revision 
     const history = (await app.inject({ url: `${base}/revisions`, headers })).json();
     expect(history.currentRevision).toBe(enabled.currentRevision);
     expect(history.latestRevision).not.toBe(history.currentRevision);
+    const sourcePage = (await app.inject({url: "/api/skill-sources?page=1&pageSize=1&query=Reviews", headers})).json();
+    expect(sourcePage).toMatchObject({page: 1, pageSize: 1, total: 1, items: [expect.objectContaining({id: source.id})]});
+    const historyReads = vi.spyOn(skills, "revisionHistory");
+    const revisionPage = (await app.inject({url: `${base}/revisions?page=2&pageSize=1`, headers})).json();
+    expect(revisionPage).toMatchObject({page: 2, pageSize: 1, total: 2, currentRevision: history.currentRevision});
+    expect(revisionPage.items[0].revision).toBe(history.currentRevision);
+    await app.inject({url: `${base}/revisions?page=1&pageSize=1`, headers});
+    expect(historyReads).toHaveBeenCalledTimes(1);
+    const diffReads = vi.spyOn(skills, "diff");
+
+    const diffPage = (await app.inject({url: `${base}/diff?revision=${history.latestRevision}&page=1&pageSize=1`, headers})).json();
+    expect(diffPage).toMatchObject({page: 1, pageSize: 1, total: 1, items: [expect.objectContaining({path: "SKILL.md"})]});
+    expect(diffPage).not.toHaveProperty("files");
+    await app.inject({url: `${base}/diff?revision=${history.latestRevision}&page=2&pageSize=1`, headers});
+    expect(diffReads).toHaveBeenCalledTimes(1);
+    expect((await app.inject({url: `/api/skill-sources/${source.id}/warnings?page=1&pageSize=1`, headers})).json())
+      .toMatchObject({items: [], total: 0});
+    expect(sourcePage.items[0]).toMatchObject({warningCount: 0});
+    expect(sourcePage.items[0]).not.toHaveProperty("warnings");
+
+    expect((await app.inject({url: `${base}/revisions?pageSize=101`, headers})).statusCode).toBe(400);
+
     const diff = (await app.inject({ url: `${base}/diff?revision=${history.latestRevision}`, headers })).json();
     expect(diff.files[0]).toMatchObject({ path: "SKILL.md", preview: "text" });
     expect(diff.files[0]).not.toHaveProperty("after");

@@ -1,3 +1,4 @@
+import type { PaginationQuery } from "../pagination.js";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -105,7 +106,8 @@ export type CreateSessionInput = {
   mcpParameters: Record<string, string | null>;
 };
 export type SessionWithMcpStatus = Session & SessionMcpStatus;
-export type SessionListItemWithMcpStatus = SessionListItem & SessionMcpStatus;
+export type SessionMcpSummary = { mcpParametersValid: boolean; missingMcpParameterCount: number };
+export type SessionListItemWithMcpStatus = SessionListItem & SessionMcpSummary;
 export type SessionRuntimeContext = { agent: Agent; session: Session };
 export type ListSessionsInput = {
   page: number;
@@ -113,6 +115,7 @@ export type ListSessionsInput = {
   query?: string;
   agentId?: number;
   status?: SessionStatus;
+  storage?: "active";
 };
 
 export class SessionManagerError extends Error {
@@ -318,6 +321,7 @@ export class SessionManager {
         ON endpoint.id = COALESCE(latest_task.endpoint_id, conversation.endpoint_id)
     `;
     const clauses: string[] = [];
+    if (input.storage === "active") clauses.push("session.storage_cleaned_at IS NULL");
     const parameters: Array<string | number> = [];
     if (input.agentId !== undefined) {
       clauses.push("session.agent_id = ?");
@@ -356,7 +360,7 @@ export class SessionManager {
       LIMIT ? OFFSET ?
     `).all(...parameters, input.pageSize, (input.page - 1) * input.pageSize) as SessionListRow[];
     const sessions = rows.map(toSessionListItem);
-    const statuses = this.mcpManager.getSessionsStatus(sessions.map(({ id, agentId }) => ({ id, agentId })));
+    const statuses = this.mcpManager.getSessionsStatusSummary(sessions.map(({ id, agentId }) => ({ id, agentId })));
     return {
       items: sessions.map((session) => ({ ...session, ...statuses.get(session.id)! })),
       page: input.page,
@@ -374,6 +378,16 @@ export class SessionManager {
     return row === undefined ? undefined : this.withMcpStatus(toSession(row));
   }
 
+  getSummary(id: number): (Session & SessionMcpSummary) | undefined {
+    const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
+    if (row === undefined) return undefined;
+    return { ...toSession(row), ...this.mcpManager.getSessionsStatusSummary([{ id, agentId: row.agent_id }]).get(id)! };
+  }
+
+  parameterPage(id: number, pagination: PaginationQuery) {
+    return this.mcpManager.getSessionParametersPage(id, pagination);
+  }
+
   /** Replaces all MCP values after a caller claims a Session in its own transaction. */
   replaceMcpParametersInTransaction(id: number, values: Record<string, string | null>): void {
     if (!this.db.inTransaction) throw new Error("session_mcp_transaction_required");
@@ -388,7 +402,7 @@ export class SessionManager {
   }
 
   /** Updates only the supplied MCP parameter values while the Session is idle. */
-  updateMcpParameters(id: number, values: Record<string, string | null>): SessionWithMcpStatus {
+  updateMcpParameters(id: number, values: Record<string, string | null>, includeParameters = true): SessionWithMcpStatus | (Session & SessionMcpSummary) {
     return this.inImmediateTransaction(() => {
       const row = this.db.prepare("SELECT * FROM sessions WHERE id = ?").get(id) as SessionRow | undefined;
       if (row === undefined) throw new SessionManagerError("session_not_found");
@@ -399,7 +413,7 @@ export class SessionManager {
       if (row.status !== "idle" || active !== undefined) throw new SessionManagerError("session_busy");
       const normalized = this.mcpManager.normalizeSessionValues(row.agent_id, values, false);
       this.mcpManager.applySessionValuePatchInTransaction(id, normalized);
-      return this.withMcpStatus(toSession(row));
+      return includeParameters ? this.withMcpStatus(toSession(row)) : this.getSummary(id)!;
     });
   }
 
@@ -491,9 +505,9 @@ export class SessionManager {
   /**
    * Resets the Provider's persisted runtime state, then clears the recorded ID.
    */
-  async resetProviderSession(id: number): Promise<Session> {
+  async resetProviderSession(id: number, includeParameters = true): Promise<Session> {
     return this.withMaintenance(id, async () => {
-      const session = this.get(id);
+      const session = this.getSummary(id);
       if (session === undefined) throw new SessionManagerError("session_not_found");
       if (session.storageCleanedAt !== null) throw new SessionManagerError("session_storage_cleaned");
       const agent = this.agentManager.get(session.agentId);
@@ -506,7 +520,7 @@ export class SessionManager {
           await completeSessionMaintenance({
             db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner, usageCollector: this.usageCollector
           }, id, "reset");
-          return this.get(id)!;
+          return includeParameters ? this.get(id)! : this.getSummary(id)!;
         } catch (error) {
           throw new SessionManagerError("runtime_reset_failed", { cause: error });
         }
@@ -532,7 +546,7 @@ export class SessionManager {
         await completeSessionMaintenance({
           db: this.db, workspaceManager: this.workspaceManager, providerSessionCleaner: this.providerSessionCleaner, usageCollector: this.usageCollector
         }, id, "reset");
-        return this.get(id)!;
+        return includeParameters ? this.get(id)! : this.getSummary(id)!;
       } catch (error) {
         throw new SessionManagerError("runtime_reset_failed", { cause: error });
       }

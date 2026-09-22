@@ -14,6 +14,16 @@ const setup = () => {
 };
 
 describe("MCP usage observer ownership", () => {
+  it("persists default argument and result estimates independently of model context capture", () => {
+    const { session, host, observer } = setup();
+    const token = observer.issueTicket(session.id, 7), invocationId = randomUUID();
+    observer.record(token, { invocationId, toolName: "search", phase: "start", occurredAt: "2026-09-21T01:00:00Z",
+      argumentContent: { tokens: 3, byteLength: 12, partial: false } });
+    observer.record(token, { invocationId, toolName: "search", phase: "end", occurredAt: "2026-09-21T01:00:01Z",
+      status: "succeeded", resultBytes: 100, resultContent: { tokens: 8, byteLength: 32, partial: false } });
+    expect(host.attribution.rankings({}, "mcp_tool")[0]).toMatchObject({ calls: 1, observedArgumentTokens: 3,
+      observedResultTokens: 8, observedTotalTokens: 11, totalInputTokens: null });
+  });
   it("completes calls without reading historical attribution details", () => {
     const { session, host, observer } = setup();
     const token = observer.issueTicket(session.id, 7), invocationId = randomUUID();

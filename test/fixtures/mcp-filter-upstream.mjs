@@ -25,7 +25,7 @@ server.setRequestHandler("tools/list", async () => ({
   ]
 }));
 server.setRequestHandler("tools/call", async (request) => ({
-  content: [{ type: "text", text: request.params.name }]
+  content: [{ type: "text", text: process.env.MCP_TEST_RESULT_TEXT ?? request.params.name }]
 }));
 server.setRequestHandler("resources/list", async () => ({
   resources: [{ uri: "docs://guide", name: "Guide", mimeType: "text/plain" }]

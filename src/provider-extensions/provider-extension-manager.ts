@@ -1,3 +1,4 @@
+import { pageResult, type PaginationQuery } from "../pagination.js";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
@@ -245,6 +246,13 @@ export class ProviderExtensionManager {
       if (left.kind !== right.kind) return left.kind === "plugin" ? -1 : 1;
       return left.name.localeCompare(right.name) || left.id.localeCompare(right.id);
     });
+  }
+
+  listPage(agentId: number, input: PaginationQuery) {
+    // Discovery is cached by the provider; only lightweight catalog metadata is paged here.
+    const items = this.list(agentId).filter(item => `${item.name} ${item.description} ${item.kind}`.toLowerCase().includes(input.query?.toLowerCase() ?? ""));
+    const offset = (input.page - 1) * input.pageSize;
+    return pageResult(items.slice(offset, offset + input.pageSize), items.length, input);
   }
 
   setEnabled(agentId: number, id: string, enabled: boolean): ProviderExtensionCatalogItem | undefined {

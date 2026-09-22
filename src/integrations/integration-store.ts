@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
 import { insertedId } from "../db.js";
+import { pageResult } from "../pagination.js";
 import type { Page, Run, RunStatus } from "../domain.js";
 import type {
   IntegrationConversation,
@@ -217,6 +218,8 @@ export type ListWebhookDeliveriesInput = {
   status?: WebhookDeliveryStatus;
   subscriptionId?: number;
   taskId?: number;
+  subscriptionPage?: number;
+  subscriptionPageSize?: number;
 };
 
 export type WebhookDeliveryPage = Page<WebhookDelivery> & { latest: WebhookDelivery[] };
@@ -391,7 +394,12 @@ export class IntegrationStore {
     return this.getWebhookReceipt(endpointId, receipt.provider, receipt.deliveryId)!;
   }
 
-  listWebhookReceipts(endpointId: number): WebhookReceiptDetail[] {
+  listWebhookReceiptsPage(endpointId: number, input: { page: number; pageSize: number }): Page<WebhookReceiptDetail> {
+    const total = (this.db.prepare("SELECT COUNT(*) AS total FROM integration_webhook_receipts WHERE endpoint_id = ?").get(endpointId) as { total: number }).total;
+    return pageResult(this.listWebhookReceipts(endpointId, input), total, input);
+  }
+
+  listWebhookReceipts(endpointId: number, input?: { page: number; pageSize: number }): WebhookReceiptDetail[] {
     return (this.db.prepare(`SELECT receipt.id, receipt.provider, receipt.delivery_id AS deliveryId,
       receipt.event_type AS eventType, receipt.filter_version AS filterVersion, receipt.decision,
       receipt.reason, receipt.created_at AS createdAt, task.id AS taskId, receipt.batch_id AS batchId,
@@ -400,8 +408,8 @@ export class IntegrationStore {
       LEFT JOIN integration_webhook_batches batch ON batch.id = receipt.batch_id
       LEFT JOIN integration_tasks task ON task.endpoint_id = receipt.endpoint_id
         AND task.request_id = COALESCE(batch.request_id, receipt.provider || ':' || receipt.delivery_id)
-      WHERE receipt.endpoint_id = ? ORDER BY receipt.id DESC LIMIT 30
-    `).all(endpointId) as (Omit<WebhookReceiptDetail, "scheduledAt"> & { dueAt: number | null })[])
+      WHERE receipt.endpoint_id = ? ORDER BY receipt.id DESC LIMIT ? OFFSET ?
+    `).all(endpointId, input?.pageSize ?? 30, input ? (input.page - 1) * input.pageSize : 0) as (Omit<WebhookReceiptDetail, "scheduledAt"> & { dueAt: number | null })[])
       .map(({ dueAt, ...receipt }) => ({ ...receipt, scheduledAt: dueAt === null ? null : new Date(dueAt).toISOString() }));
   }
 
@@ -491,8 +499,19 @@ export class IntegrationStore {
     return (this.db.prepare("SELECT * FROM integration_endpoints ORDER BY created_at ASC, id ASC").all() as EndpointRow[]).map(toEndpoint);
   }
 
+  listEndpointsPage(input: { page: number; pageSize: number; query?: string; agentId?: number }): Page<IntegrationEndpoint> {
+    const query = `%${input.query?.trim() ?? ""}%`;
+    const where = `(name LIKE ? OR slug LIKE ?)${input.agentId === undefined ? "" : " AND agent_id = ?"}`;
+    const params = [query, query, ...(input.agentId === undefined ? [] : [input.agentId])];
+    const total = (this.db.prepare(`SELECT COUNT(*) AS count FROM integration_endpoints WHERE ${where}`).get(...params) as { count: number }).count;
+    const items = (this.db.prepare(`SELECT id,name,slug,agent_id,enabled,prompt_prefix,'[]' AS parameter_mappings_json,created_at,updated_at FROM integration_endpoints WHERE ${where}
+      ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`).all(...params, input.pageSize, (input.page - 1) * input.pageSize) as EndpointRow[]).map(toEndpoint);
+    return pageResult(items, total, input);
+  }
+
   /** Aggregates management counters and one latest Task per Endpoint without materializing history. */
-  listEndpointManagementSummaries(): EndpointManagementSummary[] {
+  listEndpointManagementSummaries(endpointIds?: number[]): EndpointManagementSummary[] {
+    if (endpointIds?.length === 0) return [];
     const rows = this.db.prepare(`
       SELECT endpoint.id AS endpoint_id,
         (SELECT COUNT(*) FROM integration_conversations conversation
@@ -511,8 +530,9 @@ export class IntegrationStore {
         WHERE recent.endpoint_id = endpoint.id
         ORDER BY recent.created_at DESC, recent.id DESC LIMIT 1
       )
+      ${endpointIds === undefined ? "" : `WHERE endpoint.id IN (${endpointIds.map(() => "?").join(",")})`}
       ORDER BY endpoint.created_at ASC, endpoint.id ASC
-    `).all() as EndpointManagementSummaryRow[];
+    `).all(...(endpointIds ?? [])) as EndpointManagementSummaryRow[];
     return rows.map((row) => ({
       endpointId: row.endpoint_id,
       activeConversationCount: row.active_conversation_count,
@@ -526,6 +546,12 @@ export class IntegrationStore {
         createdAt: row.latest_task_created_at!
       }
     }));
+  }
+
+  getEndpointWithoutMappings(id: number): IntegrationEndpoint | undefined {
+    const row = this.db.prepare(`SELECT id,name,slug,agent_id,enabled,prompt_prefix,'[]' AS parameter_mappings_json,created_at,updated_at
+      FROM integration_endpoints WHERE id=?`).get(id) as EndpointRow | undefined;
+    return row ? toEndpoint(row) : undefined;
   }
 
   getEndpoint(id: number): IntegrationEndpoint | undefined {
@@ -623,6 +649,13 @@ export class IntegrationStore {
     `).all(endpointId) as ConversationRow[]).map(toConversation);
   }
 
+  listConversationsPage(endpointId: number, input: { page: number; pageSize: number }): Page<IntegrationConversation> {
+    const total = (this.db.prepare("SELECT COUNT(*) AS count FROM integration_conversations WHERE endpoint_id = ?").get(endpointId) as { count: number }).count;
+    const items = (this.db.prepare(`SELECT * FROM integration_conversations WHERE endpoint_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+      .all(endpointId, input.pageSize, (input.page - 1) * input.pageSize) as ConversationRow[]).map(toConversation);
+    return pageResult(items, total, input);
+  }
+
   getActiveConversation(endpointId: number, conversationKey: string): IntegrationConversation | undefined {
     const row = this.db.prepare(`
       SELECT * FROM integration_conversations
@@ -674,6 +707,13 @@ export class IntegrationStore {
     return (this.db.prepare(`
       SELECT * FROM integration_tasks WHERE endpoint_id = ? ORDER BY created_at ASC, id ASC
     `).all(endpointId) as TaskRow[]).map(this.toTask);
+  }
+
+  listTasksPage(endpointId: number, input: { page: number; pageSize: number }): Page<IntegrationTask> {
+    const total = (this.db.prepare("SELECT COUNT(*) AS count FROM integration_tasks WHERE endpoint_id = ?").get(endpointId) as { count: number }).count;
+    const items = (this.db.prepare(`SELECT * FROM integration_tasks WHERE endpoint_id = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+      .all(endpointId, input.pageSize, (input.page - 1) * input.pageSize) as TaskRow[]).map(this.toTask);
+    return pageResult(items, total, input);
   }
 
   getTask(id: number): IntegrationTask | undefined {
@@ -929,6 +969,14 @@ export class IntegrationStore {
     `).all(endpointId) as SubscriptionRow[]).map(toSubscription);
   }
 
+  listSubscriptionsPage(endpointId: number, input: { page: number; pageSize: number; query?: string }): Page<WebhookSubscription> {
+    const query = `%${input.query?.trim() ?? ""}%`;
+    const total = (this.db.prepare("SELECT COUNT(*) AS count FROM webhook_subscriptions WHERE endpoint_id = ? AND name LIKE ?").get(endpointId, query) as { count: number }).count;
+    const items = (this.db.prepare(`SELECT * FROM webhook_subscriptions WHERE endpoint_id = ? AND name LIKE ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`)
+      .all(endpointId, query, input.pageSize, (input.page - 1) * input.pageSize) as SubscriptionRow[]).map(toSubscription);
+    return pageResult(items, total, input);
+  }
+
   getSubscription(id: number): WebhookSubscription | undefined {
     const row = this.subscriptionRow(id);
     return row === undefined ? undefined : toSubscription(row);
@@ -1040,16 +1088,16 @@ export class IntegrationStore {
     // Look up one indexed head per subscription, not once per historical delivery.
     const latest = (this.db.prepare(`
       SELECT delivery.*
-      FROM webhook_subscriptions subscription
+      FROM (SELECT * FROM webhook_subscriptions WHERE endpoint_id = ?
+        ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?) subscription
       JOIN webhook_deliveries delivery ON delivery.id = (
         SELECT recent.id FROM webhook_deliveries recent
         WHERE recent.subscription_id = subscription.id
         ORDER BY recent.created_at DESC, recent.id DESC
         LIMIT 1
       )
-      WHERE subscription.endpoint_id = ?
       ORDER BY delivery.created_at DESC, delivery.id DESC
-    `).all(endpointId) as DeliveryRow[]).map(toDelivery);
+    `).all(endpointId, input.subscriptionPageSize ?? 20, ((input.subscriptionPage ?? 1) - 1) * (input.subscriptionPageSize ?? 20)) as DeliveryRow[]).map(toDelivery);
     return {
       items,
       latest,

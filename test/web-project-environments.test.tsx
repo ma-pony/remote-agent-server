@@ -15,6 +15,7 @@ const environment = {
   id: "environment-1", name: "示例平台", currentRevisionId: "revision-1", lastCheckedAt: now,
   workspacePath: revision.workspacePath,
   sync: { status: "idle" as const, automatic: true as const, intervalMs: 10_800_000, nextScheduledAt: "2026-08-13T03:00:00.000Z" },
+  repositoryCount: 1,
   repositories: [{
     id: "repository-1", projectEnvironmentId: "environment-1", name: "example-service",
     gitUrl: "git@example.test:team/example-service.git", prepareCommand: "bundle install",
@@ -29,7 +30,10 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/project-environments");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/project-environments") return response([environment]);
+    if (url === "/api/project-environments?page=1&pageSize=20") return response({ items: [environment], page: 1, pageSize: 20, total: 21, totalPages: 2 });
+    if (url === "/api/project-environments?page=2&pageSize=20") return response({ items: [{ ...environment, id: "second", name: "第二页环境" }], page: 2, pageSize: 20, total: 21, totalPages: 2 });
+    if (url.includes("/repositories?page=")) return response({ items: environment.repositories, page: 1, pageSize: 20, total: 1, totalPages: 1 });
+    if (url.includes("/revisions?page=")) return response({ items: [revision], page: 1, pageSize: 20, total: 1, totalPages: 1 });
     throw new Error(`Unexpected request: ${url}`);
   }));
 });
@@ -48,8 +52,10 @@ it("展示整个项目环境的同步计划和路径，并可立即同步", asyn
   window.history.replaceState({}, "", `/project-environments/${environment.id}`);
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/project-environments/${environment.id}` && (init?.method ?? "GET") === "GET") return response(environment);
+    if (url === `/api/project-environments/${environment.id}/summary` && (init?.method ?? "GET") === "GET") return response(environment);
     if (url === `/api/project-environments/${environment.id}/sync` && init?.method === "POST") return response({ accepted: true });
+    if (url.includes("/repositories?page=")) return response({ items: environment.repositories, page: 1, pageSize: 20, total: 1, totalPages: 1 });
+    if (url.includes("/revisions?page=")) return response({ items: [revision], page: 1, pageSize: 20, total: 1, totalPages: 1 });
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -70,7 +76,9 @@ it("项目列表展示实际路径并说明随环境整体同步", async () => {
   window.history.replaceState({}, "", `/project-environments/${environment.id}/repositories`);
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/project-environments/${environment.id}`) return response(environment);
+    if (url === `/api/project-environments/${environment.id}/summary`) return response(environment);
+    if (url.includes("/repositories?page=")) return response({ items: environment.repositories, page: 1, pageSize: 20, total: 1, totalPages: 1 });
+    if (url.includes("/revisions?page=")) return response({ items: [revision], page: 1, pageSize: 20, total: 1, totalPages: 1 });
     throw new Error(`Unexpected request: ${url}`);
   }));
 
@@ -85,11 +93,22 @@ it("同步排队时禁止重复触发", async () => {
   const queued = { ...environment, sync: { ...environment.sync, status: "queued" as const } };
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/project-environments/${environment.id}`) return response(queued);
+    if (url === `/api/project-environments/${environment.id}/summary`) return response(queued);
+    if (url.includes("/repositories?page=")) return response({ items: environment.repositories, page: 1, pageSize: 20, total: 1, totalPages: 1 });
+    if (url.includes("/revisions?page=")) return response({ items: [revision], page: 1, pageSize: 20, total: 1, totalPages: 1 });
     throw new Error(`Unexpected request: ${url}`);
   }));
 
   render(<App />);
 
   expect(await screen.findByRole("button", { name: "等待同步" })).toBeDisabled();
+});
+
+it("只在翻页时加载下一页环境", async () => {
+  render(<App />);
+  await screen.findByRole("link", { name: "示例平台" });
+  expect(screen.queryByText("第二页环境")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  expect(await screen.findByRole("link", { name: "第二页环境" })).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "示例平台" })).not.toBeInTheDocument();
 });

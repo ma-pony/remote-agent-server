@@ -65,7 +65,7 @@ it("错误 API 令牌不能进入管理台或写入浏览器会话", async () =>
 it("验证正确 API 令牌后才进入管理台并保存令牌", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     if (String(input) === "/api/auth/verify") return new Response(null, { status: 204 });
-    return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+    return new Response(JSON.stringify({items: [], page: 1, pageSize: 20, total: 0, totalPages: 0}), { status: 200, headers: { "content-type": "application/json" } });
   });
   vi.stubGlobal("fetch", fetchMock);
 
@@ -94,7 +94,7 @@ it("启动时清除浏览器中已经失效的 API 令牌", async () => {
 
 it("控制台导航和页面随语言切换，并在中文模式下使用完整中文名称", async () => {
   sessionStorage.setItem("apiToken", "test-token");
-  vi.stubGlobal("fetch", vi.fn(async () => new Response("[]", {
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({items: [], page: 1, pageSize: 20, total: 0, totalPages: 0}), {
     status: 200,
     headers: { "content-type": "application/json" }
   })));

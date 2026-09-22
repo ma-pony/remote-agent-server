@@ -3,6 +3,7 @@ import { isAbsolute, delimiter, join } from "node:path";
 
 import type Database from "better-sqlite3";
 import { insertedId } from "../db.js";
+import { pageResult, type PaginationQuery } from "../pagination.js";
 
 import type { SecretStore } from "./secret-store.js";
 import type {
@@ -160,6 +161,43 @@ export class McpManager {
     return (this.db.prepare(
       "SELECT * FROM agent_mcp_servers WHERE agent_id = ? ORDER BY created_at ASC, id ASC"
     ).all(agentId) as McpServerRow[]).map(toSummary);
+  }
+
+  listServersPage(agentId: number, pagination: PaginationQuery) {
+    this.requireAgent(agentId);
+    const query = pagination.query ?? "";
+    const where = "agent_id = ? AND instr(lower(name), lower(?)) > 0";
+    const total = (this.db.prepare(`SELECT count(*) AS total FROM agent_mcp_servers WHERE ${where}`).get(agentId, query) as { total: number }).total;
+    const rows = this.db.prepare(`SELECT * FROM agent_mcp_servers WHERE ${where} ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`)
+      .all(agentId, query, pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as McpServerRow[];
+    return pageResult(rows.map(toSummary), total, pagination);
+  }
+
+  listParameterDefinitionsPage(agentId: number, pagination: PaginationQuery) {
+    this.requireAgent(agentId);
+    const query = pagination.query ?? "";
+    const where = "agent_id = ? AND (instr(lower(key), lower(?)) > 0 OR instr(lower(label), lower(?)) > 0)";
+    const total = (this.db.prepare(`SELECT count(*) AS total FROM agent_session_parameters WHERE ${where}`).get(agentId, query, query) as { total: number }).total;
+    const rows = this.db.prepare(`SELECT * FROM agent_session_parameters WHERE ${where} ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?`)
+      .all(agentId, query, query, pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as SessionParameterRow[];
+    return pageResult(rows.map(toParameter), total, pagination);
+  }
+
+  listCatalogPage(agentId: number, pagination: PaginationQuery) {
+    this.requireAgent(agentId);
+    const where = `server.source_mcp_server_id IS NULL AND server.agent_id <> ?
+      AND NOT EXISTS (SELECT 1 FROM agent_mcp_servers installed WHERE installed.agent_id = ?
+        AND (installed.source_mcp_server_id = server.id OR installed.name = server.name))
+      AND (instr(lower(server.name), lower(?)) > 0 OR instr(lower(agent.name), lower(?)) > 0)`;
+    const params = [agentId, agentId, pagination.query ?? "", pagination.query ?? ""];
+    const from = "FROM agent_mcp_servers server JOIN agents agent ON agent.id = server.agent_id";
+    const total = (this.db.prepare(`SELECT count(*) AS total ${from} WHERE ${where}`).get(...params) as { total: number }).total;
+    const items = this.db.prepare(`SELECT server.id, server.name, server.transport,
+      server.check_timeout_seconds AS checkTimeoutSeconds, server.agent_id AS sourceAgentId,
+      agent.name AS sourceAgentName ${from} WHERE ${where}
+      ORDER BY server.created_at ASC, server.id ASC LIMIT ? OFFSET ?`)
+      .all(...params, pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as SharedMcpServerSummary[];
+    return pageResult(items, total, pagination);
   }
 
   listCatalog(agentId: number): SharedMcpServerSummary[] {
@@ -513,6 +551,27 @@ export class McpManager {
         now
       );
     }
+  }
+
+  getSessionParametersPage(sessionId: number, pagination: PaginationQuery) {
+    const session = this.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: number } | undefined;
+    if (session === undefined) return undefined;
+    const definitions = this.listParameterDefinitionsPage(session.agent_id, pagination);
+    const rows = definitions.items.length === 0 ? [] : this.db.prepare(`
+      SELECT parameter_id, plain_value, NULL AS encrypted_value FROM session_mcp_parameter_values
+      WHERE session_id = ? AND parameter_id IN (${definitions.items.map(() => "?").join(",")})
+    `).all(sessionId, ...definitions.items.map((item) => item.id)) as SessionValueRow[];
+    return { ...definitions, items: this.buildSessionStatus(definitions.items, rows).mcpParameters };
+  }
+
+  getSessionsStatusSummary(sessions: Array<{ id: number; agentId: number }>) {
+    if (sessions.length === 0) return new Map<number, { mcpParametersValid: boolean; missingMcpParameterCount: number }>();
+    const rows = this.db.prepare(`SELECT s.id, COUNT(p.id) AS missing
+      FROM sessions s LEFT JOIN agent_session_parameters p ON p.agent_id = s.agent_id AND p.required = 1
+        AND NOT EXISTS (SELECT 1 FROM session_mcp_parameter_values v WHERE v.session_id = s.id AND v.parameter_id = p.id)
+      WHERE s.id IN (${sessions.map(() => "?").join(",")}) GROUP BY s.id`)
+      .all(...sessions.map((session) => session.id)) as Array<{ id: number; missing: number }>;
+    return new Map(rows.map((row) => [row.id, { mcpParametersValid: row.missing === 0, missingMcpParameterCount: row.missing }]));
   }
 
   getSessionStatus(sessionId: number): SessionMcpStatus {

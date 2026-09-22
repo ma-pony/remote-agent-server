@@ -36,6 +36,18 @@ afterEach(() => {
 });
 
 describe("SkillManager", () => {
+  it("pages searchable catalog metadata and retains an enabled Skill outside the current page", () => {
+    const root = makeRoot();
+    for (let i = 0; i < 5; i++) writeSkill(join(root, "codex", `skill-${i}`), `skill-${i}`, "Searchable catalog");
+    const manager = new SkillManager({dataDir: join(root, "data"), roots: rootsFor(root)});
+    const selected = manager.list(1)[0]!;
+    manager.setEnabled(1, selected.id, true);
+    const result = manager.listPage(1, {page: 2, pageSize: 2, query: "searchable"});
+    expect(result).toMatchObject({page: 2, pageSize: 2, total: 5, totalPages: 3});
+    expect(result.items.map(item => item.name)).toEqual(["skill-2", "skill-3"]);
+    expect(manager.listPage(1, {page: 1, pageSize: 1}).items[0]).toMatchObject({id: selected.id, enabled: true});
+  });
+
   it("扫描主机和插件 Skills，读取描述并按来源优先级去重", () => {
     const root = makeRoot();
     writeSkill(join(root, "codex", "review"), "code-review", "Codex review skill");

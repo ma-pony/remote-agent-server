@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { pagedManagementResponse } from "./paged-management-response.js";
 
 import "@testing-library/jest-dom/vitest";
 
@@ -77,13 +78,14 @@ it("在 Session 累计区展示执行器上报的精确累计用量", async () =
   ];
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/sessions/session-usage") return response({
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/session-usage") return pagedManagementResponse(url, {
       id: "session-usage", agentId: agent.id, title: "用量会话", status: "idle",
       providerSessionId: null, workspacePath: "/tmp/session", projectEnvironmentRevisionId: null,
       instructionsSnapshot: "", createdAt: now, updatedAt: now, runs, usageSummary: summary
     });
-    if (url === "/api/agents") return response([agent]);
-    if (url.endsWith("/events?afterSeq=0")) return response([]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+    if (url.endsWith("/events?afterSeq=0&limit=100")) return pagedManagementResponse(url, []);
     throw new Error(`Unexpected request: ${url}`);
   }));
 
@@ -137,15 +139,16 @@ it("终态事件后读取 canonical Run 和 Session 并刷新用量", async () =
   let canonicalReads = 0;
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === "/api/sessions/session-live") {
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === "/api/sessions/session-live") {
       sessionReads += 1;
-      return response(sessionReads === 1 ? sessionDetail(runningRun, emptySummary) : sessionDetail(terminalRun, summary));
+      return pagedManagementResponse(url, sessionReads === 1 ? sessionDetail(runningRun, emptySummary) : sessionDetail(terminalRun, summary));
     }
-    if (url === "/api/agents") return response([agent]);
-    if (url === "/api/runs/run-live/events?afterSeq=0") return response([]);
+    if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
+    if (url === "/api/runs/run-live/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
     if (url === "/api/runs/run-live") {
       canonicalReads += 1;
-      return response(canonicalReads === 1 ? runningRun : terminalRun);
+      return pagedManagementResponse(url, canonicalReads === 1 ? runningRun : terminalRun);
     }
     throw new Error(`Unexpected request: ${url}`);
   });
@@ -177,7 +180,7 @@ it("终态事件后读取 canonical Run 和 Session 并刷新用量", async () =
   expect(canonicalReads).toBe(2);
   expect(screen.getByText("总计 1.4万")).toBeInTheDocument();
   expect(screen.getByText("已统计 1 / 1 个会话")).toBeInTheDocument();
-  expect(fetchMock.mock.calls.filter(([request]) => request.toString() === "/api/sessions/session-live")).toHaveLength(2);
+  expect(fetchMock.mock.calls.filter(([request]) => request.toString() === "/api/sessions/session-live?includeParameters=false")).toHaveLength(2);
 });
 
 it("在 Agent 概览用英文展示所有 Session 的累计用量", async () => {
@@ -185,9 +188,9 @@ it("在 Agent 概览用英文展示所有 Session 的累计用量", async () => 
   window.history.replaceState({}, "", `/agents/${agent.id}`);
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
-    if (url === `/api/agents/${agent.id}`) return response(agent);
-    if (url === "/api/integration-endpoints") return response([]);
-    if (url === `/api/agents/${agent.id}/usage`) return response({
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, []);
+    if (url === `/api/agents/${agent.id}/usage`) return pagedManagementResponse(url, {
       ...summary,
       sessionCount: 4,
       measuredSessionCount: 3

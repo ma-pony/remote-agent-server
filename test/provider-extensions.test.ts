@@ -124,6 +124,14 @@ afterEach(async () => {
 });
 
 describe("Provider extensions", () => {
+  it("pages and searches cached Provider catalogs", async () => {
+    const {app, codexAgentId} = await fixture();
+    const result = await app.inject({url: `/api/agents/${codexAgentId}/extensions?page=2&pageSize=1`, headers: authHeaders});
+    expect(result.json()).toMatchObject({page: 2, pageSize: 1, total: 2, totalPages: 2, items: [expect.objectContaining({kind: "hook"})]});
+    const filtered = await app.inject({url: `/api/agents/${codexAgentId}/extensions?page=1&pageSize=1&query=browser`, headers: authHeaders});
+    expect(filtered.json()).toMatchObject({total: 1, items: [expect.objectContaining({name: "browser"})]});
+  });
+
   it("按 Agent Provider 发现插件和 Hook，并由当前 Agent 显式启用", async () => {
     const { app, codexAgentId, claudeAgentId } = await fixture();
 

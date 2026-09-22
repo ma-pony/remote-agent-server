@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { capabilityKinds, type Capability, type ContextBlock, type InvocationInput } from "../core/context-types.js";
+import { capabilityKinds, contentCapability, type Capability, type ContextBlock, type InvocationInput } from "../core/context-types.js";
 import { normalizeUsage } from "../core/usage.js";
 import type { UsageMetrics } from "../core/types.js";
 import type { UsageSourceEntry } from "../source-coordinator.js";
@@ -37,10 +37,10 @@ const runtimeKind = (value: string | null | undefined): string | null | undefine
 const requestItems = (body: ObjectValue | null): ObjectValue[] => {
   if (!body) return [];
   const items = [...objects(body.input)];
-  for (const item of objects(body.input)) if (!isResult(item)) items.push(...objects(item.content));
+  for (const item of objects(body.input)) if (!isResult(item)) items.push(...objects(item.content).map((part) => ({ ...part, role: item.role })));
   for (const message of objects(body.messages)) {
     items.push(message);
-    if (!isResult(message)) items.push(...objects(message.content), ...objects(message.tool_calls));
+    if (!isResult(message)) items.push(...objects(message.content).map((part) => ({ ...part, role: message.role })), ...objects(message.tool_calls));
   }
   return items;
 };
@@ -123,7 +123,9 @@ export const normalizeCanonicalExchanges = (snapshot: CanonicalSnapshot, calls =
       const content = typeof value === "string" ? { identity, modality: "text" as const, text: value }
         : { identity, modality: "unsupported" as const, mediaType: object(value)?.type as string | undefined };
       const call = toolInvocationId ? calls.get(toolInvocationId) : undefined;
-      const primary = call?.capability ? [{ capability: call.capability, evidence: "direct" as const }]
+      const contentOwner = contentCapability(kind);
+      const primary = contentOwner ? [{ capability: contentOwner, evidence: "direct" as const }]
+        : call?.capability ? [{ capability: call.capability, evidence: "direct" as const }]
         : references(name ?? "unattributed");
       const tags = (call?.tags ?? []).map((capability) => ({ capability, evidence: "direct" as const }));
       blocks.push({ position: blocks.length, kind, content, capabilities: [...primary, ...tags],
@@ -133,18 +135,20 @@ export const normalizeCanonicalExchanges = (snapshot: CanonicalSnapshot, calls =
       const name = nameOf(tool) ?? "unknown-definition";
       block("definition", JSON.stringify(tool), `definition:${name}:${hash(JSON.stringify(tool))}`, name);
     }
-    if (typeof request?.instructions === "string") block("other", request.instructions, `${invocationId}:instructions`);
-    if (typeof request?.system === "string") block("other", request.system, `${invocationId}:system`);
+    if (typeof request?.instructions === "string") block("system_prompt", request.instructions, `${invocationId}:instructions`);
+    if (typeof request?.system === "string") block("system_prompt", request.system, `${invocationId}:system`);
     else if (Array.isArray(request?.system)) {
       for (const [index, part] of request.system.entries()) {
-        block("other", object(part)?.type === "text" ? object(part)?.text : part, `${invocationId}:system:${index}`);
+        block("system_prompt", object(part)?.type === "text" ? object(part)?.text : part, `${invocationId}:system:${index}`);
       }
     }
-    if (typeof request?.input === "string") block("other", request.input, `${invocationId}:input`);
+    if (typeof request?.input === "string") block("user_message", request.input, `${invocationId}:input`);
     for (const item of requestItems(request)) {
       const id = callId(item);
       const toolId = id ? `${record.session_id}:${id}` : undefined;
       const name = nameOf(item) ?? (toolId ? calls.get(toolId)?.name : undefined) ?? "unknown-tool";
+      const contentKind = item.role === "system" || item.role === "developer" ? "system_prompt"
+        : item.role === "user" ? "user_message" : item.role === "assistant" ? "assistant_message" : "other";
       if (isCall(item)) {
         const args = item.arguments ?? item.input ?? object(item.function)?.arguments;
         block("arguments", typeof args === "string" ? args : args === undefined ? undefined : JSON.stringify(args),
@@ -159,9 +163,9 @@ export const normalizeCanonicalExchanges = (snapshot: CanonicalSnapshot, calls =
           runtimeKind: runtimeKind(record.agent) ?? null, executionEvidence: "unknown", origin: "context",
           capability: calls.get(toolId)?.capability ?? references(name)[0]!.capability, startedAt: null, endedAt: null,
           status: item.is_error === true ? "tool_error" : "succeeded", sourceId, revision: snapshot.revision, rawResultBytes: null });
-      } else if (typeof item.content === "string") block("other", item.content, `${invocationId}:content:${blocks.length}`);
-      else if (typeof item.text === "string") block("other", item.text, `${invocationId}:text:${blocks.length}`);
-      else if (!Array.isArray(item.content) && !Array.isArray(item.tool_calls)) block("other", item, `${invocationId}:opaque:${blocks.length}`);
+      } else if (typeof item.content === "string") block(contentKind, item.content, `${invocationId}:content:${blocks.length}`);
+      else if (typeof item.text === "string") block(contentKind, item.text, `${invocationId}:text:${blocks.length}`);
+      else if (!Array.isArray(item.content) && !Array.isArray(item.tool_calls)) block(contentKind, item, `${invocationId}:opaque:${blocks.length}`);
     }
     const accounting = usage(response, record.endpoint);
     const model = typeof response?.model === "string" && response.model ? response.model
