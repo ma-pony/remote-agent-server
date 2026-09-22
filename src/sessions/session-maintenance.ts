@@ -83,7 +83,7 @@ export const completeSessionMaintenance = async (
   const usageCollector = dependencies.usageCollector ?? new HostUsageCollector(dependencies.db);
   if (operation === "delete") usageCollector.deleteSession(id);
   else {
-    usageCollector.importLegacy();
+    usageCollector.importLegacy(id);
     await usageCollector.prepareMaintenance(id, operation);
   }
   await dependencies.providerSessionCleaner.purge({

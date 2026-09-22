@@ -64,6 +64,13 @@ const invocationPageSize = 50;
 const sourcePollIntervalMs = 1_000;
 const maxSourcePollAttempts = 60;
 const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+const validTimezone = (value: string | null): string => {
+  if (!value) return browserTimezone;
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value });
+    return value;
+  } catch { return browserTimezone; }
+};
 const dimensions: CapabilityKind[] = ["mcp_tool", "builtin_tool", "cli", "skill", "plugin", "hook", "unknown"];
 const sorts: SortKey[] = ["inputBytes", "totalInputTokens", "calls", "definitionInputTokens", "firstResultInputTokens", "repeatedResultInputTokens", "failures", "latencyMsP95"];
 
@@ -119,7 +126,8 @@ export const AgentUsagePage = () => {
   const agentId = searchParams.get("agentId") ?? "";
   const sessionId = searchParams.get("sessionId") ?? "";
   const range = (["7d", "30d", "all"].includes(searchParams.get("range") ?? "") ? searchParams.get("range") : "7d") as RangeKey;
-  const timezone = searchParams.get("timezone") || browserTimezone;
+  const requestedTimezone = searchParams.get("timezone");
+  const timezone = useMemo(() => validTimezone(requestedTimezone), [requestedTimezone]);
   const requestedRuntimeKind = searchParams.get("runtimeKind") ?? "";
   const runtimeKind = requestedRuntimeKind === "claude-code" ? "claude_code" : requestedRuntimeKind;
   const dimension = (dimensions.includes(searchParams.get("dimension") as CapabilityKind) ? searchParams.get("dimension") : "mcp_tool") as CapabilityKind;
@@ -136,6 +144,8 @@ export const AgentUsagePage = () => {
   const [reload, setReload] = useState(0);
   const [guideOpen, setGuideOpen] = useState(false);
   const [selectedCapability, setSelectedCapability] = useState<Capability | null>(null);
+  const sourceQuery = queryString({ agentId: agentId || undefined, sessionId: sessionId || undefined });
+  const sourceUrl = `/usage/sources${sourceQuery ? `?${sourceQuery}` : ""}`;
 
   const updateFilter = (key: string, value: string, resetOffset = true) => {
     const next = new URLSearchParams(searchParams);
@@ -179,7 +189,7 @@ export const AgentUsagePage = () => {
       runtimeKind: runtimeKind || undefined,
       ...bounds
     });
-  }, [agentId, range, runtimeKind, sessionId, timezone]);
+  }, [agentId, range, runtimeKind, sessionId, timezone, reload]);
   const requestQuery = useMemo(() => [scopeQuery, queryString({ dimension, sort, offset: String(offset), limit: String(PAGE_SIZE) })]
     .filter(Boolean).join("&"), [scopeQuery, dimension, sort, offset]);
 
@@ -192,19 +202,18 @@ export const AgentUsagePage = () => {
   useEffect(() => {
     const controller = new AbortController();
     setSummary(null); setTimeseries(null); setSources(null); setError("");
-    const sourcePromise = api<UsageSource[]>("/usage/sources", { signal: controller.signal });
     void Promise.all([
       api<SummaryResponse>(`/usage/summary?${scopeQuery}`, { signal: controller.signal }),
       api<TimeseriesResponse>(`/usage/timeseries?${scopeQuery}`, { signal: controller.signal }),
-      sourcePromise
+      api<UsageSource[]>(sourceUrl, { signal: controller.signal })
     ]).then(([nextSummary, nextTimeseries, nextSources]) => {
       setSummary(nextSummary); setTimeseries(nextTimeseries);
-      setSources(sessionId === "" ? nextSources : nextSources.filter((source) => source.mappings.some((mapping) => mapping.sessionId === sessionId)));
+      setSources(nextSources);
     }).catch((reason: unknown) => {
       if (!controller.signal.aborted) setError(errorMessage(reason));
     });
     return () => controller.abort();
-  }, [reload, scopeQuery, sessionId]);
+  }, [reload, scopeQuery, sourceUrl]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -227,10 +236,9 @@ export const AgentUsagePage = () => {
     const poll = async (): Promise<void> => {
       let visibleSources: UsageSource[] | null = null;
       try {
-        const nextSources = await api<UsageSource[]>("/usage/sources", { signal: controller.signal });
+        const nextSources = await api<UsageSource[]>(sourceUrl, { signal: controller.signal });
         if (controller.signal.aborted) return;
-        visibleSources = sessionId === "" ? nextSources
-          : nextSources.filter((source) => source.mappings.some((mapping) => mapping.sessionId === sessionId));
+        visibleSources = nextSources;
         const nextById = new Map(visibleSources.map((source) => [source.id, source]));
         const reachedTerminal = [...trackedIds].some((id) => nextById.get(id)?.status !== "collecting");
         const stillCollecting = visibleSources.some((source) => trackedIds.has(source.id) && (source.status === "collecting" || source.status === "failed"));
@@ -272,7 +280,7 @@ export const AgentUsagePage = () => {
       controller.abort();
       if (timeout !== undefined) clearTimeout(timeout);
     };
-  }, [collectingSourceIds, recoveryPending, requestQuery, scopeQuery, sessionId, text]);
+  }, [collectingSourceIds, recoveryPending, requestQuery, scopeQuery, sourceUrl, text]);
 
   const collectSource = async (source: UsageSource) => {
     setError("");
@@ -362,7 +370,9 @@ export const AgentUsagePage = () => {
       <SourceList sources={sources ?? []} onCollect={collectSource} formatDate={formatDate} />
     </div>}
 
-    <InvocationSheet capability={selectedCapability} onClose={() => setSelectedCapability(null)} baseQuery={requestQuery} sessionSelected={sessionId !== ""} />
+    {selectedCapability === null ? null : <InvocationSheet
+      key={JSON.stringify([scopeQuery, selectedCapability.kind, selectedCapability.serverId, selectedCapability.id])}
+      capability={selectedCapability} onClose={() => setSelectedCapability(null)} baseQuery={scopeQuery} sessionSelected={sessionId !== ""} />}
     <GuideSheet open={guideOpen} onOpenChange={setGuideOpen} />
   </PageContainer>;
 };
@@ -423,7 +433,7 @@ const SourceList = ({ sources, onCollect, formatDate }: { sources: UsageSource[]
     idle: text("待采集", "Idle"), collecting: text("采集中", "Collecting"),
     completed: text("已完成", "Completed"), failed: text("失败", "Failed")
   })[status as "idle" | "collecting" | "completed" | "failed"] ?? status;
-  return <Card><CardHeader><CardTitle>{text("数据来源", "Data sources")}</CardTitle><CardDescription>{text("这里的采集状态决定分析是否可能完整；选择会话时只显示映射到该会话的来源。", "Collection status determines whether analysis can be complete; selecting a session limits this list to mapped sources.")}</CardDescription></CardHeader><CardContent>{sources.length === 0 ? <p className="text-sm text-muted-foreground">{text("当前范围没有已注册来源。", "No registered sources match this scope.")}</p> : <div className="divide-y rounded-lg border">{sources.map((source) => <div key={source.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="truncate font-medium">{source.sourceKey}</p><Badge variant="outline">{kindLabel(source.kind)}</Badge><Badge variant={statusVariant(source.status)}>{statusLabel(source.status)}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{text("最近成功：", "Last success: ")}{formatDate(source.lastSuccessAt)} · {text(`拒绝 ${source.rejectedRecords} 条`, `${source.rejectedRecords} rejected`)}</p>{source.errorCode === null ? null : <p className="mt-1 font-mono text-xs text-destructive">{source.errorCode}</p>}</div><Button type="button" size="sm" variant="outline" disabled={source.status === "collecting"} onClick={() => void onCollect(source)}><RefreshCw className={source.status === "collecting" ? "animate-spin" : ""} />{source.status === "collecting" ? text("采集中", "Collecting") : text("重新采集", "Collect")}</Button></div>)}</div>}</CardContent></Card>;
+  return <Card><CardHeader><CardTitle>{text("数据来源", "Data sources")}</CardTitle><CardDescription>{text("这里的采集状态决定分析是否可能完整；只显示映射到所选智能体和会话的来源。", "Collection status determines whether analysis can be complete; only sources mapped to the selected Agent and Session are shown.")}</CardDescription></CardHeader><CardContent>{sources.length === 0 ? <p className="text-sm text-muted-foreground">{text("当前范围没有已注册来源。", "No registered sources match this scope.")}</p> : <div className="divide-y rounded-lg border">{sources.map((source) => <div key={source.id} className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between"><div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="truncate font-medium">{source.sourceKey}</p><Badge variant="outline">{kindLabel(source.kind)}</Badge><Badge variant={statusVariant(source.status)}>{statusLabel(source.status)}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{text("最近成功：", "Last success: ")}{formatDate(source.lastSuccessAt)} · {text(`拒绝 ${source.rejectedRecords} 条`, `${source.rejectedRecords} rejected`)}</p>{source.errorCode === null ? null : <p className="mt-1 font-mono text-xs text-destructive">{source.errorCode}</p>}</div><Button type="button" size="sm" variant="outline" disabled={source.status === "collecting"} onClick={() => void onCollect(source)}><RefreshCw className={source.status === "collecting" ? "animate-spin" : ""} />{source.status === "collecting" ? text("采集中", "Collecting") : text("重新采集", "Collect")}</Button></div>)}</div>}</CardContent></Card>;
 };
 
 const TokenMeasurement = ({ estimate }: { estimate: TokenEstimate }) => {
@@ -447,7 +457,7 @@ const TokenMeasurement = ({ estimate }: { estimate: TokenEstimate }) => {
 };
 
 const InvocationSheet = ({ capability, onClose, baseQuery, sessionSelected }: {
-  capability: Capability | null;
+  capability: Capability;
   onClose(): void;
   baseQuery: string;
   sessionSelected: boolean;
@@ -455,26 +465,17 @@ const InvocationSheet = ({ capability, onClose, baseQuery, sessionSelected }: {
   const { text, formatDate } = useI18n();
   const [origin, setOrigin] = useState<InvocationOriginFilter>("counted");
   const [scope, setScope] = useState<"range" | "session">("range");
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [cursorHistory, setCursorHistory] = useState<Array<string | null>>([]);
+  const [cursorHistory, setCursorHistory] = useState<string[]>([]);
+  const cursor = cursorHistory.at(-1) ?? null;
   const [page, setPage] = useState<InvocationPage | null>(null);
   const [detail, setDetail] = useState<InvocationDetail | null>(null);
+  const [detailRequest, setDetailRequest] = useState<{ id: string; origin: InvocationOriginFilter } | null>(null);
   const [error, setError] = useState("");
 
   useEffect(() => {
-    setOrigin("counted");
-    setScope("range");
-    setCursor(null);
-    setCursorHistory([]);
-    setPage(null);
-    setDetail(null);
-    setError("");
-  }, [capability?.id, capability?.kind, capability?.serverId]);
-
-  useEffect(() => {
-    if (capability === null) return;
     const controller = new AbortController();
     setPage(null);
+    setDetailRequest(null);
     setDetail(null);
     setError("");
     const original = new URLSearchParams(baseQuery);
@@ -497,16 +498,20 @@ const InvocationSheet = ({ capability, onClose, baseQuery, sessionSelected }: {
     return () => controller.abort();
   }, [baseQuery, capability, cursor, origin, scope]);
 
-  const openDetail = async (id: string) => {
+  useEffect(() => {
+    if (detailRequest === null) return;
+    const controller = new AbortController();
     setDetail(null);
     setError("");
-    try { setDetail(await api<InvocationDetail>(`/usage/${origin === "context" ? "context-evidence" : "invocations"}/${encodeURIComponent(id)}`)); }
-    catch (reason) { setError(errorMessage(reason)); }
-  };
+    void api<InvocationDetail>(`/usage/${detailRequest.origin === "context" ? "context-evidence" : "invocations"}/${encodeURIComponent(detailRequest.id)}`,
+      { signal: controller.signal }).then((value) => {
+        if (!controller.signal.aborted) setDetail(value);
+      }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    return () => controller.abort();
+  }, [detailRequest]);
 
   const changeOrigin = (value: string) => {
     setOrigin(value as InvocationOriginFilter);
-    setCursor(null);
     setCursorHistory([]);
     setDetail(null);
   };
@@ -524,10 +529,10 @@ const InvocationSheet = ({ capability, onClose, baseQuery, sessionSelected }: {
     skill: text("技能", "Skill"), other: text("其他", "Other")
   })[value];
 
-  return <Sheet open={capability !== null} onOpenChange={(open) => { if (!open) onClose(); }}>
+  return <Sheet open onOpenChange={(open) => { if (!open) onClose(); }}>
     <SheetContent className="overflow-y-auto sm:max-w-2xl">
       <SheetHeader>
-        <SheetTitle>{capability === null ? text("调用证据", "Invocation evidence") : text(`${capability.name} 调用证据`, `${capability.name} invocation evidence`)}</SheetTitle>
+        <SheetTitle>{text(`${capability.name} 调用证据`, `${capability.name} invocation evidence`)}</SheetTitle>
         <SheetDescription>{text("实际调用与模型输入证据使用独立记录；输入证据不会增加调用次数。调用正文不会被保留。", "Actual calls and model-input evidence use independent records; input evidence never increases call counts. Call bodies are not retained.")}</SheetDescription>
       </SheetHeader>
       <div className="flex flex-col gap-4 px-4 pb-6">
@@ -539,12 +544,12 @@ const InvocationSheet = ({ capability, onClose, baseQuery, sessionSelected }: {
           <TabsContent value="counted"><p className="text-sm text-muted-foreground">{text("这里的记录与排名中的调用次数一致；上下文快照不会被重复算作执行。", "These records match the ranking call count; context snapshots are not counted again as executions.")}</p></TabsContent>
           <TabsContent value="context"><Alert><Database /><AlertTitle>{text("独立输入证据", "Independent input evidence")}</AlertTitle><AlertDescription>{text("这些记录来自模型上下文，不代表第二次工具执行。日期筛选使用模型请求时间，包含定义、标签及未归因内容。", "These records come from model context and do not represent another tool execution. Date filtering uses model-request time, including definitions, tags and unattributed content.")}</AlertDescription></Alert></TabsContent>
         </Tabs>
-        {sessionSelected ? <Alert><Database /><AlertTitle>{scope === "range" ? text("按排名日期范围筛选", "Filtered by ranking date range") : text("显示全部会话记录", "Showing all Session records")}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{scope === "range" ? text("没有任何可用时间证据的记录可能不会出现。排名筛选保持不变。", "Records without any usable time evidence may be absent. The ranking filter remains unchanged.") : text("列表忽略日期范围，以包含无时间证据的记录；能力排名仍使用原日期范围。", "The list ignores the date range to include records without time evidence; capability ranking still uses the original range.")}</span><Button type="button" size="sm" variant="outline" onClick={() => { setScope((value) => value === "range" ? "session" : "range"); setCursor(null); setCursorHistory([]); }}>{scope === "range" ? text("显示全部会话记录", "Show all Session records") : text("恢复日期筛选", "Restore date filter")}</Button></AlertDescription></Alert> : null}
+        {sessionSelected ? <Alert><Database /><AlertTitle>{scope === "range" ? text("按排名日期范围筛选", "Filtered by ranking date range") : text("显示全部会话记录", "Showing all Session records")}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{scope === "range" ? text("没有任何可用时间证据的记录可能不会出现。排名筛选保持不变。", "Records without any usable time evidence may be absent. The ranking filter remains unchanged.") : text("列表忽略日期范围，以包含无时间证据的记录；能力排名仍使用原日期范围。", "The list ignores the date range to include records without time evidence; capability ranking still uses the original range.")}</span><Button type="button" size="sm" variant="outline" onClick={() => { setScope((value) => value === "range" ? "session" : "range"); setCursorHistory([]); }}>{scope === "range" ? text("显示全部会话记录", "Show all Session records") : text("恢复日期筛选", "Restore date filter")}</Button></AlertDescription></Alert> : null}
         {error !== "" ? <Alert variant="destructive"><TriangleAlert /><AlertTitle>{text("调用证据加载失败", "Invocation evidence failed to load")}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
         {page === null && error === "" ? <Skeleton className="h-36" /> : page?.items.length === 0
           ? <p className="py-8 text-center text-sm text-muted-foreground">{origin === "counted" ? text("没有匹配的实际调用。", "No matching actual calls.") : text("没有匹配的模型输入证据。", "No matching model-input evidence.")}</p>
-          : <div className="divide-y rounded-lg border">{page?.items.map((invocation) => <div key={invocation.id} className="flex items-center justify-between gap-3 p-3"><div className="min-w-0"><p className="truncate font-mono text-xs">{"modelInvocationId" in invocation ? invocation.modelInvocationId : invocation.id}</p><p className="mt-1 text-xs text-muted-foreground">{"status" in invocation ? invocationStatusLabel(invocation.status) : text("输入证据", "Input evidence")} · {formatDate("occurredAt" in invocation ? invocation.occurredAt : invocation.startedAt)}</p></div><Button type="button" size="sm" variant="outline" aria-label={origin === "counted" ? text(`打开调用 ${invocation.id}`, `Open invocation ${invocation.id}`) : text(`打开输入证据 ${invocation.id}`, `Open input evidence ${invocation.id}`)} onClick={() => void openDetail(invocation.id)}>{origin === "counted" ? text("打开调用", "Open invocation") : text("打开证据", "Open evidence")}</Button></div>)}</div>}
-        {page !== null && (cursorHistory.length > 0 || page.nextCursor !== null) ? <div className="flex justify-end gap-2"><Button size="sm" variant="outline" disabled={cursorHistory.length === 0} onClick={() => { const previous = cursorHistory.at(-1) ?? null; setCursorHistory((history) => history.slice(0, -1)); setCursor(previous); }}>{text("上一页", "Previous")}</Button><Button size="sm" variant="outline" disabled={page.nextCursor === null} onClick={() => { setCursorHistory((history) => [...history, cursor]); setCursor(page.nextCursor); }}>{text("下一页", "Next")}</Button></div> : null}
+          : <div className="divide-y rounded-lg border">{page?.items.map((invocation) => <div key={invocation.id} className="flex items-center justify-between gap-3 p-3"><div className="min-w-0"><p className="truncate font-mono text-xs">{"modelInvocationId" in invocation ? invocation.modelInvocationId : invocation.id}</p><p className="mt-1 text-xs text-muted-foreground">{"status" in invocation ? invocationStatusLabel(invocation.status) : text("输入证据", "Input evidence")} · {formatDate("occurredAt" in invocation ? invocation.occurredAt : invocation.startedAt)}</p></div><Button type="button" size="sm" variant="outline" aria-label={origin === "counted" ? text(`打开调用 ${invocation.id}`, `Open invocation ${invocation.id}`) : text(`打开输入证据 ${invocation.id}`, `Open input evidence ${invocation.id}`)} onClick={() => setDetailRequest({ id: invocation.id, origin })}>{origin === "counted" ? text("打开调用", "Open invocation") : text("打开证据", "Open evidence")}</Button></div>)}</div>}
+        {page !== null && (cursorHistory.length > 0 || page.nextCursor !== null) ? <div className="flex justify-end gap-2"><Button size="sm" variant="outline" disabled={cursorHistory.length === 0} onClick={() => { setCursorHistory((history) => history.slice(0, -1)); }}>{text("上一页", "Previous")}</Button><Button size="sm" variant="outline" disabled={page.nextCursor === null} onClick={() => { if (page.nextCursor !== null) setCursorHistory((history) => [...history, page.nextCursor!]); }}>{text("下一页", "Next")}</Button></div> : null}
         {detail === null ? null : <Card>
           <CardHeader><CardTitle>{text("持久化证据", "Persisted evidence")}</CardTitle><CardDescription>{text("正文未保留；以下为持久化的计数和关联证据。", "Bodies are not retained; the following counts and linkage evidence are persisted.")}</CardDescription></CardHeader>
           <CardContent className="flex flex-col gap-4">

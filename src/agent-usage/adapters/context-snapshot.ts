@@ -82,7 +82,10 @@ export type CanonicalSnapshot = {
 };
 /** Shared in-memory normalizer; file import only handles decoding and validation. */
 export const normalizeCanonicalExchanges = (snapshot: CanonicalSnapshot, calls = new Map<string, CanonicalCall>(),
-  callTags?: (name: string, args: unknown) => Capability[]): UsageSourceEntry[] => {
+  resolvers: {
+    callTags?: (name: string, args: unknown) => Capability[];
+    capability?: (name: string, args?: unknown) => Capability | undefined;
+  } = {}): UsageSourceEntry[] => {
   const aliases = new Map(snapshot.capabilities.map((entry) => [entry.runtimeName, entry]));
   if (aliases.size !== snapshot.capabilities.length) throw new Error("context_snapshot_alias_conflict");
   const rows = snapshot.requests;
@@ -91,9 +94,15 @@ export const normalizeCanonicalExchanges = (snapshot: CanonicalSnapshot, calls =
       const id = callId(item), name = nameOf(item);
       if (isCall(item) && id && name) {
         const key = `${record.session_id}:${id}`;
-        if (calls.has(key) && calls.get(key)?.name !== name) throw new Error("context_snapshot_call_conflict");
+        const previous = calls.get(key);
+        if (previous && previous.name !== name) throw new Error("context_snapshot_call_conflict");
         const args = item.arguments ?? item.input ?? object(item.function)?.arguments;
-        calls.set(key, { name, capability: calls.get(key)?.capability ?? aliases.get(name)?.capability, tags: args === undefined ? calls.get(key)?.tags : callTags?.(name, args) ?? calls.get(key)?.tags });
+        // A replayed call belongs to its original projection, including a confirmed empty tag set.
+        const capability = previous?.capability ?? aliases.get(name)?.capability ?? resolvers.capability?.(name, args);
+        const tags = previous?.tags ?? (args === undefined ? undefined : resolvers.callTags?.(name, args));
+        if (!previous || previous.capability !== capability || previous.tags !== tags) {
+          calls.set(key, { name, capability, tags });
+        }
       }
     }
   }
@@ -107,14 +116,17 @@ export const normalizeCanonicalExchanges = (snapshot: CanonicalSnapshot, calls =
     const references = (name: string) => {
       const alias = aliases.get(name);
       const unknown: Capability = { id: `unknown:${record.provider}:${hash(name)}`, name, kind: "unknown" };
-      return [alias?.capability ?? unknown, ...alias?.tags ?? []].map((capability) => ({ capability, evidence: "direct" as const }));
+      return [alias?.capability ?? resolvers.capability?.(name) ?? unknown, ...alias?.tags ?? []]
+        .map((capability) => ({ capability, evidence: "direct" as const }));
     };
     const block = (kind: ContextBlock["kind"], value: unknown, identity: string, name?: string, toolInvocationId?: string) => {
       const content = typeof value === "string" ? { identity, modality: "text" as const, text: value }
         : { identity, modality: "unsupported" as const, mediaType: object(value)?.type as string | undefined };
-      blocks.push({ position: blocks.length, kind, content, capabilities: [...(toolInvocationId && calls.get(toolInvocationId)?.capability
-        ? [{ capability: calls.get(toolInvocationId)!.capability!, evidence: "direct" as const }] : name ? references(name) : references("unattributed")),
-        ...(toolInvocationId ? calls.get(toolInvocationId)?.tags ?? [] : []).map((capability) => ({ capability, evidence: "direct" as const }))],
+      const call = toolInvocationId ? calls.get(toolInvocationId) : undefined;
+      const primary = call?.capability ? [{ capability: call.capability, evidence: "direct" as const }]
+        : references(name ?? "unattributed");
+      const tags = (call?.tags ?? []).map((capability) => ({ capability, evidence: "direct" as const }));
+      blocks.push({ position: blocks.length, kind, content, capabilities: [...primary, ...tags],
         ...(toolInvocationId ? { toolInvocationId } : {}) });
     };
     for (const tool of objects(request?.tools)) {
@@ -152,6 +164,9 @@ export const normalizeCanonicalExchanges = (snapshot: CanonicalSnapshot, calls =
       else if (!Array.isArray(item.content) && !Array.isArray(item.tool_calls)) block("other", item, `${invocationId}:opaque:${blocks.length}`);
     }
     const accounting = usage(response, record.endpoint);
+    const model = typeof response?.model === "string" && response.model ? response.model
+      : record.model ?? (typeof request?.model === "string" ? request.model : null);
+    const runtime = runtimeKind(record.agent);
     const supportedEndpoint = ["/messages", "/responses", "/chat/completions"].some((path) => record.endpoint.endsWith(path));
     const coverage = request === null ? "none" : record.context_fidelity === "opaque" ? "opaque"
       : !supportedEndpoint || record.context_fidelity === "partial" || request.previous_response_id || request.conversation ? "partial" : "full";
@@ -161,9 +176,9 @@ export const normalizeCanonicalExchanges = (snapshot: CanonicalSnapshot, calls =
         scope: "model_request", semantics: "snapshot", coverageId: invocationId, invocationId, executionId: null,
         providerEpochId: epoch, occurredAt, finality: record.response_complete ? "final" : "interim", revision: snapshot.revision,
         measurement: "reported", normalizationProfile: accounting.profile, metrics: accounting.metrics,
-        runtimeKind: runtimeKind(record.agent) ?? undefined, model: (typeof response?.model === "string" && response.model ? response.model : record.model ?? (typeof request?.model === "string" ? request.model : null)) },
+        runtimeKind: runtime ?? undefined, model },
       context: { invocationId, providerEpochId: epoch, sourceId, revision: snapshot.revision, occurredAt,
-        runtimeKind: runtimeKind(record.agent) ?? null, model: (typeof response?.model === "string" && response.model ? response.model : record.model ?? (typeof request?.model === "string" ? request.model : null)),
+        runtimeKind: runtime ?? null, model,
         modelProvider: record.modelProvider ?? null,
         coverage, historyComplete: snapshot.historyComplete, blocks },
       invocations

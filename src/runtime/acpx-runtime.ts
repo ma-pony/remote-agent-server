@@ -753,6 +753,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       } finally {
         this.sessions.delete(input.sessionId);
         registry.unregister(agent);
+        await this.usageCapture?.release(input.sessionId);
       }
       throw new AgentRuntimeError(
         "session_resume_failed",

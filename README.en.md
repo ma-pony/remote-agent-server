@@ -319,7 +319,11 @@ The sidebar, Agent and Session pages open one usage analysis view with Agent, Se
 
 Managed Codex/Claude Code logs supplement Runtime evidence, including startup and shutdown harvesting; the MCP observer records executions. Configure `USAGE_CAPTURE_UPSTREAMS` to automatically capture supported API-key model requests and inspect concrete tool definitions, first/repeated result inputs and Skill/plugin attribution. Generic **Context Snapshot** imports remain available. Reported usage, actual executions and context evidence are counted separately without an external telemetry platform. Reset and storage cleanup collect before purging and preserve historical statistics; explicit Session deletion clears its statistics and rejects late replay.
 
-Ranking controls refresh independently. Database-side filtering and bounded evidence pages preserve lifetime first/repeat attribution. Managed logs parse only new records; incomplete trailing lines remain pending for retry.
+Recognized built-in tools and structured CLI calls in automatic capture share capability identities with Runtime execution. Compound shell commands remain attributed to the shell, without guessing inner executables. Historical calls retain their first confirmed Skill/plugin ownership when later Runs change configuration.
+
+Ranking controls refresh independently. Capability date filters and bounded evidence pages preserve lifetime first/repeat attribution. Model summaries and trends share accounting logic and index parent/detail containment by Session, epoch and Run instead of rescanning the ledger per parent. They still read historical measurement metadata for the selected subjects to reconcile cumulative and unplaced usage. Managed logs parse only new records; incomplete trailing lines remain pending for retry.
+
+Source listings and collection polling follow the selected Agent and Session. Switching capabilities or closing the evidence sheet cancels stale detail requests; reopening starts from the first page.
 
 Existing `usage`/`usageSummary` API semantics remain unchanged. The new ledger is exposed through `/api/usage/*`; see the [usage analysis guide](docs/agent-usage.md) for collection boundaries, the snapshot contract and executable import examples.
 

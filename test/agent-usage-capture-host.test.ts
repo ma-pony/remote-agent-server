@@ -47,6 +47,20 @@ it("does not rewrite unchanged tool call cache rows on subsequent requests", asy
   expect(db.prepare("SELECT * FROM cache_writes").all()).toEqual([]);
   expect(db.prepare("SELECT * FROM agent_usage_capture_calls").all()).toHaveLength(1);
 });
+it("deduplicates MCP aliases and excludes every identity for ambiguous runtime names", async () => {
+  const { capture, host, session, run } = await setup();
+  const server = (serverId: string) => ({ name: "docs", type: "stdio" as const, command: "fake", args: [], env: [],
+    usageIdentity: { serverId, tools: ["search", "search"] } });
+  const route = await capture.prepare({ sessionId: session.id, provider: "codex", workspacePath: "/workspace",
+    mcpServers: [server("7"), server("8"), server("7")] });
+  capture.startRun(session.id, run);
+  await (await fetch(route!.baseUrl + "/responses", { method: "POST", body: JSON.stringify({
+    input: [], tools: [{ type: "function", name: "mcp__docs__search", parameters: {} }]
+  }) })).text();
+  await capture.drain();
+  expect(host.attribution.rankings({}, "mcp_tool")).toEqual([]);
+  expect(host.attribution.rankings({}, "unknown")[0]?.capability.name).toBe("mcp__docs__search");
+});
 it("retries call identity persistence after a transaction rolls back", async () => {
   const { db, host, capture, route, session, run } = await setup(); capture.startRun(session.id, run);
   const callId = `${host.epoch(session.id)}:retry-call`;
@@ -98,6 +112,71 @@ it("associates confirmed Skill and plugin ownership per Read call, never the def
   expect(skill.capability.id).toBe("skill1"); expect(plugin.capability.id).toBe("plugin1");
   expect(skill.definitionInputTokens).toBe(0); expect(skill.firstResultInputTokens).toBeGreaterThan(0);
   expect(skill.exposureCount).toBe(2);
+});
+it.each(["removed", "replaced"])("preserves historical Skill and plugin ownership after the projection is %s", async (change) => {
+  const { db, host, capture, route, session, run, seed } = await setup();
+  capture.startRun(session.id, run);
+  const skill = { id: "original", name: "Original", revision: "1", source: "local" as const,
+    skillMdPath: "/workspace/skills/review/SKILL.md", directoryAliases: ["/workspace/skills/review"],
+    pluginId: "original-plugin", pluginName: "Original plugin" };
+  host.runtimeCapabilities.recordProjection(run, [skill]);
+  const body = JSON.stringify({ model: "fixture-model", input: [
+    { type: "function_call", call_id: "historical-read", name: "Read", arguments: JSON.stringify({ path: skill.skillMdPath }) },
+    { type: "function_call_output", call_id: "historical-read", output: "original skill content" }
+  ] });
+  const send = async () => {
+    await (await fetch(route.baseUrl + "/responses", { method: "POST", body })).text();
+    await capture.drain();
+  };
+  await send();
+  capture.endRun(session.id, run);
+  db.prepare("UPDATE runs SET status='succeeded' WHERE id=?").run(run);
+  seed.run(session.id, "running");
+  const next = (db.prepare("SELECT MAX(id) AS id FROM runs").get() as { id: number }).id;
+  host.runtimeCapabilities.recordProjection(next, change === "removed" ? [] : [
+    { ...skill, id: "replacement", revision: "2", pluginId: "replacement-plugin" }
+  ]);
+  capture.startRun(session.id, next);
+  await send();
+  for (const dimension of ["skill", "plugin"] as const) {
+    const rows = host.attribution.rankings({}, dimension);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ capability: { id: dimension === "skill" ? "original" : "original-plugin" }, exposureCount: 4 });
+    expect(rows[0]!.repeatedResultInputTokens).toBeGreaterThan(0);
+  }
+});
+
+it("attributes built-in and structured CLI input to the same capabilities as Runtime execution", async () => {
+  const { host, capture, route, session, run } = await setup();
+  capture.startRun(session.id, run);
+  for (const [id, kind, rawInput] of [
+    ["read-call", "read", { path: "/workspace/README.md" }],
+    ["git-call", "execute", { argv: ["git", "status"] }]
+  ] as const) {
+    host.runtimeCapabilities.recordTool(run, { toolCallId: id, kind, rawInput, status: "in_progress" });
+    host.runtimeCapabilities.recordTool(run, { toolCallId: id, kind, rawInput, status: "completed", rawOutput: "result" });
+  }
+  const body = JSON.stringify({ model: "fixture-model", tools: [
+    { type: "function", name: "Read", parameters: {} }, { type: "function", name: "exec_command", parameters: {} }
+  ], input: [
+    { type: "function_call", call_id: "read-call", name: "Read", arguments: '{"path":"/workspace/README.md"}' },
+    { type: "function_call_output", call_id: "read-call", output: "read result" },
+    { type: "function_call", call_id: "git-call", name: "exec_command", arguments: '{"argv":["git","status"]}' },
+    { type: "function_call_output", call_id: "git-call", output: "git result" }
+  ] });
+  for (let index = 0; index < 2; index++) {
+    await (await fetch(route.baseUrl + "/responses", { method: "POST", body })).text();
+    await capture.drain();
+  }
+  expect(host.attribution.rankings({}, "builtin_tool")).toEqual([
+    expect.objectContaining({ capability: expect.objectContaining({ id: "runtime:codex:builtin:read" }), calls: 1, exposureCount: 6 })
+  ]);
+  const cli = host.attribution.rankings({}, "cli");
+  expect(cli.find((row) => row.capability.name === "git")).toMatchObject({ calls: 1, exposureCount: 4 });
+  expect(cli.find((row) => row.capability.name === "git")!.repeatedResultInputTokens).toBeGreaterThan(0);
+  // A generic shell definition does not belong to every executable invoked through it.
+  expect(cli.find((row) => row.capability.name === "Shell command")).toMatchObject({ calls: 0, exposureCount: 2 });
+  expect(host.attribution.rankings({}, "unknown")).toEqual([]);
 });
 it.each(["capture-first", "native-first"])("reconciles Claude native message identity in %s order, keeping terminal native evidence over partial capture", async (order) => {
   const { host, session } = await setup(); const { parseProviderLog } = await import("../src/agent-usage/adapters/provider-logs.js");

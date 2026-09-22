@@ -40,3 +40,8 @@ export type UsageSummary = {
   conflictingRanges: number;
   asOf: string;
 };
+export type UsageTimeseries = {
+  bucket: "day" | "week" | "month";
+  items: Array<{ period: string; usage: UsageMetrics; observedRanges: number }>;
+  unplacedUsage: UsageMetrics;
+};

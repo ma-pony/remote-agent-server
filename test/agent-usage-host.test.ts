@@ -14,6 +14,31 @@ const setup = () => {
 };
 
 describe("host usage integration", () => {
+  it("reuses a ready maintenance barrier without rediscovering potentially purged files", async () => {
+    const { db, session } = setup();
+    const discover = vi.fn(async () => undefined);
+    const host = new HostUsageCollector(db, {}, discover);
+    await host.prepareMaintenance(session.id, "reset");
+    discover.mockRejectedValue(new Error("files already purged"));
+    await host.prepareMaintenance(session.id, "reset");
+    expect(discover).toHaveBeenCalledTimes(1);
+    await expect(host.prepareMaintenance(session.id, "cleanup")).rejects.toThrow("usage_maintenance_conflict");
+    host.finishMaintenance(session.id);
+    expect(host.collectionFailures()).toEqual([]);
+  });
+
+  it("imports only the maintained Session and its Runs when a Session is supplied", () => {
+    const { db, host, seed, session } = setup();
+    const other = seed.session();
+    seed.run(other.id, "succeeded");
+    db.prepare("UPDATE sessions SET total_tokens=100").run();
+    db.prepare("UPDATE runs SET total_tokens=50").run();
+    host.importLegacy(session.id);
+    expect(host.store.records().map((row) => row.sessionId)).toEqual([String(session.id), String(session.id)]);
+    host.importLegacy();
+    expect(host.store.records()).toHaveLength(4);
+  });
+
   it("continues recovery beyond one batch in the same process", async () => {
     const { db, seed } = setup();
     for (let index = 0; index < 101; index++) seed.session();

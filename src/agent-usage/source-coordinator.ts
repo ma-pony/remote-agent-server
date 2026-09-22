@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { UsageError } from "./core/errors.js";
 import type { UsageBinding, UsageObservation } from "./core/types.js";
 import type { UsageStore } from "./storage/usage-store.js";
 import type { ModelContextInput, InvocationInput } from "./core/context-types.js";
@@ -9,6 +10,9 @@ export type SourceRecord = {
   checkpoint: string | null; status: string; collectionId: string | null;
   errorCode: string | null; rejectedRecords: number; lastSuccessAt: string | null;
   mappings: Array<{ sourceSessionKey: string; sessionId: string; providerEpochId: string; state: string }>;
+};
+export type SourceFilter = {
+  id?: string; sourceKey?: string; agentId?: string; sessionId?: string; mappingState?: "active";
 };
 export interface UsageSourceAdapter {
   describe(): SourceCapabilities;
@@ -61,18 +65,18 @@ export class UsageSourceCoordinator {
 
   registerSource(config: SourceConfig): SourceRecord {
     const adapter = this.adapters[config.kind];
-    if (!adapter) throw new Error("usage_source_unsupported");
+    if (!adapter) throw new UsageError("usage_source_unsupported");
     const id = createHash("sha256").update(JSON.stringify([config.namespace, config.sourceKey])).digest("hex").slice(0, 32);
     return this.store.db.transaction(() => {
       const mappings = this.mappings(id);
-      if (mappings.some((row) => row.state === "revoked")) throw new Error("usage_mapping_revoked");
+      if (mappings.some((row) => row.state === "revoked")) throw new UsageError("usage_mapping_revoked");
       const previous = this.source(id);
       if (previous !== undefined) {
-        if (previous.config_json !== canonical(config)) throw new Error("usage_source_conflict");
+        if (previous.config_json !== canonical(config)) throw new UsageError("usage_source_conflict");
         for (const row of mappings) this.store.assertBinding(this.binding(row));
         return this.project(previous);
       }
-      if (new Set(config.mappings.map((mapping) => mapping.sourceSessionKey)).size !== config.mappings.length) throw new Error("usage_mapping_conflict");
+      if (new Set(config.mappings.map((mapping) => mapping.sourceSessionKey)).size !== config.mappings.length) throw new UsageError("usage_mapping_conflict");
       this.store.db.prepare(`INSERT INTO agent_usage_sources
         (id, namespace, source_key, kind, input_json, config_json, capabilities_json) VALUES (?, ?, ?, ?, ?, ?, ?)`)
         .run(id, config.namespace, config.sourceKey, config.kind, canonical(config.inputRef), canonical(config), canonical(adapter.describe()));
@@ -87,19 +91,19 @@ export class UsageSourceCoordinator {
   }
 
   collect(id: string, frozenBoundary?: string): Promise<void> {
-    if (this.closed) return Promise.reject(new Error("usage_collector_closed"));
+    if (this.closed) return Promise.reject(new UsageError("usage_collector_closed"));
     const current = this.jobs.get(id);
     if (current) return current.promise;
     const source = this.source(id);
-    if (!source) return Promise.reject(new Error("usage_source_not_found"));
+    if (!source) return Promise.reject(new UsageError("usage_source_not_found"));
     const adapter = this.adapters[source.kind];
-    if (!adapter) return Promise.reject(new Error("usage_source_unsupported"));
+    if (!adapter) return Promise.reject(new UsageError("usage_source_unsupported"));
     const collectionId = source.status === "collecting" && source.collection_id !== null ? source.collection_id : randomUUID();
     this.store.db.prepare("UPDATE agent_usage_sources SET status = 'collecting', collection_id = ?, error_code = NULL WHERE id = ?").run(collectionId, id);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => { controller.abort(); reject(new Error("usage_collection_timeout")); }, this.timeoutMs);
+      timer = setTimeout(() => { controller.abort(); reject(new UsageError("usage_collection_timeout")); }, this.timeoutMs);
       timer.unref();
     });
     const collect = async () => {
@@ -122,12 +126,12 @@ export class UsageSourceCoordinator {
               try {
                 this.store.observe(this.binding(mapping), { ...entry.observation, sourceId: id, providerEpochId: mapping.epoch_id });
                 if (entry.context || entry.invocations?.length) {
-                  if (!this.attribution) throw new Error("usage_attribution_unavailable");
+                  if (!this.attribution) throw new UsageError("usage_attribution_unavailable");
                   if (entry.context) this.attribution.upsertContext(this.binding(mapping), { ...entry.context, sourceId: id, providerEpochId: mapping.epoch_id });
                   for (const invocation of entry.invocations ?? []) this.attribution.observeInvocation(this.binding(mapping), { ...invocation, sourceId: id, providerEpochId: mapping.epoch_id });
                 }
               } catch (error) {
-                if (!(error instanceof Error) || !["usage_subject_deleted", "usage_binding_stale"].includes(error.message)) throw error;
+                if (!(error instanceof UsageError) || !["usage_subject_deleted", "usage_binding_stale"].includes(error.code)) throw error;
                 rejected = true;
               }
             }
@@ -157,9 +161,9 @@ export class UsageSourceCoordinator {
       this.store.db.prepare(`UPDATE agent_usage_sources SET status = 'completed', last_success_at = ?, error_code = NULL
         WHERE id = ? AND collection_id = ?`).run(new Date().toISOString(), id, collectionId);
     }).catch((error: unknown) => {
-      const code = error instanceof Error && error.message === "usage_collection_timeout" ? error.message : "usage_source_failed";
+      const code = error instanceof UsageError && error.code === "usage_collection_timeout" ? error.code : "usage_source_failed";
       this.store.db.prepare("UPDATE agent_usage_sources SET status = 'failed', error_code = ? WHERE id = ? AND collection_id = ?").run(code, id, collectionId);
-      throw new Error(code);
+      throw new UsageError(code, { cause: error });
     }).finally(() => { clearTimeout(timer); this.jobs.delete(id); });
     this.jobs.set(id, { promise, controller });
     return promise;
@@ -169,19 +173,47 @@ export class UsageSourceCoordinator {
   startCollect(id: string): SourceRecord {
     void this.collect(id).catch(() => { /* The persisted source state reports the sanitized error. */ });
     const row = this.source(id);
-    if (!row) throw new Error("usage_source_not_found");
+    if (!row) throw new UsageError("usage_source_not_found");
     return this.project(row);
   }
 
-  listSources(namespace: string): SourceRecord[] {
-    const rows = this.store.db.prepare("SELECT * FROM agent_usage_sources WHERE namespace = ? ORDER BY source_key").all(namespace) as SourceRow[];
-    return rows.map((row) => this.project(row));
+  listSources(namespace: string, filter: SourceFilter = {}): SourceRecord[] {
+    const clauses = ["s.namespace = ?"];
+    const params = [namespace];
+    for (const [field, column] of [["id", "id"], ["sourceKey", "source_key"]] as const) {
+      if (filter[field] !== undefined) { clauses.push(`s.${column} = ?`); params.push(filter[field]); }
+    }
+    const mappings = ["m.source_id = s.id"];
+    for (const [field, column] of [["sessionId", "session_id"], ["mappingState", "state"]] as const) {
+      if (filter[field] !== undefined) { mappings.push(`m.${column} = ?`); params.push(filter[field]); }
+    }
+    if (filter.agentId !== undefined) {
+      mappings.push(`EXISTS (SELECT 1 FROM agent_usage_subjects u WHERE u.namespace = m.namespace
+        AND u.kind = 'session' AND u.subject_id = m.session_id AND u.agent_id = ?)`);
+      params.push(filter.agentId);
+    }
+    if (mappings.length > 1) clauses.push(`EXISTS (SELECT 1 FROM agent_usage_source_mappings m WHERE ${mappings.join(" AND ")})`);
+    const where = clauses.join(" AND ");
+    const rows = this.store.db.prepare(`SELECT s.* FROM agent_usage_sources s WHERE ${where} ORDER BY s.source_key`)
+      .all(...params) as SourceRow[];
+    if (rows.length === 0) return [];
+    // Load every mapping of selected sources together; filtering must not truncate a source's public mappings.
+    const mappingRows = this.store.db.prepare(`SELECT mapping.* FROM agent_usage_source_mappings mapping
+      JOIN agent_usage_sources s ON s.id = mapping.source_id WHERE ${where}`)
+      .all(...params) as Array<MappingRow & { source_id: string }>;
+    const bySource = new Map<string, MappingRow[]>();
+    for (const row of mappingRows) {
+      const group = bySource.get(row.source_id) ?? [];
+      group.push(row);
+      bySource.set(row.source_id, group);
+    }
+    return rows.map((row) => this.project(row, bySource.get(row.id) ?? []));
   }
 
   async prepareMaintenance(binding: UsageBinding, operation: "reset" | "cleanup", id: string): Promise<void> {
     this.store.assertBinding(binding);
     let pending = this.maintenance(binding);
-    if (pending && (pending.id !== id || pending.operation !== operation)) throw new Error("usage_maintenance_conflict");
+    if (pending && (pending.id !== id || pending.operation !== operation)) throw new UsageError("usage_maintenance_conflict");
     if (pending?.state === "ready") return;
     pending ??= { id, operation, state: "draining", boundaries: {} };
     this.saveMaintenance(binding, pending);
@@ -194,12 +226,12 @@ export class UsageSourceCoordinator {
         if (this.jobs.has(source.id)) await this.jobs.get(source.id)!.promise;
         if (pending.boundaries[source.id] === undefined) {
           const adapter = this.adapters[source.kind];
-          if (!adapter) throw new Error("usage_source_unsupported");
+          if (!adapter) throw new UsageError("usage_source_unsupported");
           let timer: ReturnType<typeof setTimeout>;
           try {
             pending.boundaries[source.id] = await Promise.race([
               adapter.freeze(JSON.parse(source.input_json) as Record<string, string>),
-              new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("usage_collection_timeout")), this.timeoutMs); timer.unref(); })
+              new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new UsageError("usage_collection_timeout")), this.timeoutMs); timer.unref(); })
             ]);
           } finally { clearTimeout(timer!); }
           this.saveMaintenance(binding, pending);
@@ -208,7 +240,7 @@ export class UsageSourceCoordinator {
       }
       pending.state = "ready";
       this.saveMaintenance(binding, pending);
-    } catch { throw new Error("usage_collection_pending"); }
+    } catch { throw new UsageError("usage_collection_pending"); }
   }
 
   maintenance(binding: UsageBinding): Maintenance | null {
@@ -222,7 +254,7 @@ export class UsageSourceCoordinator {
       this.store.assertBinding(binding);
       const pending = this.maintenance(binding);
       if (!pending) return;
-      if (pending.state !== "ready") throw new Error("usage_collection_pending");
+      if (pending.state !== "ready") throw new UsageError("usage_collection_pending");
       this.store.db.prepare(`UPDATE agent_usage_subjects SET state = 'active', maintenance_json = NULL,
         epoch = epoch + ? WHERE namespace = ? AND kind = 'session' AND subject_id = ?`)
         .run(Number(pending.operation === "reset"), binding.namespace, binding.sessionId);
@@ -247,10 +279,6 @@ export class UsageSourceCoordinator {
         ON u.namespace = m.namespace AND u.kind = 'session' AND u.subject_id = m.session_id
         WHERE m.source_id = s.id AND m.state = 'active' AND u.state = 'active')`).all() as Array<{ id: string }>;
     return rows.map((row) => ({ id: row.id, sessionIds: this.mappings(row.id).map((mapping) => mapping.session_id) }));
-  }
-
-  async recover(): Promise<void> {
-    for (const source of this.recoverySources()) await this.collect(source.id).catch(() => undefined);
   }
 
   cancelCollections(): void {
@@ -283,11 +311,11 @@ export class UsageSourceCoordinator {
     return { namespace: row.namespace, agentId: row.agent_id, sessionId: row.session_id, generation: row.subject_generation };
   }
 
-  private project(row: SourceRow): SourceRecord {
+  private project(row: SourceRow, mappings = this.mappings(row.id)): SourceRecord {
     return { id: row.id, sourceKey: row.source_key, kind: row.kind, capabilities: JSON.parse(row.capabilities_json) as SourceCapabilities,
       checkpoint: row.checkpoint, status: row.status, collectionId: row.collection_id, errorCode: row.error_code,
       rejectedRecords: row.rejected_records, lastSuccessAt: row.last_success_at,
-      mappings: this.mappings(row.id).map((mapping) => ({ sourceSessionKey: mapping.source_session_key, sessionId: mapping.session_id,
+      mappings: mappings.map((mapping) => ({ sourceSessionKey: mapping.source_session_key, sessionId: mapping.session_id,
         providerEpochId: mapping.epoch_id, state: mapping.state })) };
   }
 }

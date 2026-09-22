@@ -1,8 +1,9 @@
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { UsageStore } from "../src/agent-usage/storage/usage-store.js";
 import { normalizeUsage } from "../src/agent-usage/core/usage.js";
 import { accountingRequests } from "./fixtures/agent-usage/accounting.js";
+import type { UsageRecord } from "../src/agent-usage/core/types.js";
 
 const databases: Database.Database[] = [];
 const setup = () => {
@@ -14,6 +15,48 @@ const setup = () => {
 afterEach(() => { for (const db of databases.splice(0)) db.close(); });
 
 describe("usage ledger", () => {
+  it.each(["provider_session", "turn"] as const)("indexes %s containment without rescanning unrelated ranges", (scope) => {
+    const { store, binding } = setup();
+    const records: UsageRecord[] = [];
+    let identityReads = 0;
+    for (let index = 0; index < 400; index++) {
+      const common = { ...accountingRequests()[0]!, ...binding, executionId: `run-${index}`,
+        sessionId: scope === "provider_session" ? `session-${index}` : binding.sessionId };
+      for (const row of [
+        { ...common, scope, eventId: `parent-${index}`, coverageId: `parent-${index}`, invocationId: null,
+          occurredAt: null, metrics: normalizeUsage({ inputTotalTokens: 100, outputTotalTokens: 20 }) },
+        { ...common, eventId: `request-${index}`, coverageId: `request-${index}`, invocationId: `request-${index}`,
+          metrics: normalizeUsage({ inputTotalTokens: 100, outputTotalTokens: 10 }) }
+      ]) {
+        Object.defineProperty(row, "namespace", { enumerable: true, get() { identityReads++; return binding.namespace; } });
+        records.push(row);
+      }
+    }
+    vi.spyOn(store, "records").mockReturnValue(records);
+    expect(store.summary()).toMatchObject({ usage: { totalTokens: 48_000 }, unplacedUsage: { totalTokens: 4_000 } });
+    // Counting identity reads detects quadratic containment work without a machine-dependent time limit.
+    expect(identityReads).toBeLessThan(records.length * 50);
+  });
+
+  it("reads the ledger once and reuses one calendar formatter for a timeseries query", () => {
+    const { store, binding } = setup();
+    for (let index = 0; index < 200; index++) store.observe(binding, {
+      ...accountingRequests()[0]!, eventId: `event-${index}`, coverageId: `request-${index}`, invocationId: `request-${index}`
+    });
+    const records = vi.spyOn(store, "records");
+    const DateTimeFormat = Intl.DateTimeFormat;
+    const formatter = vi.spyOn(Intl, "DateTimeFormat").mockImplementation(function (locales, options) {
+      return new DateTimeFormat(locales, options);
+    });
+    try {
+      const result = store.timeseries({}, "Asia/Singapore", "day");
+      expect(result.items).toEqual([{ period: "2026-09-20", usage: expect.objectContaining({ totalTokens: 220_000 }), observedRanges: 200 }]);
+      expect(records).toHaveBeenCalledTimes(1);
+      expect(formatter).toHaveBeenCalledTimes(1);
+    } finally {
+      formatter.mockRestore();
+    }
+  });
   it("retains known totals while exposing missing requests and cache subsets", () => {
     const { store, binding } = setup();
     for (const observation of accountingRequests()) store.observe(binding, observation);

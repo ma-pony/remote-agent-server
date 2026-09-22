@@ -34,16 +34,25 @@ export class UsageHttpRelay {
     const port = (this.server!.address() as { port: number }).port;
     return { baseUrl: `http://127.0.0.1:${port}/${token}`, credential: randomBytes(32).toString("hex"), revoke: async () => {
       this.routes.delete(token);
-      for (const [request, item] of this.active) if (item.token === token) { item.finish("interrupted"); request.destroy(); }
+      for (const [request, item] of this.active) {
+        if (item.token !== token) continue;
+        item.finish("interrupted");
+        request.destroy();
+      }
       await this.drain();
     } };
   }
   private start(): Promise<void> {
     return this.starting ??= new Promise<void>((resolve, reject) => {
       this.server = createServer((req, res) => {
-        const match = /^\/([a-f0-9]{64})(\/[^#]*)?$/.exec(req.url ?? ""); const route = match ? this.routes.get(match[1]!) : undefined;
-        if (!route) { res.writeHead(404).end(); return; }
-        const endpoint = match![2] ?? "/"; const base = new URL(route.upstream.baseUrl);
+        const match = /^\/([a-f0-9]{64})(\/[^#]*)?$/.exec(req.url ?? "");
+        const route = match ? this.routes.get(match[1]!) : undefined;
+        if (!route) {
+          res.writeHead(404).end();
+          return;
+        }
+        const endpoint = match![2] ?? "/";
+        const base = new URL(route.upstream.baseUrl);
         const basePath = base.pathname.replace(/\/$/, "");
         // SDKs differ on whether the version suffix is part of baseURL.
         base.pathname = basePath + (basePath.endsWith("/v1") && endpoint.startsWith("/v1/") ? endpoint.slice(3).split("?")[0] : endpoint.split("?")[0]);
@@ -51,8 +60,13 @@ export class UsageHttpRelay {
         const outbound = headers(req.headers, true);
         if (route.upstream.protocol === "anthropic_messages") outbound["x-api-key"] = route.upstream.apiKey;
         else outbound.authorization = `Bearer ${route.upstream.apiKey}`;
-        let binding: unknown; let issue: string | null = null;
-        try { binding = route.begin(); } catch { issue = "binding_unavailable"; }
+        let binding: unknown;
+        let issue: string | null = null;
+        try {
+          binding = route.begin();
+        } catch {
+          issue = "binding_unavailable";
+        }
         const reserved = issue === null && this.observedWork < (this.limits.maxObservedRequests ?? 64);
         if (reserved) this.observedWork++;
         else issue ??= "capture_capacity";
@@ -61,16 +75,25 @@ export class UsageHttpRelay {
         const sizes = { request: 0, response: 0 };
         const tap = (field: "request" | "response") => new Transform({ transform: (chunk: Buffer, _encoding, callback) => {
           if (exchange.issue === null) {
-            if (sizes[field] + chunk.length > (this.limits.maxBodyBytes ?? 2 * 1024 * 1024)) { exchange.issue = "body_limit"; chunks.request = []; chunks.response = []; }
-            else { sizes[field] += chunk.length; chunks[field].push(chunk); }
+            if (sizes[field] + chunk.length > (this.limits.maxBodyBytes ?? 2 * 1024 * 1024)) {
+              exchange.issue = "body_limit";
+              chunks.request = [];
+              chunks.response = [];
+            } else {
+              sizes[field] += chunk.length;
+              chunks[field].push(chunk);
+            }
           }
           callback(null, chunk);
         } });
         let finished = false;
         const finish = (reason?: string) => {
-          if (finished) return; finished = true; this.active.delete(upstream);
+          if (finished) return;
+          finished = true;
+          this.active.delete(upstream);
           exchange.issue ??= reason ?? null;
-          exchange.request = Buffer.concat(chunks.request); exchange.response = Buffer.concat(chunks.response);
+          exchange.request = Buffer.concat(chunks.request);
+          exchange.response = Buffer.concat(chunks.response);
           const work = Promise.resolve().then(() => route.finish(binding, exchange)).catch(() => {}).then(() => {
             if (reserved) this.observedWork--;
             this.work.delete(work);
@@ -78,28 +101,55 @@ export class UsageHttpRelay {
           this.work.add(work);
         };
         const upstream = (base.protocol === "https:" ? httpsRequest : httpRequest)(base, { method: req.method, headers: outbound }, (response) => {
-          exchange.status = response.statusCode ?? 502; exchange.responseEncoding = String(response.headers["content-encoding"] ?? "identity"); exchange.contentType = String(response.headers["content-type"] ?? "");
+          exchange.status = response.statusCode ?? 502;
+          exchange.responseEncoding = String(response.headers["content-encoding"] ?? "identity");
+          exchange.contentType = String(response.headers["content-type"] ?? "");
           res.writeHead(exchange.status, headers(response.headers, false));
-          response.on("error", () => { finish("upstream_aborted"); res.destroy(); });
-          response.on("end", () => finish()); response.pipe(tap("response")).pipe(res);
+          response.on("error", () => {
+            finish("upstream_aborted");
+            res.destroy();
+          });
+          response.on("end", () => finish());
+          response.pipe(tap("response")).pipe(res);
         });
         this.active.set(upstream, { token: match![1]!, finish });
-        upstream.on("error", () => { finish("upstream_failed"); if (!res.headersSent) res.writeHead(502).end(); else res.destroy(); });
-        req.on("aborted", () => { finish("downstream_aborted"); upstream.destroy(); });
-        req.on("error", () => { finish("downstream_aborted"); upstream.destroy(); });
-        res.on("close", () => { if (!res.writableFinished) { finish("downstream_aborted"); upstream.destroy(); } });
+        upstream.on("error", () => {
+          finish("upstream_failed");
+          if (!res.headersSent) res.writeHead(502).end();
+          else res.destroy();
+        });
+        const abort = () => {
+          finish("downstream_aborted");
+          upstream.destroy();
+        };
+        req.on("aborted", abort);
+        req.on("error", abort);
+        res.on("close", () => {
+          if (!res.writableFinished) abort();
+        });
         req.pipe(tap("request")).pipe(upstream);
       });
-      this.server.on("connection", (socket) => { this.sockets.add(socket); socket.on("close", () => this.sockets.delete(socket)); });
-      this.server.once("error", reject); this.server.listen(0, "127.0.0.1", resolve);
+      this.server.on("connection", (socket) => {
+        this.sockets.add(socket);
+        socket.on("close", () => this.sockets.delete(socket));
+      });
+      this.server.once("error", reject);
+      this.server.listen(0, "127.0.0.1", resolve);
     });
   }
-  async drain(): Promise<void> { while (this.work.size) await Promise.all([...this.work]); }
+  async drain(): Promise<void> {
+    while (this.work.size) await Promise.all([...this.work]);
+  }
   async close(): Promise<void> {
     this.closed = true;
     await this.starting?.catch(() => undefined);
-    this.routes.clear(); for (const [request, item] of this.active) { item.finish("interrupted"); request.destroy(); }
-    for (const socket of this.sockets) socket.destroy(); await this.drain();
+    this.routes.clear();
+    for (const [request, item] of this.active) {
+      item.finish("interrupted");
+      request.destroy();
+    }
+    for (const socket of this.sockets) socket.destroy();
+    await this.drain();
     if (this.server) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
   }
 }

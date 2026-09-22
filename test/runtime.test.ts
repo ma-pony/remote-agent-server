@@ -778,6 +778,37 @@ describe("AcpxAgentRuntime", () => {
     expect(options.agentRegistry.list()).toEqual([]);
   });
 
+  it.each([false, true])("Provider ID 不匹配后撤销采集路由（Handle 关闭失败：%s）", async (closeFails) => {
+    const { createTestDatabase } = await import("./helpers.js");
+    const { HostUsageCollector } = await import("../src/agent-usage/host-collector.js");
+    const { HostUsageCapture } = await import("../src/agent-usage/capture/host-capture.js");
+    const root = makeRoot();
+    const { db, seed } = createTestDatabase();
+    const session = seed.session();
+    const capture = new HostUsageCapture(new HostUsageCollector(db), {
+      codex: { baseUrl: "http://127.0.0.1:1/v1", protocol: "responses", apiKeyEnv: "TEST_CAPTURE_KEY" }
+    }, new Map([["codex", "synthetic-key"]]));
+    const prepare = vi.spyOn(capture, "prepare");
+    const acp = runtimeStub({ handle: { agentSessionId: "wrong-provider-session" } });
+    if (closeFails) acp.close.mockRejectedValueOnce(new Error("close failed"));
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root), undefined, undefined, capture);
+    try {
+      await expect(runtime.ensureSession(sessionInput(root, {
+        sessionId: session.id, providerSessionId: "expected-provider-session"
+      }))).rejects.toThrow(closeFails ? "close failed" : "Provider session resume returned a different session ID");
+      const route = await prepare.mock.results[0]!.value;
+      expect(route).toBeDefined();
+      const response = await fetch(route!.baseUrl + "/responses", { method: "POST", body: "{}" });
+      await response.text();
+      expect(response.status).toBe(404);
+    } finally {
+      await runtime.shutdown();
+      await capture.close();
+      db.close();
+    }
+  });
+
   it("重复 ensure 幂等且首次 prompt 只注入一次", async () => {
     const root = makeRoot();
     const acp = runtimeStub();

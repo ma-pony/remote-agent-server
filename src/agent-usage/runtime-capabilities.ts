@@ -1,5 +1,7 @@
-import { basename, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import { isAbsolute, join, normalize, relative, resolve } from "node:path";
 
+import { UsageError } from "./core/errors.js";
+import { runtimeToolCapability, structuredExecutable } from "./core/tool-capabilities.js";
 import type { Capability, InvocationStatus } from "./core/context-types.js";
 import type { UsageFilter } from "./core/types.js";
 import type { ProjectedSkill } from "../runtime/skill-projector.js";
@@ -59,12 +61,6 @@ const withinDirectory = (path: string, directory: string): boolean => {
   return fromDirectory === "" || (!fromDirectory.startsWith("..") && !isAbsolute(fromDirectory));
 };
 
-const executableName = (value: string | undefined): string | undefined => {
-  if (value === undefined) return undefined;
-  const name = basename(value);
-  return /^[a-zA-Z0-9._+-]{1,128}$/.test(name) ? name : undefined;
-};
-
 const outputBytes = (value: unknown): number | null => {
   if (value === undefined) return null;
   if (typeof value === "string") return Buffer.byteLength(value);
@@ -86,15 +82,6 @@ const statusOf = (value: unknown): InvocationStatus => {
 };
 
 const terminal = (status: InvocationStatus): boolean => status !== "running";
-
-const stableBuiltinName = (kind: string): string => ({
-  read: "Read file",
-  edit: "Edit file",
-  search: "Search files",
-  fetch: "Fetch resource",
-  delete: "Delete file",
-  move: "Move file"
-}[kind] ?? "Runtime tool");
 
 /**
  * Persists bounded, body-free evidence from Runtime tool events. MCP identity is deliberately
@@ -200,13 +187,13 @@ export class RuntimeCapabilityCollector {
     }
     if (this.store.db.prepare(`SELECT 1 FROM agent_usage_runtime_mcp_mirrors WHERE namespace = ? AND session_id = ?
       AND provider_epoch_id = ? AND execution_id = ? AND native_call_id = ?`).get(...mirrorKey)) return;
-    const executable = this.structuredExecutable(kind, input);
+    const executable = structuredExecutable(kind, input);
     const status = statusOf(content.status);
     const observedAt = new Date().toISOString();
     const bytes = outputBytes(content.rawOutput);
     const baseInvocationId = `runtime:${run.runtimeKind}:run:${runId}:call:${nativeId}`;
 
-    const primary = this.runtimeCapability(run.runtimeKind, kind, executable, input);
+    const primary = runtimeToolCapability(run.runtimeKind, kind, input);
     this.observe(binding, epoch, String(runId), run.runtimeKind, baseInvocationId, primary, status, observedAt, bytes);
 
     let associations = this.associations(binding.namespace, binding.sessionId, epoch, String(runId), nativeId);
@@ -280,7 +267,7 @@ export class RuntimeCapabilityCollector {
     const row = this.store.db.prepare(`SELECT r.session_id, s.agent_id, s.workspace_path, a.provider
       FROM runs r JOIN sessions s ON s.id = r.session_id JOIN agents a ON a.id = s.agent_id WHERE r.id = ?`)
       .get(runId) as { session_id: number; agent_id: number; workspace_path: string; provider: string } | undefined;
-    if (row === undefined) throw new Error("usage_run_not_found");
+    if (row === undefined) throw new UsageError("usage_run_not_found");
     return { sessionId: row.session_id, agentId: row.agent_id, workspacePath: row.workspace_path, runtimeKind: row.provider };
   }
 
@@ -288,7 +275,7 @@ export class RuntimeCapabilityCollector {
     const row = this.store.db.prepare(`SELECT epoch FROM agent_usage_subjects
       WHERE namespace = ? AND kind = 'session' AND subject_id = ? AND state = 'active'`)
       .get(namespace, sessionId) as { epoch: number } | undefined;
-    if (row === undefined) throw new Error("usage_subject_deleted");
+    if (row === undefined) throw new UsageError("usage_subject_deleted");
     return `session:${sessionId}:epoch:${row.epoch}`;
   }
 
@@ -311,31 +298,6 @@ export class RuntimeCapabilityCollector {
         AND native_call_id = ? AND stage != 'catalog_visible'
       ORDER BY event_id ASC`).all(namespace, sessionId, epoch, executionId, nativeCallId) as ActivityAssociationRow[];
     return [...new Map(rows.map((row) => [row.event_id, row])).values()];
-  }
-
-  private structuredExecutable(kind: string, input: Record<string, unknown> | undefined): { name?: string; path?: string } | undefined {
-    if (kind !== "execute" || input === undefined) return undefined;
-    const direct = safePath(input.executable) ?? safePath(input.program);
-    const argv = Array.isArray(input.argv) ? input.argv : undefined;
-    const outer = direct ?? safePath(argv?.[0]);
-    return outer === undefined ? undefined : { name: executableName(outer), path: outer };
-  }
-
-  private runtimeCapability(
-    runtimeKind: string,
-    kind: string,
-    executable: { name?: string } | undefined,
-    input: Record<string, unknown> | undefined
-  ): Capability {
-    if (kind === "execute" && (executable !== undefined || typeof input?.command === "string" || typeof input?.cmd === "string")) {
-      const name = executable?.name ?? "Shell command";
-      const identity = executable?.name ?? "shell";
-      return { id: `runtime:${runtimeKind}:cli:${identity}`, kind: "cli", name };
-    }
-    if (["read", "edit", "search", "fetch", "delete", "move"].includes(kind)) {
-      return { id: `runtime:${runtimeKind}:builtin:${kind}`, kind: "builtin_tool", name: stableBuiltinName(kind) };
-    }
-    return { id: `runtime:${runtimeKind}:unknown`, kind: "unknown", name: "Runtime tool" };
   }
 
   private eventPath(

@@ -32,6 +32,25 @@ const setup = async (usageTokenizers = [fixtureTokenizerConfig()]) => {
 const register = (app: FastifyInstance, payload: unknown) => app.inject({ method: "POST", url: "/api/usage/sources", headers, payload });
 
 describe("usage source management API", () => {
+  it("filters source listings by Agent and Session at the API boundary", async () => {
+    const { app, manager, registration, session } = await setup();
+    const registered = await register(app, registration);
+    const agentId = manager.collector.binding(session.id).agentId;
+    const list = (query: string) => app.inject({ url: `/api/usage/sources?${query}`, headers });
+    expect((await list(`agentId=${agentId}&sessionId=${session.id}`)).json()).toEqual([registered.json()]);
+    expect((await list("agentId=999999")).json()).toEqual([]);
+    expect((await list("sessionId=999999")).json()).toEqual([]);
+    expect((await list("sessionId=invalid")).statusCode).toBe(400);
+  });
+
+  it.each(["database unavailable", "usage_source_conflict"])("does not classify an untyped internal error as client input: %s", async (message) => {
+    const { app, manager, registration } = await setup();
+    vi.spyOn(manager, "register").mockRejectedValueOnce(new Error(message));
+    const response = await register(app, registration);
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({ error: { code: "usage_source_failed", message: "Usage source operation could not be completed" } });
+    expect(response.body).not.toContain(message);
+  });
   it("returns ranked fallback estimates through the import API with no tokenizer profiles configured", async () => {
     const { app, root, manager, registration } = await setup([]);
     await writeFile(join(root, "fallback.json"), JSON.stringify(snapshotFixture()));

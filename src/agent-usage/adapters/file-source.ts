@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
+import { UsageError } from "../core/errors.js";
 import type { SourceCapabilities, UsageSourceAdapter, UsageSourceEntry, UsageCollectionEntry } from "../source-coordinator.js";
 
 export type ParsedSourceEntry = UsageSourceEntry;
@@ -37,7 +38,7 @@ export class FileUsageSource implements UsageSourceAdapter {
     const offset = incremental ? previous?.offset ?? 0 : 0;
     const { bytes, boundary: verified } = await this.read(input, boundary.size, signal, offset,
       this.options.appendOnly !== false ? previous : null);
-    if (verified.identity !== boundary.identity || verified.digest !== boundary.digest) throw new Error("usage_source_changed");
+    if (verified.identity !== boundary.identity || verified.digest !== boundary.digest) throw new UsageError("usage_source_changed");
     if (!incremental) {
       if (previous?.digest === boundary.digest && previous.identity === boundary.identity && previous.complete) return;
       const entries = this.options.parse(bytes.toString("utf8"));
@@ -56,7 +57,7 @@ export class FileUsageSource implements UsageSourceAdapter {
     if (unterminated && bytes.length) {
       const newline = bytes.indexOf(10);
       const prefix = bytes.subarray(0, newline < 0 ? bytes.length : newline).toString("utf8");
-      if (prefix.trim()) throw new Error("usage_source_changed");
+      if (prefix.trim()) throw new UsageError("usage_source_changed");
       cursor = newline < 0 ? bytes.length : newline + 1;
       unterminated = newline < 0;
     }
@@ -86,7 +87,7 @@ export class FileUsageSource implements UsageSourceAdapter {
     const finalCheckpoint = JSON.stringify({ ...boundary, offset: offset + cursor, line,
       state: parser.snapshot(), index: skip, unterminated } satisfies Checkpoint);
     if (finalCheckpoint !== lastCheckpoint) yield { checkpoint: finalCheckpoint };
-    if (cursor < bytes.length) throw new Error("usage_source_incomplete");
+    if (cursor < bytes.length) throw new UsageError("usage_source_incomplete");
   }
 
   private async read(input: Record<string, string>, size?: number, signal?: AbortSignal, keepFrom?: number,
@@ -95,25 +96,25 @@ export class FileUsageSource implements UsageSourceAdapter {
     const handle = await open(await this.options.resolve(input), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const stat = await handle.stat(), length = size ?? stat.size;
-      if (!stat.isFile()) throw new Error("usage_source_not_file");
-      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_FILE_BYTES) throw new Error("usage_source_too_large");
-      if (stat.size < length || keepFrom !== undefined && (keepFrom < 0 || keepFrom > length)) throw new Error("usage_source_changed");
+      if (!stat.isFile()) throw new UsageError("usage_source_not_file");
+      if (!Number.isSafeInteger(length) || length < 0 || length > MAX_FILE_BYTES) throw new UsageError("usage_source_too_large");
+      if (stat.size < length || keepFrom !== undefined && (keepFrom < 0 || keepFrom > length)) throw new UsageError("usage_source_changed");
       const identity = digest(Buffer.from(`${stat.dev}:${stat.ino}:${stat.birthtimeMs}`));
-      if (input.fileIdentity !== undefined && input.fileIdentity !== identity) throw new Error("usage_source_changed");
-      if (previous && (previous.identity !== identity || previous.size > length)) throw new Error("usage_source_changed");
+      if (input.fileIdentity !== undefined && input.fileIdentity !== identity) throw new UsageError("usage_source_changed");
+      if (previous && (previous.identity !== identity || previous.size > length)) throw new UsageError("usage_source_changed");
       const hash = createHash("sha256"), prefix = createHash("sha256");
       const buffer = Buffer.alloc(Math.min(64 * 1024, length)), retained: Buffer[] = [];
       let offset = 0;
       while (offset < length) {
         signal?.throwIfAborted();
         const result = await handle.read(buffer, 0, Math.min(buffer.length, length - offset), offset);
-        if (result.bytesRead === 0) throw new Error("usage_source_changed");
+        if (result.bytesRead === 0) throw new UsageError("usage_source_changed");
         const chunk = buffer.subarray(0, result.bytesRead); hash.update(chunk);
         if (previous && offset < previous.size) prefix.update(chunk.subarray(0, Math.min(chunk.length, previous.size - offset)));
         if (keepFrom !== undefined && offset + chunk.length > keepFrom) retained.push(Buffer.from(chunk.subarray(Math.max(0, keepFrom - offset))));
         offset += chunk.length;
       }
-      if (previous && prefix.digest("hex") !== previous.digest) throw new Error("usage_source_changed");
+      if (previous && prefix.digest("hex") !== previous.digest) throw new UsageError("usage_source_changed");
       return { bytes: Buffer.concat(retained), boundary: { identity, size: length, digest: hash.digest("hex") } };
     } finally { await handle.close(); }
   }

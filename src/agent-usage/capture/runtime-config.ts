@@ -1,3 +1,4 @@
+import { UsageError } from "../core/errors.js";
 import type { Provider } from "../../domain.js";
 import type { RelayRoute } from "./http-relay.js";
 /** Only local opaque credentials enter the child. Routing overrides remain ephemeral. */
@@ -13,5 +14,5 @@ export function captureRuntimeEnvironment(provider: Provider, route: RelayRoute)
     "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
     "CLAUDE_CODE_USE_FOUNDRY", "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL"],
     values: { ANTHROPIC_API_KEY: route.credential, ANTHROPIC_BASE_URL: route.baseUrl } };
-  throw new Error("usage_capture_runtime_unsupported");
+  throw new UsageError("usage_capture_runtime_unsupported");
 }

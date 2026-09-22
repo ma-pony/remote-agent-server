@@ -1,6 +1,8 @@
 import type Database from "better-sqlite3";
-import { metricNames, type UsageBinding, type UsageFilter, type UsageObservation, type UsageRecord, type UsageSummary } from "../core/types.js";
-import { accountingRows, intervalIntersects, intervalOverlapConflicts, completeUsage, containedDetail, isAccountable, normalizeUsage, rangeConflicts, reconcileSources, sumUsage } from "../core/usage.js";
+import { UsageError } from "../core/errors.js";
+import { metricNames, type UsageBinding, type UsageFilter, type UsageObservation, type UsageRecord, type UsageSummary, type UsageTimeseries } from "../core/types.js";
+import { normalizeUsage, sumUsage } from "../core/usage.js";
+import { UsageAnalysis } from "../core/usage-analysis.js";
 
 type SubjectRow = { agent_id: string | null; generation: number; state: "active" | "draining" | "deleted" };
 
@@ -39,8 +41,8 @@ export class UsageStore {
         this.db.prepare(`INSERT INTO agent_usage_subjects (namespace, kind, subject_id, agent_id)
           VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`).run(namespace, kind, id, kind === "session" ? agentId : null);
         const row = this.subject(namespace, kind, id)!;
-        if (row.state === "deleted") throw new Error("usage_subject_deleted");
-        if (kind === "session" && row.agent_id !== agentId) throw new Error("usage_subject_mismatch");
+        if (row.state === "deleted") throw new UsageError("usage_subject_deleted");
+        if (kind === "session" && row.agent_id !== agentId) throw new UsageError("usage_subject_mismatch");
       }
       return { namespace, agentId, sessionId, generation: this.subject(namespace, "session", sessionId)!.generation };
     })();
@@ -49,9 +51,9 @@ export class UsageStore {
   assertBinding(binding: UsageBinding): void {
     const session = this.subject(binding.namespace, "session", binding.sessionId);
     const agent = this.subject(binding.namespace, "agent", binding.agentId);
-    if (session?.state === "deleted" || agent?.state === "deleted") throw new Error("usage_subject_deleted");
+    if (session?.state === "deleted" || agent?.state === "deleted") throw new UsageError("usage_subject_deleted");
     if (session === undefined || agent === undefined || session.generation !== binding.generation || session.agent_id !== binding.agentId) {
-      throw new Error("usage_binding_stale");
+      throw new UsageError("usage_binding_stale");
     }
   }
 
@@ -116,54 +118,11 @@ export class UsageStore {
   }
 
   summary(filter: UsageFilter = {}): UsageSummary {
-    const all = reconcileSources(this.records(filter));
-    const isLocated = (row: UsageRecord) => row.occurredAt !== null && row.scope !== "provider_session";
-    const inPeriod = (row: UsageRecord) => {
-      if (filter.from === undefined && filter.to === undefined) return true;
-      return isLocated(row) && (filter.from === undefined || Date.parse(row.intervalStart ?? row.occurredAt!) >= Date.parse(filter.from))
-        && (filter.to === undefined || Date.parse(row.occurredAt!) < Date.parse(filter.to));
-    };
-    const records = all.records.filter(inPeriod);
-    const datedBasis = accountingRows(all.records.filter(isLocated));
-    const selected = filter.from === undefined && filter.to === undefined ? accountingRows(records) : datedBasis.filter(inPeriod);
-    const ambiguous = datedBasis.filter((row) => intervalIntersects(row, filter) && !inPeriod(row));
-    const conflicts = all.conflicts + rangeConflicts(all.records) + intervalOverlapConflicts(all.records)
-      + all.records.filter((row) => row.issues?.some((issue) => issue !== "cumulative_fields_missing")).length;
-    const requests = records.filter((row) => row.scope === "model_request");
-    const complete = requests.filter(completeUsage).length;
-    const missing = requests.filter((row) => !isAccountable(row) || Object.values(row.metrics).every((value) => value === null)).length;
-    const unknown = records.filter((row) => !isAccountable(row)).length;
-    const totalRows = selected.filter((row) => row.metrics.totalTokens !== null);
-    const scopes = new Set((totalRows.length > 0 ? totalRows : selected).map((row) => row.scope));
-    const basis = scopes.size === 0 ? "none" : scopes.size > 1 ? "mixed" : scopes.has("provider_session") ? "range_totals"
-      : scopes.has("turn") ? "turn_totals" : scopes.has("interval") ? "interval_totals" : "model_requests";
-    const unplaced = accountingRows(all.records).filter((row) => !isLocated(row)).map((parent) => {
-      const detail = sumUsage(accountingRows(containedDetail(parent, all.records).filter(isLocated)));
-      const metrics = { ...parent.metrics };
-      for (const key of metricNames) {
-        if (metrics[key] !== null && detail[key] !== null) {
-          const residual = metrics[key]! - detail[key]!;
-          metrics[key] = residual >= 0 ? residual : null;
-        }
-      }
-      return { metrics };
-    });
-    return {
-      usage: sumUsage(selected),
-      locatedUsage: sumUsage(datedBasis.filter(inPeriod)),
-      unplacedUsage: sumUsage([...unplaced, ...ambiguous]),
-      accountingBasis: basis,
-      completeness: conflicts > 0 ? "conflict" : ambiguous.length > 0 ? "partial" : records.length === 0 ? "none"
-        : unknown > 0 || complete < requests.length || records.some((row) => !completeUsage(row) || row.finality !== "final"
-          || row.issues?.includes("cumulative_fields_missing")) ? "partial" : "complete",
-      observedModelRequests: requests.length,
-      requestsWithCompleteUsage: complete,
-      requestsWithMissingUsage: missing,
-      requestsWithPartialUsage: requests.length - complete - missing,
-      unverifiedObservations: unknown,
-      conflictingRanges: conflicts,
-      asOf: new Date().toISOString()
-    };
+    return new UsageAnalysis(this.records(filter)).summary(filter);
+  }
+
+  timeseries(filter: UsageFilter, timezone: string, bucket: "day" | "week" | "month"): UsageTimeseries {
+    return new UsageAnalysis(this.records(filter)).timeseries(filter, timezone, bucket);
   }
 
   deleteSession(namespace: string, sessionId: string): void {

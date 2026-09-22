@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { Tokenizer } from "@huggingface/tokenizers";
+import { UsageError } from "./errors.js";
 import type { TokenEstimate } from "./context-types.js";
 import { MAX_TOKENIZABLE_BLOCK_BYTES } from "./context.js";
 
@@ -42,7 +43,7 @@ export class ModelTokenizers {
     const ids = new Set<string>();
     const engines = new Map<string, Tokenizer>();
     for (const profile of profiles) {
-      if (ids.has(profile.id)) throw new Error("usage_tokenizer_id_conflict");
+      if (ids.has(profile.id)) throw new UsageError("usage_tokenizer_id_conflict");
       ids.add(profile.id);
       const revision = hash(JSON.stringify([profile.tokenizerJson, profile.tokenizerConfig]));
       let tokenizer = engines.get(revision);
@@ -60,7 +61,7 @@ export class ModelTokenizers {
       } };
       for (const model of profile.models) {
         const key = modelKey(model, profile.modelProvider ?? null);
-        if (this.profiles.has(key)) throw new Error("usage_tokenizer_model_conflict");
+        if (this.profiles.has(key)) throw new UsageError("usage_tokenizer_model_conflict");
         this.profiles.set(key, loaded);
       }
     }

@@ -2,8 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { HostUsageCollector } from "./host-collector.js";
 import { capabilityKinds, type AttributionRankRow } from "./core/context-types.js";
-import { accountingRows, reconcileSources, sumUsage } from "./core/usage.js";
-import type { UsageFilter, UsageRecord } from "./core/types.js";
+import type { UsageFilter } from "./core/types.js";
 
 const querySchema = z.object({
   agentId: z.string().regex(/^[1-9]\d*$/).optional(), sessionId: z.string().regex(/^[1-9]\d*$/).optional(),
@@ -22,19 +21,6 @@ const querySchema = z.object({
   origin: z.enum(["counted", "execution", "context"]).default("counted")
 }).strict().refine((query) => !query.from || !query.to || Date.parse(query.from) < Date.parse(query.to));
 
-const periodKey = (timestamp: string, timezone: string, bucket: "day" | "week" | "month"): string => {
-  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(timestamp));
-  const part = (kind: string) => parts.find((item) => item.type === kind)!.value;
-  const day = `${part("year")}-${part("month")}-${part("day")}`;
-  if (bucket === "day") return day;
-  if (bucket === "month") return day.slice(0, 7);
-  // Calendar arithmetic after timezone conversion; no assumption that every local day is 24 hours.
-  const date = new Date(`${day}T00:00:00Z`);
-  date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
-  return date.toISOString().slice(0, 10);
-};
-const inPeriod = (timestamp: string | null, filter: UsageFilter): boolean => timestamp !== null
-  && (!filter.from || Date.parse(timestamp) >= Date.parse(filter.from)) && (!filter.to || Date.parse(timestamp) < Date.parse(filter.to));
 const insights = (row: AttributionRankRow) => [
   ...(row.repeatedResultInputTokens !== null && row.repeatedResultInputTokens > 0 ? [{ kind: "repeated_results", tokens: row.repeatedResultInputTokens }] : []),
   ...(row.calls === 0 && (row.definitionInputTokens ?? 0) > 0 ? [{ kind: "unused_definitions", tokens: row.definitionInputTokens }] : []),
@@ -62,10 +48,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       const filter: UsageFilter = { namespace, agentId: query.agentId, sessionId: query.sessionId,
         from: query.from === undefined ? undefined : new Date(query.from).toISOString(),
         to: query.to === undefined ? undefined : new Date(query.to).toISOString(), runtimeKind: query.runtimeKind };
-      const sources = collector.sources.listSources(namespace).filter((source) => source.mappings.some((mapping) =>
-        (!query.sessionId || mapping.sessionId === query.sessionId) && (!query.agentId || collector.db.prepare(
-          "SELECT 1 FROM agent_usage_subjects WHERE namespace = ? AND kind = 'session' AND subject_id = ? AND agent_id = ?"
-        ).get(namespace, mapping.sessionId, query.agentId) !== undefined)));
+      const sources = collector.sources.listSources(namespace, filter);
       const collectionFailures = collector.collectionFailures(filter);
       const captureHealth = collector.capture?.health(filter) ?? [];
       const capturePartial = captureHealth.some((item) => item.status !== "observed");
@@ -80,21 +63,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
           analysisStatus: sources.length === 0 && summary.completeness === "none" && collectionFailures.length === 0 && captureHealth.length === 0 ? "empty" : metadata.analysisStatus };
       }
       if (endpoint === "timeseries") {
-        const selected = accountingRows(reconcileSources(collector.store.records(filter)).records.filter((row) =>
-          row.scope !== "provider_session" && row.occurredAt !== null)).filter((row) =>
-          inPeriod(row.occurredAt, filter) && (row.intervalStart === undefined || inPeriod(row.intervalStart, filter)));
-        const groups = new Map<string, UsageRecord[]>();
-        const ambiguous: UsageRecord[] = [];
-        for (const row of selected) {
-          const key = periodKey(row.occurredAt!, query.timezone, query.bucket);
-          if (row.intervalStart !== undefined && periodKey(row.intervalStart, query.timezone, query.bucket) !== key) {
-            ambiguous.push(row); continue;
-          }
-          const group = groups.get(key) ?? []; group.push(row); groups.set(key, group);
-        }
-        return { ...metadata, bucket: query.bucket, items: [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
-          .map(([period, rows]) => ({ period, usage: sumUsage(rows), observedRanges: rows.length })),
-          unplacedUsage: sumUsage([{ metrics: collector.store.summary(filter).unplacedUsage }, ...ambiguous]) };
+        return { ...metadata, ...collector.store.timeseries(filter, query.timezone, query.bucket) };
       }
       if (endpoint === "capabilities") {
         const all = collector.attribution.rankings(filter, query.dimension).sort((a, b) =>

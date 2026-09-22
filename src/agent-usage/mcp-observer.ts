@@ -4,6 +4,7 @@ import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
+import { UsageError } from "./core/errors.js";
 import type { HostUsageCollector } from "./host-collector.js";
 import type { UsageBinding } from "./core/types.js";
 import { stableHash } from "./core/context.js";
@@ -49,12 +50,12 @@ export class McpUsageObserver {
 
   record(token: string, value: unknown): void {
     const ticket = this.tickets.get(token);
-    if (!ticket) throw new Error("usage_observer_unauthorized");
+    if (!ticket) throw new UsageError("usage_observer_unauthorized");
     this.collector.store.assertBinding(ticket.binding);
     const event = observationSchema.parse(value);
     const id = stableHash(ticket.binding.namespace, ticket.binding.sessionId, ticket.epoch, event.invocationId);
     if (event.phase === "start") {
-      if (ticket.epoch !== this.collector.epoch(Number(ticket.binding.sessionId))) throw new Error("usage_binding_stale");
+      if (ticket.epoch !== this.collector.epoch(Number(ticket.binding.sessionId))) throw new UsageError("usage_binding_stale");
       const run = this.collector.db.prepare("SELECT id FROM runs WHERE session_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1")
         .get(Number(ticket.binding.sessionId)) as { id: number } | undefined;
       this.collector.attribution.observeInvocation(ticket.binding, { invocationId: event.invocationId, providerEpochId: ticket.epoch,
@@ -64,7 +65,7 @@ export class McpUsageObserver {
         revision: 1, rawResultBytes: null, origin: "execution" });
     } else {
       const previous = this.collector.attribution.invocation(ticket.binding.namespace, id);
-      if (!previous || previous.capability.name !== event.toolName || !event.status) throw new Error("usage_invocation_not_found");
+      if (!previous || previous.capability.name !== event.toolName || !event.status) throw new UsageError("usage_invocation_not_found");
       this.collector.attribution.observeInvocation(ticket.binding, { ...previous, endedAt: event.occurredAt,
         status: event.status, revision: 2, rawResultBytes: event.resultBytes ?? null });
     }

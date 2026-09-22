@@ -88,7 +88,8 @@ export const accountingRows = (records: UsageRecord[]): UsageRecord[] => {
       // Explicitly higher-priority direct request evidence is a known-subset dated basis.
       // Pick one basis before date filtering; never add intervals to captured requests.
       const preferRequests = requests.length > 0 && nativeIntervals.length > 0
-        && Math.min(...requests.map((row) => row.sourcePriority ?? 100)) < Math.min(...nativeIntervals.map((row) => row.sourcePriority ?? 100));
+        && requests.reduce((min, row) => Math.min(min, row.sourcePriority ?? 100), Infinity)
+          < nativeIntervals.reduce((min, row) => Math.min(min, row.sourcePriority ?? 100), Infinity);
       const intervals = preferRequests ? [] : nativeIntervals;
       for (const interval of intervals) select(interval, metric);
       const covered = new Set<string>();
@@ -108,23 +109,80 @@ export const accountingRows = (records: UsageRecord[]): UsageRecord[] => {
   });
 };
 
-export const sameEpoch = (a: UsageRecord, b: UsageRecord): boolean => a.namespace === b.namespace
-  && a.sessionId === b.sessionId && a.providerEpochId === b.providerEpochId;
+export const isLocated = (row: UsageRecord): boolean => row.occurredAt !== null && row.scope !== "provider_session";
+const epochKey = (row: UsageRecord): string => JSON.stringify([row.namespace, row.sessionId, row.providerEpochId]);
 
-export const containedDetail = (parent: UsageRecord, records: UsageRecord[]): UsageRecord[] => records.filter((row) =>
-  sameEpoch(parent, row) && (parent.scope === "provider_session" ? row.scope !== "provider_session"
-    : parent.scope === "turn" && row.scope === "model_request" && row.executionId !== null && row.executionId === parent.executionId));
+type EpochRanges = {
+  details: UsageRecord[];
+  requestsByExecution: Map<string, UsageRecord[]>;
+  providerParents: number;
+  turnParents: Map<string, number>;
+  unidentifiedRequests: boolean;
+  totals: Map<string, UsageMetrics>;
+};
 
-export const rangeConflicts = (records: UsageRecord[]): number => records.filter((row) => isAccountable(row) &&
-  (row.scope === "provider_session" || row.scope === "turn")).reduce((count, parent) => {
-  const detail = sumUsage(accountingRows(containedDetail(parent, records)));
-  const contradicts = metricNames.some((key) => parent.metrics[key] !== null && detail[key] !== null && parent.metrics[key]! < detail[key]!);
-  const ambiguous = records.some((row) => row !== parent && sameEpoch(row, parent) && row.scope === parent.scope
-    && (parent.scope === "provider_session" || (parent.executionId !== null && parent.executionId === row.executionId)))
-    || (parent.scope === "turn" && records.some((row) => isAccountable(row) && sameEpoch(row, parent)
-      && row.scope === "model_request" && row.executionId === null));
-  return count + Number(contradicts || ambiguous);
-}, 0);
+/** Query-local containment index; each request is indexed once instead of scanning the ledger per parent. */
+export class UsageRangeIndex {
+  private readonly epochs = new Map<string, EpochRanges>();
+
+  constructor(records: UsageRecord[]) {
+    for (const row of records) {
+      const key = epochKey(row);
+      let epoch = this.epochs.get(key);
+      if (!epoch) {
+        epoch = { details: [], requestsByExecution: new Map(), providerParents: 0,
+          turnParents: new Map(), unidentifiedRequests: false, totals: new Map() };
+        this.epochs.set(key, epoch);
+      }
+      if (row.scope === "provider_session") epoch.providerParents++;
+      else epoch.details.push(row);
+      if (row.scope === "turn" && row.executionId !== null) {
+        epoch.turnParents.set(row.executionId, (epoch.turnParents.get(row.executionId) ?? 0) + 1);
+      }
+      if (row.scope !== "model_request") continue;
+      if (row.executionId === null) {
+        if (isAccountable(row)) epoch.unidentifiedRequests = true;
+      } else {
+        const requests = epoch.requestsByExecution.get(row.executionId) ?? [];
+        requests.push(row);
+        epoch.requestsByExecution.set(row.executionId, requests);
+      }
+    }
+  }
+
+  detailUsage(parent: UsageRecord, locatedOnly = false): UsageMetrics {
+    const epoch = this.epochs.get(epochKey(parent));
+    if (!epoch) return emptyUsage();
+    const key = JSON.stringify([parent.scope, parent.scope === "turn" ? parent.executionId : null, locatedOnly]);
+    const cached = epoch.totals.get(key);
+    if (cached) return cached;
+    const details = parent.scope === "provider_session" ? epoch.details
+      : parent.scope === "turn" && parent.executionId !== null ? epoch.requestsByExecution.get(parent.executionId) ?? [] : [];
+    const totals = sumUsage(accountingRows(locatedOnly ? details.filter(isLocated) : details));
+    epoch.totals.set(key, totals);
+    return totals;
+  }
+
+  ambiguous(parent: UsageRecord): boolean {
+    const epoch = this.epochs.get(epochKey(parent));
+    if (!epoch) return false;
+    if (parent.scope === "provider_session") return epoch.providerParents > 1;
+    return parent.scope === "turn" && (epoch.unidentifiedRequests
+      || parent.executionId !== null && (epoch.turnParents.get(parent.executionId) ?? 0) > 1);
+  }
+}
+
+export const rangeConflicts = (records: UsageRecord[], ranges = new UsageRangeIndex(records)): number => {
+  let count = 0;
+  for (const parent of records) {
+    if (!isAccountable(parent) || parent.scope !== "provider_session" && parent.scope !== "turn") continue;
+    const detail = ranges.detailUsage(parent);
+    const contradicts = metricNames.some((key) => parent.metrics[key] !== null && detail[key] !== null
+      && parent.metrics[key]! < detail[key]!);
+    if (contradicts || ranges.ambiguous(parent)) count++;
+  }
+  return count;
+};
 
 /** Point request timestamps cannot prove disjoint coverage from cumulative native intervals. */
 export const intervalOverlapConflicts = (records: UsageRecord[]): number => {

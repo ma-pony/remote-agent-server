@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { UsageStore } from "../src/agent-usage/storage/usage-store.js";
 import { UsageSourceCoordinator, type UsageSourceAdapter } from "../src/agent-usage/source-coordinator.js";
 import { accountingRequests } from "./fixtures/agent-usage/accounting.js";
@@ -27,6 +27,27 @@ const adapter = (): UsageSourceAdapter => ({
 });
 
 describe("usage source coordinator", () => {
+  it("queries scoped sources in a fixed number of reads and preserves all mappings", () => {
+    const { db, coordinator, config } = setup(adapter());
+    const shared = coordinator.registerSource({ ...config, mappings: [...config.mappings,
+      { sourceSessionKey: "capture-2", agentId: "agent-2", sessionId: "session-2", providerEpochId: "epoch-1" }] });
+    for (let index = 0; index < 100; index++) coordinator.registerSource({ ...config, sourceKey: `other-${index}`,
+      mappings: [{ sourceSessionKey: "other", agentId: "agent-3", sessionId: `other-${index}`, providerEpochId: "epoch-1" }] });
+    coordinator.registerSource({ ...config, namespace: "other" });
+    const prepare = vi.spyOn(db, "prepare");
+    try {
+      expect(coordinator.listSources("test")).toHaveLength(101);
+      expect(prepare).toHaveBeenCalledTimes(2);
+      expect(coordinator.listSources("test", { sessionId: "session-1", agentId: "agent-1" })).toEqual([shared]);
+      expect(coordinator.listSources("test", { sessionId: "session-1", agentId: "agent-2" })).toEqual([]);
+      expect(coordinator.listSources("test", { id: shared.id })).toEqual([shared]);
+      expect(coordinator.listSources("test", { sourceKey: config.sourceKey })).toEqual([shared]);
+      coordinator.revokeSubject("test", "session-1");
+      expect(coordinator.listSources("test", { sessionId: "session-1", mappingState: "active" })).toEqual([]);
+      expect(coordinator.listSources("test", { sessionId: "session-2", mappingState: "active" })[0]?.mappings).toHaveLength(2);
+    } finally { prepare.mockRestore(); }
+  });
+
   it("commits a bounded batch and one checkpoint write instead of one per record", async () => {
     const { db, coordinator, config, store } = setup(adapter());
     const source = coordinator.registerSource(config);

@@ -1,3 +1,4 @@
+import { UsageError } from "./core/errors.js";
 import { ModelTokenizers } from "./core/tokenizers.js";
 import type Database from "better-sqlite3";
 import type { HostUsageCapture } from "./capture/host-capture.js";
@@ -36,7 +37,7 @@ export class HostUsageCollector {
   }
   binding(sessionId: number): UsageBinding {
     const session = this.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: number } | undefined;
-    if (!session) throw new Error("usage_session_not_found");
+    if (!session) throw new UsageError("usage_session_not_found");
     return this.store.bindSession(this.namespace, String(session.agent_id), String(sessionId));
   }
 
@@ -51,7 +52,7 @@ export class HostUsageCollector {
     const run = this.db.prepare(`SELECT r.session_id, r.started_at, a.provider FROM runs r
       JOIN sessions s ON s.id = r.session_id JOIN agents a ON a.id = s.agent_id WHERE r.id = ?`)
       .get(runId) as { session_id: number; started_at: string | null; provider: string } | undefined;
-    if (!run) throw new Error("usage_run_not_found");
+    if (!run) throw new UsageError("usage_run_not_found");
     this.producers.add(run.session_id);
     const binding = this.binding(run.session_id);
     const epoch = this.epoch(run.session_id);
@@ -69,11 +70,12 @@ export class HostUsageCollector {
     });
   }
 
-  importLegacy(): void {
+  importLegacy(sessionId?: number): void {
+    const params = sessionId === undefined ? [] : [sessionId];
     const rows = this.db.prepare(`SELECT s.*, a.provider FROM sessions s JOIN agents a ON a.id = s.agent_id
-      WHERE s.input_tokens IS NOT NULL OR s.output_tokens IS NOT NULL OR s.total_tokens IS NOT NULL
-        OR s.cached_read_tokens IS NOT NULL OR s.cached_write_tokens IS NOT NULL OR s.thought_tokens IS NOT NULL`)
-      .all() as Array<{ id: number; provider: string } & LegacyMetrics>;
+      WHERE ${sessionId === undefined ? "" : "s.id = ? AND "}(s.input_tokens IS NOT NULL OR s.output_tokens IS NOT NULL OR s.total_tokens IS NOT NULL
+        OR s.cached_read_tokens IS NOT NULL OR s.cached_write_tokens IS NOT NULL OR s.thought_tokens IS NOT NULL)`)
+      .all(...params) as Array<{ id: number; provider: string } & LegacyMetrics>;
     for (const row of rows) {
       try {
         this.store.observe(this.binding(row.id), {
@@ -84,14 +86,14 @@ export class HostUsageCollector {
           metrics: legacyMetrics(row)
         });
       } catch (error) {
-        if (!(error instanceof Error) || error.message !== "usage_subject_deleted") throw error;
+        if (!(error instanceof UsageError) || error.code !== "usage_subject_deleted") throw error;
       }
     }
     const runs = this.db.prepare(`SELECT r.*, a.provider FROM runs r
       JOIN sessions s ON s.id = r.session_id JOIN agents a ON a.id = s.agent_id
-      WHERE r.input_tokens IS NOT NULL OR r.output_tokens IS NOT NULL OR r.total_tokens IS NOT NULL
-        OR r.cached_read_tokens IS NOT NULL OR r.cached_write_tokens IS NOT NULL OR r.thought_tokens IS NOT NULL`)
-      .all() as Array<{ id: number; session_id: number; started_at: string | null; provider: string } & LegacyMetrics>;
+      WHERE ${sessionId === undefined ? "" : "r.session_id = ? AND "}(r.input_tokens IS NOT NULL OR r.output_tokens IS NOT NULL OR r.total_tokens IS NOT NULL
+        OR r.cached_read_tokens IS NOT NULL OR r.cached_write_tokens IS NOT NULL OR r.thought_tokens IS NOT NULL)`)
+      .all(...params) as Array<{ id: number; session_id: number; started_at: string | null; provider: string } & LegacyMetrics>;
     for (const row of runs) {
       try {
         this.store.observe(this.binding(row.session_id), {
@@ -102,16 +104,19 @@ export class HostUsageCollector {
           runtimeKind: row.provider, metrics: legacyMetrics(row)
         });
       } catch (error) {
-        if (!(error instanceof Error) || error.message !== "usage_subject_deleted") throw error;
+        if (!(error instanceof UsageError) || error.code !== "usage_subject_deleted") throw error;
       }
     }
   }
 
   async prepareMaintenance(sessionId: number, operation: "reset" | "cleanup"): Promise<void> {
-    await this.capture?.release(sessionId);
-    await this.discover(sessionId);
     const binding = this.binding(sessionId);
     const pending = this.sources.maintenance(binding);
+    if (pending && pending.operation !== operation) throw new UsageError("usage_maintenance_conflict");
+    // A ready barrier already captured the stopped producer. Its files may now be partially purged.
+    if (pending?.state === "ready") return;
+    await this.capture?.release(sessionId);
+    await this.discover(sessionId);
     await this.sources.prepareMaintenance(binding, operation, pending?.id ?? `${this.epoch(sessionId)}:${operation}`);
   }
 
@@ -137,8 +142,7 @@ export class HostUsageCollector {
   private async harvestSession(sessionId: number): Promise<void> {
     await this.discover(sessionId);
     try {
-      const sources = this.sources.listSources(this.namespace).filter((source) => source.mappings.some((mapping) =>
-        mapping.sessionId === String(sessionId) && mapping.state === "active"));
+      const sources = this.sources.listSources(this.namespace, { sessionId: String(sessionId), mappingState: "active" });
       for (const source of sources) await this.sources.collect(source.id);
       this.db.prepare("UPDATE agent_usage_harvests SET status = 'completed', error_code = NULL WHERE namespace = ? AND session_id = ?")
         .run(this.namespace, String(sessionId));
@@ -149,7 +153,7 @@ export class HostUsageCollector {
     }
   }
 
-  private eligibleSessions(): Array<{ id: number }> {
+  private eligibleSessions(includeCompleted = true): Array<{ id: number }> {
     this.db.prepare(`INSERT INTO agent_usage_harvests (namespace, session_id, status)
       SELECT ?, CAST(s.id AS TEXT), 'pending' FROM sessions s JOIN agents a ON a.id = s.agent_id
       WHERE a.provider IN ('codex', 'claude_code') AND s.provider_session_id IS NOT NULL
@@ -161,10 +165,11 @@ export class HostUsageCollector {
     return this.db.prepare(`SELECT s.id FROM sessions s JOIN agents a ON a.id = s.agent_id
       JOIN agent_usage_harvests h ON h.namespace = ? AND h.session_id = CAST(s.id AS TEXT)
       WHERE a.provider IN ('codex', 'claude_code') AND s.provider_session_id IS NOT NULL AND s.storage_cleaned_at IS NULL
+        AND (? OR h.status != 'completed')
         AND NOT EXISTS (SELECT 1 FROM agent_usage_subjects u WHERE u.namespace = ?
           AND ((u.kind = 'session' AND u.subject_id = CAST(s.id AS TEXT))
             OR (u.kind = 'agent' AND u.subject_id = CAST(a.id AS TEXT))) AND u.state != 'active')
-      ORDER BY h.attempted_at ASC, s.id ASC`).all(this.namespace, this.namespace) as Array<{ id: number }>;
+      ORDER BY h.attempted_at ASC, s.id ASC`).all(this.namespace, Number(includeCompleted), this.namespace) as Array<{ id: number }>;
   }
 
   /** A single owned continuation performs bounded batches; readiness never waits for source I/O. */
@@ -176,9 +181,7 @@ export class HostUsageCollector {
   }
 
   private queueRecovery(initial: boolean): void {
-    const sessions = this.eligibleSessions().filter(({ id }) => initial || this.db.prepare(
-      "SELECT 1 FROM agent_usage_harvests WHERE namespace = ? AND session_id = ? AND status != 'completed'"
-    ).get(this.namespace, String(id)) !== undefined);
+    const sessions = this.eligibleSessions(initial);
     const managedIds = new Set(sessions.map(({ id }) => String(id)));
     this.recoveryQueue.push(...sessions.map(({ id }) => () => this.harvestSession(id)));
     // Registered imports without managed discovery are owned by the same continuation.
@@ -248,6 +251,7 @@ export class HostUsageCollector {
     this.observer?.revokeSession(sessionId);
   }
   deleteSession(sessionId: number): void {
+    this.producers.delete(sessionId);
     this.capture?.deleteSession(sessionId);
     this.db.transaction(() => {
       this.db.prepare("DELETE FROM agent_usage_harvests WHERE namespace = ? AND session_id = ?").run(this.namespace, String(sessionId));

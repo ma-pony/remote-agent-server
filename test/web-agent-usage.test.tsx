@@ -43,6 +43,13 @@ beforeEach(() => {
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 const mount = () => render(<I18nProvider><BrowserRouter><AgentUsagePage /></BrowserRouter></I18nProvider>);
 
+it("无效 URL 时区回退到浏览器时区，不使整页崩溃", async () => {
+  window.history.replaceState({}, "", "/usage?timezone=invalid-timezone");
+  mount();
+  expect(await screen.findByText("3,300")).toBeInTheDocument();
+  expect(screen.getByLabelText("时区")).toHaveValue(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+});
+
 it("切换排名排序只刷新排名，保留已经加载的汇总和趋势", async () => {
   mount(); await screen.findByText("3,300"); await screen.findByRole("button", { name: "查看 search 的调用" });
   const fetch = vi.mocked(globalThis.fetch); fetch.mockClear();
@@ -136,6 +143,64 @@ it("Agent、Session 与排名维度筛选保留在 URL 并传给同一查询", a
   fireEvent.change(screen.getByLabelText("会话筛选"), { target: { value: "2" } });
   fireEvent.change(screen.getByLabelText("能力维度"), { target: { value: "plugin" } });
   await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("dimension=plugin") && String(url).includes("sessionId=2"))).toBe(true));
+  await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes("/usage/sources?agentId=1&sessionId=2"))).toBe(true));
+});
+
+it("切换证据后忽略旧详情响应，并从第一页重新打开能力", async () => {
+  const fetch = vi.mocked(globalThis.fetch);
+  const original = fetch.getMockImplementation()!;
+  let finishOld!: (value: Response) => void;
+  let detailSignal: AbortSignal | null | undefined;
+  fetch.mockImplementation(async (input, init) => {
+    if (String(input).endsWith("/usage/invocations/call-1")) {
+      detailSignal = init?.signal;
+      return new Promise<Response>((resolve) => { finishOld = resolve; });
+    }
+    return original(input, init);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "查看 search 的调用" }));
+  fireEvent.click(await screen.findByRole("button", { name: "打开调用 call-1" }));
+  await waitFor(() => expect(finishOld).toBeTypeOf("function"));
+  fireEvent.click(screen.getByRole("tab", { name: "模型输入证据" }));
+  fireEvent.click(await screen.findByRole("button", { name: "打开输入证据 evidence-1" }));
+  expect(await screen.findByText("epoch-1")).toBeInTheDocument();
+  await act(async () => { finishOld(response({ invocation: { status: "succeeded", origin: "execution", executionId: "STALE_DETAIL" },
+    exposures: [], subsequentModelInvocationIds: [] })); });
+  expect(screen.queryByText("STALE_DETAIL")).not.toBeInTheDocument();
+  expect(detailSignal?.aborted).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+  fireEvent.click(screen.getByRole("button", { name: "查看 search 的调用" }));
+  expect(await screen.findByRole("button", { name: "打开调用 call-1" })).toBeInTheDocument();
+  expect(screen.queryByText("持久化证据")).not.toBeInTheDocument();
+});
+
+it("调用分页使用同一游标历史往返，切换证据类型回到第一页", async () => {
+  const fetch = vi.mocked(globalThis.fetch);
+  const original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/usage/invocations") {
+      const cursor = url.searchParams.get("cursor");
+      return response({ items: [{ id: cursor ?? "first", status: "succeeded", startedAt: null }],
+        nextCursor: cursor === null ? "second" : cursor === "second" ? "third" : null });
+    }
+    if (url.pathname === "/api/usage/context-evidence") expect(url.searchParams.has("cursor")).toBe(false);
+    return original(input, init);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole("button", { name: "查看 search 的调用" }));
+  await screen.findByRole("button", { name: "打开调用 first" });
+  expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByRole("button", { name: "打开调用 second" });
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByRole("button", { name: "打开调用 third" });
+  expect(screen.getByRole("button", { name: "下一页" })).toBeDisabled();
+  fireEvent.click(screen.getByRole("button", { name: "上一页" }));
+  await screen.findByRole("button", { name: "打开调用 second" });
+  fireEvent.click(screen.getByRole("tab", { name: "模型输入证据" }));
+  expect(await screen.findByRole("button", { name: "打开输入证据 evidence-1" })).toBeInTheDocument();
 });
 it("加载失败有重试入口，缺少数据有接入指引", async () => {
   const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
