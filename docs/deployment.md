@@ -505,6 +505,8 @@ Session 存储清理成功时，也会删除通过 Task 关联的全部 Webhook 
 
 已有大量用量记录的线上库首次升级到带执行定位索引的版本时，启动会一次性扫描调用表建立索引，需预留时间和磁盘空间。保持 `USAGE_EVENT_RETENTION_DAYS=0` 完成首次启动及回填核验，再按需要改回 7 天；单次索引构建完成后不会在每次启动重建。先前已清理的原始正文不会因升级而自动恢复，不要清空数据库或手动删除 WAL。
 
+重新启用原始事件清理后，可通过管理鉴权读取 `/api/usage/status` 的全局 `recovery` 和 `eventRetention`。先看 `recovery.phase`、`lastBackfillMs`，再看 `eventRetention.checkedRuns`、`retiredEvents`、`skippedByReason`、`lastStepMs` 和 `lastErrorAt`；这些是进程内诊断值，重启即清零，且不表示数据库剩余数量。扫到最后一个 Run 后最多等待 5 分钟再检查新完成补算的历史 Run。清理不会自动缩小数据库文件，不要为追求文件缩小在线执行 VACUUM。
+
 统计查询通过独立只读 Worker 访问原 SQLite，未迁移到新数据库，无需改变备份路径；允许一个执行查询和最多 16 个排队查询，过载返回 503，空闲 60 秒释放。Worker 的 SQLite 页缓存预算为 8 MiB，此外仍有运行时、结果与查询临时内存。长读事务暂时保留 WAL 快照，Worker 不消除统计本身的 CPU／I/O 成本。清理释放的数据库页用于复用，不会自动执行 `VACUUM` 或强制截断 WAL；不要把逻辑清理完成等同于磁盘文件已缩小。
 
 未配置 `USAGE_TOKENIZERS` 时仍可使用工具 token 排名：内置已知模型自动获取词表，其余模型使用带明确标记的通用文本兜底。手动配置可增加未内置模型；新获得词表的模型会触发有保留原文的 Runtime 旧记录补算。

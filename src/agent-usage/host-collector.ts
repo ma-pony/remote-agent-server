@@ -25,6 +25,12 @@ export class HostUsageCollector {
   private recoveryStopped = true;
   private recoveryController?: AbortController;
   private recoveryQueue: Array<() => Promise<void>> = [];
+  private recoveryPhase: "stopped" | "idle" | "backfill" | "retention" | "sources" | "retrying" = "stopped";
+  private recoveryPhaseSince = new Date().toISOString();
+  private lastRecoveryErrorAt: string | null = null;
+  private lastBackfillMs: number | null = null;
+  private lastBackfillAt: string | null = null;
+  private nextBackfillCheckAt = 0;
   readonly store: UsageStore;
   readonly sources: UsageSourceCoordinator;
   readonly attribution: AttributionStore;
@@ -188,9 +194,23 @@ export class HostUsageCollector {
   startRecovery(): void {
     if (!this.recoveryStopped) return;
     this.recoveryStopped = false;
+    this.nextBackfillCheckAt = 0;
+    this.setRecoveryPhase("idle");
     this.recoveryController = new AbortController();
     this.queueRecovery(true);
     this.scheduleRecovery(0);
+  }
+
+  recoveryStatus() {
+    return { phase: this.recoveryPhase, phaseSince: this.recoveryPhaseSince,
+      pendingSources: this.recoveryQueue.length, lastErrorAt: this.lastRecoveryErrorAt,
+      lastBackfillMs: this.lastBackfillMs, lastBackfillAt: this.lastBackfillAt };
+  }
+
+  private setRecoveryPhase(phase: typeof this.recoveryPhase): void {
+    if (phase === this.recoveryPhase) return;
+    this.recoveryPhase = phase;
+    this.recoveryPhaseSince = new Date().toISOString();
   }
 
   private queueRecovery(initial: boolean): void {
@@ -207,7 +227,11 @@ export class HostUsageCollector {
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
       this.recoveryWork = this.recoveryBatch().catch(() => {
-        if (!this.recoveryStopped) this.scheduleRecovery(30_000);
+        if (!this.recoveryStopped) {
+          this.lastRecoveryErrorAt = new Date().toISOString();
+          this.setRecoveryPhase("retrying");
+          this.scheduleRecovery(30_000);
+        }
       }).finally(() => { this.recoveryWork = undefined; });
     }, delay);
     this.recoveryTimer.unref();
@@ -215,27 +239,44 @@ export class HostUsageCollector {
 
   private async recoveryBatch(): Promise<void> {
     const started = performance.now();
-    const contentPending = await this.contentBackfill.step(this.recoveryController?.signal);
-    if (this.recoveryStopped) return;
-    const retentionPending = this.eventRetention.step();
-    const deadline = performance.now() + 25;
-    let admitted = 0;
-    while (!this.recoveryStopped && this.recoveryQueue.length > 0 && admitted++ < 100 && performance.now() < deadline) {
-      const work = this.recoveryQueue.shift()!;
-      await work().catch(() => undefined);
-    }
-    if (this.recoveryStopped) return;
-    // Yield real idle time, not just an event-loop turn. Large individual records can still
-    // exceed the soft work budget; the worker keeps their tokenization off the main thread.
-    if (this.recoveryQueue.length > 0 || contentPending || retentionPending) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
-    else {
-      this.queueRecovery(false);
-      this.scheduleRecovery(30_000);
+    try {
+      let contentPending = false;
+      if (performance.now() >= this.nextBackfillCheckAt) {
+        this.setRecoveryPhase("backfill");
+        const backfillStarted = performance.now();
+        try { contentPending = await this.contentBackfill.step(this.recoveryController?.signal); }
+        finally {
+          this.lastBackfillMs = Math.round((performance.now() - backfillStarted) * 1_000) / 1_000;
+          this.lastBackfillAt = new Date().toISOString();
+        }
+        this.nextBackfillCheckAt = contentPending ? 0 : performance.now() + 5_000;
+      }
+      if (this.recoveryStopped) return;
+      this.setRecoveryPhase("retention");
+      const retentionPending = this.eventRetention.step() !== "idle";
+      this.setRecoveryPhase("sources");
+      const deadline = performance.now() + 25;
+      let admitted = 0;
+      while (!this.recoveryStopped && this.recoveryQueue.length > 0 && admitted++ < 100 && performance.now() < deadline) {
+        const work = this.recoveryQueue.shift()!;
+        await work().catch(() => undefined);
+      }
+      if (this.recoveryStopped) return;
+      // Yield real idle time, not just an event-loop turn. Large individual records can still
+      // exceed the soft work budget; the worker keeps their tokenization off the main thread.
+      if (this.recoveryQueue.length > 0 || contentPending || retentionPending) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
+      else {
+        this.queueRecovery(false);
+        this.scheduleRecovery(30_000);
+      }
+    } finally {
+      if (!this.recoveryStopped) this.setRecoveryPhase("idle");
     }
   }
 
   async stopRecovery(): Promise<void> {
     this.recoveryStopped = true;
+    this.setRecoveryPhase("stopped");
     this.recoveryController?.abort();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;

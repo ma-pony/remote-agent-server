@@ -24,10 +24,32 @@ describe("host usage integration", () => {
     try {
       await vi.advanceTimersByTimeAsync(0);
       expect(step).toHaveBeenCalledTimes(1);
+      expect(host.recoveryStatus()).toMatchObject({ phase: "idle", lastBackfillMs: 30,
+        lastBackfillAt: expect.any(String) });
       await vi.advanceTimersByTimeAsync(89);
       expect(step).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(1);
       expect(step).toHaveBeenCalledTimes(2);
+    } finally { await host.stopRecovery(); }
+    expect(host.recoveryStatus().phase).toBe("stopped");
+  });
+
+  it("does not rescan completed backfill on every retention check", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { host } = setup();
+    let elapsed = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+    const backfill = vi.spyOn(host.contentBackfill, "step").mockResolvedValue(false);
+    const retention = vi.spyOn(host.eventRetention, "step").mockReturnValue("scanned");
+    host.startRecovery();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(retention).toHaveBeenCalledTimes(4);
+      expect(backfill).toHaveBeenCalledTimes(1);
+      elapsed = 5_000;
+      await vi.advanceTimersByTimeAsync(50);
+      expect(backfill).toHaveBeenCalledTimes(2);
     } finally { await host.stopRecovery(); }
   });
 

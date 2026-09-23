@@ -68,7 +68,8 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
         captureHealthCounts: collector.capture?.healthCounts(filter) ?? {},
         contentBackfill: collector.contentBackfill.status(filter)
       }));
-      if (endpoint === "status") return { ...status, revision };
+      if (endpoint === "status") return { ...status, revision, recovery: collector.recoveryStatus(),
+        eventRetention: collector.eventRetention.status() };
       const { sourceCounts, captureHealthCounts, contentBackfill } = status;
       const sourceCount = Object.values(sourceCounts).reduce((sum, count) => sum + count, 0);
       const failurePage = cache.get(`failures:${JSON.stringify([filter, query.failurePage])}`,

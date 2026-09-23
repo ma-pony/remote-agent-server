@@ -31,11 +31,14 @@ it("retires bounded raw batches, preserves counts and final replies, and never r
   const before = collector.attribution.rankings({}, "all");
   const totalBefore = collector.store.overview({});
   const cursor = events.latestSeq(id);
-  expect(collector.eventRetention.step(now)).toBe(true);
+  expect(collector.eventRetention.step(now)).toBe("retired");
+  expect(collector.eventRetention.status()).toMatchObject({ enabled: true, checkedRuns: 1, retiredEvents: 100,
+    lastAction: "retired", lastRunId: id, lastRetiredAt: new Date(now).toISOString() });
   expect(events.list(id, 0, 200)).toHaveLength(7);
   const restarted = new HostUsageCollector(db);
-  expect(restarted.eventRetention.step(now)).toBe(true);
-  expect(restarted.eventRetention.step(now)).toBe(false);
+  expect(restarted.eventRetention.step(now)).toBe("retired");
+  expect(restarted.eventRetention.step(now)).toBe("scanned");
+  expect(restarted.eventRetention.step(now)).toBe("idle");
   expect(events.list(id, 0)).toMatchObject([{ type: "status", seq: 1 }]);
   expect(db.prepare("SELECT input,result,events_pruned_through_seq FROM runs WHERE id=?").get(id))
     .toEqual({ input: "test input", result: "Final reply", events_pruned_through_seq: cursor });
@@ -52,6 +55,15 @@ it("retires bounded raw batches, preserves counts and final replies, and never r
     WHERE i.namespace=? AND i.session_id=? AND i.execution_id=CAST(? AS TEXT)
       AND p.token_count IS NULL LIMIT 1`).all(collector.namespace, String(session.id), id) as Array<{ detail: string }>;
   expect(toolPlan.some(row => row.detail.includes("agent_usage_invocations_execution"))).toBe(true);
+  const runPlan = db.prepare("EXPLAIN QUERY PLAN SELECT id FROM runs WHERE id>=? ORDER BY id LIMIT 1")
+    .all(0) as Array<{ detail: string }>;
+  expect(runPlan.some(row => row.detail.includes("INTEGER PRIMARY KEY"))).toBe(true);
+  expect(runPlan.some(row => row.detail.includes("TEMP B-TREE"))).toBe(false);
+  const eligibilityPlan = db.prepare(`EXPLAIN QUERY PLAN SELECT r.id FROM runs r
+    JOIN sessions s ON s.id=r.session_id
+    LEFT JOIN agent_usage_runtime_backfills j ON j.namespace=? AND j.run_id=r.id WHERE r.id=?`)
+    .all(collector.namespace, id) as Array<{ detail: string }>;
+  expect(eligibilityPlan.some(row => row.detail.includes("SEARCH r USING INTEGER PRIMARY KEY"))).toBe(true);
 });
 
 it("revisits earlier Runs when their usage becomes complete after later history was retired", async () => {
@@ -62,11 +74,14 @@ it("revisits earlier Runs when their usage becomes complete after later history 
   events.append(secondId, "message", { stream: "output", text: "later Run" });
   while (await collector.contentBackfill.step()) { /* complete bounded replay */ }
   db.prepare("UPDATE agent_usage_runtime_backfills SET status='pending' WHERE run_id=?").run(id);
-  expect(collector.eventRetention.step(now)).toBe(true);
+  expect(collector.eventRetention.step(now)).toBe("scanned");
   expect(events.list(id, 0)).toHaveLength(3);
+  expect(collector.eventRetention.step(now)).toBe("retired");
   db.prepare("UPDATE agent_usage_runtime_backfills SET status='completed' WHERE run_id=?").run(id);
-  expect(collector.eventRetention.step(now)).toBe(false);
-  expect(collector.eventRetention.step(now)).toBe(true);
+  expect(collector.eventRetention.step(now)).toBe("scanned");
+  expect(collector.eventRetention.step(now)).toBe("idle");
+  expect(collector.eventRetention.step(now)).toBe("idle");
+  expect(collector.eventRetention.step(now + 5 * 60_000)).toBe("retired");
   expect(events.list(id, 0)).toMatchObject([{ type: "status" }]);
 });
 
@@ -81,14 +96,32 @@ it.each(["pending", "failed", "error", "queued", "running", "maintenance", "rece
     if (state === "unfinished") db.prepare("UPDATE runs SET finished_at=NULL WHERE id=?").run(id);
     if (state === "uncounted message") db.prepare("UPDATE agent_usage_conversation_content SET tokens=NULL").run();
     if (state === "uncounted tool") db.prepare("UPDATE agent_usage_invocation_payloads SET token_count=NULL").run();
-    expect(collector.eventRetention.step(now)).toBe(false);
+    expect(collector.eventRetention.step(now)).toBe("scanned");
+    const reason = state === "queued" || state === "running" || state === "maintenance" ? "session_busy"
+      : state === "recent" || state === "unfinished" ? "run_not_expired"
+        : state === "uncounted message" ? "content_uncounted"
+          : state === "uncounted tool" ? "tool_uncounted" : "backfill_incomplete";
+    expect(collector.eventRetention.status().skippedByReason).toEqual({ [reason]: 1 });
     expect(events.list(id, 0)).toHaveLength(3);
   }
 );
 
+it("waits for the backfill cursor before retiring newer raw events, then revisits the Run", async () => {
+  const { db, id, events, collector } = await setup();
+  const latestSeq = events.latestSeq(id);
+  db.prepare("UPDATE agent_usage_runtime_backfills SET last_seq=1 WHERE run_id=?").run(id);
+  expect(collector.eventRetention.step(now)).toBe("scanned");
+  expect(collector.eventRetention.status().skippedByReason).toEqual({ backfill_cursor_behind: 1 });
+  expect(events.list(id, 0)).toHaveLength(3);
+  expect(collector.eventRetention.step(now)).toBe("idle");
+  db.prepare("UPDATE agent_usage_runtime_backfills SET last_seq=? WHERE run_id=?").run(latestSeq, id);
+  expect(collector.eventRetention.step(now + 5 * 60_000)).toBe("retired");
+  expect(events.list(id, 0)).toMatchObject([{ type: "status" }]);
+});
+
 it("disables retirement at zero retention", async () => {
   const { id, events, collector } = await setup(1, 0);
-  expect(collector.eventRetention.step(now)).toBe(false);
+  expect(collector.eventRetention.step(now)).toBe("idle");
   expect(events.list(id, 0)).toHaveLength(3);
 });
 
@@ -99,17 +132,19 @@ it("rolls compaction, deletion and the expiry marker back together on failure", 
     CREATE TRIGGER fail_retirement BEFORE UPDATE OF events_pruned_at ON runs
     BEGIN SELECT RAISE(ABORT, 'retirement failed'); END;`);
   expect(() => collector.eventRetention.step(now)).toThrow("retirement failed");
+  expect(collector.eventRetention.status()).toMatchObject({ lastAction: "failed", checkedRuns: 0,
+    lastErrorAt: new Date(now).toISOString() });
   expect(events.list(id, 0)).toHaveLength(3);
   expect(db.prepare("SELECT events_pruned_at FROM runs WHERE id=?").get(id)).toEqual({ events_pruned_at: null });
   expect(db.prepare("SELECT COUNT(*) AS n FROM agent_usage_conversation_content WHERE estimate_id IS NOT NULL").get()).toEqual({ n: 0 });
   db.exec("DROP TRIGGER fail_retirement");
-  expect(collector.eventRetention.step(now)).toBe(true);
+  expect(collector.eventRetention.step(now)).toBe("retired");
 });
 
 it("does not schedule a vocabulary replay when its raw evidence has expired", async () => {
   const { db, id, collector } = await setup();
   db.prepare("UPDATE runs SET resolved_model='fixture-model' WHERE id=?").run(id);
-  expect(collector.eventRetention.step(now)).toBe(true);
+  expect(collector.eventRetention.step(now)).toBe("retired");
   const before = db.prepare("SELECT * FROM agent_usage_runtime_backfills").all();
   const upgraded = new HostUsageCollector(db, {}, undefined, fixtureTokenizers());
   expect(await upgraded.contentBackfill.step()).toBe(false);
@@ -120,6 +155,6 @@ it("bounds retired payload bytes even when fewer than 100 events remain", async 
   const { db, id, collector } = await setup(3);
   // Counts were already committed; emulate large source bodies without tokenizing fixture megabytes.
   db.prepare("UPDATE events SET content_json=? WHERE type='message'").run(JSON.stringify({ text: "x".repeat(1_500_000) }));
-  expect(collector.eventRetention.step(now)).toBe(true);
+  expect(collector.eventRetention.step(now)).toBe("retired");
   expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id=? AND type='message'").get(id)).toEqual({ n: 1 });
 });

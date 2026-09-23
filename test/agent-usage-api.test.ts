@@ -110,7 +110,12 @@ it("shares summary and trend accounting and polls status without rerunning histo
     const status = (await get(app, "/status")).json();
     expect(status.revision).toBe(first.revision);
     expect(status).not.toHaveProperty("usage");
+    expect(status.recovery).toMatchObject({ phase: "stopped", pendingSources: 0 });
+    expect(status.eventRetention).toMatchObject({ enabled: true, checkedRuns: 0, retiredEvents: 0 });
   }
+  manager.collector.eventRetention.step();
+  expect((await get(app, "/status")).json().eventRetention).toMatchObject({ lastAction: "idle",
+    lastStepAt: expect.any(String), nextSweepAt: expect.any(String) });
   expect(records).toHaveBeenCalledTimes(1); expect(rankings).toHaveBeenCalledTimes(1);
   observe(manager, bindings.first, { id: "two", at: "2026-09-20T01:00:00Z", total: 40 });
   expect((await get(app, "/status")).json().revision).not.toBe(first.revision);
