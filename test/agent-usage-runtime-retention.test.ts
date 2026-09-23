@@ -24,7 +24,7 @@ const setup = async (count = 1, retentionMs?: number) => {
 };
 
 it("retires bounded raw batches, preserves counts and final replies, and never reuses event sequences", async () => {
-  const { db, id, events, collector } = await setup(105);
+  const { db, session, id, events, collector } = await setup(105);
   // Simulate the prior on-disk representation: compaction must preserve its exact provenance.
   db.exec(`UPDATE agent_usage_conversation_content SET estimate_json=(SELECT estimate_json
     FROM agent_usage_token_estimates WHERE id=estimate_id),estimate_id=NULL`);
@@ -47,6 +47,27 @@ it("retires bounded raw batches, preserves counts and final replies, and never r
   const plan = db.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM agent_usage_conversation_content WHERE namespace=? AND run_id=? AND tokens IS NULL")
     .all(collector.namespace, id) as Array<{ detail: string }>;
   expect(plan.some(row => row.detail.includes("agent_usage_conversation_uncounted"))).toBe(true);
+  const toolPlan = db.prepare(`EXPLAIN QUERY PLAN SELECT 1 FROM agent_usage_invocations i
+    JOIN agent_usage_invocation_payloads p ON p.public_id=i.public_id
+    WHERE i.namespace=? AND i.session_id=? AND i.execution_id=CAST(? AS TEXT)
+      AND p.token_count IS NULL LIMIT 1`).all(collector.namespace, String(session.id), id) as Array<{ detail: string }>;
+  expect(toolPlan.some(row => row.detail.includes("agent_usage_invocations_execution"))).toBe(true);
+});
+
+it("revisits earlier Runs when their usage becomes complete after later history was retired", async () => {
+  const { db, seed, session, id, events, collector } = await setup();
+  seed.run(session.id, "succeeded");
+  const secondId = (db.prepare("SELECT MAX(id) AS id FROM runs").get() as { id: number }).id;
+  db.prepare("UPDATE runs SET finished_at=? WHERE id=?").run("2026-09-01T00:00:00.000Z", secondId);
+  events.append(secondId, "message", { stream: "output", text: "later Run" });
+  while (await collector.contentBackfill.step()) { /* complete bounded replay */ }
+  db.prepare("UPDATE agent_usage_runtime_backfills SET status='pending' WHERE run_id=?").run(id);
+  expect(collector.eventRetention.step(now)).toBe(true);
+  expect(events.list(id, 0)).toHaveLength(3);
+  db.prepare("UPDATE agent_usage_runtime_backfills SET status='completed' WHERE run_id=?").run(id);
+  expect(collector.eventRetention.step(now)).toBe(false);
+  expect(collector.eventRetention.step(now)).toBe(true);
+  expect(events.list(id, 0)).toMatchObject([{ type: "status" }]);
 });
 
 it.each(["pending", "failed", "error", "queued", "running", "maintenance", "recent", "unfinished", "uncounted message", "uncounted tool"])(

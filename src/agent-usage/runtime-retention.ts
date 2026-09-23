@@ -3,6 +3,9 @@ import type { RuntimeConversationCollector } from "./runtime-conversation.js";
 
 /** Retires raw replay bodies only after their durable usage projections have completed. */
 export class RuntimeEventRetention {
+  // Recheck the current Run after each batch, then wrap to revisit deferred Runs.
+  private nextRunId = 0;
+
   constructor(private readonly db: Database.Database, private readonly namespace: string,
     private readonly conversation: RuntimeConversationCollector, private readonly retentionMs: number) {}
 
@@ -12,7 +15,7 @@ export class RuntimeEventRetention {
       const job = this.db.prepare(`SELECT r.id,j.last_seq FROM runs r
         JOIN sessions s ON s.id=r.session_id
         JOIN agent_usage_runtime_backfills j ON j.namespace=? AND j.run_id=r.id
-        WHERE r.status NOT IN ('queued','running') AND r.finished_at<?
+        WHERE r.id>=? AND r.status NOT IN ('queued','running') AND r.finished_at<?
           AND s.status='idle' AND s.pending_operation IS NULL
           AND j.status='completed' AND j.error_code IS NULL
           AND NOT EXISTS (SELECT 1 FROM agent_usage_conversation_content c
@@ -24,8 +27,11 @@ export class RuntimeEventRetention {
               AND p.token_count IS NULL)
           AND NOT EXISTS (SELECT 1 FROM runs active WHERE active.session_id=s.id AND active.status IN ('queued','running'))
           AND EXISTS (SELECT 1 FROM events e WHERE e.run_id=r.id AND e.seq<=j.last_seq AND e.type IN ('message','tool'))
-        ORDER BY r.id LIMIT 1`).get(this.namespace, new Date(now - this.retentionMs).toISOString()) as { id: number; last_seq: number } | undefined;
-      if (!job) return false;
+        ORDER BY r.id LIMIT 1`).get(this.namespace, this.nextRunId, new Date(now - this.retentionMs).toISOString()) as { id: number; last_seq: number } | undefined;
+      if (!job) {
+        this.nextRunId = 0;
+        return false;
+      }
       const candidates = this.db.prepare(`SELECT id,seq,octet_length(content_json) AS bytes FROM events
         WHERE run_id=? AND seq<=? AND type IN ('message','tool') ORDER BY seq LIMIT 100`)
         .all(job.id, job.last_seq) as Array<{ id: number; seq: number; bytes: number }>;
@@ -41,6 +47,7 @@ export class RuntimeEventRetention {
       this.db.prepare(`UPDATE runs SET events_pruned_at=COALESCE(events_pruned_at,?),
         events_pruned_through_seq=MAX(events_pruned_through_seq,?) WHERE id=?`)
         .run(new Date(now).toISOString(), batch.at(-1)!.seq, job.id);
+      this.nextRunId = job.id;
       return true;
     })();
   }

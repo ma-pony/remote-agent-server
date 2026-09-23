@@ -180,6 +180,8 @@ export class AttributionStore {
         ON agent_usage_exposures(tool_invocation_id);
       CREATE INDEX IF NOT EXISTS agent_usage_invocations_subject
         ON agent_usage_invocations(namespace, agent_id, session_id, started_at);
+      CREATE INDEX IF NOT EXISTS agent_usage_invocations_execution
+        ON agent_usage_invocations(namespace, session_id, execution_id) WHERE execution_id IS NOT NULL;
     `);
     const columns = store.db.prepare("PRAGMA table_info(agent_usage_exposures)").all() as Array<{ name: string }>;
     const invocationColumns = store.db.prepare("PRAGMA table_info(agent_usage_invocations)").all() as Array<{ name: string }>;
