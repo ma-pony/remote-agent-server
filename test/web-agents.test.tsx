@@ -24,10 +24,10 @@ const endpoint = {
   activeTaskCount: 0, latestTask: null, createdAt: now, updatedAt: now
 };
 const usageSummary = {
-  sessionCount: 0, measuredSessionCount: 0,
+  completeness: "none",
   usage: {
-    inputTokens: null, outputTokens: null, cachedReadTokens: null,
-    cachedWriteTokens: null, thoughtTokens: null, totalTokens: null
+    inputTotalTokens: null, outputTotalTokens: null, cacheReadTokens: null,
+    cacheWriteTokens: null, reasoningOutputTokens: null, totalTokens: null
   }
 };
 const response = (value: unknown): Response => new Response(JSON.stringify(value), {
@@ -75,7 +75,7 @@ it("在 Agent 列表页直接复制创建", async () => {
       return pagedManagementResponse(url, cloned);
     }
     if (url === `/api/agents/${cloned.id}`) return pagedManagementResponse(url, cloned);
-    if (url === `/api/agents/${cloned.id}/usage`) return pagedManagementResponse(url, usageSummary);
+    if (url === `/api/usage/summary?agentId=${cloned.id}`) return pagedManagementResponse(url, usageSummary);
     if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, []);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   }));
@@ -97,14 +97,14 @@ it("在 Agent 详情页输入新名称并快捷复制配置", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}` && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, agent);
-    if (url === `/api/agents/${agent.id}/usage`) return pagedManagementResponse(url, usageSummary);
+    if (url === `/api/usage/summary?agentId=${agent.id}`) return pagedManagementResponse(url, usageSummary);
     if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, []);
     if (url === `/api/agents/${agent.id}/clone` && init?.method === "POST") {
       cloneBody = JSON.parse(String(init.body));
       return pagedManagementResponse(url, cloned);
     }
     if (url === `/api/agents/${cloned.id}` && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, cloned);
-    if (url === `/api/agents/${cloned.id}/usage`) return pagedManagementResponse(url, usageSummary);
+    if (url === `/api/usage/summary?agentId=${cloned.id}`) return pagedManagementResponse(url, usageSummary);
     throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
   }));
 
@@ -124,7 +124,7 @@ it("Agent 概览集中展示绑定的外部调用入口", async () => {
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
-    if (url === `/api/agents/${agent.id}/usage`) return pagedManagementResponse(url, usageSummary);
+    if (url === `/api/usage/summary?agentId=${agent.id}`) return pagedManagementResponse(url, usageSummary);
     if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, [endpoint]);
     throw new Error(`Unexpected request: GET ${url}`);
   }));
@@ -151,7 +151,7 @@ it("Agent 没有调用入口时可创建并在新建页自动选中当前 Agent"
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
-    if (url === `/api/agents/${agent.id}/usage`) return pagedManagementResponse(url, usageSummary);
+    if (url === `/api/usage/summary?agentId=${agent.id}`) return pagedManagementResponse(url, usageSummary);
     if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, []);
     if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [otherAgent, agent]);
     if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/session-parameters`) return pagedManagementResponse(url, []);

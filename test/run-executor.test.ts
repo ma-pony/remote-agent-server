@@ -898,36 +898,6 @@ describe("RunExecutor", () => {
     setupResult.db.close();
   });
 
-  it("将 Runtime 返回的累计精确用量保存到 Session 而不是 Run", async () => {
-    const runtime = createFakeRuntime({
-      result: {
-        status: "completed",
-        sessionUsage: {
-          inputTokens: 897,
-          outputTokens: 17,
-          cachedReadTokens: 15_104,
-          thoughtTokens: 0,
-          totalTokens: 16_018
-        }
-      } as RuntimeTurnResult
-    });
-    const setupResult = setup(runtime);
-
-    await setupResult.executor.execute(setupResult.run.id);
-
-    expect(setupResult.sessionManager.get(TEST_SESSION_ID)).toMatchObject({
-      usage: {
-        inputTokens: 897,
-        outputTokens: 17,
-        cachedReadTokens: 15_104,
-        cachedWriteTokens: null,
-        thoughtTokens: 0,
-        totalTokens: 16_018
-      }
-    });
-    expect(setupResult.runRepository.get(setupResult.run.id)?.usage).toBeNull();
-    setupResult.db.close();
-  });
 
   it("保存 Runtime error 事件，但仍只用 canonical result 决定终态", async () => {
     const setupResult = setup(createFakeRuntime({

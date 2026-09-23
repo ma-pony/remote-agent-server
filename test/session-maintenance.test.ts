@@ -194,8 +194,7 @@ describe("durable Session maintenance", () => {
       expect(existsSync(attachmentPath)).toBe(false);
     } else {
       expect(db.prepare("SELECT * FROM sessions WHERE id = ?").get(session.id)).toMatchObject({
-        status: "idle", pending_operation: null, provider_session_id: null,
-        total_tokens: operation === "cleanup" ? 42 : null
+        status: "idle", pending_operation: null, provider_session_id: null
       });
       expect(repository.listBySession(session.id)).toHaveLength(1);
       if (operation === "cleanup") {

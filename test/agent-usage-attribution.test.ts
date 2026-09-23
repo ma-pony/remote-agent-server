@@ -33,6 +33,38 @@ const context = (): ModelContextInput => ({
 });
 
 describe("agent usage invocation attribution", () => {
+  it("adds each request exposure once and filters cumulative occupation by Agent, Session and date", async () => {
+    const { usage, attribution, binding } = setup();
+    const sameAgent = usage.bindSession("test", "agent-1", "session-2");
+    const otherAgent = usage.bindSession("test", "agent-2", "session-3");
+    const blocks: ModelContextInput["blocks"] = [
+      { position: 0, kind: "definition", content: { identity: "definition", modality: "text", text: "search definition" },
+        capabilities: [{ capability, evidence: "direct" }] },
+      { position: 1, kind: "arguments", toolInvocationId: "call-1",
+        content: { identity: "arguments", modality: "text", text: "search arguments" },
+        capabilities: [{ capability, evidence: "direct" }] },
+      { ...context().blocks[0]!, position: 2 }
+    ];
+    const save = (subject: typeof binding, id: string, date: string) => attribution.upsertContext(subject,
+      { ...context(), invocationId: id, occurredAt: date, blocks });
+    await save(binding, "first", "2026-09-20T10:00:00Z");
+    const one = attribution.rankings({ namespace: "test", sessionId: binding.sessionId }, "mcp_tool")[0]!;
+    await save(binding, "second", "2026-09-21T10:00:00Z");
+    await save(sameAgent, "third", "2026-09-21T11:00:00Z");
+    await save(otherAgent, "fourth", "2026-09-21T12:00:00Z");
+    expect(attribution.rankings({ namespace: "test", sessionId: binding.sessionId }, "mcp_tool")[0])
+      .toMatchObject({ totalInputTokens: one.totalInputTokens! * 2, argumentInputTokens: one.argumentInputTokens! * 2,
+        exposureCount: 6 });
+    expect(attribution.rankings({ namespace: "test", agentId: binding.agentId }, "mcp_tool")[0])
+      .toMatchObject({ totalInputTokens: one.totalInputTokens! * 3, exposureCount: 9 });
+    expect(attribution.rankings({ namespace: "test", agentId: binding.agentId,
+      from: "2026-09-21T00:00:00Z", to: "2026-09-22T00:00:00Z" }, "mcp_tool")[0])
+      .toMatchObject({ totalInputTokens: one.totalInputTokens! * 2, exposureCount: 6 });
+    expect(attribution.rankingsPage({ namespace: "test" }, "mcp_tool",
+      { sort: "argumentInputTokens", limit: 10, offset: 0 }).items[0]?.argumentInputTokens)
+      .toBe(one.argumentInputTokens! * 4);
+  });
+
   it("selects bounded indexed context candidates before building evidence page IDs", async () => {
     const { db, attribution, binding } = setup();
     for (let index = 0; index < 200; index++) await attribution.upsertContext(binding, {

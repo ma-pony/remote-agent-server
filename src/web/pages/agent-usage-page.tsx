@@ -90,7 +90,7 @@ type UsageSource = {
   mappings: Array<{ sessionId: string; state: string }>;
 };
 type RankingView = "content" | "context";
-type SortKey = "observedTotalTokens" | "observedArgumentTokens" | "observedResultTokens" | "totalInputTokens" | "inputBytes" | "calls" | "definitionInputTokens" | "firstResultInputTokens" | "repeatedResultInputTokens" | "failures" | "latencyMsP95";
+type SortKey = "observedTotalTokens" | "observedArgumentTokens" | "observedResultTokens" | "totalInputTokens" | "inputBytes" | "calls" | "definitionInputTokens" | "argumentInputTokens" | "firstResultInputTokens" | "repeatedResultInputTokens" | "failures" | "latencyMsP95";
 type RangeKey = "7d" | "30d" | "all";
 
 const PAGE_SIZE = 50;
@@ -107,7 +107,7 @@ const validTimezone = (value: string | null): string => {
 };
 const dimensions: RankingDimension[] = ["all", "user_prompt", "configured_instructions", "system_prompt", "assistant_output", "assistant_thought", "mcp_tool", "builtin_tool", "cli", "skill", "plugin", "hook", "unknown"];
 const contentSorts: SortKey[] = ["observedTotalTokens", "observedArgumentTokens", "observedResultTokens", "calls", "failures", "latencyMsP95"];
-const contextSorts: SortKey[] = ["inputBytes", "totalInputTokens", "calls", "definitionInputTokens", "firstResultInputTokens", "repeatedResultInputTokens", "failures", "latencyMsP95"];
+const contextSorts: SortKey[] = ["totalInputTokens", "argumentInputTokens", "definitionInputTokens", "firstResultInputTokens", "repeatedResultInputTokens", "inputBytes", "calls", "failures", "latencyMsP95"];
 
 const zonedDateParts = (instant: Date, timezone: string) => Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
   timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
@@ -169,7 +169,7 @@ export const AgentUsagePage = () => {
   const requestedRuntimeKind = searchParams.get("runtimeKind") ?? "";
   const runtimeKind = requestedRuntimeKind === "claude-code" ? "claude_code" : requestedRuntimeKind;
   const dimension = (dimensions.includes(searchParams.get("dimension") as RankingDimension) ? searchParams.get("dimension") : "all") as RankingDimension;
-  const view: RankingView = searchParams.get("view") === "context" ? "context" : "content";
+  const view: RankingView = searchParams.get("view") === "content" ? "content" : "context";
   const sorts = view === "content" ? contentSorts : contextSorts;
   const sort = (sorts.includes(searchParams.get("sort") as SortKey) ? searchParams.get("sort") : view === "content" ? "observedTotalTokens" : "totalInputTokens") as SortKey;
   const offset = Math.max(0, Number.parseInt(searchParams.get("offset") ?? "0", 10) || 0);
@@ -368,8 +368,8 @@ export const AgentUsagePage = () => {
     observedTotalTokens: text("内容估算总量", "Estimated content total"),
     observedArgumentTokens: text("输入内容估算", "Estimated input content"),
     observedResultTokens: text("返回内容估算", "Estimated returned content"),
-    totalInputTokens: text("估算输入", "Estimated input"), inputBytes: text("输入字节数", "Input bytes"), calls: text("调用次数", "Calls"),
-    definitionInputTokens: text("定义输入", "Definition input"), firstResultInputTokens: text("首次结果输入", "First result input"),
+    totalInputTokens: text("累计输入估算", "Cumulative input estimate"), inputBytes: text("输入字节数", "Input bytes"), calls: text("调用次数", "Calls"),
+    definitionInputTokens: text("定义输入", "Definition input"), argumentInputTokens: text("参数输入", "Argument input"), firstResultInputTokens: text("首次结果输入", "First result input"),
     repeatedResultInputTokens: text("重复结果输入", "Repeated result input"), failures: text("失败次数", "Failures"),
     latencyMsP95: text("P95 延迟", "P95 latency")
   })[value];
@@ -436,8 +436,8 @@ export const AgentUsagePage = () => {
 
       <Tabs value={view} onValueChange={changeView}>
         <TabsList aria-label={text("能力计量视图", "Capability measurement view")}>
-          <TabsTrigger value="content" onClick={() => changeView("content")}>{text("观测内容", "Observed content")}</TabsTrigger>
           <TabsTrigger value="context" onClick={() => changeView("context")}>{text("模型输入上下文", "Model-input context")}</TabsTrigger>
+          <TabsTrigger value="content" onClick={() => changeView("content")}>{text("观测内容", "Observed content")}</TabsTrigger>
         </TabsList>
         <TabsContent value={view}>
       {ranking === null ? <Skeleton className="h-48" aria-label={text("正在加载排名", "Loading rankings")} /> : empty ? filteredEmpty
@@ -479,7 +479,8 @@ const CapabilityTable = ({ stageOffset, onStagePageChange, view, ranking, estima
   })[stage];
   const estimateNotice = (row: AttributionRankRow): string | null => {
     const incompleteContext = row.contextCoverage.partial + row.contextCoverage.opaque + row.contextCoverage.none;
-    if (row.estimateCompleteness === "complete" && row.missingExposureCount === 0 && incompleteContext === 0) return null;
+    if (row.estimateCompleteness === "complete" && row.missingExposureCount === 0 && incompleteContext === 0
+      && (row.unknownFirstResultInputTokens ?? 0) === 0) return null;
     const zhCoverage = ([[row.contextCoverage.full, "完整"], [row.contextCoverage.partial, "部分"],
       [row.contextCoverage.opaque, "不透明"], [row.contextCoverage.none, "未知"]] as Array<[number, string]>)
       .filter(([count]) => count > 0).map(([count, label]) => `${count} ${label}`).join(" / ");
@@ -488,29 +489,75 @@ const CapabilityTable = ({ stageOffset, onStagePageChange, view, ranking, estima
       .filter(([count]) => count > 0).map(([count, label]) => `${count} ${label}`).join(" / ");
     const zh = [row.estimateCompleteness === "none" ? "输入未知" : row.estimateCompleteness === "partial" ? "部分估算" : null,
       row.missingExposureCount > 0 ? `${row.missingExposureCount} 项输入未知` : null,
+      (row.unknownFirstResultInputTokens ?? 0) > 0 ? `${row.unknownFirstResultInputTokens} Token 结果首次状态未知` : null,
       incompleteContext > 0 ? `上下文：${zhCoverage}` : null]
       .filter((item) => item !== null).join(" · ");
     const en = [row.estimateCompleteness === "none" ? "Input unknown" : row.estimateCompleteness === "partial" ? "Partial estimate" : null,
       row.missingExposureCount > 0 ? `${row.missingExposureCount} input exposure${row.missingExposureCount === 1 ? "" : "s"} unknown` : null,
+      (row.unknownFirstResultInputTokens ?? 0) > 0 ? `${row.unknownFirstResultInputTokens} result tokens with unknown first use` : null,
       incompleteContext > 0 ? `Context: ${enCoverage}` : null]
       .filter((item) => item !== null).join(" · ");
     return text(zh, en);
   };
   return <Card>
-    <CardHeader><CardTitle>{view === "content" ? text("能力内容估算", "Capability content estimates") : text("能力输入估算", "Capability input estimates")}</CardTitle>
+    <CardHeader><CardTitle>{view === "content" ? text("能力内容估算", "Capability content estimates") : text("累计能力占用估算", "Cumulative capability input estimates")}</CardTitle>
       <CardDescription>{view === "content"
         ? text("提示词、对话与工具内容按实际观测计量。输入包括提示词和工具参数，返回包括模型回复与工具结果；内容估算不代表模型上下文暴露，也不计入 Provider 上报用量。", "Prompts, conversation and tool content are measured from observations. Input includes prompts and tool arguments; returned content includes assistant output and tool results. These estimates do not establish model-context exposure and are not added to provider-reported usage.")
-        : text("基于已持久化的提示词、对话历史、定义与工具内容暴露估算；它不是 Provider 上报的 Token。MCP 工具按服务器身份分别排名。", "Estimated from persisted exposure of prompts, conversation history, definitions and tool content; this is not provider-reported usage. MCP tools are ranked by server identity.")}</CardDescription>
+        : text("同一能力内容每进入一次已采集的模型请求，就计入一次累计输入；未采集请求不推测。一次性内容量仅供对照，模型上报总量还包含未归因输入和输出。", "Each observed model request counts a capability's input again when it appears. Uncaptured requests are not inferred. One-time content is shown for comparison; reported totals also include unattributed input and output.")}</CardDescription>
       <CardDescription>{text("技能与插件的关联内容可能重叠，不可跨维度相加作为计费用量。", "Content associated with skills and plugins can overlap; do not add dimensions together as billable usage.")}</CardDescription>
     </CardHeader>
     <CardContent className="flex flex-col gap-5 overflow-x-auto">
-      {ranking.items.length === 0 ? <p className="py-8 text-center text-sm text-muted-foreground">{text("当前维度没有可排名的能力。", "No capabilities can be ranked for this dimension.")}</p> : view === "content" ? <ToolContentTable rows={ranking.items} dimensionLabel={dimensionLabel} onOpen={onOpen} /> : <table className="w-full min-w-[58rem] text-left text-sm"><thead className="border-b text-xs text-muted-foreground"><tr><th className="pb-3 font-medium">{text("能力", "Capability")}</th><th className="pb-3 text-right font-medium">{text("内容观测 / 调用（失败）", "Content observations / calls (failed)")}</th><th className="pb-3 text-right font-medium">{text("输入字节数", "Input bytes")}</th><th className="pb-3 text-right font-medium">{text("定义输入", "Definition input")}</th><th className="pb-3 text-right font-medium">{text("首次结果", "First result")}</th><th className="pb-3 text-right font-medium">{text("重复结果", "Repeated result")}</th><th className="pb-3 text-right font-medium">{text("估算总输入", "Estimated total input")}</th><th className="pb-3 text-right font-medium"><span className="sr-only">{text("操作", "Actions")}</span></th></tr></thead><tbody className="divide-y">{ranking.items.map((row) => {
-        const notice = estimateNotice(row);
-        const count = (value: number | null) => value !== null ? estimate(value)
-          : row.tokenizationStatus === "mixed" ? text("分项显示", "See breakdown")
-          : row.exposureCount > 0 ? text("无法估算", "Unavailable") : estimate(null);
-        return <tr key={`${row.capability.kind}:${row.capability.serverId ?? ""}:${row.capability.id}`}><td className="py-3"><p className="font-medium">{capabilityLabel(row.capability, text)}</p><p className="mt-1 text-xs text-muted-foreground">{dimensionLabel(row.capability.kind)}{row.capability.serverId === undefined ? "" : ` · ${text("服务器", "Server")} ${row.capability.serverId}`}</p>{row.tokenEstimates.map((item, index) => <div key={index} className="mt-2"><TokenMeasurement estimate={item} /><p className="text-xs text-muted-foreground">{item.totalInputTokens === null ? text("Token 未知", "Tokens unknown") : text(`${item.totalInputTokens} 估算 Token`, `${item.totalInputTokens} estimated tokens`)}</p></div>)}</td><td className="py-3 text-right font-mono tabular-nums"><ActivityCount row={row} />{row.contextOnlyCalls > 0 ? <p className="mt-1 text-xs text-muted-foreground">{text(`上下文证据：${row.contextOnlyCalls}`, `Context evidence: ${row.contextOnlyCalls}`)}</p> : null}</td><td className="py-3 text-right font-mono tabular-nums">{formatNumber(row.inputBytes, text("未知", "Unknown"))}</td><td className="py-3 text-right font-mono tabular-nums">{count(row.definitionInputTokens)}</td><td className="py-3 text-right font-mono tabular-nums">{count(row.firstResultInputTokens)}</td><td className="py-3 text-right font-mono tabular-nums">{count(row.repeatedResultInputTokens)}</td><td className="py-3 text-right"><div className="flex flex-col items-end gap-1"><span className="font-mono tabular-nums">{count(row.totalInputTokens)}</span>{row.tokenizationStatus === "mixed" ? <Badge variant="outline">{text("混合估算，明细见各模型", "Mixed estimates; see model breakdown")}</Badge> : null}{notice === null ? null : <Badge variant="outline">{notice}</Badge>}</div></td><td className="py-3 text-right"><Button type="button" size="sm" variant="outline" aria-label={isContentCapability(row.capability) ? text(`查看 ${capabilityLabel(row.capability, text)} 的内容证据`, `View content evidence for ${capabilityLabel(row.capability, text)}`) : text(`查看 ${row.capability.name} 的调用`, `View calls for ${row.capability.name}`)} onClick={() => onOpen(row.capability)}>{isContentCapability(row.capability) ? text("查看证据", "View evidence") : text("查看调用", "View calls")}</Button></td></tr>;
-      })}</tbody></table>}
+      {ranking.items.length === 0
+        ? <p className="py-8 text-center text-sm text-muted-foreground">{text("当前维度没有可排名的能力。", "No capabilities can be ranked for this dimension.")}</p>
+        : view === "content"
+          ? <ToolContentTable rows={ranking.items} dimensionLabel={dimensionLabel} onOpen={onOpen} />
+          : <table className="w-full min-w-[70rem] text-left text-sm">
+            <thead className="border-b text-xs text-muted-foreground"><tr>
+              <th className="pb-3 font-medium">{text("能力", "Capability")}</th>
+              <th className="pb-3 text-right font-medium">{text("内容观测 / 调用（失败）", "Content observations / calls (failed)")}</th>
+              <th className="pb-3 text-right font-medium">{text("一次性内容估算", "One-time content estimate")}</th>
+              <th className="pb-3 text-right font-medium">{text("输入字节数", "Input bytes")}</th>
+              <th className="pb-3 text-right font-medium">{text("定义输入", "Definition input")}</th>
+              <th className="pb-3 text-right font-medium">{text("参数输入", "Argument input")}</th>
+              <th className="pb-3 text-right font-medium">{text("首次结果", "First result")}</th>
+              <th className="pb-3 text-right font-medium">{text("重复结果", "Repeated result")}</th>
+              <th className="pb-3 text-right font-medium">{text("累计输入估算", "Cumulative input estimate")}</th>
+              <th className="pb-3 text-right font-medium"><span className="sr-only">{text("操作", "Actions")}</span></th>
+            </tr></thead>
+            <tbody className="divide-y">{ranking.items.map((row) => {
+              const notice = estimateNotice(row);
+              const count = (value: number | null) => value !== null ? estimate(value)
+                : row.tokenizationStatus === "mixed" ? text("分项显示", "See breakdown")
+                : row.exposureCount > 0 ? text("无法估算", "Unavailable") : estimate(null);
+              return <tr key={`${row.capability.kind}:${row.capability.serverId ?? ""}:${row.capability.id}`}>
+                <td className="py-3">
+                  <p className="font-medium">{capabilityLabel(row.capability, text)}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{dimensionLabel(row.capability.kind)}{row.capability.serverId === undefined ? "" : ` · ${text("服务器", "Server")} ${row.capability.serverId}`}</p>
+                  {row.tokenEstimates.map((item, index) => <div key={index} className="mt-2"><TokenMeasurement estimate={item} />
+                    <p className="text-xs text-muted-foreground">{item.totalInputTokens === null ? text("Token 未知", "Tokens unknown") : text(`${item.totalInputTokens} 估算 Token`, `${item.totalInputTokens} estimated tokens`)}</p>
+                  </div>)}
+                </td>
+                <td className="py-3 text-right font-mono tabular-nums"><ActivityCount row={row} />{row.contextOnlyCalls > 0
+                  ? <p className="mt-1 text-xs text-muted-foreground">{text(`上下文证据：${row.contextOnlyCalls}`, `Context evidence: ${row.contextOnlyCalls}`)}</p> : null}</td>
+                <td className="py-3 text-right font-mono tabular-nums">{formatNumber(row.observedTotalTokens)}</td>
+                <td className="py-3 text-right font-mono tabular-nums">{formatNumber(row.inputBytes, text("未知", "Unknown"))}</td>
+                <td className="py-3 text-right font-mono tabular-nums">{count(row.definitionInputTokens)}</td>
+                <td className="py-3 text-right font-mono tabular-nums">{count(row.argumentInputTokens)}</td>
+                <td className="py-3 text-right font-mono tabular-nums">{count(row.firstResultInputTokens)}</td>
+                <td className="py-3 text-right font-mono tabular-nums">{count(row.repeatedResultInputTokens)}</td>
+                <td className="py-3 text-right"><div className="flex flex-col items-end gap-1">
+                  <span className="font-mono tabular-nums">{count(row.totalInputTokens)}</span>
+                  {row.tokenizationStatus === "mixed" ? <Badge variant="outline">{text("混合估算，明细见各模型", "Mixed estimates; see model breakdown")}</Badge> : null}
+                  {notice === null ? null : <Badge variant="outline">{notice}</Badge>}
+                </div></td>
+                <td className="py-3 text-right"><Button type="button" size="sm" variant="outline"
+                  aria-label={isContentCapability(row.capability)
+                    ? text(`查看 ${capabilityLabel(row.capability, text)} 的内容证据`, `View content evidence for ${capabilityLabel(row.capability, text)}`)
+                    : text(`查看 ${row.capability.name} 的调用`, `View calls for ${row.capability.name}`)}
+                  onClick={() => onOpen(row.capability)}>{isContentCapability(row.capability) ? text("查看证据", "View evidence") : text("查看调用", "View calls")}</Button></td>
+              </tr>;
+            })}</tbody>
+          </table>}
       {(ranking.stages ?? []).length === 0 ? null : <section aria-labelledby="runtime-stage-evidence-title"><h3 id="runtime-stage-evidence-title" className="font-medium">{text("运行时阶段证据", "Runtime stage evidence")}</h3><p className="mt-1 text-sm text-muted-foreground">{text("读取、引用和脚本阶段是独立活动证据，不计入调用次数。", "Read, reference, and script stages are independent activity evidence and are not added to call counts.")}</p><div className="mt-3 flex flex-wrap gap-2">{ranking.stages?.map((item) => <Badge key={`${item.capability.kind}:${item.capability.id}:${item.stage}`} variant="outline">{item.capability.name} · {stageLabel(item.stage)} · {item.count}</Badge>)}</div><ListPagination page={Math.floor(stageOffset / 20) + 1} pageSize={20} total={ranking.stageTotal ?? 0} totalPages={Math.ceil((ranking.stageTotal ?? 0) / 20)} onPageChange={onStagePageChange} /></section>}
     </CardContent>
   </Card>;

@@ -150,6 +150,24 @@ const observe = (
   metrics: { inputTotalTokens: input.total - 10, outputTotalTokens: 10, totalTokens: input.total }
 });
 
+it("batches paged Session totals from the same ledger as Agent and Session summaries", async () => {
+  const { app, manager, bindings, ids } = await setup(undefined, true);
+  await manager.collector.stopRecovery();
+  observe(manager, bindings.first, { id: "one", at: "2026-09-20T00:00:00Z", total: 30 });
+  observe(manager, bindings.second, { id: "two", at: "2026-09-20T00:01:00Z", total: 50 });
+  observe(manager, bindings.other, { id: "other", at: "2026-09-20T00:02:00Z", total: 70 });
+  const requested = [bindings.first.sessionId, bindings.second.sessionId, ids.unboundSession];
+  const response = await get(app, `/session-summaries?ids=${requested.join(",")}`);
+  expect(response.statusCode).toBe(200);
+  const rows = response.json().items as Array<{ sessionId: string; summary: { usage: { totalTokens: number | null } } }>;
+  expect(rows.map((row) => [row.sessionId, row.summary.usage.totalTokens])).toEqual([
+    [bindings.first.sessionId, 30], [bindings.second.sessionId, 50], [ids.unboundSession, null]
+  ]);
+  expect((await get(app, `/summary?agentId=${ids.firstAgent}`)).json().usage.totalTokens).toBe(80);
+  expect((await get(app, `/summary?sessionId=${bindings.first.sessionId}`)).json().usage.totalTokens).toBe(30);
+  expect((await get(app, "/session-summaries?ids=0")).statusCode).toBe(400);
+});
+
 const invocation = (
   id: string,
   capability: Capability,
@@ -492,6 +510,10 @@ describe("usage query API", () => {
       estimateCompleteness: "none"
     });
     expect(ranking.body).not.toContain("synthetic private body");
+    const argumentSort = await get(app,
+      `/capabilities?sessionId=${bindings.first.sessionId}&dimension=mcp_tool&sort=argumentInputTokens`);
+    expect(argumentSort.statusCode).toBe(200);
+    expect(argumentSort.json()).toMatchObject({ sort: "argumentInputTokens", total: 3 });
 
     const offset = await get(app,
       `/capabilities?sessionId=${bindings.first.sessionId}&dimension=mcp_tool&sort=calls&offset=1&limit=1`);

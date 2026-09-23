@@ -34,14 +34,13 @@ const usage = {
   contextWindowTokens: 258_400
 };
 const summary = {
-  sessionCount: 1,
-  measuredSessionCount: 1,
+  completeness: "complete",
   usage: {
-    inputTokens: 12_000,
-    outputTokens: 2_000,
-    cachedReadTokens: 8_000,
-    cachedWriteTokens: null,
-    thoughtTokens: 600,
+    inputTotalTokens: 12_000,
+    outputTotalTokens: 2_000,
+    cacheReadTokens: 8_000,
+    cacheWriteTokens: null,
+    reasoningOutputTokens: 600,
     totalTokens: 14_000
   }
 };
@@ -82,8 +81,9 @@ it("在 Session 累计区展示执行器上报的精确累计用量", async () =
     if (new URL(url, "http://localhost").pathname === "/api/sessions/session-usage") return pagedManagementResponse(url, {
       id: "session-usage", agentId: agent.id, title: "用量会话", status: "idle",
       providerSessionId: null, workspacePath: "/tmp/session", projectEnvironmentRevisionId: null,
-      instructionsSnapshot: "", createdAt: now, updatedAt: now, runs, usageSummary: summary
+      instructionsSnapshot: "", createdAt: now, updatedAt: now, runs
     });
+    if (url === `/api/usage/summary?agentId=${agent.id}&sessionId=session-usage`) return pagedManagementResponse(url, summary);
     if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
     if (url.endsWith("/events?afterSeq=0&limit=100")) return pagedManagementResponse(url, []);
     throw new Error(`Unexpected request: ${url}`);
@@ -99,14 +99,14 @@ it("在 Session 累计区展示执行器上报的精确累计用量", async () =
     ["输出", "2000"],
     ["缓存读取", "8000"],
     ["缓存写入", "—"],
-    ["思考", "600"],
+    ["推理输出", "600"],
     ["总计", "1.4万"]
   ] as const;
   for (const [label, value] of expectedDetails) {
     const term = within(cumulativeCard).getByText(label, { selector: "dt" });
     expect(within(term.closest("div")!).getByRole("definition")).toHaveTextContent(value);
   }
-  expect(within(cumulativeCard).getByText("已统计 1 / 1 个会话")).toBeInTheDocument();
+  expect(within(cumulativeCard).getByText("已采集记录完整")).toBeInTheDocument();
   expect(screen.queryByText("输入 1.2万 · 输出 2000 · 缓存读取 8000 · 思考 600 · 总计 1.4万")).not.toBeInTheDocument();
 });
 
@@ -119,30 +119,34 @@ it("终态事件后读取 canonical Run 和 Session 并刷新用量", async () =
   };
   const terminalRun = { ...runningRun, status: "succeeded", result: "完成", finishedAt: now, usage };
   const emptySummary = {
-    sessionCount: 1,
-    measuredSessionCount: 0,
+    completeness: "none",
     usage: {
-      inputTokens: null,
-      outputTokens: null,
-      cachedReadTokens: null,
-      cachedWriteTokens: null,
-      thoughtTokens: null,
+      inputTotalTokens: null,
+      outputTotalTokens: null,
+      cacheReadTokens: null,
+      cacheWriteTokens: null,
+      reasoningOutputTokens: null,
       totalTokens: null
     }
   };
-  const sessionDetail = (run: typeof runningRun | typeof terminalRun, usageSummary: typeof emptySummary | typeof summary) => ({
+  const sessionDetail = (run: typeof runningRun | typeof terminalRun) => ({
     id: "session-live", agentId: agent.id, title: "实时用量", status: run.status === "running" ? "running" : "idle",
     providerSessionId: null, workspacePath: "/tmp/session", projectEnvironmentRevisionId: null,
-    instructionsSnapshot: "", createdAt: now, updatedAt: now, runs: [run], usageSummary
+    instructionsSnapshot: "", createdAt: now, updatedAt: now, runs: [run]
   });
   let sessionReads = 0;
   let canonicalReads = 0;
+  let usageReads = 0;
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
     if (new URL(url, "http://localhost").pathname === "/api/sessions/session-live") {
       sessionReads += 1;
-      return pagedManagementResponse(url, sessionReads === 1 ? sessionDetail(runningRun, emptySummary) : sessionDetail(terminalRun, summary));
+      return pagedManagementResponse(url, sessionReads === 1 ? sessionDetail(runningRun) : sessionDetail(terminalRun));
+    }
+    if (url === `/api/usage/summary?agentId=${agent.id}&sessionId=session-live`) {
+      usageReads++;
+      return pagedManagementResponse(url, usageReads === 1 ? emptySummary : summary);
     }
     if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
     if (url === "/api/runs/run-live/events?afterSeq=0&limit=100") return pagedManagementResponse(url, []);
@@ -161,7 +165,7 @@ it("终态事件后读取 canonical Run 和 Session 并刷新用量", async () =
 
   render(<App />);
 
-  await vi.waitFor(() => expect(screen.getByText("已统计 0 / 1 个会话")).toBeInTheDocument());
+  await vi.waitFor(() => expect(screen.getByText("暂无上报")).toBeInTheDocument());
   await vi.waitFor(() => expect(streamOptions).toBeDefined());
   await act(async () => {
     streamOptions?.onmessage?.({
@@ -178,8 +182,8 @@ it("终态事件后读取 canonical Run 和 Session 并刷新用量", async () =
   expect(canonicalReads).toBe(1);
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
   expect(canonicalReads).toBe(2);
-  expect(screen.getByText("总计 1.4万")).toBeInTheDocument();
-  expect(screen.getByText("已统计 1 / 1 个会话")).toBeInTheDocument();
+  await vi.waitFor(() => expect(screen.getByText("总计 1.4万")).toBeInTheDocument());
+  expect(screen.getByText("已采集记录完整")).toBeInTheDocument();
   expect(fetchMock.mock.calls.filter(([request]) => request.toString() === "/api/sessions/session-live?includeParameters=false")).toHaveLength(2);
 });
 
@@ -190,11 +194,7 @@ it("在 Agent 概览用英文展示所有 Session 的累计用量", async () => 
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
     if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, []);
-    if (url === `/api/agents/${agent.id}/usage`) return pagedManagementResponse(url, {
-      ...summary,
-      sessionCount: 4,
-      measuredSessionCount: 3
-    });
+    if (url === `/api/usage/summary?agentId=${agent.id}`) return pagedManagementResponse(url, summary);
     throw new Error(`Unexpected request: ${url}`);
   }));
 
@@ -202,5 +202,5 @@ it("在 Agent 概览用英文展示所有 Session 的累计用量", async () => 
 
   expect(await screen.findByRole("heading", { name: "Token usage" })).toBeInTheDocument();
   expect(await screen.findByRole("heading", { name: "Cumulative" })).toBeInTheDocument();
-  expect(screen.getByText("Measured 3 / 4 sessions")).toBeInTheDocument();
+  expect(screen.getByText("Collected records complete")).toBeInTheDocument();
 });

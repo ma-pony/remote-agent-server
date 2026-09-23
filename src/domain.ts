@@ -19,14 +19,6 @@ export type TokenUsage = {
   contextWindowTokens: number | null;
 };
 
-export type TokenUsageTotals = Omit<TokenUsage, "contextUsedTokens" | "contextWindowTokens">;
-
-export type TokenUsageSummary = {
-  sessionCount: number;
-  measuredSessionCount: number;
-  usage: TokenUsageTotals;
-};
-
 export type ProjectEnvironment = {
   id: number;
   name: string;
@@ -89,7 +81,6 @@ export type Session = {
   workspacePath: string;
   projectEnvironmentRevisionId: number | null;
   instructionsSnapshot: string;
-  usage: TokenUsageTotals | null;
   createdAt: string;
   updatedAt: string;
 };

@@ -73,6 +73,11 @@ export const accountingRows = (records: UsageRecord[]): UsageRecord[] => {
   return [...epochs.values()].flatMap((rows) => {
     const ordered = rows.slice().sort((a, b) => (a.sourcePriority ?? 100) - (b.sourcePriority ?? 100)
       || a.coverageId.localeCompare(b.coverageId) || a.sourceId.localeCompare(b.sourceId));
+    // A cumulative snapshot can lag behind later request observations. Keep the
+    // larger verified detail basis for that metric instead of hiding newer usage.
+    const detailRows = ordered.some((row) => row.scope === "provider_session")
+      ? accountingRows(ordered.filter((row) => row.scope !== "provider_session")) : [];
+    const detailTotals = sumUsage(detailRows);
     const selected = new Map<UsageRecord, UsageRecord>();
     const select = (row: UsageRecord, metric: typeof metricNames[number]) => {
       const masked = selected.get(row) ?? { ...row, metrics: emptyUsage() };
@@ -82,7 +87,12 @@ export const accountingRows = (records: UsageRecord[]): UsageRecord[] => {
     for (const metric of metricNames) {
       const known = ordered.filter((row) => row.metrics[metric] !== null);
       const range = known.find((row) => row.scope === "provider_session");
-      if (range) { select(range, metric); continue; }
+      if (range) {
+        if (detailTotals[metric] !== null && detailTotals[metric]! > range.metrics[metric]!) {
+          for (const detail of detailRows) if (detail.metrics[metric] !== null) select(detail, metric);
+        } else select(range, metric);
+        continue;
+      }
       const requests = known.filter((row) => row.scope === "model_request");
       const nativeIntervals = known.filter((row) => row.scope === "interval");
       // Explicitly higher-priority direct request evidence is a known-subset dated basis.

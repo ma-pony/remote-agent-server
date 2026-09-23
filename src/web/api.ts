@@ -206,7 +206,6 @@ export type Session = {
   workspacePath: string;
   projectEnvironmentRevisionId: number | null;
   instructionsSnapshot: string;
-  usage: Omit<TokenUsage, "contextUsedTokens" | "contextWindowTokens"> | null;
   createdAt: string;
   updatedAt: string;
   mcpParametersValid?: boolean;
@@ -326,16 +325,9 @@ export type TokenUsage = {
   contextWindowTokens: number | null;
 };
 
-export type TokenUsageSummary = {
-  sessionCount: number;
-  measuredSessionCount: number;
-  usage: Omit<TokenUsage, "contextUsedTokens" | "contextWindowTokens">;
-};
-
 export type SessionDetail = Session & {
   runs: Run[];
   hasOlderRuns?: boolean;
-  usageSummary?: TokenUsageSummary;
 };
 
 export type RunEvent = {

@@ -1,5 +1,8 @@
-import type { TokenUsage, TokenUsageSummary } from "@/api";
+import { useEffect, useState } from "react";
+import { api, errorMessage, type TokenUsage } from "@/api";
+import type { UsageSummary } from "../../agent-usage/core/types.js";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
 
 const compactToken = (value: number | null, locale: string): string => value === null
@@ -35,23 +38,23 @@ export const TokenUsageLine = ({ usage }: { usage: TokenUsage | null | undefined
   </div>;
 };
 
-export const TokenUsageSummaryCard = ({
+const TokenUsageSummaryCard = ({
   title,
   summary,
   headingLevel = 3
 }: {
   title: string;
-  summary: TokenUsageSummary;
+  summary: UsageSummary;
   headingLevel?: 2 | 3;
 }) => {
   const { locale, text } = useI18n();
   const Heading = headingLevel === 2 ? "h2" : "h3";
   const details = [
-    ["input", text("输入", "Input"), summary.usage.inputTokens],
-    ["output", text("输出", "Output"), summary.usage.outputTokens],
-    ["cache-read", text("缓存读取", "Cache read"), summary.usage.cachedReadTokens],
-    ["cache-write", text("缓存写入", "Cache write"), summary.usage.cachedWriteTokens],
-    ["thought", text("思考", "Thought"), summary.usage.thoughtTokens],
+    ["input", text("输入", "Input"), summary.usage.inputTotalTokens],
+    ["output", text("输出", "Output"), summary.usage.outputTotalTokens],
+    ["cache-read", text("缓存读取", "Cache read"), summary.usage.cacheReadTokens],
+    ["cache-write", text("缓存写入", "Cache write"), summary.usage.cacheWriteTokens],
+    ["thought", text("推理输出", "Reasoning output"), summary.usage.reasoningOutputTokens],
     ["total", text("总计", "Total"), summary.usage.totalTokens]
   ] as const;
   return <Card>
@@ -64,10 +67,32 @@ export const TokenUsageSummaryCard = ({
           <dd className="mt-1 font-mono text-base font-semibold tabular-nums">{compactToken(value, locale)}</dd>
         </div>)}
       </dl>
-      <p className="mt-3 text-xs text-muted-foreground">{text(
-        `已统计 ${summary.measuredSessionCount} / ${summary.sessionCount} 个会话`,
-        `Measured ${summary.measuredSessionCount} / ${summary.sessionCount} sessions`
-      )}</p>
+      <p className="mt-3 text-xs text-muted-foreground">{summary.completeness === "complete"
+        ? text("已采集记录完整", "Collected records complete") : summary.completeness === "none"
+          ? text("暂无上报", "No reported usage") : summary.completeness === "conflict"
+            ? text("来源存在冲突，数值仅供核对", "Sources conflict; verify this figure")
+            : text("上报不完整，数值仅为已知部分", "Incomplete reports; known portion only")}</p>
     </CardContent>
   </Card>;
+};
+
+export const LedgerUsageSummaryCard = ({ agentId, sessionId, title, headingLevel = 3, refreshKey }: {
+  agentId?: number; sessionId?: number; title: string; headingLevel?: 2 | 3; refreshKey?: string;
+}) => {
+  const { text } = useI18n();
+  const [summary, setSummary] = useState<UsageSummary | null>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    const query = new URLSearchParams();
+    if (agentId !== undefined) query.set("agentId", String(agentId));
+    if (sessionId !== undefined) query.set("sessionId", String(sessionId));
+    setSummary(null); setError("");
+    void api<UsageSummary>(`/usage/summary?${query}`, { signal: controller.signal }).then(setSummary)
+      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    return () => controller.abort();
+  }, [agentId, sessionId, refreshKey]);
+  if (error) return <p role="alert" className="text-sm text-destructive">{text("用量加载失败：", "Failed to load usage: ")}{error}</p>;
+  return summary ? <TokenUsageSummaryCard title={title} summary={summary} headingLevel={headingLevel} />
+    : <Skeleton className="h-40" aria-label={text("正在加载用量", "Loading usage")} />;
 };

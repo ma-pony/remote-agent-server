@@ -1,4 +1,4 @@
-import type { Provider, TokenUsage, TokenUsageTotals } from "../domain.js";
+import type { Provider, TokenUsage } from "../domain.js";
 import type { RuntimeMcpServer } from "../mcp/mcp-types.js";
 import type { UsageObservation } from "../agent-usage/core/types.js";
 
@@ -29,7 +29,7 @@ export type RuntimeTurnResult = (
   | { status: "completed" }
   | { status: "cancelled" }
   | { status: "failed"; code?: string; message: string }
-) & { sessionUsage?: Partial<TokenUsageTotals> };
+);
 export type RuntimeDoctor = { ok: boolean; message: string; details: string[] };
 export type RuntimeModelCatalogInput = {
   agentId: number;

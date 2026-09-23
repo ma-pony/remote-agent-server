@@ -16,7 +16,6 @@ const session = {
   providerSessionId: null,
   workspacePath: "/tmp/session-1",
   projectEnvironmentRevisionId: "revision-1",
-  usage: { inputTokens: 9000, outputTokens: 2345, cachedReadTokens: null, cachedWriteTokens: null, thoughtTokens: null, totalTokens: 12345 },
   agentName: "主力 Codex",
   agentProvider: "codex",
   projectEnvironmentName: "爬虫项目环境",
@@ -31,6 +30,10 @@ const session = {
   updatedAt: now
 };
 const response = (value: unknown): Response => new Response(JSON.stringify(value), { headers: { "content-type": "application/json" } });
+const usageSummary = { completeness: "complete", usage: { totalTokens: 12345 } };
+const usageResponse = (url: string) => url.startsWith("/api/usage/session-summaries?ids=")
+  ? pagedManagementResponse(url, { items: url.split("ids=")[1]!.split(",").map((sessionId) => ({ sessionId, summary: usageSummary })) })
+  : pagedManagementResponse(url, usageSummary);
 const page = (items: unknown[], overrides: Partial<{ page: number; pageSize: number; total: number; totalPages: number }> = {}) => ({
   items,
   page: 1,
@@ -45,6 +48,7 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/sessions");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
+    if (url.startsWith("/api/usage/session-summaries?ids=") || url.startsWith("/api/usage/summary?")) return usageResponse(url);
     if (url === "/api/sessions?page=1&pageSize=20") return pagedManagementResponse(url, page([session]));
     if (url === "/api/sessions?page=1&pageSize=20&query=ticket-2084") return pagedManagementResponse(url, page([session]));
     if (url === "/api/sessions?page=1&pageSize=20&query=ticket-9999") return pagedManagementResponse(url, page([]));
@@ -104,6 +108,7 @@ it("列表支持翻页并把搜索交给服务端", async () => {
   const older = { ...session, id: "session-older", title: "第二页会话" };
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
+    if (url.startsWith("/api/usage/session-summaries?ids=") || url.startsWith("/api/usage/summary?")) return usageResponse(url);
     if (url === "/api/sessions?page=1&pageSize=20") {
       return pagedManagementResponse(url, page([session], { total: 21, totalPages: 2 }));
     }
@@ -122,6 +127,8 @@ it("列表支持翻页并把搜索交给服务端", async () => {
   expect(await screen.findByText(/第 1 \/ 2 页/)).toBeInTheDocument();
   fireEvent.click(screen.getAllByRole("button", { name: "下一页" }).find(button => !(button as HTMLButtonElement).disabled)!);
   expect(await screen.findByRole("link", { name: "第二页会话" })).toBeInTheDocument();
+  await waitFor(() => expect(fetchMock.mock.calls.some(([input]) =>
+    input === "/api/usage/session-summaries?ids=session-older")).toBe(true));
 
   fireEvent.change(screen.getByLabelText("搜索会话"), { target: { value: "ticket-2084" } });
   expect(await screen.findByRole("link", { name: session.title })).toBeInTheDocument();
@@ -132,6 +139,7 @@ it("列表支持翻页并把搜索交给服务端", async () => {
 it("列表二次确认后永久删除空闲 Session 并原地移除", async () => {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
+    if (url.startsWith("/api/usage/session-summaries?ids=") || url.startsWith("/api/usage/summary?")) return usageResponse(url);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
     if (url === "/api/sessions?page=1&pageSize=20" && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, page([session]));
     if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -156,6 +164,7 @@ it("运行中的 Session 禁止删除", async () => {
   const running = { ...session, status: "running" };
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
+    if (url.startsWith("/api/usage/session-summaries?ids=") || url.startsWith("/api/usage/summary?")) return usageResponse(url);
     if (url === "/api/sessions?page=1&pageSize=20") return pagedManagementResponse(url, page([running]));
     if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
     throw new Error(`Unexpected request: ${url}`);
@@ -169,6 +178,7 @@ it("已清理存储的 Session 仍可查看统计但不能继续发送", async (
   const cleaned = { ...session, storageCleanedAt: "2026-08-24T00:00:00.000Z" };
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
+    if (url.startsWith("/api/usage/session-summaries?ids=") || url.startsWith("/api/usage/summary?")) return usageResponse(url);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
     if (url === "/api/sessions?page=1&pageSize=20") return pagedManagementResponse(url, page([cleaned]));
     if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) {
@@ -176,7 +186,6 @@ it("已清理存储的 Session 仍可查看统计但不能继续发送", async (
         ...cleaned,
         runs: [],
         hasOlderRuns: false,
-        usageSummary: { sessionCount: 1, measuredSessionCount: 1, usage: cleaned.usage }
       });
     }
     if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -196,6 +205,7 @@ it("详情页删除成功后返回 Session 列表", async () => {
   window.history.replaceState({}, "", `/sessions/${session.id}`);
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
+    if (url.startsWith("/api/usage/session-summaries?ids=") || url.startsWith("/api/usage/summary?")) return usageResponse(url);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
     if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}` && (init?.method ?? "GET") === "GET") return pagedManagementResponse(url, { ...session, runs: [] });
     if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);

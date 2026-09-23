@@ -251,8 +251,7 @@ describe("SessionCleanupScheduler", () => {
     expect(manager.get(101)).toMatchObject({
       id: 101,
       providerSessionId: null,
-      storageCleanedAt: "2026-08-24T00:00:00.000Z",
-      usage: { inputTokens: 100, outputTokens: 23, totalTokens: 123 }
+      storageCleanedAt: "2026-08-24T00:00:00.000Z"
     });
     expect(manager.get(102)?.status).toBe("idle");
     expect(manager.get(103)?.status).toBe("running");

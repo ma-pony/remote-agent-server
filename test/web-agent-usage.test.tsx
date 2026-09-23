@@ -131,7 +131,7 @@ it("loads source and exposure pages on demand instead of downloading every row",
 });
 
 it("analyzes prompt and conversation as dimensions with content evidence and preserved scope", async () => {
-  window.history.replaceState({}, "", "/usage?range=7d&agentId=1&sessionId=2");
+  window.history.replaceState({}, "", "/usage?range=7d&agentId=1&sessionId=2&view=content");
   const prompt = { ...ranks[0], capability: { kind: "user_prompt", id: "user_prompt", name: "user_prompt" },
     calls: 0, failures: 0, contentObservations: 2, observedArgumentTokens: 123, observedResultTokens: null,
     observedTotalTokens: 123, observedArgumentCalls: 0, observedResultCalls: 0 };
@@ -189,7 +189,7 @@ it("opens model-input evidence directly for system prompts without runtime obser
   expect(within(button.closest("tr")!).getByText("3 次模型输入暴露")).toBeInTheDocument();
   expect(within(button.closest("tr")!).queryByText("0 次内容观测")).not.toBeInTheDocument();
   expect(within(button.closest("tr")!).queryByText("内容缺失")).not.toBeInTheDocument();
-  expect(within(button.closest("tr")!).getByText("仅模型输入证据")).toBeInTheDocument();
+  expect(screen.getByText("累计能力占用估算")).toBeInTheDocument();
   fireEvent.click(button);
   expect(await screen.findByRole("button", { name: "打开输入证据 evidence-1" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "模型输入证据" })).toHaveAttribute("aria-selected", "true");
@@ -238,7 +238,6 @@ it("展示未知模型兜底估算和混合计量来源，保留可排名的数�
   expect(screen.queryByText("无法估算")).not.toBeInTheDocument();
   expect(screen.getByText(/example-a.*a/)).toBeInTheDocument();
   expect(screen.getByText(/example-b.*b/)).toBeInTheDocument();
-  expect(screen.queryByText("未采集模型输入")).not.toBeInTheDocument();
   expect(screen.getByText("1,024")).toBeInTheDocument();
   fireEvent.change(screen.getByLabelText("排序"), { target: { value: "inputBytes" } });
   await waitFor(() => expect(window.location.search).toContain("sort=inputBytes"));
@@ -557,10 +556,17 @@ it("等待首次请求时只轮询轻量状态，不反复加载整页", async (
 });
 
 
-it("未采集 HTTP 上下文时默认展示工具内容估算和逐侧覆盖率", async () => {
+it("默认对照一次性内容与累计占用，仍可查看逐侧内容覆盖", async () => {
   mount();
   expect(await screen.findByText("362")).toBeInTheDocument();
-  expect(screen.getByText("350")).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "一次性内容估算" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "参数输入" })).toBeInTheDocument();
+  expect(screen.getByRole("columnheader", { name: "累计输入估算" })).toBeInTheDocument();
+  expect(screen.getByLabelText("排序")).toHaveValue("totalInputTokens");
+  fireEvent.change(screen.getByLabelText("排序"), { target: { value: "argumentInputTokens" } });
+  await waitFor(() => expect(window.location.search).toContain("sort=argumentInputTokens"));
+  fireEvent.click(screen.getByRole("tab", { name: "观测内容" }));
+  expect(await screen.findByText("350")).toBeInTheDocument();
   expect(screen.getByText("12")).toBeInTheDocument();
   expect(screen.getByText("已计量 2 / 2 次调用")).toBeInTheDocument();
   expect(screen.getByText("已计量 1 / 2 次调用")).toBeInTheDocument();
@@ -573,7 +579,7 @@ it("未采集 HTTP 上下文时默认展示工具内容估算和逐侧覆盖率"
 });
 
 it("切换内容与上下文视图保留范围筛选并使用各自排序", async () => {
-  window.history.replaceState({}, "", "/usage?range=30d&agentId=1&sessionId=2&timezone=UTC&dimension=plugin");
+  window.history.replaceState({}, "", "/usage?range=30d&agentId=1&sessionId=2&timezone=UTC&dimension=plugin&view=content");
   mount(); await screen.findByText("362");
   fireEvent.click(screen.getByRole("tab", { name: "模型输入上下文" }));
   expect(await screen.findByRole("columnheader", { name: "重复结果" })).toBeInTheDocument();
@@ -630,6 +636,7 @@ it("历史内容回填自动刷新到完成并停止显示进行中状态", asyn
 it("等待词表超过一分钟时降低刷新频率并在补算完成后显示模型词表计数", async () => {
   vi.useFakeTimers();
   try {
+    window.history.replaceState({}, "", "/usage?view=content");
     const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
     let ready = false, summaryGets = 0;
     fetch.mockImplementation(async (input, init) => {

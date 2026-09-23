@@ -113,8 +113,7 @@ export const registerSessionRoutes = (
         return {
           ...session,
           runs: page.items,
-          hasOlderRuns: page.hasMore,
-          usageSummary: runRepository.summarizeBySession(session.id)
+          hasOlderRuns: page.hasMore
         };
       })();
   });

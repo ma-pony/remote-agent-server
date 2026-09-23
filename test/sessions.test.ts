@@ -253,15 +253,11 @@ describe("Session API", () => {
     expect(invalid.statusCode).toBe(400);
   });
 
-  it("列表返回可区分外部接入会话的摘要和累计 Token", async () => {
+  it("列表返回可区分外部接入会话的摘要", async () => {
     const { app, db } = await createTestApp();
     const agent = await createAgent(app);
     const session = await createSession(app, agent.id);
     const now = "2026-08-24T08:00:00.000Z";
-    db.prepare(`
-      UPDATE sessions SET input_tokens = 9000, output_tokens = 2345, total_tokens = 12345
-      WHERE id = ?
-    `).run(session.id);
     const endpointId = Number(db.prepare(`
       INSERT INTO integration_endpoints
         (name, slug, agent_id, enabled, token_hash, created_at, updated_at)
@@ -289,7 +285,6 @@ describe("Session API", () => {
         agentName: "Codex",
         agentProvider: "codex",
         projectEnvironmentName: "Test environment",
-        usage: expect.objectContaining({ totalTokens: 12345 }),
         integration: {
           endpointId,
           endpointName: "Crawler development",

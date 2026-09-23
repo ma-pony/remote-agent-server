@@ -171,6 +171,18 @@ describe("usage ledger", () => {
     expect(store.summary({ namespace: "test" }).completeness).toBe("conflict");
   });
 
+  it("uses later request detail when a Provider Session snapshot is stale", () => {
+    const { store, binding } = setup();
+    const request = accountingRequests()[0]!;
+    store.observe(binding, { ...request, eventId: "parent", scope: "provider_session", coverageId: "epoch-1",
+      invocationId: null, occurredAt: null, metrics: { inputTotalTokens: 100, outputTotalTokens: 10 } });
+    store.observe(binding, request);
+    const session = store.summary({ namespace: "test", sessionId: binding.sessionId });
+    expect(session).toMatchObject({ usage: { inputTotalTokens: 1000, outputTotalTokens: 100, totalTokens: 1100 },
+      completeness: "conflict" });
+    expect(store.summary({ namespace: "test", agentId: binding.agentId }).usage.totalTokens).toBe(1100);
+  });
+
   it("flags an unexplained cumulative decrease and retains the prior accounting basis", () => {
     const { store, binding } = setup();
     const range = { ...accountingRequests()[0]!, semantics: "cumulative" as const, scope: "provider_session" as const, coverageId: "epoch-1" };

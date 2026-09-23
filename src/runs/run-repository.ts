@@ -4,7 +4,7 @@ import type Database from "better-sqlite3";
 
 import { parseStoredModelPolicy, type AgentModelPolicy } from "../agents/model-policy.js";
 import { insertedId } from "../db.js";
-import type { Run, RunStatus, TokenUsage, TokenUsageSummary } from "../domain.js";
+import type { Run, RunStatus, TokenUsage } from "../domain.js";
 import { assertSynchronousTransactionHook } from "../transaction-hook.js";
 
 type RunRow = {
@@ -77,30 +77,6 @@ export type FinishRunInput = {
   error?: string;
   usage?: Partial<TokenUsage>;
 };
-
-type UsageSummaryRow = {
-  session_count: number;
-  measured_session_count: number;
-  input_tokens: number | null;
-  output_tokens: number | null;
-  cached_read_tokens: number | null;
-  cached_write_tokens: number | null;
-  thought_tokens: number | null;
-  total_tokens: number | null;
-};
-
-const toUsageSummary = (row: UsageSummaryRow): TokenUsageSummary => ({
-  sessionCount: row.session_count,
-  measuredSessionCount: row.measured_session_count,
-  usage: {
-    inputTokens: row.input_tokens,
-    outputTokens: row.output_tokens,
-    cachedReadTokens: row.cached_read_tokens,
-    cachedWriteTokens: row.cached_write_tokens,
-    thoughtTokens: row.thought_tokens,
-    totalTokens: row.total_tokens
-  }
-});
 
 export type RunStateProjection = {
   onStarted(run: Run): undefined;
@@ -288,46 +264,6 @@ export class RunRepository {
         maxConcurrentRuns: row.max_concurrent_runs,
         modelPolicy: parseStoredModelPolicy(row.model_policy_json)
       };
-  }
-
-  /** Returns the exact cumulative usage stored for one Session. */
-  summarizeBySession(sessionId: number): TokenUsageSummary {
-    return toUsageSummary(this.db.prepare(`
-      SELECT
-        COUNT(*) AS session_count,
-        COALESCE(SUM(CASE WHEN
-          input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cached_read_tokens IS NOT NULL OR
-          cached_write_tokens IS NOT NULL OR thought_tokens IS NOT NULL OR total_tokens IS NOT NULL
-        THEN 1 ELSE 0 END), 0) AS measured_session_count,
-        SUM(input_tokens) AS input_tokens,
-        SUM(output_tokens) AS output_tokens,
-        SUM(cached_read_tokens) AS cached_read_tokens,
-        SUM(cached_write_tokens) AS cached_write_tokens,
-        SUM(thought_tokens) AS thought_tokens,
-        SUM(total_tokens) AS total_tokens
-      FROM sessions
-      WHERE id = ?
-    `).get(sessionId) as UsageSummaryRow);
-  }
-
-  /** Sums the latest cumulative usage of every Session owned by one Agent. */
-  summarizeByAgent(agentId: number): TokenUsageSummary {
-    return toUsageSummary(this.db.prepare(`
-      SELECT
-        COUNT(*) AS session_count,
-        COALESCE(SUM(CASE WHEN
-          input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cached_read_tokens IS NOT NULL OR
-          cached_write_tokens IS NOT NULL OR thought_tokens IS NOT NULL OR total_tokens IS NOT NULL
-        THEN 1 ELSE 0 END), 0) AS measured_session_count,
-        SUM(input_tokens) AS input_tokens,
-        SUM(output_tokens) AS output_tokens,
-        SUM(cached_read_tokens) AS cached_read_tokens,
-        SUM(cached_write_tokens) AS cached_write_tokens,
-        SUM(thought_tokens) AS thought_tokens,
-        SUM(total_tokens) AS total_tokens
-      FROM sessions
-      WHERE agent_id = ?
-    `).get(agentId) as UsageSummaryRow);
   }
 
   /**

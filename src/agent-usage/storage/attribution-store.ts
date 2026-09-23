@@ -453,7 +453,7 @@ export class AttributionStore {
     return this.store.db.prepare(`WITH scoped AS (${content.sql}) SELECT 1 FROM scoped LIMIT 1`).get(...content.params) !== undefined;
   }
 
-  rankingsPage(filter: AttributionFilter, dimension: RankingDimension, options: { sort: "observedTotalTokens" | "observedArgumentTokens" | "observedResultTokens" | "totalInputTokens" | "inputBytes" | "calls" | "definitionInputTokens" | "firstResultInputTokens" | "repeatedResultInputTokens" | "failures" | "latencyMsP95"; limit: number; offset: number }): { items: AttributionRankRow[]; total: number } {
+  rankingsPage(filter: AttributionFilter, dimension: RankingDimension, options: { sort: "observedTotalTokens" | "observedArgumentTokens" | "observedResultTokens" | "totalInputTokens" | "inputBytes" | "calls" | "definitionInputTokens" | "argumentInputTokens" | "firstResultInputTokens" | "repeatedResultInputTokens" | "failures" | "latencyMsP95"; limit: number; offset: number }): { items: AttributionRankRow[]; total: number } {
     const context = this.contextWhere(filter);
     context.clauses.push("1");
     if (dimension !== "all") { context.clauses.push("json_extract(e.capability_key,'$[0]')=?"); context.params.push(dimension); }
@@ -494,6 +494,7 @@ export class AttributionStore {
     } else {
       const firstUse = options.sort === "firstResultInputTokens" || options.sort === "repeatedResultInputTokens";
       const predicate = options.sort === "definitionInputTokens" ? "e.block_kind='definition'"
+        : options.sort === "argumentInputTokens" ? "e.block_kind='arguments'"
         : firstUse ? `${ResultFirstUseIndex.classification}='${options.sort === "firstResultInputTokens" ? "first" : "repeat"}'` : undefined;
       const value = options.sort === "inputBytes" ? "SUM(e.byte_length)" : predicate
         ? `CASE WHEN SUM(${predicate})=0 THEN 0 ELSE SUM(CASE WHEN ${predicate} THEN e.token_count END) END` : "SUM(e.token_count)";

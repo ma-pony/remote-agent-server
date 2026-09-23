@@ -1107,7 +1107,7 @@ describe("AcpxAgentRuntime", () => {
     ]);
   });
 
-  it("Turn 完成后汇总 acpx 的完整 perRequest 作为 Session 精确用量", async () => {
+  it("Turn 完成后不把 acpx 的有界 perRequest 当作累计用量", async () => {
     const root = makeRoot();
     const acp = runtimeStub({
       cumulativeUsage: {
@@ -1140,17 +1140,8 @@ describe("AcpxAgentRuntime", () => {
 
     const turn = runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
 
-    await expect(turn.result).resolves.toEqual({
-      status: "completed",
-      sessionUsage: {
-        inputTokens: 5_656,
-        outputTokens: 31,
-        cachedReadTokens: 26_112,
-        thoughtTokens: 0,
-        totalTokens: 31_799
-      }
-    });
-    expect(acp.getStatus).toHaveBeenCalledWith({ handle: expect.objectContaining({ agentSessionId: "provider-session-1" }) });
+    await expect(turn.result).resolves.toEqual({ status: "completed" });
+    expect(acp.getStatus).not.toHaveBeenCalled();
   });
 
   it("支持 turn cancel、session cancel 和 reset discard", async () => {

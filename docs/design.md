@@ -232,7 +232,7 @@ Session 保留策略清理占用空间较大的 Workspace、浏览器数据、Pr
 
 Session 使用可空的内部字段 `pending_operation` 持久化 `cleanup`、`delete` 或 `reset`。标记与 `running` 占用状态一起提交后才执行外部操作；进程内还会拒绝同一 Session 的并发维护。正常完成与重启恢复复用事务性收尾逻辑，验证操作类型、占用状态和无活动 Run 后，才清除标记或删除记录。一般 Run 恢复不会释放带维护标记的 Session。
 
-启动时先重试创建中断的目录清理，再恢复维护操作，最后恢复和调度 Run。清理或删除未完成时保留标记与占用；已开始的存储清理在后续清理轮次重试，不受新的保留期或关闭自动清理影响，删除可由原删除接口重试。创建失败的补偿与启动恢复都在目录删除成功后才移除 pending Session 记录。重置恢复清除旧 Provider/ACP 本地会话和当前上下文累计值，保留 Workspace 与 Run 历史；随后新 Run 创建新的 Provider 上下文。
+启动时先重试创建中断的目录清理，再恢复维护操作，最后恢复和调度 Run。清理或删除未完成时保留标记与占用；已开始的存储清理在后续清理轮次重试，不受新的保留期或关闭自动清理影响，删除可由原删除接口重试。创建失败的补偿与启动恢复都在目录删除成功后才移除 pending Session 记录。重置恢复清除旧 Provider/ACP 本地会话，保留 Workspace、Run 历史与独立用量账本；随后新 Run 创建新的 Provider 上下文。
 
 ## 8. Agent 能力投影
 
@@ -297,9 +297,9 @@ Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace �
 
 运行对话内容以 Run 和事件序号作幂等键，只保存计数和估算来源；实时路径与历史回补共享同一投影。`user_prompt`、`configured_instructions`、`system_prompt`、`assistant_output`、`assistant_thought` 作为五个独立能力维度，与工具统一筛选、排序和分页。配置指令每 Run 计一次，消息按已持久化片段计量，使用 `contentObservations` 而非工具 `calls`。模型请求保留 system/developer、user、assistant 角色，分别归入系统提示词、用户提示词和模型回复；同一能力行同时承载内容观测及真实模型输入证据，两套数值独立于彼此及 Provider 上报账本。运行内容证据按时间和稳定身份游标分页，详情不返回正文。
 
-`src/agent-usage/core` 和 SQLite 投影使用通用字符串身份；`HostUsageCollector` 负责转换业务 Agent／Session／Run、维护 epoch 和校验宿主映射。来源观察、去重及选定的账本投影保存在现有数据库中，采集记录按最多 100 条分批，事件、上下文派生数据和批次末 checkpoint 在一个事务中提交；读取失败可提交此前已验证的批次，取消后不继续提交。Provider 的缓存字段作为输入子集；未知 scope／semantics 和旧 Session／Run 快照保留证据，不进入可累加总量。父范围汇总与明细按指标选择非重叠会计基础。
+`src/agent-usage/core` 和 SQLite 投影使用通用字符串身份；`HostUsageCollector` 负责转换业务 Agent／Session／Run、维护 epoch 和校验宿主映射。Agent／Session 详情与会话列表的累计展示均读取同一账本；列表按当前页 Session ID 一次批量读取，查询在只读 Worker 中完成。来源观察、去重及选定的账本投影保存在现有数据库中，采集记录按最多 100 条分批，事件、上下文派生数据和批次末 checkpoint 在一个事务中提交；读取失败可提交此前已验证的批次，取消后不继续提交。Provider 的缓存字段作为输入子集；未知 scope／semantics 和旧 Session／Run 快照保留证据，不进入可累加总量。父范围汇总与明细按指标选择非重叠会计基础；明细超过滞后的父范围时选明细并报告冲突。
 
-MCP 包装器就地提取可见文本并估算参数／结果，通过私有 Unix socket 仅发送计数、字节、部分计量标记与缺口原因，由宿主统一写库；调用开始时冻结 Run 归属，缺少显式执行身份时标为推断。Runtime 工具事件按 Run 模型匹配本地词表，补充 CLI、Skill 读取／脚本及插件归属，目录投影不计为调用。默认内容排名以调用为单位，只计一次参数和结果；通用上下文快照与 HTTP 采集另行计量定义、首次／重复结果输入。两者分别保存在 invocation payload 与 context exposure 投影，不能混同，也不能加进 Provider 账单。Skill、插件等维度是重叠视角，不构成可相加账单。
+MCP 包装器就地提取可见文本并估算参数／结果，通过私有 Unix socket 仅发送计数、字节、部分计量标记与缺口原因，由宿主统一写库；调用开始时冻结 Run 归属，缺少显式执行身份时标为推断。Runtime 工具事件按 Run 模型匹配本地词表，补充 CLI、Skill 读取／脚本及插件归属，目录投影不计为调用。默认排名对照一次性调用内容和按每个已采集模型请求累计的定义、参数、首次／重复结果输入；两者分别保存在 invocation payload 与 context exposure 投影，不能混同，也不能加进 Provider 账单。Skill、插件等维度是重叠视角，不构成可相加账单。
 
 后台恢复从已终止 Run，以及显式申请词表补算的运行中 Run 的保留 events 回补内容估算，按最新 Run 优先、每批最多 100 条事件和 4 MiB 正文（最多 16 MiB 的单事件可独占一批）。正文计量在事务外完成，一批投影与游标原子提交，各内容接收器的内部事务隔离单条失败；重启从已提交游标继续，稳定身份保证幂等；坏记录记为脱敏缺口，后续记录继续。Run 的 epoch 固定，原始事件时间用于日期归属；未知开始时间的完成事件可按结束时间筛选，不伪造耗时。历史 MCP 只向同 Run、明确 Server/Tool 且时间唯一匹配的包装器调用补充估算，含糊匹配不双计。原事件和 Skill 投影不存在时不能重建正文或归属。回补只写无正文元数据；首次获得词表的模型可覆盖仍保留原文的 Runtime 兜底计数，按 Run 保存已补算模型、游标和重试时间，不增加调用次数。Session 删除同时清除进度并阻止重放。
 

@@ -136,6 +136,21 @@ export class UsageStore {
     return { summary: analysis.summary(filter), timeseries: analysis.timeseries(filter, timezone, bucket) };
   }
 
+  summariesBySession(namespace: string, sessionIds: string[]): Array<{ sessionId: string; summary: UsageSummary }> {
+    if (sessionIds.length === 0) return [];
+    const rows = this.db.prepare(`SELECT session_id, payload_json FROM agent_usage_ledger
+      WHERE namespace=? AND session_id IN (${sessionIds.map(() => "?").join(",")})`)
+      .all(namespace, ...sessionIds) as Array<{ session_id: string; payload_json: string }>;
+    const grouped = new Map<string, UsageRecord[]>();
+    for (const row of rows) {
+      const records = grouped.get(row.session_id) ?? [];
+      records.push(JSON.parse(row.payload_json) as UsageRecord);
+      grouped.set(row.session_id, records);
+    }
+    return sessionIds.map((sessionId) => ({ sessionId,
+      summary: new UsageAnalysis(grouped.get(sessionId) ?? []).summary() }));
+  }
+
   deleteSession(namespace: string, sessionId: string): void {
     this.db.transaction(() => {
       this.db.prepare(`INSERT INTO agent_usage_subjects (namespace, kind, subject_id, state)

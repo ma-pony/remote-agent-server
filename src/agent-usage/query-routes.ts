@@ -15,7 +15,7 @@ const querySchema = z.object({
   }),
   runtimeKind: z.string().min(1).max(100).optional(), subagents: z.literal("self").default("self"),
   dimension: z.enum(["all", ...capabilityKinds]).default("all"),
-  sort: z.enum(["observedTotalTokens", "observedArgumentTokens", "observedResultTokens", "totalInputTokens", "inputBytes", "calls", "definitionInputTokens", "firstResultInputTokens", "repeatedResultInputTokens", "failures", "latencyMsP95"]).default("observedTotalTokens"),
+  sort: z.enum(["observedTotalTokens", "observedArgumentTokens", "observedResultTokens", "totalInputTokens", "inputBytes", "calls", "definitionInputTokens", "argumentInputTokens", "firstResultInputTokens", "repeatedResultInputTokens", "failures", "latencyMsP95"]).default("observedTotalTokens"),
   bucket: z.enum(["day", "week", "month"]).default("day"),
   limit: z.coerce.number().int().min(1).max(200).default(50), offset: z.coerce.number().int().min(0).max(100000).default(0),
   capturePage: z.coerce.number().int().min(1).default(1), failurePage: z.coerce.number().int().min(1).default(1),
@@ -53,6 +53,14 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
     if (subject.state !== "active" || subject.agent_id !== String(session.agent_id)) return null;
     return `session:${sessionId}:epoch:${subject.epoch}`;
   };
+  app.get("/usage/session-summaries", { errorHandler: queryError }, async (request, reply) => {
+    const parsed = z.object({ ids: z.string().regex(/^[1-9]\d*(,[1-9]\d*)*$/).max(2100) }).strict().safeParse(request.query);
+    if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
+    const ids = [...new Set(parsed.data.ids.split(","))];
+    if (ids.length > 100) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
+    return { revision: cache.revision(), items: await cache.getAsync(`session-totals:${ids.join(",")}`,
+      () => reader.read("sessionSummaries", [namespace, ids])) };
+  });
   for (const endpoint of ["status", "summary", "timeseries", "capabilities", "invocations", "context-evidence", "content-evidence"] as const) {
     app.get(`/usage/${endpoint}`, { errorHandler: queryError }, async (request, reply) => {
       const parsed = querySchema.safeParse(request.query);

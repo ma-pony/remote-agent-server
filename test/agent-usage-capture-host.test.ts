@@ -25,16 +25,36 @@ it("automatically reports totals and MCP definition/repeated-result exposure wit
   const { db, host, capture, route, session, run } = await setup();
   expect(capture.health({})).toEqual([expect.objectContaining({ status: "waiting", sessionId: String(session.id) })]);
   capture.startRun(session.id, run);
-  for (const input of [[], [{ type: "function_call_output", call_id: "call1", output: "SYNTHETIC_PAYLOAD_SENTINEL" }], [{ type: "function_call_output", call_id: "call1", output: "SYNTHETIC_PAYLOAD_SENTINEL" }]]) {
+  const replay = [{ type: "function_call", call_id: "call1", name: "mcp__docs__search", arguments: "{}" },
+    { type: "function_call_output", call_id: "call1", output: "SYNTHETIC_PAYLOAD_SENTINEL" }];
+  const snapshots = [];
+  for (const input of [[], replay, replay]) {
     await (await fetch(route.baseUrl + "/responses", { method: "POST", body: JSON.stringify({ model: "fixture-model", input, tools: [{ type: "function", name: "mcp__docs__search", parameters: { type: "object" } }] }) })).text(); await capture.drain();
+    snapshots.push(host.attribution.rankings({}, "mcp_tool")[0]!);
   }
   expect(host.store.summary().usage.totalTokens).toBe(36);
-  const ranks = host.attribution.rankings({}, "mcp_tool");
-  expect(ranks[0]).toMatchObject({ capability: { id: "mcp:7:search", serverId: "7" }, calls: 0 });
-  expect(ranks[0]!.firstResultInputTokens).toBeGreaterThan(0); expect(ranks[0]!.definitionInputTokens).toBeGreaterThan(0); expect(ranks[0]!.repeatedResultInputTokens).toBeGreaterThan(0);
+  const [first, second, cumulative] = snapshots;
+  expect(cumulative).toMatchObject({ capability: { id: "mcp:7:search", serverId: "7" }, calls: 0,
+    exposureCount: 7, contextCoverage: { full: 3, partial: 0, opaque: 0, none: 0 } });
+  expect(cumulative!.definitionInputTokens).toBe(first!.definitionInputTokens! * 3);
+  expect(cumulative!.argumentInputTokens).toBe(second!.argumentInputTokens! * 2);
+  expect(cumulative!.firstResultInputTokens).toBe(second!.firstResultInputTokens);
+  expect(cumulative!.repeatedResultInputTokens).toBe(second!.firstResultInputTokens);
+  expect(cumulative!.totalInputTokens).toBe(cumulative!.definitionInputTokens! + cumulative!.argumentInputTokens!
+    + cumulative!.firstResultInputTokens! + cumulative!.repeatedResultInputTokens!);
   expect(db.serialize().includes(Buffer.from("SYNTHETIC_PAYLOAD_SENTINEL"))).toBe(false);
   expect(db.serialize().includes(Buffer.from("secret-sentinel"))).toBe(false);
   expect(capture.health({})[0]).toMatchObject({ status: "observed", observed: 3 });
+});
+it("marks server-side conversation history as partial even after a complete HTTP exchange", async () => {
+  const { host, capture, route, session, run } = await setup(); capture.startRun(session.id, run);
+  await (await fetch(route.baseUrl + "/responses", { method: "POST", body: JSON.stringify({
+    previous_response_id: "earlier-response", input: [],
+    tools: [{ type: "function", name: "mcp__docs__search", parameters: {} }]
+  }) })).text();
+  await capture.drain();
+  expect(host.attribution.rankings({}, "mcp_tool")[0]?.contextCoverage)
+    .toEqual({ full: 0, partial: 1, opaque: 0, none: 0 });
 });
 it.each(["ready", "close"])("keeps reported usage while vocabulary is pending and handles %s without persisting fallback counts", async outcome => {
   const { db, host, capture, route, session, run } = await setup(); capture.startRun(session.id, run);

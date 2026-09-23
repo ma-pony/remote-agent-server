@@ -4,6 +4,7 @@ import { AttributionStore } from "./storage/attribution-store.js";
 
 export type UsageQueries = {
   overview: { args: Parameters<UsageStore["overview"]>; result: ReturnType<UsageStore["overview"]> };
+  sessionSummaries: { args: Parameters<UsageStore["summariesBySession"]>; result: ReturnType<UsageStore["summariesBySession"]> };
   rankings: { args: Parameters<AttributionStore["rankingsPage"]>; result: ReturnType<AttributionStore["rankingsPage"]> };
 };
 export type UsageQuery = { [K in keyof UsageQueries]: { kind: K; args: UsageQueries[K]["args"] } }[keyof UsageQueries];
@@ -14,6 +15,7 @@ export const openUsageQueryReader = (filename: string) => {
   db.pragma("cache_size=-8192");
   const store = new UsageStore(db), attribution = new AttributionStore(store);
   const read = db.transaction((query: UsageQuery) => query.kind === "overview"
-    ? store.overview(...query.args) : attribution.rankingsPage(...query.args));
+    ? store.overview(...query.args) : query.kind === "sessionSummaries"
+      ? store.summariesBySession(...query.args) : attribution.rankingsPage(...query.args));
   return { read, close: () => db.close() };
 };

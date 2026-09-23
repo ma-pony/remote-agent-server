@@ -188,12 +188,6 @@ export const registerAgentRoutes = (
     }
   });
 
-  app.get<{ Params: { id: string } }>("/agents/:id/usage", (request, reply) => {
-    const id = parseId(request.params.id);
-    if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
-    return runRepository.summarizeByAgent(id);
-  });
-
   app.get<{ Params: { id: string } }>("/agents/:id/skills", (request, reply) => {
     const id = parseId(request.params.id);
     if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);

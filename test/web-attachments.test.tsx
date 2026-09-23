@@ -19,7 +19,8 @@ const setup = (fail = false) => {
       bodies.push(JSON.parse(String(init.body)));
       status = fail ? 400 : 201;
       body = fail ? { error: { message: "upload rejected" } } : { id: 7, sessionId: 1, input: "", status: "succeeded", result: "ok", error: null };
-    } else if (url === "/api/agents") body = [{ id: 1, name: "Agent" }];
+    } else if (url.startsWith("/api/usage/summary?")) body = { completeness: "none", usage: { totalTokens: null } };
+    else if (url === "/api/agents") body = [{ id: 1, name: "Agent" }];
     else body = { id: 1, agentId: 1, title: "Files", status: "idle", runs: [], mcpParameters: [] };
     return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
   }));

@@ -20,11 +20,11 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState, PageContainer, PageHeader } from "@/components/page-header";
-import { TokenUsageSummaryCard } from "@/components/token-usage";
+import { LedgerUsageSummaryCard } from "@/components/token-usage";
 import {
   api, errorMessage, type Agent, type AgentDoctorResult, type AgentModelCatalog, type AgentModelPolicy,
   type AgentSkill, type IntegrationEndpointSummary, type Page,
-  type ProjectEnvironment, type Provider, type TokenUsageSummary
+  type ProjectEnvironment, type Provider
 } from "@/api";
 import { useI18n } from "@/i18n";
 import { ListPagination } from "@/components/list-pagination";
@@ -356,7 +356,7 @@ export const AgentDetailLayout = () => {
 
   return <PageContainer>
     <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />{text("返回智能体", "Back to agents")}</Link></Button>
-    <PageHeader eyebrow={providerNames[agent.provider]} title={agent.name} description={text("项目环境、运行检查和技能均在这个智能体范围内管理。", "Project environment, runtime checks, and skills are managed within this agent.")} action={<div className="flex flex-wrap items-center gap-2"><Button asChild size="sm" variant="outline"><Link to={`/usage?agentId=${agent.id}`}><BarChart3 />{text("用量分析", "Usage analysis")}</Link></Button><AgentCloneDialog key={agent.id} agent={agent} /><Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div>} />
+    <PageHeader eyebrow={providerNames[agent.provider]} title={agent.name} description={text("项目环境、运行检查和技能均在这个智能体范围内管理。", "Project environment, runtime checks, and skills are managed within this agent.")} action={<div className="flex flex-wrap items-center gap-2"><Button asChild size="sm" variant="outline"><Link to={`/usage?agentId=${agent.id}&range=all`}><BarChart3 />{text("用量分析", "Usage analysis")}</Link></Button><AgentCloneDialog key={agent.id} agent={agent} /><Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div>} />
     <Tabs value={section} onValueChange={(value) => navigate(value === "overview" ? `/agents/${id}` : `/agents/${id}/${value}`)}>
       <TabsList variant="line" aria-label={text("智能体管理", "Agent management")}><TabsTrigger value="overview">{text("概览", "Overview")}</TabsTrigger><TabsTrigger value="skills">{text("技能", "Skills")}</TabsTrigger><TabsTrigger value="extensions">{text("扩展", "Extensions")}</TabsTrigger><TabsTrigger value="parameters">{text("会话参数", "Session parameters")}</TabsTrigger><TabsTrigger value="mcp">MCP</TabsTrigger><TabsTrigger value="settings">{text("设置", "Settings")}</TabsTrigger></TabsList>
     </Tabs>
@@ -372,22 +372,15 @@ export const AgentOverviewPage = () => {
   const endpoints = endpointResult?.items ?? null;
   const [endpointPage, setEndpointPage] = useState(1);
   const [endpointsError, setEndpointsError] = useState("");
-  const [usage, setUsage] = useState<TokenUsageSummary | null>(null);
-  const [usageError, setUsageError] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
     const controller = new AbortController();
     setEndpointResult(null);
     setEndpointsError("");
-    setUsage(null);
-    setUsageError("");
     void api<Page<IntegrationEndpointSummary>>(`/integration-endpoints?agentId=${agent.id}&page=${endpointPage}&pageSize=20`, { signal: controller.signal })
       .then(setEndpointResult)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setEndpointsError(errorMessage(reason)); });
-    void api<TokenUsageSummary>(`/agents/${agent.id}/usage`, { signal: controller.signal })
-      .then(setUsage)
-      .catch((reason: unknown) => { if (!controller.signal.aborted) setUsageError(errorMessage(reason)); });
     return () => controller.abort();
   }, [agent.id, endpointPage]);
   const toggle = async () => {
@@ -424,9 +417,7 @@ export const AgentOverviewPage = () => {
     </section>
     <section aria-labelledby="agent-token-usage-title">
       <h2 id="agent-token-usage-title" className="mb-3 font-heading text-lg font-medium">{text("Token 用量", "Token usage")}</h2>
-      {usageError !== "" ? <Alert variant="destructive"><XCircle /><AlertTitle>{text("用量加载失败", "Failed to load usage")}</AlertTitle><AlertDescription>{usageError}</AlertDescription></Alert>
-        : usage === null ? <Skeleton className="h-40" />
-          : <div className="flex flex-col gap-2"><p className="text-sm text-muted-foreground">{text("旧版接口汇总当前 Session 上报值，可能不完整；新账本请打开用量分析。", "The legacy API summarizes current Session reports and may be incomplete; open Usage analysis for the new ledger.")}</p><TokenUsageSummaryCard title={text("累计", "Cumulative")} summary={usage} /></div>}
+      <LedgerUsageSummaryCard agentId={agent.id} title={text("累计", "Cumulative")} />
     </section>
   </div>;
 };

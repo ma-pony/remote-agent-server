@@ -63,9 +63,7 @@ export const finishSessionMaintenance = (
     } else {
       usageCollector.finishMaintenance(id);
       db.prepare(`
-        UPDATE sessions SET status = 'idle', pending_operation = NULL, provider_session_id = NULL,
-          input_tokens = NULL, output_tokens = NULL, cached_read_tokens = NULL,
-          cached_write_tokens = NULL, thought_tokens = NULL, total_tokens = NULL, updated_at = ?
+        UPDATE sessions SET status = 'idle', pending_operation = NULL, provider_session_id = NULL, updated_at = ?
         WHERE id = ?
       `).run(completedAt, id);
     }

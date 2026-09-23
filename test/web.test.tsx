@@ -44,6 +44,9 @@ const session = {
   createdAt: now,
   updatedAt: now
 };
+const emptyLedgerSummary = { completeness: "none", usage: { inputTotalTokens: null,
+  outputTotalTokens: null, cacheReadTokens: null, cacheWriteTokens: null,
+  reasoningOutputTokens: null, totalTokens: null } };
 
 const jsonResponse = (body: unknown, status = 200): Response => new Response(JSON.stringify(body), {
   status,
@@ -87,6 +90,7 @@ describe("最小管理界面", () => {
     const savedBodies: Record<string, string> = {};
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
       if (init?.method === "PUT") {
         savedBodies[url] = String(init.body);
         return pagedManagementResponse(url, JSON.parse(savedBodies[url]));
@@ -142,6 +146,7 @@ describe("最小管理界面", () => {
     let patchBody = "";
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
       if (url === "/api/agents/3" && init?.method === "PATCH") {
         patchBody = String(init.body);
         return pagedManagementResponse(url, { ...currentAgent, ...JSON.parse(patchBody), effectiveMaxConcurrentRuns: 2 });
@@ -196,6 +201,7 @@ describe("最小管理界面", () => {
     let patchBody = "";
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
       if (url === "/api/agents/3" && init?.method === "PATCH") {
         patchBody = String(init.body);
         return pagedManagementResponse(url, { ...currentAgent, ...JSON.parse(patchBody) });
@@ -267,6 +273,7 @@ describe("最小管理界面", () => {
     window.history.replaceState({}, "", "/agents/3/settings");
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
       if (url === "/api/agents/3") return pagedManagementResponse(url, {
         id: 3, name: "Crawler Agent", provider: "codex", enabled: true, instructions: "",
         maxConcurrentRuns: null, effectiveMaxConcurrentRuns: 4,
@@ -433,6 +440,7 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [staleRun] });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -462,6 +470,7 @@ describe("最小管理界面", () => {
     ];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, runs });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -491,6 +500,7 @@ describe("最小管理界面", () => {
     let failNew = true;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === "/api/sessions/session-old") return oldResponse.promise;
       if (new URL(url, "http://localhost").pathname === "/api/sessions/session-new" && failNew) {
@@ -540,6 +550,7 @@ describe("最小管理界面", () => {
     let nextRun = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, runs: [oldRun] });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -646,6 +657,7 @@ describe("最小管理界面", () => {
     const olderRun = { ...recentRun, id: "run-1", input: "更早任务", result: "更早结果" };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, runs: [recentRun], hasOlderRuns: true });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -682,6 +694,7 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -729,6 +742,7 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -767,6 +781,7 @@ describe("最小管理界面", () => {
     let canonicalRequests = 0;
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -827,6 +842,7 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -874,6 +890,7 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);
@@ -929,6 +946,7 @@ describe("最小管理界面", () => {
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = requestUrl(input);
+      if (url.startsWith("/api/usage/summary?")) return pagedManagementResponse(url, emptyLedgerSummary);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
       if (new URL(url, "http://localhost").pathname === `/api/sessions/${session.id}`) return pagedManagementResponse(url, { ...session, status: "running", runs: [runningRun] });
       if (new URL(url, "http://localhost").pathname === "/api/agents") return pagedManagementResponse(url, [agent]);

@@ -357,9 +357,6 @@ export class RunExecutor {
         nextEvent = this.nextEvent(iterator);
       }
 
-      if (result.sessionUsage !== undefined) {
-        this.sessionManager.saveTokenUsage(session.id, result.sessionUsage);
-      }
       return this.finishFromCanonicalResult(run.id, output, result, usage);
     } catch (error) {
       clearMessageFlushTimer();

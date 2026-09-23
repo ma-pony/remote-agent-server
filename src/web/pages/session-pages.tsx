@@ -19,6 +19,7 @@ import { api, errorMessage, type Agent, type AgentSessionParameter, type Page, t
 import { ListPagination } from "@/components/list-pagination";
 import { PagedResourceSelect } from "@/components/paged-resource-select";
 import { useI18n } from "@/i18n";
+import type { UsageSummary } from "../../agent-usage/core/types.js";
 
 const ErrorAlert = ({ message }: { message: string }) => { const { text } = useI18n(); return message === "" ? null : <Alert variant="destructive"><XCircle /><AlertTitle>{text("操作失败", "Operation failed")}</AlertTitle><AlertDescription>{message}</AlertDescription></Alert>; };
 
@@ -47,6 +48,8 @@ export const SessionDeleteDialog = ({ session, onDeleted, onError }: {
 export const SessionListPage = () => {
   const { locale, text, formatDate } = useI18n();
   const [result, setResult] = useState<Page<SessionListItem> | null>(null);
+  const [usageBySession, setUsageBySession] = useState<Record<string, UsageSummary> | null>(null);
+  const [usageError, setUsageError] = useState("");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
   const [agentId, setAgentId] = useState("");
@@ -60,17 +63,35 @@ export const SessionListPage = () => {
     if (agentId !== "") parameters.set("agentId", agentId);
     if (status !== "") parameters.set("status", status);
     setResult(null);
+    setUsageBySession(null);
+    setUsageError("");
     void api<Page<SessionListItem>>(`/sessions?${parameters.toString()}`, { signal: controller.signal })
-      .then(setResult)
+      .then(async (next) => {
+        if (controller.signal.aborted) return;
+        setResult(next);
+        if (next.items.length === 0) { setUsageBySession({}); return; }
+        try {
+          const ids = next.items.map((session) => session.id).join(",");
+          const totals = await api<{ items: Array<{ sessionId: string; summary: UsageSummary }> }>(
+            `/usage/session-summaries?ids=${ids}`, { signal: controller.signal });
+          if (!controller.signal.aborted) setUsageBySession(Object.fromEntries(totals.items.map((item) => [item.sessionId, item.summary])));
+        } catch (reason) { if (!controller.signal.aborted) setUsageError(errorMessage(reason)); }
+      })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
   }, [agentId, page, query, refresh, status]);
   const sessions = result?.items ?? [];
   const filtered = query.trim() !== "" || agentId !== "" || status !== "";
   const providerLabel = (provider: SessionListItem["agentProvider"]): string => provider === "claude_code" ? "Claude Code" : provider === "codex" ? "Codex" : "Hermes";
-  const tokenTotal = (session: SessionListItem): string => session.usage?.totalTokens == null
-    ? text("未统计", "Not measured")
-    : new Intl.NumberFormat(locale).format(session.usage.totalTokens);
+  const tokenTotal = (session: SessionListItem): string => {
+    const summary = usageBySession?.[String(session.id)];
+    if (!summary) return usageError ? text("加载失败", "Failed to load") : usageBySession ? text("未上报", "Not reported") : text("加载中…", "Loading…");
+    const total = summary.usage.totalTokens;
+    if (total === null) return text("未上报", "Not reported");
+    const formatted = new Intl.NumberFormat(locale).format(total);
+    return summary.completeness === "complete" ? formatted
+      : summary.completeness === "conflict" ? `${formatted} ⚠` : `≥ ${formatted}`;
+  };
   return <PageContainer><PageHeader eyebrow={text("对话工作区", "CONVERSATION WORKSPACES")} title={text("会话", "Sessions")} description={text("活动会话使用独立工作区；过期后释放存储并保留历史与统计。", "Active sessions use isolated workspaces; expired sessions release storage while retaining history and statistics.")} action={<Button asChild><Link to="/sessions/new"><Plus />{text("新建会话", "New session")}</Link></Button>} /><ErrorAlert message={error} /><div className="mb-5 grid gap-3 rounded-xl border bg-card p-3 shadow-sm md:grid-cols-[minmax(0,1fr)_13rem_10rem]"><div className="flex items-center gap-2 px-1"><Search className="size-4 text-muted-foreground" /><Input type="search" name="session-search" aria-label={text("搜索会话", "Search sessions")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("搜索标题、会话 ID 或外部标识", "Search title, session ID, or external reference")} value={query} onChange={(event) => { setPage(1); setQuery(event.target.value); }} /></div><PagedResourceSelect<Agent> endpoint="/agents" ariaLabel={text("按智能体筛选", "Filter by agent")} value={agentId} onValueChange={value => {setPage(1); setAgentId(value);}} getOption={agent => ({value: String(agent.id), label: agent.name})} emptyLabel={text("全部智能体", "All agents")} /><NativeSelect aria-label={text("按会话状态筛选", "Filter by session status")} value={status} onChange={(event) => { setPage(1); setStatus(event.target.value); }}><NativeSelectOption value="">{text("全部状态", "All statuses")}</NativeSelectOption><NativeSelectOption value="running">{text("运行中", "Running")}</NativeSelectOption><NativeSelectOption value="idle">{text("空闲", "Idle")}</NativeSelectOption></NativeSelect></div>
     {result === null ? <div className="flex flex-col gap-3">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-40" />)}</div> : sessions.length === 0 ? <EmptyState icon={MessagesSquare} title={filtered ? text("没有匹配结果", "No matching sessions") : text("还没有会话", "No sessions yet")} description={filtered ? text("调整筛选条件，或清除筛选查看全部会话。", "Change or clear the filters to see every session.") : text("创建会话并选择智能体，开始第一轮任务。", "Create a session, choose an agent, and start the first task.")} action={filtered ? <Button variant="outline" onClick={() => { setPage(1); setQuery(""); setAgentId(""); setStatus(""); }}>{text("清除筛选", "Clear filters")}</Button> : <Button asChild><Link to="/sessions/new"><Plus />{text("新建会话", "New session")}</Link></Button>} /> : <div className="surface-list divide-y overflow-hidden rounded-xl border bg-card">{sessions.map((session) => <article key={session.id} className="grid gap-5 p-5 transition-colors duration-150 hover:bg-muted/40 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center"><div className="min-w-0"><div className="flex flex-wrap items-center gap-x-3 gap-y-2"><h2 className="min-w-0 truncate font-heading text-lg font-medium"><Link className="hover:underline" to={`/sessions/${session.id}`} aria-label={session.title}>{session.title}</Link></h2><span className="font-mono text-xs text-muted-foreground">{text(`会话 #${session.id}`, `Session #${session.id}`)}</span></div><div className="mt-3 flex flex-wrap gap-x-5 gap-y-2 text-sm text-muted-foreground"><span className="inline-flex items-center gap-1.5"><Bot className="size-3.5" />{session.agentName} · {providerLabel(session.agentProvider)}</span><span className="inline-flex items-center gap-1.5"><FolderGit2 className="size-3.5" />{session.projectEnvironmentName ?? text("未绑定项目环境", "No project environment")}</span></div>{session.integration === null ? <div className="mt-4 inline-flex items-center gap-2 rounded-md border border-dashed px-3 py-2 text-xs text-muted-foreground"><Hash className="size-3.5" />{text("手工创建", "Created manually")}</div> : <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border bg-muted/25 px-3 py-2 text-xs"><span className="inline-flex items-center gap-1.5 text-muted-foreground"><Cable className="size-3.5" />{text("外部接入", "Integration")}</span><Link aria-label={text(`查看接入端点 ${session.integration.endpointName}`, `View integration endpoint ${session.integration.endpointName}`)} className="font-medium hover:underline" to={`/integration-endpoints/${session.integration.endpointId}`}>{session.integration.endpointName}</Link><span className="font-mono text-muted-foreground">/{session.integration.endpointSlug}</span>{session.integration.conversationKey === null ? null : <span><span className="mr-1 text-muted-foreground">{text("外部对话", "Conversation")}</span><span className="font-mono">{session.integration.conversationKey}</span></span>}{session.integration.latestRequestId === null ? null : <span className="truncate"><span className="mr-1 text-muted-foreground">{text("最近请求", "Latest request")}</span><span className="font-mono">{session.integration.latestRequestId}</span></span>}</div>}</div><div className="flex items-end justify-between gap-5 border-t pt-4 lg:min-w-52 lg:flex-col lg:border-l lg:border-t-0 lg:pl-5 lg:pt-0"><div className="lg:text-right"><p className="text-[11px] font-medium tracking-wide text-muted-foreground uppercase">{text("累计 Token", "Total tokens")}</p><p className="mt-1 font-mono text-xl font-semibold tabular-nums">{tokenTotal(session)}</p></div><div className="flex flex-wrap items-center justify-end gap-3"><Badge variant={session.storageCleanedAt != null ? "outline" : session.status === "running" ? "default" : "secondary"}>{session.storageCleanedAt != null ? text("存储已清理", "Storage cleaned") : session.status === "running" ? text("运行中", "Running") : text("空闲", "Idle")}</Badge><time className="text-xs text-muted-foreground" dateTime={session.updatedAt}>{formatDate(session.updatedAt)}</time><SessionDeleteDialog session={session} onDeleted={() => { if (sessions.length === 1 && page > 1) setPage((current) => current - 1); else setRefresh((value) => value + 1); }} onError={setError} /></div></div></article>)}</div>}
     {result === null ? null : <ListPagination {...result} onPageChange={setPage} />}

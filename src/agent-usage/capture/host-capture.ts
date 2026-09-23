@@ -154,7 +154,7 @@ export class HostUsageCapture {
             requests: [{ request: decoded.request, response: decoded.response, record: { id: intent.id, invocationId,
               session_id: intent.epoch, timestamp: intent.startedAt, provider: subject.provider, agent: subject.provider,
               modelProvider: this.upstreams[subject.provider]?.modelProvider,
-              endpoint: exchange.endpoint, context_fidelity: "partial", response_complete: decoded.complete } }] }, calls, {
+              endpoint: exchange.endpoint, context_fidelity: issue ? "partial" : "complete", response_complete: decoded.complete } }] }, calls, {
             callTags: (name, args) => this.skillTags(intent, name, args),
             capability: (name, args) => capturedToolCapability(subject.provider, name, args)
           }) : [];
@@ -163,7 +163,10 @@ export class HostUsageCapture {
       if (entry?.context?.blocks.some((block) => block.content.modality === "unsupported")) issue ??= "unsupported_content";
       if (issue) {
         subject.historyComplete = false;
-        if (entry?.context) entry.context.historyComplete = false;
+        if (entry?.context) {
+          entry.context.historyComplete = false;
+          if (entry.context.coverage === "full") entry.context.coverage = "partial";
+        }
       }
       // Reported usage remains available even while the independent vocabulary is being fetched.
       if (entry && intent.runId !== null) this.host.store.observe(intent.binding,

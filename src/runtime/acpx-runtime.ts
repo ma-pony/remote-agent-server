@@ -17,13 +17,12 @@ import {
   type AcpRuntimeHandle,
   type AcpRuntimeOptions,
   type AcpRuntimeTurn,
-  type AcpRuntimeTurnResult,
-  type AcpRuntimeUsageBreakdown
+  type AcpRuntimeTurnResult
 } from "acpx/runtime";
 
 import type { AppConfig } from "../config.js";
 import Database from "better-sqlite3";
-import type { Provider, TokenUsage, TokenUsageTotals } from "../domain.js";
+import type { Provider, TokenUsage } from "../domain.js";
 import { SystemProviderSessionCleaner } from "./provider-session-cleaner.js";
 import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 import { SkillManager } from "../skills/skill-manager.js";
@@ -546,50 +545,6 @@ const usageContent = (event: Extract<AcpRuntimeEvent, { type: "status" }>): Part
   return usage;
 };
 
-const sessionUsageContent = (source: AcpRuntimeUsageBreakdown | undefined): Partial<TokenUsageTotals> | undefined => {
-  if (source === undefined) return undefined;
-  const usage: Partial<TokenUsageTotals> = {};
-  const fields = [
-    ["inputTokens", source.inputTokens],
-    ["outputTokens", source.outputTokens],
-    ["cachedReadTokens", source.cachedReadTokens],
-    ["cachedWriteTokens", source.cachedWriteTokens],
-    ["thoughtTokens", source.thoughtTokens],
-    ["totalTokens", source.totalTokens]
-  ] as const;
-  for (const [field, value] of fields) {
-    const normalized = validUsageValue(value);
-    if (normalized !== undefined) usage[field] = normalized;
-  }
-  return Object.keys(usage).length === 0 ? undefined : usage;
-};
-
-const aggregateSessionUsage = (source: {
-  cumulative?: AcpRuntimeUsageBreakdown;
-  perRequest?: Record<string, AcpRuntimeUsageBreakdown>;
-} | undefined): Partial<TokenUsageTotals> | undefined => {
-  const requests = Object.values(source?.perRequest ?? {});
-  if (requests.length === 0) return sessionUsageContent(source?.cumulative);
-
-  const total: Partial<TokenUsageTotals> = {};
-  for (const request of requests) {
-    const usage = sessionUsageContent(request);
-    if (usage === undefined) continue;
-    for (const field of [
-      "inputTokens",
-      "outputTokens",
-      "cachedReadTokens",
-      "cachedWriteTokens",
-      "thoughtTokens",
-      "totalTokens"
-    ] as const) {
-      const value = usage[field];
-      if (value !== undefined && value !== null) total[field] = (total[field] ?? 0) + value;
-    }
-  }
-  return Object.keys(total).length === 0 ? undefined : total;
-};
-
 const mapEvent = (event: AcpRuntimeEvent): RuntimeEvent | undefined => {
   if (event.type === "text_delta") {
     return { type: "message", stream: event.stream ?? "output", text: event.text };
@@ -802,18 +757,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     }); } catch (error) { this.usageCapture?.endRun(input.sessionId, input.requestId); throw error; }
     const activeTurn = { handle: session.handle, turn };
     this.activeTurns.set(input.sessionId, activeTurn);
-    const result = turn.result.then(async (canonical): Promise<RuntimeTurnResult> => {
-      const mapped = mapResult(canonical);
-      try {
-        const getStatus = session.runtime.getStatus;
-        if (getStatus === undefined) return mapped;
-        const status = await getStatus.call(session.runtime, { handle: session.handle });
-        const sessionUsage = aggregateSessionUsage(status.usage);
-        return sessionUsage === undefined ? mapped : { ...mapped, sessionUsage };
-      } catch (_error) {
-        return mapped;
-      }
-    });
+    const result = turn.result.then(mapResult);
     void result.then(() => this.usageCapture?.endRun(input.sessionId, input.requestId), () => this.usageCapture?.endRun(input.sessionId, input.requestId));
     const clearActiveTurn = (): void => { this.usageCapture?.endRun(input.sessionId, input.requestId); this.clearActiveTurn(input.sessionId, activeTurn); };
 
