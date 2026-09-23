@@ -11,6 +11,7 @@ import { UsageSourceCoordinator, type UsageSourceAdapter } from "./source-coordi
 import { AttributionStore } from "./storage/attribution-store.js";
 import { RuntimeCapabilityCollector } from "./runtime-capabilities.js";
 import { RuntimeContentBackfill } from "./runtime-backfill.js";
+import { RuntimeEventRetention } from "./runtime-retention.js";
 import { RuntimeConversationCollector } from "./runtime-conversation.js";
 
 /** The only layer that translates business-table IDs into the reusable usage module. */
@@ -22,6 +23,7 @@ export class HostUsageCollector {
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private recoveryWork?: Promise<void>;
   private recoveryStopped = true;
+  private recoveryController?: AbortController;
   private recoveryQueue: Array<() => Promise<void>> = [];
   readonly store: UsageStore;
   readonly sources: UsageSourceCoordinator;
@@ -29,8 +31,9 @@ export class HostUsageCollector {
   readonly runtimeCapabilities: RuntimeCapabilityCollector;
   readonly contentBackfill: RuntimeContentBackfill;
   readonly conversationContent: RuntimeConversationCollector;
+  readonly eventRetention: RuntimeEventRetention;
   constructor(readonly db: Database.Database, adapters: Record<string, UsageSourceAdapter> = {},
-    private readonly discoverManagedSources?: (sessionId: number) => Promise<void>, tokenizers = new ModelTokenizers()) {
+    private readonly discoverManagedSources?: (sessionId: number) => Promise<void>, tokenizers = new ModelTokenizers(), eventRetentionMs = 7 * 24 * 60 * 60 * 1000) {
     this.store = new UsageStore(db);
     db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_harvests (
       namespace TEXT NOT NULL, session_id TEXT NOT NULL, status TEXT NOT NULL,
@@ -40,8 +43,9 @@ export class HostUsageCollector {
     this.runtimeCapabilities = new RuntimeCapabilityCollector(this.store, this.attribution, this.namespace);
     this.conversationContent = new RuntimeConversationCollector(this.store, this.attribution, this.namespace);
     this.contentBackfill = new RuntimeContentBackfill(db, this.namespace,
-      (runId, content, event) => this.runtimeCapabilities.recordTool(runId, content, event), this.conversationContent, tokenizers.knownModels());
+      (runId, content, event, signal) => this.runtimeCapabilities.prepareTool(runId, content, event, signal), this.conversationContent, tokenizers.knownModels());
     this.sources = new UsageSourceCoordinator(this.store, adapters, 30_000, this.attribution);
+    this.eventRetention = new RuntimeEventRetention(db, this.namespace, this.conversationContent, eventRetentionMs);
   }
   binding(sessionId: number): UsageBinding {
     const session = this.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: number } | undefined;
@@ -184,6 +188,7 @@ export class HostUsageCollector {
   startRecovery(): void {
     if (!this.recoveryStopped) return;
     this.recoveryStopped = false;
+    this.recoveryController = new AbortController();
     this.queueRecovery(true);
     this.scheduleRecovery(0);
   }
@@ -201,21 +206,28 @@ export class HostUsageCollector {
     if (this.recoveryStopped) return;
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = undefined;
-      this.recoveryWork = this.recoveryBatch().finally(() => { this.recoveryWork = undefined; });
+      this.recoveryWork = this.recoveryBatch().catch(() => {
+        if (!this.recoveryStopped) this.scheduleRecovery(30_000);
+      }).finally(() => { this.recoveryWork = undefined; });
     }, delay);
     this.recoveryTimer.unref();
   }
 
   private async recoveryBatch(): Promise<void> {
-    const contentPending = await this.contentBackfill.step();
-    const deadline = Date.now() + 5_000;
+    const started = performance.now();
+    const contentPending = await this.contentBackfill.step(this.recoveryController?.signal);
+    if (this.recoveryStopped) return;
+    const retentionPending = this.eventRetention.step();
+    const deadline = performance.now() + 25;
     let admitted = 0;
-    while (!this.recoveryStopped && this.recoveryQueue.length > 0 && admitted++ < 100 && Date.now() < deadline) {
+    while (!this.recoveryStopped && this.recoveryQueue.length > 0 && admitted++ < 100 && performance.now() < deadline) {
       const work = this.recoveryQueue.shift()!;
       await work().catch(() => undefined);
     }
     if (this.recoveryStopped) return;
-    if (this.recoveryQueue.length > 0 || contentPending) this.scheduleRecovery(10);
+    // Yield real idle time, not just an event-loop turn. Large individual records can still
+    // exceed the soft work budget; the worker keeps their tokenization off the main thread.
+    if (this.recoveryQueue.length > 0 || contentPending || retentionPending) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
     else {
       this.queueRecovery(false);
       this.scheduleRecovery(30_000);
@@ -224,6 +236,7 @@ export class HostUsageCollector {
 
   async stopRecovery(): Promise<void> {
     this.recoveryStopped = true;
+    this.recoveryController?.abort();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
     this.recoveryQueue = [];

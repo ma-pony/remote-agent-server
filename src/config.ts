@@ -22,6 +22,7 @@ export type AppConfig = {
   usageImportRoots?: Record<string, string>;
   usageCaptureUpstreams?: CaptureUpstreams;
   usageTokenizers?: TokenizerProfileConfig[];
+  usageEventRetentionMs?: number;
 };
 
 const configSchema = z.object({
@@ -40,6 +41,7 @@ const configSchema = z.object({
   SESSION_RETENTION_HOURS: z.coerce.number().int().min(0).max(8760).default(7 * 24),
   RUN_TIMEOUT_MINUTES: z.coerce.number().int().min(1).max(1440).default(60),
   RUNTIME_IDLE_MINUTES: z.coerce.number().nonnegative().default(5),
+  USAGE_EVENT_RETENTION_DAYS: z.coerce.number().int().min(0).max(365).default(7),
   USAGE_TOKENIZERS: z.string().default("[]").transform((value, context) => {
     try { return JSON.parse(value) as unknown; }
     catch { context.addIssue({ code: "custom", message: "USAGE_TOKENIZERS must be a JSON array" }); return z.NEVER; }
@@ -78,6 +80,7 @@ export const loadConfig = (env: Record<string, string | undefined>): AppConfig =
     runTimeoutMs: config.RUN_TIMEOUT_MINUTES * 60 * 1000,
     runtimeIdleMs: config.RUNTIME_IDLE_MINUTES * 60 * 1000,
     usageImportRoots: config.USAGE_IMPORT_ROOTS,
+    usageEventRetentionMs: config.USAGE_EVENT_RETENTION_DAYS * 24 * 60 * 60 * 1000,
     usageCaptureUpstreams: config.USAGE_CAPTURE_UPSTREAMS,
     usageTokenizers: config.USAGE_TOKENIZERS
   };

@@ -4,7 +4,7 @@ import { createTestDatabase } from "./helpers.js";
 import { accountingRequests } from "./fixtures/agent-usage/accounting.js";
 
 const databases: Array<ReturnType<typeof createTestDatabase>["db"]> = [];
-afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); for (const db of databases.splice(0)) db.close(); });
 const setup = () => {
   const { db, seed } = createTestDatabase(); databases.push(db);
   const session = seed.session(); seed.run(session.id, "running");
@@ -14,6 +14,49 @@ const setup = () => {
 };
 
 describe("host usage integration", () => {
+  it("leaves idle time between background batches proportional to their work", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { host } = setup();
+    let elapsed = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+    const step = vi.spyOn(host.contentBackfill, "step").mockImplementation(async () => { elapsed += 30; return true; });
+    host.startRecovery();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(step).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(89);
+      expect(step).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(step).toHaveBeenCalledTimes(2);
+    } finally { await host.stopRecovery(); }
+  });
+
+  it("stops in-flight content measurement without committing it and can resume", async () => {
+    const { host, db, runId } = setup();
+    db.prepare("UPDATE runs SET status='succeeded' WHERE id=?").run(runId);
+    db.prepare("INSERT INTO events (run_id,seq,type,content_json,created_at) VALUES (?,1,'tool','{}',?)")
+      .run(runId, "2026-09-22T01:00:00.000Z");
+    let signal: AbortSignal | undefined;
+    const commit = vi.fn();
+    const prepare = vi.spyOn(host.runtimeCapabilities, "prepareTool").mockImplementation(async (_id, _content, _event, currentSignal) => {
+      signal = currentSignal;
+      await new Promise<void>(resolve => currentSignal!.addEventListener("abort", () => resolve(), { once: true }));
+      return { commit };
+    });
+    host.startRecovery();
+    try {
+      await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
+      await host.stopRecovery();
+      expect(signal?.aborted).toBe(true);
+      expect(commit).not.toHaveBeenCalled();
+      expect(host.contentBackfill.status()).toMatchObject({ status: "pending", processedEvents: 0 });
+      prepare.mockResolvedValue({ commit });
+      host.startRecovery();
+      await vi.waitFor(() => expect(host.contentBackfill.status()).toMatchObject({ status: "completed", processedEvents: 1 }));
+      expect(commit).toHaveBeenCalledTimes(1);
+    } finally { await host.stopRecovery(); }
+  });
+
   it("starts bounded content replay automatically without native-log or HTTP capture configuration", async () => {
     const { host, db, runId, session } = setup();
     db.prepare("UPDATE runs SET status = 'succeeded' WHERE id = ?").run(runId);

@@ -136,6 +136,16 @@ export class ModelTokenizers {
     }
     if (automatic) {
       if (!this.loading.has(automatic.id)) {
+        const cached = await this.assets!.loadCached(automatic);
+        signal?.throwIfAborted();
+        if (cached) {
+          // Another concurrent measurement may have registered the same profile while reading.
+          if (!this.resolve(model!, modelProvider)) this.register([{ ...cached, models: cached.models.filter(name => !this.resolve(name, null)) }]);
+          return this.count(text, model, modelProvider);
+        }
+        if (this.resolve(model!, modelProvider)) return this.count(text, model, modelProvider);
+      }
+      if (!this.loading.has(automatic.id)) {
         const loading = this.assets!.load(automatic).then(profile => {
           this.register([{ ...profile, models: profile.models.filter(name => !this.resolve(name, null)) }]);
         }).catch(() => { /* The asset loader enforces the retry cooldown. */ })

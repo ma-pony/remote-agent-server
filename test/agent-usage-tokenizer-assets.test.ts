@@ -32,6 +32,7 @@ describe("lazy tokenizer assets", () => {
   it("fetches only on first use, shares in-flight downloads, and reuses verified disk assets offline", async () => {
     const f = await fixture();
     const assets = new LazyTokenizerAssets(f.directory, f.request);
+    expect(await assets.loadCached(f.profile)).toBeUndefined();
     expect(f.request).not.toHaveBeenCalled();
     const [first, second] = await Promise.all([assets.load(f.profile), assets.load(f.profile)]);
     expect(first).toEqual(f.data); expect(second).toEqual(first);
@@ -39,7 +40,9 @@ describe("lazy tokenizer assets", () => {
     expect(f.request.mock.calls.map(call => call[0])).toContain("https://huggingface.co/example/model/resolve/pinned-revision/tokenizer.json");
     expect(await readFile(join(f.directory, `${f.profile.tokenizerSha256}.json`), "utf8")).toBe(f.json);
     const offline = vi.fn<typeof fetch>().mockRejectedValue(new Error("offline"));
-    expect(await new LazyTokenizerAssets(f.directory, offline).load(f.profile)).toEqual(first);
+    const restarted = new LazyTokenizerAssets(f.directory, offline);
+    expect(await restarted.loadCached(f.profile)).toEqual(first);
+    expect(await restarted.load(f.profile)).toEqual(first);
     expect(offline).not.toHaveBeenCalled();
     expect((await readdir(f.directory)).sort()).toEqual([`${f.profile.tokenizerSha256}.json`, `${f.profile.configSha256}.json`].sort());
   });
@@ -47,7 +50,10 @@ describe("lazy tokenizer assets", () => {
   it("replaces a corrupt cache only with pinned bytes", async () => {
     const f = await fixture();
     await writeFile(join(f.directory, `${f.profile.tokenizerSha256}.json`), "corrupt");
-    await new LazyTokenizerAssets(f.directory, f.request).load(f.profile);
+    const assets = new LazyTokenizerAssets(f.directory, f.request);
+    expect(await assets.loadCached(f.profile)).toBeUndefined();
+    expect(f.request).not.toHaveBeenCalled();
+    await assets.load(f.profile);
     expect(await readFile(join(f.directory, `${f.profile.tokenizerSha256}.json`), "utf8")).toBe(f.json);
   });
 
@@ -77,8 +83,12 @@ describe("lazy tokenizer assets", () => {
     const engine = new ModelTokenizers([fixtureProfile("manual", ["manual-alias"])], { automaticCacheDirectory: f.directory, worker: false });
     engines.push(engine);
     const counts = await Promise.all([engine.countAsync("hello", "deepseek-flash"), engine.countAsync("world", "deepseek-flash")]);
-    expect(counts.every(count => count.tokens === null && count.reason === "tokenizer_pending")).toBe(true);
+    for (const count of counts) {
+      if (count.reason === "tokenizer_pending") expect(count.tokens).toBeNull();
+      else expect(count).toMatchObject({ tokens: 1, method: "model_tokenizer", reason: null });
+    }
     await vi.waitFor(async () => expect(await engine.countAsync("hello", "deepseek-flash")).toMatchObject({ tokens: 1, method: "model_tokenizer" }));
+    expect(load).toHaveBeenCalledTimes(1);
     expect(await engine.countAsync("hello", "manual-alias")).toMatchObject({ tokenizerId: "manual" });
     load.mockClear();
     await engine.countAsync("hello world", "deepseek-flash");

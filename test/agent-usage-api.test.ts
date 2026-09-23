@@ -27,9 +27,10 @@ const providerFixture = (name: string): string[] => readFileSync(
 ).trimEnd().split("\n");
 const setup = async (sessionCleanupScheduler: SessionCleanupSchedulerLike = {
   start() {}, stop() {}, async runCleanup() {}
-}) => {
+}, fileBacked = false) => {
   const root = await mkdtemp(join(tmpdir(), "usage-query-api-"));
-  const { db, seed } = createTestDatabase();
+  const databasePath = fileBacked ? join(root, "usage.sqlite") : ":memory:";
+  const { db, seed } = createTestDatabase(databasePath);
   const first = seed.session();
   const second = seed.session();
   const unbound = seed.session();
@@ -43,7 +44,7 @@ const setup = async (sessionCleanupScheduler: SessionCleanupSchedulerLike = {
   const config = loadConfig({
     API_TOKEN: "test-token",
     DATA_DIR: root,
-    DATABASE_PATH: ":memory:",
+    DATABASE_PATH: databasePath,
     PROJECT_ENVIRONMENTS_ROOT: join(root, "environments"),
     SESSIONS_ROOT: join(root, "sessions"),
     SESSION_RETENTION_HOURS: "0"
@@ -76,6 +77,22 @@ const setup = async (sessionCleanupScheduler: SessionCleanupSchedulerLike = {
 };
 
 const get = (app: FastifyInstance, path: string) => app.inject({ method: "GET", url: `/api/usage${path}`, headers });
+
+it("serves status while a file-backed ranking runs in the query worker", async () => {
+  const { app, manager } = await setup(undefined, true);
+  await manager.collector.stopRecovery();
+  const mainQuery = vi.spyOn(manager.collector.attribution, "rankingsPage")
+    .mockImplementation(() => { throw new Error("Query ran on the HTTP thread"); });
+  try {
+    let completed = false;
+    const ranking = get(app, "/capabilities").then(response => { completed = true; return response; });
+    const status = await get(app, "/status");
+    expect(status.statusCode).toBe(200);
+    expect(completed).toBe(false);
+    expect((await ranking).statusCode).toBe(200);
+    expect(mainQuery).not.toHaveBeenCalled();
+  } finally { mainQuery.mockRestore(); }
+});
 
 it("shares summary and trend accounting and polls status without rerunning historical queries", async () => {
   const { app, manager, bindings } = await setup();

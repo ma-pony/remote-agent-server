@@ -307,7 +307,7 @@ Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选�
 
 设置保存在数据库中。Run 超时作用于新启动的 Run；存储保留期在下一次清理时生效；并发修改立即作用于后续调度。提高上限会继续派发排队工作，降低上限不会取消正在运行的工作。系统始终保证同一 Session 的 Run 串行、同一外部 Conversation 复用同一 Session 且串行、同一 Webhook 订阅按顺序投递，并合并同一项目环境的重复同步请求。
 
-服务启动时会立即执行一次存储清理，之后每 10 分钟检查一次。保留期按 Session 的最后活动时间计算，服务重启不会重新计算已空闲 Session 的保留期。达到保留期的空闲 Session 会删除 Workspace、浏览器数据、Provider 原生会话，以及该 Session 下所有 Task 的 Webhook 投递记录（含等待、投递中和已结束记录）；清理后不再重试这些投递。Session、Run、事件、Task/Conversation 关联和 Token 统计继续保留。不关联 Task 的测试投递不受 Session 清理影响，重置 Provider 上下文也不删除投递记录。
+服务启动时会立即执行一次存储清理，之后每 10 分钟检查一次。保留期按 Session 的最后活动时间计算，服务重启不会重新计算已空闲 Session 的保留期。达到保留期的空闲 Session 会删除 Workspace、浏览器数据、Provider 原生会话，以及该 Session 下所有 Task 的 Webhook 投递记录（含等待、投递中和已结束记录）；清理后不再重试这些投递。Session、Run、Task/Conversation 关联和 Token 统计继续保留；原始消息／工具事件另按下文的用量事件保留期处理。不关联 Task 的测试投递不受 Session 清理影响，重置 Provider 上下文也不删除投递记录。
 
 删除前会再次检查 Session 是否仍然到期。清理或删除失败时，Session 保持占用，防止使用已被部分删除的 Workspace；自动清理会在后续轮次重试，手动删除可以重新调用删除接口。关闭自动清理会停止接收新的清理任务，已经开始的清理仍会完成。服务重启会先恢复未完成的清理、删除或重置，再调度 Run。
 
@@ -323,11 +323,13 @@ Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选�
 
 托管的 Codex／Claude Code 日志补充 Runtime 证据，启动恢复和关闭时补采，MCP 观察器记录执行事实。配置 `USAGE_CAPTURE_UPSTREAMS` 后可自动采集支持的 API-key 模型请求，查看具体工具定义、结果首次／重复输入及 Skill／插件归属；也可手动导入通用“上下文快照（Context Snapshot）”。上报用量、实际执行与上下文证据分别计量，不要求外部遥测平台。Reset 和存储清理前先采集，保留历史统计；显式删除 Session 清除对应统计并拒收迟到重放。
 
-启动后后台分批回补已有 Run 中保留的工具事件，页面显示进度与缺口；恢复原事件日期，重启不会重复累加。CLI 支持结构化参数和可确定的单条 Shell 命令，包括常见 env／rtk／shell 包装；管道、组合命令和动态展开保留为 Shell。明确读取已投影 Skill 文件或执行其脚本时记录 Skill／插件归属，仅目录可见不计为使用。
+启动后后台分批回补已有 Run 中保留的工具事件，页面显示进度与缺口；恢复原事件日期，重启不会重复累加。计数与游标按批提交，批次之间主动休息，停止后从已提交进度继续；单条大记录仍可能超过软时间预算。CLI 支持结构化参数和可确定的单条 Shell 命令，包括常见 env／rtk／shell 包装；管道、组合命令和动态展开保留为 Shell。明确读取已投影 Skill 文件或执行其脚本时记录 Skill／插件归属，仅目录可见不计为使用。
 
 汇总、排名、趋势和来源独立展示，慢请求不会挡住其他已加载区域。排名切换与翻页独立刷新，先按所选指标排序分页，再读取当页完整指标；日期筛选和输入证据分页在数据库侧收窄范围，首次／重复归因仍基于完整历史。相同范围的汇总与趋势共享一次账本读取和核对，统计结果使用有界缓存，数据库写入后失效；仍需读取所选主体的历史计量元数据以核对累计总量和未归位用量。后台恢复期间只轮询轻量状态，数据变化才刷新统计，隐藏页面暂停轮询。托管 JSONL 日志流式读取并只解析新增记录，不再受整文件 16 MiB 限制；单行仍有上限，未写完的行保留为待重试采集。
 
 数据来源列表和采集状态轮询遵循当前 Agent／Session 筛选；切换能力或关闭证据抽屉会取消旧详情请求，重新打开从第一页开始。
+
+文件数据库的汇总、趋势和能力排名通过独立只读 Worker 查询，共用有界队列和结果缓存，避免重聚合阻塞管理 API。新增对话计量仅引用共享词表元数据。Run 结束满 7 天后，统计与词表补算已完成、无空计数且 Session 空闲时，后台分批清理原始消息分片和工具正文；最终回复、计数、排名及关联继续保留，页面显示原始事件已过期。`USAGE_EVENT_RETENTION_DAYS=0` 可关闭这项清理，与 Workspace 保留期独立。清理后的正文不能用于未来词表重算，已有估算保留原来源；释放的 SQLite 页可复用，文件不会立即缩小。
 
 旧 `usage`／`usageSummary` API 保持原语义，新账本通过 `/api/usage/*` 提供。来源边界、缺失说明、快照格式及可执行接入示例见[用量分析指南](docs/agent-usage.md)。
 
@@ -789,6 +791,7 @@ curl --fail-with-body \
 | `DATA_DIR` | 否 | `/srv/remote-agent/data` | 运行数据和加密主密钥目录。 |
 | `DATABASE_PATH` | 否 | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite 数据库路径。 |
 | `USAGE_TOKENIZERS` | 否 | `[]` | 按完整模型名匹配的本地词表覆盖与 SHA-256；内置模型按需下载，失败自动重试，未知模型使用文本兜底，见[多模型词表](docs/agent-usage.md#配置多模型词表)。 |
+| `USAGE_EVENT_RETENTION_DAYS` | 否 | `7` | 已完成 Run 原始消息／工具事件保留天数；计量完成且会话空闲后分批清理，`0` 关闭。最终回复和统计继续保留。 |
 | `USAGE_IMPORT_ROOTS` | 否 | `{}` | 用量文件导入根目录的 JSON 对象，值必须是绝对路径；默认不允许外部目录导入，见[接入指南](docs/agent-usage.md)。 |
 | `USAGE_CAPTURE_UPSTREAMS` | 否 | `{}` | 托管 Runtime 自动模型请求采集的上游配置；声明协议、API base URL 和 API key 环境变量名。显式选择 API-key 路由，见[接入指南](docs/agent-usage.md)。 |
 | `PROJECT_ENVIRONMENTS_ROOT` | 否 | `/srv/remote-agent/environments` | 项目环境版本目录。 |

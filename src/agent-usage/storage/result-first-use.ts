@@ -11,6 +11,7 @@ const conflict = `ON CONFLICT(${columns}) DO UPDATE SET
 /** Small, rebuildable index of lifetime first results; no payloads and no historical totals. */
 export class ResultFirstUseIndex {
   constructor(private readonly db: Database.Database) {
+    if (db.readonly) return;
     const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_usage_result_first'").get();
     db.transaction(() => {
       db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_result_first (

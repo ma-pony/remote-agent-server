@@ -56,7 +56,7 @@ export class EventStore {
     this.db.exec("BEGIN IMMEDIATE");
     let event: Event;
     try {
-      const nextSeq = (this.db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM events WHERE run_id = ?").get(runId) as { seq: number }).seq;
+      const nextSeq = this.latestSeq(runId) + 1;
       const createdAt = new Date().toISOString();
       const contentJson = JSON.stringify(content) ?? "null";
       const id = insertedId(this.db
@@ -110,7 +110,8 @@ export class EventStore {
    * Returns the latest committed sequence number for a Run.
    */
   latestSeq(runId: number): number {
-    return (this.db.prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM events WHERE run_id = ?").get(runId) as { seq: number }).seq;
+    return (this.db.prepare(`SELECT MAX(COALESCE((SELECT MAX(seq) FROM events WHERE run_id=?),0),
+      COALESCE((SELECT events_pruned_through_seq FROM runs WHERE id=?),0)) AS seq`).get(runId, runId) as { seq: number }).seq;
   }
 
   /**

@@ -16,23 +16,29 @@ export type RuntimeContentEvidenceOptions = { capabilityKind?: CapabilityKind; c
 
 /** Shared aggregate/list scope. Standalone attribution stores need no runtime-content table. */
 export const runtimeContentScope = (db: Database.Database, filter: UsageFilter, options: { capabilityKind?: CapabilityKind; capabilityId?: string; capabilityServerId?: string; keys?: string[] } = {}): { sql: string; params: string[] } => {
-  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_usage_conversation_content'").get()) {
-    return { sql: "SELECT NULL AS namespace,NULL AS agent_id,NULL AS session_id,NULL AS run_id,NULL AS event_key,NULL AS category,NULL AS occurred_at,NULL AS runtime_kind,NULL AS tokens,NULL AS bytes,NULL AS partial,NULL AS estimate_json,NULL AS capability_key WHERE 0", params: [] };
+  const selected = categories.filter(category => {
+    const capability = contentCapability(category)!;
+    return (options.capabilityKind === undefined || options.capabilityKind === capability.kind)
+      && (options.capabilityId === undefined || options.capabilityId === capability.id)
+      && options.capabilityServerId === undefined
+      && (options.keys === undefined || options.keys.includes(capabilityKey(capability)));
+  });
+  if (!selected.length || !db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_usage_conversation_content'").get()) {
+    return { sql: "SELECT NULL AS namespace,NULL AS agent_id,NULL AS session_id,NULL AS run_id,NULL AS event_key,NULL AS category,NULL AS occurred_at,NULL AS runtime_kind,NULL AS tokens,NULL AS bytes,NULL AS partial,NULL AS estimate_json,NULL AS estimate_id,NULL AS legacy_estimate_json,NULL AS capability_key WHERE 0", params: [] };
   }
-  const params = categories.flatMap((category) => [category, capabilityKey(contentCapability(category)!)]);
-  const clauses: string[] = [];
+  const params = selected.flatMap(category => [category, capabilityKey(contentCapability(category)!)]);
+  const clauses = [`c.category IN (${selected.map(() => "?").join(",")})`];
+  params.push(...selected);
   for (const [field, column] of [["namespace", "namespace"], ["agentId", "agent_id"], ["sessionId", "session_id"], ["runtimeKind", "runtime_kind"]] as const) {
     if (filter[field] !== undefined) { clauses.push(`c.${column}=?`); params.push(filter[field]); }
   }
   if (filter.from !== undefined) { clauses.push("c.occurred_at>=?"); params.push(new Date(filter.from).toISOString()); }
   if (filter.to !== undefined) { clauses.push("c.occurred_at<?"); params.push(new Date(filter.to).toISOString()); }
-  if (options.capabilityKind !== undefined) { clauses.push("json_extract(k.capability_key,'$[0]')=?"); params.push(options.capabilityKind); }
-  if (options.capabilityId !== undefined) { clauses.push("json_extract(k.capability_key,'$[2]')=?"); params.push(options.capabilityId); }
-  if (options.capabilityServerId !== undefined) clauses.push("0");
-  if (options.keys !== undefined) { clauses.push(`k.capability_key IN (${options.keys.map(() => "?").join(",")})`); params.push(...options.keys); }
-  return { sql: `SELECT c.*,k.capability_key FROM agent_usage_conversation_content c
-    JOIN (${categories.map(() => "SELECT ? AS category,? AS capability_key").join(" UNION ALL ")}) k ON k.category=c.category
-    ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}`, params };
+  return { sql: `SELECT c.namespace,c.agent_id,c.session_id,c.run_id,c.event_key,c.category,c.occurred_at,c.runtime_kind,c.tokens,c.bytes,c.partial,
+    c.estimate_id,c.estimate_json AS legacy_estimate_json,COALESCE(t.estimate_json,c.estimate_json) AS estimate_json,
+    CASE c.category ${selected.map(() => "WHEN ? THEN ?").join(" ")} END AS capability_key
+    FROM agent_usage_conversation_content c LEFT JOIN agent_usage_token_estimates t ON t.id=c.estimate_id
+    WHERE ${clauses.join(" AND ")}`, params };
 };
 
 const evidenceId = (row: Pick<ContentRow, "run_id" | "event_key" | "category">): string => `rc1.${Buffer.from(JSON.stringify([row.run_id,row.event_key,row.category])).toString("base64url")}`;

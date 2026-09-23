@@ -19,6 +19,8 @@ type RunRow = {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  events_pruned_at: string | null;
+  events_pruned_through_seq: number;
   input_tokens: number | null;
   output_tokens: number | null;
   cached_read_tokens: number | null;
@@ -55,6 +57,8 @@ const toRun = (row: RunRow): Run => ({
   createdAt: row.created_at,
   startedAt: row.started_at,
   finishedAt: row.finished_at,
+  eventsPrunedAt: row.events_pruned_at,
+  eventsPrunedThroughSeq: row.events_pruned_through_seq,
   usage: rowUsage(row)
 });
 

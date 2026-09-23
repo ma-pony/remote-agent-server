@@ -51,6 +51,9 @@ describe("configuration", () => {
 
   it("会话默认保留七天且允许通过零关闭自动清理", () => {
     expect(loadConfig(validEnv).sessionRetentionMs).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(loadConfig(validEnv).usageEventRetentionMs).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(loadConfig({ ...validEnv, USAGE_EVENT_RETENTION_DAYS: "0" }).usageEventRetentionMs).toBe(0);
+    for (const value of ["-1", "1.5", "366"]) expect(() => loadConfig({ ...validEnv, USAGE_EVENT_RETENTION_DAYS: value })).toThrow();
     expect(loadConfig({ ...validEnv, SESSION_RETENTION_HOURS: "0" }).sessionRetentionMs).toBe(0);
   });
 

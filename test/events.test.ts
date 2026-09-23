@@ -83,7 +83,7 @@ const createEventApp = async () => {
   });
   applications.push({ app, db });
   await app.ready();
-  return { app, eventStore, runId: run.id, usageSources };
+  return { app, db, eventStore, runId: run.id, usageSources };
 };
 
 const readSseEvents = async (reader: ReadableStreamDefaultReader<Uint8Array>, count: number): Promise<Event[]> => {
@@ -113,6 +113,21 @@ afterEach(async () => {
 });
 
 describe("EventStore", () => {
+  it("returns explicit expiry for both history endpoints while retaining the canonical Run", async () => {
+    const { app, db, runId } = await createEventApp();
+    db.prepare("UPDATE runs SET events_pruned_at=?,events_pruned_through_seq=10,result='Final reply' WHERE id=?")
+      .run("2026-09-23T00:00:00.000Z", runId);
+    for (const path of ["events?afterSeq=0", "events/stream?afterSeq=9"]) {
+      const response = await app.inject({ method: "GET", url: `/api/runs/${runId}/${path}`, headers: authHeaders() });
+      expect(response.statusCode).toBe(410);
+      expect(response.json()).toMatchObject({ error: { code: "run_events_expired" } });
+    }
+    const history = await app.inject({ method: "GET", url: `/api/runs/${runId}/events?afterSeq=10`, headers: authHeaders() });
+    expect(history.statusCode).toBe(200);
+    expect(history.json()).toEqual([]);
+    const canonical = await app.inject({ method: "GET", url: `/api/runs/${runId}`, headers: authHeaders() });
+    expect(canonical.json()).toMatchObject({ result: "Final reply", eventsPrunedThroughSeq: 10, eventsPrunedAt: "2026-09-23T00:00:00.000Z" });
+  });
   it("并发追加时为单个 Run 生成连续 seq", async () => {
     const { db, seed } = createTestDatabase();
     const session = seed.session();

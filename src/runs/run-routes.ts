@@ -303,8 +303,12 @@ export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependenci
     const parsed = eventQuerySchema.extend({ limit: z.coerce.number().int().min(1).max(500).default(100) }).safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Event cursor");
     const id = parseId(request.params.id);
-    if (id === undefined || deps.runRepository.get(id) === undefined) {
+    const run = id === undefined ? undefined : deps.runRepository.get(id);
+    if (id === undefined || run === undefined) {
       return sendError(reply, 404, "not_found", "Run not found");
+    }
+    if (parsed.data.afterSeq < (run.eventsPrunedThroughSeq ?? 0)) {
+      return sendError(reply, 410, "run_events_expired", "Raw Run events expired; the final result and usage statistics remain available");
     }
     return deps.eventStore.listBatch(id, parsed.data.afterSeq, deps.eventStore.latestSeq(id), parsed.data.limit);
   });
@@ -313,8 +317,12 @@ export const registerRunRoutes = (app: FastifyInstance, deps: RunRouteDependenci
     const parsed = eventQuerySchema.safeParse(request.query);
     if (!parsed.success) return sendError(reply, 400, "invalid_request", "Invalid Event cursor");
     const id = parseId(request.params.id);
-    if (id === undefined || deps.runRepository.get(id) === undefined) {
+    const run = id === undefined ? undefined : deps.runRepository.get(id);
+    if (id === undefined || run === undefined) {
       return sendError(reply, 404, "not_found", "Run not found");
+    }
+    if (parsed.data.afterSeq < (run.eventsPrunedThroughSeq ?? 0)) {
+      return sendError(reply, 410, "run_events_expired", "Raw Run events expired; the final result and usage statistics remain available");
     }
 
     reply.hijack();

@@ -5,7 +5,7 @@ import { UsageStore } from "../src/agent-usage/storage/usage-store.js";
 import { createTestDatabase } from "./helpers.js";
 
 const databases: Array<ReturnType<typeof createTestDatabase>["db"]> = [];
-afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+afterEach(() => { vi.restoreAllMocks(); for (const db of databases.splice(0)) db.close(); });
 const setup = () => {
   const { db, seed } = createTestDatabase(); databases.push(db);
   const store = new UsageStore(db);
@@ -22,6 +22,63 @@ const setup = () => {
 };
 
 describe("historical runtime content backfill", () => {
+  it("commits a measured batch and its cursor together, rolling both back if checkpointing fails", async () => {
+    const { db, run, event } = setup(), history = run();
+    for (let sequence = 1; sequence <= 10; sequence++) event(history.runId, sequence);
+    db.exec("CREATE TABLE consumed_events (sequence INTEGER PRIMARY KEY)");
+    const backfill = new RuntimeContentBackfill(db, "test", async (_id, _value, detail) => {
+      expect(db.inTransaction).toBe(false);
+      await Promise.resolve();
+      return { commit: () => {
+        expect(db.inTransaction).toBe(true);
+        db.prepare("INSERT INTO consumed_events VALUES (?)").run(detail.sequence);
+      } };
+    });
+    db.exec(`CREATE TRIGGER fail_checkpoint BEFORE UPDATE OF last_seq ON agent_usage_runtime_backfills
+      BEGIN SELECT RAISE(ABORT, 'checkpoint failure'); END;`);
+    await expect(backfill.step()).rejects.toThrow("checkpoint failure");
+    expect(db.prepare("SELECT * FROM consumed_events").all()).toEqual([]);
+    expect(backfill.status()).toMatchObject({ status: "pending", processedEvents: 0 });
+    db.exec(`DROP TRIGGER fail_checkpoint;
+      CREATE TABLE progress_writes (value INTEGER);
+      CREATE TRIGGER count_progress AFTER UPDATE OF last_seq ON agent_usage_runtime_backfills
+      BEGIN INSERT INTO progress_writes VALUES (1); END;`);
+    expect(await backfill.step()).toBe(false);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM consumed_events").get()).toEqual({ n: 10 });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM progress_writes").get()).toEqual({ n: 1 });
+    expect(backfill.status()).toMatchObject({ status: "completed", processedEvents: 10 });
+  });
+
+  it("cancels uncommitted measurements and resumes from the last committed cursor", async () => {
+    const { db, run, event } = setup(), history = run(), controller = new AbortController();
+    for (let sequence = 1; sequence <= 3; sequence++) event(history.runId, sequence);
+    const commit = vi.fn();
+    const consume = vi.fn(async (_id: number, _value: Record<string, unknown>, detail: { sequence: number }, signal?: AbortSignal) => {
+      if (detail.sequence === 2 && signal) controller.abort();
+      return { commit };
+    });
+    const backfill = new RuntimeContentBackfill(db, "test", consume);
+    await expect(backfill.step(controller.signal)).rejects.toThrow();
+    expect(commit).not.toHaveBeenCalled();
+    expect(backfill.status()).toMatchObject({ status: "pending", processedEvents: 0 });
+    const restarted = new RuntimeContentBackfill(db, "test", consume);
+    expect(await restarted.step()).toBe(false);
+    expect(commit).toHaveBeenCalledTimes(3);
+    expect(restarted.status()).toMatchObject({ status: "completed", processedEvents: 3 });
+  });
+
+  it("yields a slow batch before the event-count limit without losing later events", async () => {
+    const { db, run, event } = setup(), history = run();
+    for (let sequence = 1; sequence <= 3; sequence++) event(history.runId, sequence);
+    let elapsed = 0;
+    vi.spyOn(performance, "now").mockImplementation(() => elapsed);
+    const backfill = new RuntimeContentBackfill(db, "test", () => { elapsed += 30; });
+    expect(await backfill.step()).toBe(true);
+    expect(backfill.status()).toMatchObject({ status: "running", processedEvents: 1 });
+    while (await backfill.step()) { /* resume time-bounded batches */ }
+    expect(backfill.status()).toMatchObject({ status: "completed", processedEvents: 3 });
+  });
+
   it("retries explicitly scheduled live Runs and preserves permanent gaps across vocabulary retries", async () => {
     const { db, run, event } = setup(), live = run("running");
     event(live.runId, 1, "malformed"); event(live.runId, 2);
@@ -142,10 +199,10 @@ describe("historical runtime content backfill", () => {
     const backfill = new RuntimeContentBackfill(db, "test", async (_id, _value, detail) => {
       expect(db.inTransaction).toBe(false);
       await Promise.resolve();
-      db.transaction(() => {
+      return { commit: db.transaction(() => {
         db.prepare("INSERT INTO consumed_events VALUES (?)").run(detail.sequence);
         if (detail.sequence === 1) throw new Error("secret-provider-output");
-      })();
+      }) };
     });
     expect(await backfill.step()).toBe(false);
     expect(db.prepare("SELECT * FROM consumed_events").all()).toEqual([{ sequence: 2 }]);

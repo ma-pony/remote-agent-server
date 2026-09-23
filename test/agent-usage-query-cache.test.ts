@@ -44,3 +44,22 @@ it("bounds entry count and bytes, and skips oversized responses", () => {
     expect(oversized).toHaveBeenCalledTimes(2);
   } finally { db.close(); }
 });
+
+it("shares concurrent reads but never caches a result across a write during that read", async () => {
+  const db = new Database(":memory:");
+  try {
+    db.exec("CREATE TABLE values_table(n INTEGER)");
+    const cache = new UsageQueryCache(db);
+    let finish!: (value: number) => void;
+    const compute = vi.fn(() => new Promise<number>(resolve => { finish = resolve; }));
+    const first = cache.getAsync("summary", compute), second = cache.getAsync("summary", compute);
+    expect(compute).toHaveBeenCalledTimes(1);
+    db.exec("INSERT INTO values_table VALUES(1)");
+    finish(0);
+    expect(await Promise.all([first, second])).toEqual([0, 0]);
+    const current = vi.fn(async () => 1);
+    expect(await cache.getAsync("summary", current)).toBe(1);
+    expect(await cache.getAsync("summary", current)).toBe(1);
+    expect(current).toHaveBeenCalledTimes(1);
+  } finally { db.close(); }
+});

@@ -46,6 +46,7 @@ const LEGACY_ESTIMATE: TokenEstimate = {
 const estimateFrom = (row: Pick<ExposureRow, "estimate_json" | "model" | "token_count">): TokenEstimate => row.estimate_json
   ? JSON.parse(row.estimate_json) as TokenEstimate
   : { ...LEGACY_ESTIMATE, model: row.model, reason: row.token_count === null ? "legacy_unavailable" : null };
+type RuntimeContentGroup = { capability_key: string; category: string; estimate_json: string; tokens: number | null; observations: number };
 
 type ContextRow = {
   context_id: string;
@@ -135,6 +136,15 @@ export type AttributionPage = { capabilityId?: string; capabilityServerId?: stri
 export class AttributionStore {
   private readonly firstUses: ResultFirstUseIndex;
   constructor(readonly store: UsageStore, private readonly tokenizers = new ModelTokenizers()) {
+    store.db.function("usage_context_sort_key", { deterministic: true }, (id: string) => Buffer.from(id, "hex").toString("base64url"));
+    if (!store.db.readonly) this.initializeSchema();
+    this.firstUses = new ResultFirstUseIndex(store.db);
+    store.db.function("usage_evidence_id", { deterministic: true }, (contextId: string, key: string) =>
+      `${Buffer.from(contextId, "hex").toString("base64url")}.${Buffer.from(stableHash(key), "hex").toString("base64url")}`);
+  }
+
+  private initializeSchema(): void {
+    const { store } = this;
     store.db.exec(`
       CREATE TABLE IF NOT EXISTS agent_usage_contexts (
         context_id TEXT PRIMARY KEY,
@@ -201,7 +211,6 @@ export class AttributionStore {
             WHERE t.estimate_json=agent_usage_exposures.estimate_json), estimate_json=NULL WHERE estimate_id IS NULL;`);
       }
     })();
-    store.db.function("usage_context_sort_key", { deterministic: true }, (id: string) => Buffer.from(id, "hex").toString("base64url"));
     store.db.transaction(() => {
       const contextColumns = store.db.prepare("PRAGMA table_info(agent_usage_contexts)").all() as Array<{ name: string }>;
       if (!contextColumns.some((column) => column.name === "evidence_sort_key")) {
@@ -212,9 +221,6 @@ export class AttributionStore {
         CREATE INDEX IF NOT EXISTS agent_usage_contexts_session_evidence_page ON agent_usage_contexts(namespace, session_id, COALESCE(occurred_at,'' ) DESC, evidence_sort_key);
         CREATE INDEX IF NOT EXISTS agent_usage_contexts_agent_evidence_page ON agent_usage_contexts(namespace, agent_id, COALESCE(occurred_at,'' ) DESC, evidence_sort_key);`);
     })();
-    this.firstUses = new ResultFirstUseIndex(store.db);
-    store.db.function("usage_evidence_id", { deterministic: true }, (contextId: string, key: string) =>
-      `${Buffer.from(contextId, "hex").toString("base64url")}.${Buffer.from(stableHash(key), "hex").toString("base64url")}`);
   }
 
   async prepareContext(input: ModelContextInput, signal?: AbortSignal): Promise<Map<number, TokenCount>> {
@@ -307,8 +313,7 @@ export class AttributionStore {
         const metadataJson = JSON.stringify(metadata);
         let estimateId = estimateIds.get(metadataJson);
         if (estimateId === undefined) {
-          this.store.db.prepare("INSERT OR IGNORE INTO agent_usage_token_estimates(estimate_json) VALUES (?)").run(metadataJson);
-          estimateId = (this.store.db.prepare("SELECT id FROM agent_usage_token_estimates WHERE estimate_json=?").get(metadataJson) as { id: number }).id;
+          estimateId = this.tokenEstimateId(metadata);
           estimateIds.set(metadataJson, estimateId);
         }
         for (const [key, reference] of references) {
@@ -404,13 +409,17 @@ export class AttributionStore {
     if (value.estimate.reason === "tokenizer_pending" && this.store.db.prepare(`SELECT 1 FROM agent_usage_invocation_payloads p
       JOIN agent_usage_token_estimates t ON t.id=p.estimate_id WHERE p.public_id=? AND p.part=?
       AND p.token_count IS NOT NULL AND json_extract(t.estimate_json,'$.method')='model_tokenizer'`).get(id, part)) return;
-    const profile = JSON.stringify(value.estimate);
-    this.store.db.prepare("INSERT OR IGNORE INTO agent_usage_token_estimates(estimate_json) VALUES (?)").run(profile);
-    const estimate = this.store.db.prepare("SELECT id FROM agent_usage_token_estimates WHERE estimate_json=?").get(profile) as { id: number };
+    const estimateId = this.tokenEstimateId(value.estimate);
     this.store.db.prepare(`INSERT INTO agent_usage_invocation_payloads VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT(public_id,part) DO UPDATE SET byte_length=excluded.byte_length, token_count=excluded.token_count,
         estimate_id=excluded.estimate_id, partial=excluded.partial`)
-      .run(id, part, value.byteLength, value.tokens, estimate.id, Number(value.partial));
+      .run(id, part, value.byteLength, value.tokens, estimateId, Number(value.partial));
+  }
+
+  tokenEstimateId(estimate: TokenEstimate): number {
+    const json = JSON.stringify(estimate);
+    this.store.db.prepare("INSERT OR IGNORE INTO agent_usage_token_estimates(estimate_json) VALUES (?)").run(json);
+    return (this.store.db.prepare("SELECT id FROM agent_usage_token_estimates WHERE estimate_json=?").get(json) as { id: number }).id;
   }
 
   private payloads(ids: string[]): Map<string, Pick<AttributionInvocation, "argumentEstimate" | "resultEstimate">> {
@@ -449,18 +458,20 @@ export class AttributionStore {
     const capability = dimension === "all" ? {} : { capabilityKind: dimension };
     const execution = this.invocationWhere(filter, "execution", capability);
     const contextCalls = this.invocationWhere(filter, "context", capability);
-    const content = runtimeContentScope(this.store.db, filter, capability);
+    const contentGroups = this.runtimeContentGroups(filter, dimension);
     // Discover identities independently of metrics. Sorting by content must not aggregate
     // every input exposure or calculate latency percentiles before selecting a page.
     const base = `WITH executions AS MATERIALIZED (
       SELECT i.public_id,i.capability_key,i.status,i.started_at,i.ended_at FROM agent_usage_invocations i WHERE ${execution.clauses.join(" AND ")}),
-      runtime_content AS (${content.sql}),
+      runtime_content AS (SELECT json_extract(value,'$.capability_key') AS capability_key,
+        json_extract(value,'$.category') AS category,json_extract(value,'$.tokens') AS tokens FROM json_each(?)),
       keys AS (SELECT DISTINCT e.capability_key FROM agent_usage_contexts c JOIN agent_usage_exposures e USING(context_id)
         WHERE ${context.clauses.join(" AND ")}
         UNION SELECT capability_key FROM executions
         UNION SELECT i.capability_key FROM agent_usage_invocations i WHERE ${contextCalls.clauses.join(" AND ")}
         UNION SELECT capability_key FROM runtime_content)`;
-    const params = [...execution.params, ...content.params, ...context.params, ...contextCalls.params];
+    const params = [...execution.params, JSON.stringify(contentGroups.map(({ capability_key, category, tokens }) => ({ capability_key, category, tokens }))),
+      ...context.params, ...contextCalls.params];
     let metric: string;
     const metricParams: string[] = [];
     if (options.sort.startsWith("observed")) {
@@ -496,11 +507,19 @@ export class AttributionStore {
       .all(...params, ...metricParams, options.limit, options.offset) as Array<{ capability_key: string; total: number }>;
     const total = selected[0]?.total ?? (this.store.db.prepare(`${base} SELECT COUNT(*) AS total FROM keys`).get(...params) as { total: number }).total;
     const keys = selected.map(row => row.capability_key);
-    const rows = new Map(this.rankings(filter, dimension, keys).map((row) => [capabilityKey(row.capability), row]));
+    const rows = new Map(this.rankings(filter, dimension, keys, contentGroups.filter(row => keys.includes(row.capability_key)))
+      .map((row) => [capabilityKey(row.capability), row]));
     return { total, items: keys.map((key) => rows.get(key)!) };
   }
 
-  rankings(filter: AttributionFilter, dimension: RankingDimension, keys?: string[]): AttributionRankRow[] {
+  private runtimeContentGroups(filter: AttributionFilter, dimension: RankingDimension, keys?: string[]): RuntimeContentGroup[] {
+    const scope = runtimeContentScope(this.store.db, filter, { ...(dimension === "all" ? {} : { capabilityKind: dimension }), keys });
+    return this.store.db.prepare(`WITH scoped AS (${scope.sql}) SELECT capability_key,category,estimate_json,
+      SUM(tokens) AS tokens,COUNT(*) AS observations FROM scoped GROUP BY category,estimate_id,legacy_estimate_json`)
+      .all(...scope.params) as RuntimeContentGroup[];
+  }
+
+  rankings(filter: AttributionFilter, dimension: RankingDimension, keys?: string[], preparedContent?: RuntimeContentGroup[]): AttributionRankRow[] {
     if (keys?.length === 0) return [];
     const { clauses, params } = this.contextWhere(filter);
     clauses.push("1");
@@ -647,10 +666,7 @@ export class AttributionStore {
       if (!known.has(payload.estimate_json)) row.payloadEstimates.push(JSON.parse(payload.estimate_json) as TokenEstimate);
       known.add(payload.estimate_json); profiles.set(payload.capability_key, known);
     }
-    const contentScope = runtimeContentScope(this.store.db, filter, { ...(dimension === "all" ? {} : { capabilityKind: dimension }), keys });
-    const contentGroups = this.store.db.prepare(`WITH scoped AS (${contentScope.sql}) SELECT capability_key,category,estimate_json,
-      SUM(tokens) AS tokens,COUNT(*) AS observations FROM scoped GROUP BY capability_key,category,estimate_json`)
-      .all(...contentScope.params) as Array<{ capability_key: string; category: string; estimate_json: string; tokens: number | null; observations: number }>;
+    const contentGroups = preparedContent ?? this.runtimeContentGroups(filter, dimension, keys);
     for (const content of contentGroups) {
       const row = groups.get(content.capability_key) ?? empty(contentCapability(content.category)!);
       groups.set(content.capability_key, row);

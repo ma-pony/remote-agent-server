@@ -1,11 +1,30 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { copyFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ModelTokenizers } from "../src/agent-usage/core/tokenizers.js";
-import { fixtureProfile } from "./fixtures/agent-usage/tokenizers/helpers.js";
+import { TokenizerWorker } from "../src/agent-usage/core/tokenizer-worker.js";
+import { fixtureProfile, fixtureTokenizerConfig } from "./fixtures/agent-usage/tokenizers/helpers.js";
 
 const engines: ModelTokenizers[] = [];
 afterEach(async () => { await Promise.all(engines.splice(0).map(engine => engine.close())); });
 
 describe("complete text measurement in a worker", () => {
+  it("uses verified automatic assets on the first measurement after each worker restart", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "usage-worker-cache-")), config = fixtureTokenizerConfig();
+    try {
+      await copyFile(config.tokenizerPath, join(directory, `${config.tokenizerSha256}.json`));
+      await copyFile(config.configPath, join(directory, `${config.configSha256}.json`));
+      for (let restart = 0; restart < 2; restart++) {
+        const worker = new TokenizerWorker([], new URL("./fixtures/agent-usage/tokenizers/automatic-worker.ts", import.meta.url).href, directory);
+        try {
+          expect(await worker.count("hello world", "deepseek-flash", null))
+            .toMatchObject({ tokens: 2, method: "model_tokenizer", reason: null });
+        } finally { await worker.close(); }
+      }
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
   it("uses the model vocabulary beyond both former size limits and allows main-thread timers to run", async () => {
     const engine = new ModelTokenizers([fixtureProfile()]); engines.push(engine);
     let timerRan = false;

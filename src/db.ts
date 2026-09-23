@@ -921,4 +921,6 @@ export const migrate = (
   if (!hasColumn("runs", "skills_revision")) {
     db.exec("ALTER TABLE runs ADD COLUMN skills_revision TEXT");
   }
+  if (!hasColumn("runs", "events_pruned_at")) db.exec("ALTER TABLE runs ADD COLUMN events_pruned_at TEXT");
+  if (!hasColumn("runs", "events_pruned_through_seq")) db.exec("ALTER TABLE runs ADD COLUMN events_pruned_through_seq INTEGER NOT NULL DEFAULT 0");
 };

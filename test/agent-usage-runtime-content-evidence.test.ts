@@ -13,7 +13,7 @@ it("pages metadata-only runtime evidence with stable tied cursors, scoped detail
   const usage = new UsageStore(db), attribution = new AttributionStore(usage);
   new RuntimeConversationCollector(usage, attribution, "test");
   const estimate = JSON.stringify((await measureToolContent("private content never belongs in evidence", "result"))!.estimate);
-  const insert = db.prepare("INSERT INTO agent_usage_conversation_content VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
+  const insert = db.prepare("INSERT INTO agent_usage_conversation_content (namespace,session_id,agent_id,run_id,event_key,category,occurred_at,runtime_kind,tokens,bytes,partial,estimate_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)");
   for (let run = 1; run <= 50; run++) for (const category of ["user_prompt", "configured_instructions", "assistant_output", "assistant_thought"]) {
     insert.run("test", "session", "agent", run, "1", category, "2026-09-22T01:00:00.000Z", "codex", run, 10, 0, estimate);
   }

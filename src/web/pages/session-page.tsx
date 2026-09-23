@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, BarChart3, ChevronDown, MessageSquare, Send, Settings2, Square, XCircle } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 
-import { api, errorMessage, isRunStreamPermanentError, streamRunEvents, type Agent, type Run, type RunEvent, type RunStatus, type SessionDetail } from "../api.js";
+import { api, errorMessage, isRunStreamPermanentError, streamRunEvents, type Agent, type ApiError, type Run, type RunEvent, type RunStatus, type SessionDetail } from "../api.js";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,11 +15,16 @@ import { SessionDeleteDialog } from "./session-pages.js";
 import { useI18n } from "@/i18n";
 import { AttachmentPicker, MessageAttachments, useAttachmentDraft } from "@/components/message-attachments";
 
-type RunView = { run: Run; events: RunEvent[]; historyError: string | null; historyCursor: number; hasMoreEvents: boolean; loadingEvents?: boolean };
+type RunView = { run: Run; events: RunEvent[]; historyError: string | null; historyCursor: number; hasMoreEvents: boolean; loadingEvents?: boolean; historyExpired?: boolean };
 const activeStatuses = new Set<RunStatus>(["queued", "running"]);
 const terminalStatuses = new Set<RunStatus>(["succeeded", "failed", "cancelled"]);
 const streamRetryDelays = [500, 1_000, 2_000, 4_000, 5_000] as const;
 const canonicalPollIntervalMs = 5_000;
+const isExpiredHistory = (reason: unknown): boolean => (reason as ApiError | null)?.error?.code === "run_events_expired";
+const loadHistory = (run: Run, signal?: AbortSignal): Promise<RunEvent[]> => run.eventsPrunedAt
+  ? Promise.resolve([])
+  : api<RunEvent[]>(`/runs/${run.id}/events?afterSeq=0&limit=100`, { signal });
+const expiredHistory = (run: Run): RunView => ({ run, events: [], historyError: null, historyCursor: 0, hasMoreEvents: false, historyExpired: true });
 
 const eventContent = (item: RunEvent): Record<string, unknown> => {
   try {
@@ -94,14 +99,13 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     setViews([]);
     void api<SessionDetail>(`/sessions/${sessionId}?includeParameters=false`, { signal: controller.signal }).then(async detail => {
       const agent = await api<Agent>(`/agents/${detail.agentId}`, {signal: controller.signal});
-      const histories = await Promise.allSettled(detail.runs.map((run) =>
-        api<RunEvent[]>(`/runs/${run.id}/events?afterSeq=0&limit=100`, { signal: controller.signal })
-      ));
+      const histories = await Promise.allSettled(detail.runs.map(run => loadHistory(run, controller.signal)));
       if (controller.signal.aborted || generation !== loadGeneration.current) return;
       setSession(detail);
       setAgentName(agent.name);
       setViews(detail.runs.map((run, index) => {
         const history = histories[index];
+        if (run.eventsPrunedAt || (history?.status === "rejected" && isExpiredHistory(history.reason))) return expiredHistory(run);
         if (history?.status === "fulfilled") {
           return { run: foldHistoricalStatus(run, history.value), events: history.value, historyError: null, historyCursor: history.value.at(-1)?.seq ?? 0, hasMoreEvents: history.value.length === 100 };
         }
@@ -275,9 +279,10 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
     setError("");
     try {
       const page = await api<{ items: Run[]; hasMore: boolean }>(`/sessions/${sessionId}/runs?beforeId=${beforeId}&limit=20`);
-      const histories = await Promise.allSettled(page.items.map((run) => api<RunEvent[]>(`/runs/${run.id}/events?afterSeq=0&limit=100`)));
+      const histories = await Promise.allSettled(page.items.map(run => loadHistory(run)));
       const olderViews = page.items.map((run, index): RunView => {
         const history = histories[index];
+        if (run.eventsPrunedAt || (history?.status === "rejected" && isExpiredHistory(history.reason))) return expiredHistory(run);
         if (history?.status === "fulfilled") {
           return { run: foldHistoricalStatus(run, history.value), events: history.value, historyError: null, historyCursor: history.value.at(-1)?.seq ?? 0, hasMoreEvents: history.value.length === 100 };
         }
@@ -302,7 +307,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
 
   const loadMoreEvents = async (runId: number) => {
     const view = views.find(item => item.run.id === runId);
-    if (view === undefined || view.loadingEvents) return;
+    if (view === undefined || view.loadingEvents || view.historyExpired) return;
     const generation = loadGeneration.current;
     setViews(current => current.map(item => item.run.id === runId ? {...item, loadingEvents: true, historyError: null} : item));
     try {
@@ -316,7 +321,7 @@ export const SessionPage = ({ sessionId }: { sessionId: string }) => {
       });
     } catch (reason) {
       if (generation === loadGeneration.current) setViews(current => current.map(item => item.run.id === runId
-        ? {...item, loadingEvents: false, historyError: errorMessage(reason)} : item));
+        ? isExpiredHistory(reason) ? expiredHistory(item.run) : {...item, loadingEvents: false, historyError: errorMessage(reason)} : item));
     }
   };
 
@@ -365,16 +370,17 @@ const RunBlock = ({ view, onLoadMore }: { view: RunView; onLoadMore(): void }) =
       }
     }
     return {
-      output: view.run.result !== null && ((terminalStatuses.has(view.run.status) && view.hasMoreEvents) || outputParts.length === 0) ? view.run.result : outputParts.join(""),
+      output: view.run.result !== null && (view.historyExpired || (terminalStatuses.has(view.run.status) && view.hasMoreEvents) || outputParts.length === 0) ? view.run.result : outputParts.join(""),
       details: nextDetails
     };
-  }, [view.events, view.run.result, view.run.status, view.hasMoreEvents]);
+  }, [view.events, view.run.result, view.run.status, view.hasMoreEvents, view.historyExpired]);
 
   return <article className="flex flex-col gap-3">
     <div className="ml-auto max-w-[85%] rounded-2xl rounded-br-sm bg-foreground px-4 py-3 text-background"><span className="mb-1 block text-xs font-semibold uppercase tracking-wide opacity-70">{text("你", "You")}</span><p className="whitespace-pre-wrap">{view.run.input}</p><MessageAttachments attachments={view.run.attachments} pathPrefix={`/runs/${view.run.id}/attachments`} /></div>
     <Card className="border-l-4 border-l-primary"><CardContent className="p-5">
       <div className="mb-4 flex items-center justify-between gap-3"><div className="flex min-w-0 items-center gap-2"><span className="text-sm font-semibold">{text("智能体", "Agent")}</span>{view.run.resolvedModel === null || view.run.resolvedModel === undefined ? null : <Badge className="max-w-64 truncate font-mono font-normal" variant="outline" title={view.run.resolvedModel}>{view.run.resolvedModel}</Badge>}</div><Badge variant={view.run.status === "failed" ? "destructive" : view.run.status === "succeeded" ? "default" : "secondary"}>{({ queued: text("排队中", "Queued"), running: text("运行中", "Running"), succeeded: text("已完成", "Completed"), failed: text("失败", "Failed"), cancelled: text("已取消", "Cancelled") } satisfies Record<RunStatus, string>)[view.run.status]}</Badge></div>
       {output !== "" ? <p className="whitespace-pre-wrap leading-7">{output}</p> : activeStatuses.has(view.run.status) ? <p className="text-muted-foreground">{text("等待智能体输出…", "Waiting for agent output…")}</p> : null}
+      {view.historyExpired ? <Alert className="mt-4"><MessageSquare /><AlertTitle>{text("原始事件已过期", "Raw events expired")}</AlertTitle><AlertDescription>{text("工具正文与消息分片已按保留策略清理；最终回复和用量统计仍保留。", "Tool bodies and message fragments were removed under the retention policy. Final replies and usage statistics remain available.")}</AlertDescription></Alert> : null}
       {view.historyError !== null ? <div className="mt-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">{view.historyError}</div> : null}
       {view.hasMoreEvents || view.historyError !== null ? <Button className="mt-4" type="button" variant="outline" disabled={view.loadingEvents} onClick={onLoadMore}>{view.loadingEvents ? text("加载中…", "Loading…") : text("加载更多事件", "Load more events")}</Button> : null}
       {view.run.error !== null && !details.some((item) => item.type === "error") ? <div className="mt-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive" role="alert">{view.run.error}</div> : null}

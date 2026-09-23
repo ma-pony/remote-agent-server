@@ -8,6 +8,7 @@ import type { ProjectedSkill } from "../runtime/skill-projector.js";
 import type { AttributionStore } from "./storage/attribution-store.js";
 import type { UsageStore } from "./storage/usage-store.js";
 import { RuntimeMcpReplay } from "./runtime-mcp-replay.js";
+import { commitRuntimeContent, type PreparedRuntimeContent } from "./runtime-content.js";
 
 export type SkillActivityStage = "catalog_visible" | "body_read" | "reference_read" | "script_executed";
 
@@ -179,6 +180,10 @@ export class RuntimeCapabilityCollector {
   }
 
   async recordTool(runId: number, content: Record<string, unknown>, event?: RuntimeToolEvent, signal?: AbortSignal): Promise<void> {
+    commitRuntimeContent(await this.prepareTool(runId, content, event, signal));
+  }
+
+  async prepareTool(runId: number, content: Record<string, unknown>, event?: RuntimeToolEvent, signal?: AbortSignal): Promise<PreparedRuntimeContent | undefined> {
     const nativeId = typeof content.toolCallId === "string" && content.toolCallId.length > 0
       && content.toolCallId.length <= MAX_NATIVE_ID_LENGTH
       ? content.toolCallId
@@ -203,7 +208,7 @@ export class RuntimeCapabilityCollector {
       resultEstimate: await this.attribution.measureContent(result, "result", run.model, signal)
     };
     const measure = () => measuredPayload;
-    this.store.db.transaction(() => {
+    const commit = this.store.db.transaction(() => {
       this.store.assertBinding(binding);
       const baseInvocationId = `runtime:${run.runtimeKind}:run:${runId}:call:${nativeId}`;
 
@@ -262,10 +267,8 @@ export class RuntimeCapabilityCollector {
         this.observe(binding, epoch, String(runId), run.runtimeKind, association.event_id,
           JSON.parse(association.capability_json) as Capability, status, observedAt, bytes, payload, event !== undefined);
       }
-    })();
-    if ([measuredPayload.argumentEstimate, measuredPayload.resultEstimate].some(value => value?.estimate.reason === "tokenizer_pending")) {
-      throw new UsageError("usage_tokenizer_pending");
-    }
+    });
+    return { commit, pending: [measuredPayload.argumentEstimate, measuredPayload.resultEstimate].some(value => value?.estimate.reason === "tokenizer_pending") };
   }
 
   private stageCountQuery(filter: UsageFilter, dimension: "all" | CapabilityKind = "all") {

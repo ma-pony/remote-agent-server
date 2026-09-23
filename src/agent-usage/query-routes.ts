@@ -1,10 +1,11 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { HostUsageCollector } from "./host-collector.js";
 import { capabilityKinds, type AttributionRankRow } from "./core/context-types.js";
 import type { UsageFilter } from "./core/types.js";
 import { getRuntimeContentEvidence, listRuntimeContentEvidence } from "./runtime-content-evidence.js";
 import { UsageQueryCache } from "./query-cache.js";
+import { UsageQueryWorker, UsageQueryWorkerError } from "./query-worker.js";
 
 const querySchema = z.object({
   agentId: z.string().regex(/^[1-9]\d*$/).optional(), sessionId: z.string().regex(/^[1-9]\d*$/).optional(),
@@ -30,11 +31,18 @@ const insights = (row: AttributionRankRow) => [
   ...(row.calls === 0 && (row.definitionInputTokens ?? 0) > 0 ? [{ kind: "unused_definitions", tokens: row.definitionInputTokens }] : []),
   ...(row.failures > 0 ? [{ kind: "failed_calls", count: row.failures }] : [])
 ];
+const queryError = (error: Error, _request: FastifyRequest, reply: FastifyReply) => {
+  const code = error instanceof UsageQueryWorkerError ? error.code : "usage_query_failed";
+  return reply.code(code === "usage_query_failed" ? 500 : 503)
+    .send({ error: { code, message: "Usage analysis is temporarily unavailable" } });
+};
 
 /** Management-only projections; usage facts and estimated context contributions remain separate. */
 export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUsageCollector): void => {
   const namespace = collector.namespace;
   const cache = new UsageQueryCache(collector.db);
+  const reader = new UsageQueryWorker(collector);
+  app.addHook("preClose", async () => { await reader.close(); });
   const providerEpoch = (sessionId: string, agentId: string | undefined): string | null => {
     const session = collector.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: number } | undefined;
     if (session === undefined || (agentId !== undefined && String(session.agent_id) !== agentId)) return null;
@@ -46,7 +54,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
     return `session:${sessionId}:epoch:${subject.epoch}`;
   };
   for (const endpoint of ["status", "summary", "timeseries", "capabilities", "invocations", "context-evidence", "content-evidence"] as const) {
-    app.get(`/usage/${endpoint}`, (request, reply) => {
+    app.get(`/usage/${endpoint}`, { errorHandler: queryError }, async (request, reply) => {
       const parsed = querySchema.safeParse(request.query);
       if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
       const query = parsed.data;
@@ -77,8 +85,8 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
         analysisStatus: sourceCounts.collecting || contentBackfill.status === "pending" || contentBackfill.status === "running" ? "collecting"
           : capturePartial || contentBackfill.status === "failed" || failurePage.total > 0 || sourceCounts.failed ? "partial" : "ready" };
       if (endpoint === "summary") {
-        const { summary } = cache.get(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
-          () => collector.store.overview(filter, query.timezone, query.bucket));
+        const { summary } = await cache.getAsync(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
+          () => reader.read("overview", [filter, query.timezone, query.bucket]));
         const hasCapabilityEvidence = collector.attribution.hasEvidence(filter);
         return { ...metadata, ...summary, hasCapabilityEvidence,
           ...(capturePartial && summary.completeness !== "conflict" ? { completeness: "partial" } : {}), ...(query.sessionId === undefined ? {} : { providerEpochId: providerEpoch(query.sessionId, query.agentId) }),
@@ -87,13 +95,13 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
             && contentBackfill.status === "completed" && !hasCapabilityEvidence ? "empty" : metadata.analysisStatus };
       }
       if (endpoint === "timeseries") {
-        const { timeseries: series } = cache.get(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
-          () => collector.store.overview(filter, query.timezone, query.bucket));
+        const { timeseries: series } = await cache.getAsync(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
+          () => reader.read("overview", [filter, query.timezone, query.bucket]));
         return { ...metadata, ...series, total: series.items.length, items: series.items.slice(query.offset, query.offset + query.limit) };
       }
       if (endpoint === "capabilities") {
-        const page = cache.get(`ranking:${JSON.stringify([filter, query.dimension, query.sort, query.limit, query.offset])}`,
-          () => collector.attribution.rankingsPage(filter, query.dimension, query));
+        const page = await cache.getAsync(`ranking:${JSON.stringify([filter, query.dimension, query.sort, query.limit, query.offset])}`,
+          () => reader.read("rankings", [filter, query.dimension, query]));
         const stages = cache.get(`stages:${JSON.stringify([filter, query.dimension, query.stageOffset])}`,
           () => collector.runtimeCapabilities.stageCountsPage(filter, { dimension: query.dimension, limit: 20, offset: query.stageOffset }));
         return { ...metadata, measurement: "estimated", dimension: query.dimension, sort: query.sort, total: page.total,

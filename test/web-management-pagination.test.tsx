@@ -12,6 +12,26 @@ vi.mock("@microsoft/fetch-event-source", () => ({fetchEventSource: vi.fn()}));
 afterEach(() => {cleanup(); vi.unstubAllGlobals();});
 const json = (value: unknown) => new Response(JSON.stringify(value), {headers: {"content-type": "application/json"}});
 const page = <T,>(items: T[], total = items.length, current = 1) => ({items, total, page: current, pageSize: 20, totalPages: Math.ceil(total / 20)});
+it.each(["already expired", "expires during pagination"])("preserves final replies when raw history %s", async mode => {
+  const calls: string[] = [];
+  const run = {id: 1, status: "succeeded", input: "Question", result: "Preserved final reply", error: null,
+    ...(mode === "already expired" ? {eventsPrunedAt: "2026-09-20T00:00:00.000Z", eventsPrunedThroughSeq: 101} : {})};
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input); calls.push(url);
+    if (url === "/api/sessions/1?includeParameters=false") return json({id: 1, agentId: 1, title: "History", status: "idle", runs: [run], hasOlderRuns: false});
+    if (url === "/api/agents/1") return json({id: 1, name: "Agent"});
+    if (url === "/api/runs/1/events?afterSeq=0&limit=100") return json(Array.from({length: 100}, (_, i) => ({id: i + 1, seq: i + 1, type: "message", contentJson: JSON.stringify({stream: "output", text: "partial"})})));
+    if (url === "/api/runs/1/events?afterSeq=100&limit=100") return new Response(JSON.stringify({error: {code: "run_events_expired"}}), {status: 410});
+    throw Error(`Unexpected request ${url}`);
+  }));
+  render(<I18nProvider><MemoryRouter><SessionPage sessionId="1" /></MemoryRouter></I18nProvider>);
+  if (mode === "expires during pagination") fireEvent.click(await screen.findByRole("button", {name: "加载更多事件"}));
+  expect(await screen.findByText("原始事件已过期")).toBeVisible();
+  expect(screen.getByText("Preserved final reply")).toBeVisible();
+  expect(screen.queryByRole("button", {name: "加载更多事件"})).not.toBeInTheDocument();
+  expect(screen.queryByText(/历史加载失败/)).not.toBeInTheDocument();
+  if (mode === "already expired") expect(calls.some(url => url.includes("/events?"))).toBe(false);
+});
 it("loads bounded Run history and appends the next page without a full Agent inventory", async () => {
   const calls: string[] = [];
   const now = "2026-09-01T00:00:00.000Z";

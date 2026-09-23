@@ -9,6 +9,7 @@ type SubjectRow = { agent_id: string | null; generation: number; state: "active"
 /** Small, independently migratable SQLite module; no foreign keys to host business tables. */
 export class UsageStore {
   constructor(readonly db: Database.Database) {
+    if (db.readonly) return;
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_usage_migrations (version INTEGER PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS agent_usage_subjects (

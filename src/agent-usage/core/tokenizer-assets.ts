@@ -20,6 +20,14 @@ export class LazyTokenizerAssets {
 
   constructor(private readonly directory: string, private readonly request: typeof fetch = fetch) {}
 
+  /** A restarted worker can use verified disk assets immediately, without a download retry. */
+  async loadCached(profile: AutomaticTokenizerProfile): Promise<ModelTokenizerProfile | undefined> {
+    const [tokenizerJson, tokenizerConfig] = await Promise.all([
+      this.cached(profile.tokenizerSha256), this.cached(profile.configSha256)
+    ]);
+    return tokenizerJson && tokenizerConfig ? { id: profile.id, models: profile.models, tokenizerJson, tokenizerConfig } : undefined;
+  }
+
   load(profile: AutomaticTokenizerProfile): Promise<ModelTokenizerProfile> {
     const pending = this.pending.get(profile.id);
     if (pending) return pending;
@@ -44,6 +52,18 @@ export class LazyTokenizerAssets {
 
   private async asset(profile: AutomaticTokenizerProfile, filename: string, sha256: string): Promise<Record<string, unknown>> {
     const path = join(this.directory, `${sha256}.json`);
+    const cached = await this.cached(sha256);
+    if (cached) return cached;
+
+    for (const origin of ASSET_ORIGINS) {
+      try { return await this.download(`${origin}/${profile.repository}/resolve/${profile.revision}/${filename}`, path, sha256); }
+      catch { /* Retry the same pinned asset through the next origin. */ }
+    }
+    throw new Error("usage_tokenizer_download_failed");
+  }
+
+  private async cached(sha256: string): Promise<Record<string, unknown> | undefined> {
+    const path = join(this.directory, `${sha256}.json`);
     let cached: Buffer | undefined;
     try {
       const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -53,12 +73,7 @@ export class LazyTokenizerAssets {
       } finally { await file.close(); }
     } catch { /* Missing or damaged caches are replaced only after validating a fresh download. */ }
     if (cached && digest(cached) === sha256) return this.parse(cached);
-
-    for (const origin of ASSET_ORIGINS) {
-      try { return await this.download(`${origin}/${profile.repository}/resolve/${profile.revision}/${filename}`, path, sha256); }
-      catch { /* Retry the same pinned asset through the next origin. */ }
-    }
-    throw new Error("usage_tokenizer_download_failed");
+    return undefined;
   }
 
   private async download(url: string, path: string, sha256: string): Promise<Record<string, unknown>> {

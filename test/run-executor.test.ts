@@ -141,7 +141,7 @@ describe("RunExecutor", () => {
     h.db.prepare("UPDATE agents SET provider_default_model = 'resolved-fixture-model'").run();
     try {
       await h.executor.execute(h.run.id);
-      const row = h.db.prepare("SELECT estimate_json FROM agent_usage_conversation_content WHERE run_id=? AND category='user_prompt'").get(h.run.id) as { estimate_json: string };
+      const row = h.db.prepare("SELECT COALESCE(t.estimate_json,c.estimate_json) AS estimate_json FROM agent_usage_conversation_content c LEFT JOIN agent_usage_token_estimates t ON t.id=c.estimate_id WHERE run_id=? AND category='user_prompt'").get(h.run.id) as { estimate_json: string };
       expect(JSON.parse(row.estimate_json)).toMatchObject({ model: "resolved-fixture-model" });
     } finally { h.db.close(); }
   });

@@ -31,7 +31,8 @@ export class ManagedUsageSources {
       capabilities: { usage: kind === "codex_log" ? "provider_session" : "model_request", context: kind === "context_snapshot" ? "partial" : "none",
         identity: "explicit", version: kind === "context_snapshot" ? "context-snapshot/1" : "provider-logs/1" }
     })])) as Record<SourceRegistration["kind"], FileUsageSource>;
-    this.collector = new HostUsageCollector(db, this.adapters, (sessionId) => this.discover(sessionId), loadModelTokenizers(config.usageTokenizers, resolve(config.dataDir, "tokenizers")));
+    this.collector = new HostUsageCollector(db, this.adapters, (sessionId) => this.discover(sessionId),
+      loadModelTokenizers(config.usageTokenizers, resolve(config.dataDir, "tokenizers")), config.usageEventRetentionMs);
   }
 
   private async discover(sessionId: number): Promise<void> {
