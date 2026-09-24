@@ -50,6 +50,22 @@ it("combines model-input exposure evidence under the same content capability whi
   expect(page.items[0]!.totalInputTokens).toBeGreaterThan(0);
 });
 
+it("aggregates compacted and legacy content before resolving estimate profiles", async () => {
+  const { db, attribution, content } = setup();
+  await content("user_prompt", 30);
+  await content("user_prompt", 40, "2");
+  const { estimate_json: estimateJson } = db.prepare(`SELECT estimate_json FROM agent_usage_conversation_content
+    WHERE namespace='test' AND event_key='1'`).get() as { estimate_json: string };
+  db.prepare("INSERT OR IGNORE INTO agent_usage_token_estimates(estimate_json) VALUES(?)").run(estimateJson);
+  db.prepare(`UPDATE agent_usage_conversation_content SET estimate_id=(SELECT id FROM agent_usage_token_estimates WHERE estimate_json=?),estimate_json=''
+    WHERE namespace='test' AND event_key='1'`).run(estimateJson);
+
+  const page = attribution.rankingsPage({ namespace: "test" }, "user_prompt",
+    { sort: "observedTotalTokens", limit: 20, offset: 0 });
+  expect(page.items[0]).toMatchObject({ observedArgumentTokens: 70, contentObservations: 2 });
+  expect(page.items[0]?.payloadEstimates).toHaveLength(1);
+});
+
 it("marks content-only Runs ready while retaining namespace, session, agent, runtime and date scope", async () => {
   const { attribution, content } = setup();
   await content("user_prompt", 60);

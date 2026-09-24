@@ -2,13 +2,15 @@
 
 [English](README.en.md) · [MIT License](LICENSE) · Node.js 22 · macOS / Linux
 
-**把 Claude Code、Codex 和 Hermes 接入你的工单、CI 和业务系统。**
+**把 Claude Code、Codex 和 Hermes 接入你的工单、运维平台和内部业务系统。**
 
-在自己的机器上部署，通过 Web 管理台直接发起任务，或用 HTTP API、GitHub / GitLab Webhook 调用熟悉的命令行 Agent。Remote Agent Server 负责排队、工作区、会话和执行记录；你的系统通过查询、SSE 或签名 Webhook 取得进度与结果。
+在自己的机器上部署，让业务系统通过 HTTP API 派发任务，也可以从 Web 管理台直接调用熟悉的命令行 Agent。Remote Agent Server 负责排队、工作区、会话和执行记录；你的系统通过查询、SSE 或签名 Webhook 取得进度与结果。
 
 项目环境提前准备仓库和依赖，每个 Session 使用独立的写时复制 Workspace。同一会话可以继续追问，调用方断开连接也不影响已提交任务的执行。
 
-底层是基于 [acpx](https://github.com/openclaw/acpx) 和 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol) 的自托管执行网关，支持 Skills、MCP、执行器扩展与模型策略。单个 Fastify 进程配合 SQLite WAL，无需额外部署数据库或消息队列。
+除了执行任务，还可以**按 Agent 选择暴露的 MCP 工具**，减少无关工具干扰；**从 Git 仓库安装和更新 Skills**，预览文件变化，再按 Agent 应用版本或回退，方便维护团队规范和业务处理流程。
+
+服务通过 [acpx](https://github.com/openclaw/acpx) 和 [Agent Client Protocol（ACP）](https://github.com/agentclientprotocol) 与 Agent 通信，通过 MCP 接入外部工具，并提供执行器扩展与模型策略。单个 Fastify 进程配合 SQLite WAL，无需额外部署数据库或消息队列。
 
 [界面演示](#业务系统接入演示) · [安装并启动](#安装并启动) · [完成第一条任务](#从零完成一次-agent-执行) · [HTTP / Webhook 接入](#其他系统如何接入) · [主要功能](#主要功能) · [执行模型](#执行模型) · [配置](#配置) · [部署文档](docs/deployment.md)
 
@@ -41,10 +43,10 @@
 
 | 你想做什么 | 如何使用 |
 | --- | --- |
-| 在浏览器里运行和继续 Agent 任务 | 用管理台准备项目环境、创建 Agent 和 Session，查看消息、工具调用与结果。 |
-| 将 PR / MR 事件交给审核 Agent | 配置 GitHub / GitLab Webhook 和事件筛选；结果可查询或回调，写回评论需另配工具与权限。 |
 | 让工单或运维平台派发代码排查任务 | 通过 Task API 提交日志、说明或附件，用业务会话标识继续补充信息。 |
 | 在现有 Shell 脚本、CI/CD 或内部平台中调用 Agent | 用 curl 或任意 HTTP 客户端提交异步任务，保存 Task ID，轮询结果或接收回调。 |
+| 在浏览器里运行和继续 Agent 任务 | 用管理台准备项目环境、创建 Agent 和 Session，查看消息、工具调用与结果。 |
+| 将 PR / MR 事件交给审核 Agent | 配置 GitHub / GitLab Webhook 和事件筛选；结果可查询或回调，写回评论需另配工具与权限。 |
 
 适合已经在使用 Agent CLI，希望把它接入长期运行的业务流程的开发者和团队。首次可以只在管理台跑通一个任务，再接入现有系统；原有的脚本、CI、审批和发布流程可以继续使用。
 
@@ -55,13 +57,13 @@ Provider 继续负责推理、工具使用和原生会话，业务审批、工�
 - **异步 Task API**：外部系统通过 HTTP 提交任务，使用幂等键避免重复执行，并可查询、取消或继续多轮 Conversation。
 - **可靠事件出口**：支持增量 Event 查询、可续读 SSE 和签名 Webhook；断线不影响正在执行的 Task。
 - **统一管理 Agent**：集中配置 Provider、Agent 指令、项目环境、Skills 和 MCP。
+- **MCP 工具按需暴露**：为每个 Agent 的 MCP 选择全部工具或仅所选工具，控制暴露给模型的工具清单；支持 HTTP、stdio 和从 Provider 系统配置导入。
+- **Skills 从 Git 安装与更新**：从 Git 仓库或 marketplace 安装 Skills，预览文件变化，再按 Agent 应用新版本或回退；也保留本机发现和 ZIP 上传。
 - **可复用项目环境**：提前准备一个或多个 Git 仓库及依赖，Session 创建时无需重新安装。
 - **隔离 Workspace**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot，为每个 Session 快速创建写时复制环境。
 - **多轮 Agent 对话**：同一 Session 可以连续执行多个 Run，并在 Provider 支持时续接 ACP Session。
 - **完整执行记录**：在 SQLite 中保存用户消息、Agent 输出、工具调用、状态、错误和最终结果。
-- **Skills 管理**：发现本机 Skills、上传 ZIP 或添加 Git/marketplace 来源，预览版本变化并按 Agent 更新或回退。
 - **执行器扩展**：发现 Codex 和 Claude Code 的系统插件与 Hook，由每个 Agent 单独选择，在运行时投影到它的 Provider Home。
-- **MCP 管理**：支持 HTTP 和 stdio MCP，支持固定值、Session 参数和运行时参数，也可从 Provider 系统配置中导入 MCP，并查看服务器公开的工具。
 - **模型策略**：自动读取 Agent Core 通过 ACP 暴露的模型，可跟随 Core 默认模型、固定模型，或按 UTC 星期和 24 小时时间段为新 Run 选择模型。
 - **运行、存储与并发控制**：在管理台调整 Run 超时、空闲 Session 大文件保留期和三类服务并发，并可为单个 Agent 设置 Run 上限。
 - **有头浏览器**：Agent 可以运行在真实桌面会话中，不要求放入容器。
@@ -255,9 +257,9 @@ hermes --version
 
 Agent 页面还可以配置：
 
-- **Skills**：发现本机 Skill、上传 ZIP，并明确启用需要的 Skill。
+- **Skills**：从 Git 仓库安装、预览更新和回退版本，也可发现本机 Skill 或上传 ZIP；为每个 Agent 单独选择启用的 Skill 和版本。
 - **执行器扩展**：查看当前 Provider 系统配置中发现的插件和 Hook，并为这个 Agent 启用需要的项。
-- **MCP**：添加 HTTP 或 stdio MCP，检查连接并查看工具；也可将 Codex 或 Claude Code 的系统全局 MCP 导入当前 Agent。
+- **MCP**：添加 HTTP 或 stdio MCP，检查连接并选择暴露的工具；支持固定值、Session 参数和运行时参数，也可将 Codex 或 Claude Code 的系统全局 MCP 导入当前 Agent。
 - **运行并发策略**：默认继承系统 Run 并发，也可以设置当前 Agent 的独立上限；实际上限取两者较小值。
 - **模型策略**：模型列表来自当前 Agent Core，不允许手填未配置的模型。可以跟随 Core 默认模型、固定一个模型，或按 UTC 星期和 24 小时时间段切换；Core 未暴露模型列表时后两项不可用。
 
@@ -279,11 +281,19 @@ Agent 页面还可以配置：
 
 Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Session 检测到配置变化后会刷新执行器连接；Provider 支持时，会继续原有 Provider Session 和对话上下文。
 
-在 Agent 的 **Skills** 页面管理共享 Git 来源，可填写 GitHub、GitLab 或其他 Git 服务的 HTTPS/SSH 地址，以及可选分支、标签、提交 SHA 和仓库子目录。支持普通 Skills 仓库、Claude 的 `.claude-plugin/marketplace.json`、Codex 的 `.agents/plugins/marketplace.json`，以及 `plugin.json`、`.codex-plugin/plugin.json` 和 `.claude-plugin/plugin.json` 中的 Skills 声明。marketplace 的本地目录和 Git 插件源会解析为完整包快照；不支持的条目会显示提示。导入只提供 Skills，不执行插件 Hook、MCP 或依赖安装命令。
+### Skills：从 Git 安装和更新
+
+把团队规范、业务处理流程和操作经验维护在 Git 仓库中，再为不同 Agent 选择需要的 Skills 和版本：
+
+1. 进入 **Agent → 目标 Agent → Skills → 管理 Git 来源**，添加 GitHub、GitLab 或其他 Git 服务的 HTTPS/SSH 地址，可指定分支、标签、提交 SHA 和仓库子目录。
+2. 来源同步完成后，在 Skills 列表中启用需要的项，安装到当前 Agent。
+3. 仓库更新后手动刷新来源。可在“管理 Git 来源”中一次应用当前 Agent 的全部 Git Skill 更新，或逐项预览文件变化后应用；需要时可选择历史版本回退。批量应用会跳过本地已修改的 Skill，并显示每项失败结果。
 
 版本预览先列出变化文件、大小和权限，点击文件的“查看差异”后才加载文本变更片段。每个文件的当前和目标内容分别支持最多 1 MiB 的 UTF-8 文本，差异最多显示 64 KiB，超出时明确提示截断；文件之间不共用预览额度。二进制、非 UTF-8 和超限文件分别说明原因，仍保留文件变化信息。预览期间内容发生变化时，需要重新点击“预览变更”。
 
-手动刷新来源只发现新版本。已启用的 Agent 保持原版本；在“管理 Git 来源”中可一次应用当前 Agent 的全部 Git Skill 更新，或逐项预览文件变化后应用，也可以选择历史版本回退。批量应用会跳过本地已修改的 Skill，并显示每项失败结果。同名上传 ZIP 可作为原 Skill 的新版本发布，发布后仍需单独应用。版本摘要覆盖整个包的文件内容和可执行权限，修改 scripts、references 也会被识别。重复启用已启用的 Skill 不会更新版本，本地副本有修改时会阻止覆盖。移除 Git 来源保留已启用副本和版本历史；不同 Agent 的选择互不影响。
+支持普通 Skills 仓库、Claude 的 `.claude-plugin/marketplace.json`、Codex 的 `.agents/plugins/marketplace.json`，以及 `plugin.json`、`.codex-plugin/plugin.json` 和 `.claude-plugin/plugin.json` 中的 Skills 声明。marketplace 的本地目录和 Git 插件源会解析为完整包快照；不支持的条目会显示提示。导入只提供 Skills，不执行插件 Hook、MCP 或依赖安装命令。
+
+手动刷新来源只发现新版本。已启用的 Agent 保持原版本，直到明确批量应用 Git 更新，或逐项预览文件变化后应用；也可以选择历史版本回退。同名上传 ZIP 可作为原 Skill 的新版本发布，发布后仍需单独应用。版本摘要覆盖整个包的文件内容和可执行权限，修改 scripts、references 也会被识别。重复启用已启用的 Skill 不会更新版本，本地副本有修改时会阻止覆盖。移除 Git 来源保留已启用副本和版本历史；不同 Agent 的选择互不影响。
 
 每次 Run 使用自己的 Session 投影，运行中的任务保留原内容。Run 管理 API 的 `skillsRevision` 记录实际投影的摘要；升级前的历史 Run 为 `null`。来源管理及版本接口使用同一个管理 API Token，详见[能力投影设计](docs/design.md#8-agent-能力投影)。
 
@@ -291,9 +301,26 @@ Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Sessio
 
 已知运行时限制：部分 Provider 会把上游模型错误作为普通回复返回，同时报告运行完成。验收时需要检查实际回复和预期产物，不能只看 Run 状态。此错误状态传递问题尚未修复，排查方法见[部署文档](docs/deployment.md#provider-验收与已知限制)。
 
+### 执行器扩展
+
 执行器扩展遵循“发现 → Agent 选择 → 运行时投影”流程。在服务运行用户的 Codex 或 Claude Code 配置中安装新插件、添加 Hook 后，它们会出现在 Agent 的 **执行器扩展** 页面，默认不启用。启用的项只投影到当前 Agent。Hermes 目前不提供这项扩展管理能力。
 
 Codex 插件按 Agent 发布为本地 marketplace 快照；选择与内容版本相同的 Session 共用插件缓存。默认情况下，同一 Agent 的 Session 也共用内置市场同步目录；显式启用 Codex rollout 压缩的 Session 保留独立 `.tmp`，使各自的压缩锁互不影响。插件选择变化在下一次 Run 生效；包文件变化在发现缓存刷新后生效（默认最多 30 秒）。已有 Session 的旧插件缓存与临时克隆在下一次准备运行目录时清理，空闲 Session Home 仍按原保留策略清理。Claude Code 的插件投影暂保持现状。
+
+### MCP：按 Agent 选择工具
+
+同一个 MCP 服务可以提供多种业务工具。为不同职责的 Agent 配置各自需要的工具清单，例如让工单排查 Agent 只看到查询工单和读取日志的工具。
+
+1. 进入 **Agent → 目标 Agent → MCP**，添加 HTTP 或 stdio 服务，也可导入已有的 Provider 全局配置。
+2. 打开该服务的 **工具范围**，查看工具名称与说明；如果配置引用了 Session 参数，先选择检查使用的会话。
+3. 选择 **仅所选工具**，勾选需要的工具并保存；配置从下一次 Run 生效。
+
+| 模式 | 暴露给 Agent 的工具 |
+| --- | --- |
+| 全部工具 | 包含服务当前的全部工具，以及以后新增的工具。管理 API 中 `allowedTools` 为 `null`。 |
+| 仅所选工具 | 只包含保存的工具名称列表，服务新增工具不会自动加入；空列表不暴露任何工具。管理 API 中 `allowedTools` 为字符串数组。 |
+
+选择“仅所选工具”时，运行时会过滤 MCP 的 `tools/list`，并拒绝通过该 MCP 配置调用未选中的工具。不同 Agent 可以保存不同的工具范围。
 
 Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选择“导入并启用”后，系统把当前配置复制为 Agent 自己的 MCP。后续可以在 Agent 中单独编辑、检查、限制工具范围或删除，不会直接修改 Provider 的系统配置。MCP 值可以来自固定配置、创建 Session 时提供的参数，或 `agent_id`、`session_id`、`run_id`、`workspace_path`、`browser_profile_path` 等运行时值。敏感值加密保存，管理接口不返回明文。
 
@@ -327,13 +354,15 @@ Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选�
 
 托管的 Codex／Claude Code 日志补充 Runtime 证据，启动恢复和关闭时补采，MCP 观察器记录执行事实。配置 `USAGE_CAPTURE_UPSTREAMS` 后可自动采集支持的 API-key 模型请求，查看具体工具定义、结果首次／重复输入及 Skill／插件归属；也可手动导入通用“上下文快照（Context Snapshot）”。上报用量、实际执行与上下文证据分别计量，不要求外部遥测平台。Reset 和存储清理前先采集，保留历史统计；显式删除 Session 清除对应统计并拒收迟到重放。
 
+解析器升级不会自动重放未变化的历史 Codex 日志。需要修正已结束会话的旧估算时，可对对应来源调用 `POST /api/usage/sources/:id/collect` 并传入 `{"rebuild":true}`；重建只更新该来源的上下文估算，不重复累计模型上报用量。操作和状态检查见[用量分析指南](docs/agent-usage.md)。
+
 启动后后台分批回补已有 Run 中保留的工具事件，页面显示进度与缺口；恢复原事件日期，重启不会重复累加。计数与游标按批提交，批次之间主动休息，停止后从已提交进度继续；单条大记录仍可能超过软时间预算。CLI 支持结构化参数和可确定的单条 Shell 命令，包括常见 env／rtk／shell 包装；管道、组合命令和动态展开保留为 Shell。明确读取已投影 Skill 文件或执行其脚本时记录 Skill／插件归属，仅目录可见不计为使用。
 
-汇总、排名、趋势和来源独立展示，慢请求不会挡住其他已加载区域。排名切换与翻页独立刷新，先按所选指标排序分页，再读取当页完整指标；日期筛选和输入证据分页在数据库侧收窄范围，首次／重复归因仍基于完整历史。相同范围的汇总与趋势共享一次账本读取和核对，统计结果使用有界缓存，数据库写入后失效；仍需读取所选主体的历史计量元数据以核对累计总量和未归位用量。后台恢复期间只轮询轻量状态，数据变化才刷新统计，隐藏页面暂停轮询。托管 JSONL 日志流式读取并只解析新增记录，不再受整文件 16 MiB 限制；单行仍有上限，未写完的行保留为待重试采集。
+汇总、排名、趋势和来源独立展示，慢请求不会挡住其他已加载区域。排名切换与翻页独立刷新，先按所选指标排序分页，再读取当页完整指标；日期筛选和输入证据分页在数据库侧收窄范围，首次／重复归因仍基于完整历史。请求上下文在写入时保存去重后的输入总量，已有记录由后台小批次补齐，补齐前仍按原始归因记录计算。相同范围的汇总与趋势共享一次账本读取和核对，统计结果使用有界缓存，数据库写入后失效；仍需读取所选主体的历史计量元数据以核对累计总量和未归位用量。后台恢复期间只轮询轻量状态，采集结束后才刷新重统计，隐藏页面暂停轮询。托管 JSONL 日志流式读取并只解析新增记录，不再受整文件 16 MiB 限制；单行仍有上限，未写完的行保留为待重试采集。
 
-数据来源列表和采集状态轮询遵循当前 Agent／Session 筛选；切换能力或关闭证据抽屉会取消旧详情请求，重新打开从第一页开始。
+数据来源列表和采集状态轮询遵循当前 Agent／Session 筛选；列表默认每页 20 条，查询不读取仅供服务端恢复使用的 checkpoint。切换能力或关闭证据抽屉会取消旧详情请求，重新打开从第一页开始。
 
-文件数据库的汇总、趋势和能力排名通过独立只读 Worker 查询，共用有界队列和结果缓存，避免重聚合阻塞管理 API。新增对话计量仅引用共享词表元数据。Run 结束满 7 天后，统计与词表补算已完成、无空计数且 Session 空闲时，后台分批清理原始消息分片和工具正文；每步只检查一个 Run，`/api/usage/status` 可查看进程内清理进度与跳过原因。最终回复、计数、排名及关联继续保留，页面显示原始事件已过期。`USAGE_EVENT_RETENTION_DAYS=0` 可关闭这项清理，与 Workspace 保留期独立。清理后的正文不能用于未来词表重算，已有估算保留原来源；释放的 SQLite 页可复用，文件不会立即缩小。
+文件数据库的汇总／趋势与能力排名分别使用只读 Worker 和有界队列，结果共用有界缓存，避免重聚合阻塞管理 API。新增对话计量仅引用共享词表元数据。Run 结束满 7 天后，统计与词表补算已完成、无空计数且 Session 空闲时，后台分批清理原始消息分片和工具正文；每步只检查一个 Run，`/api/usage/status` 可查看进程内清理进度与跳过原因。最终回复、计数、排名及关联继续保留，页面显示原始事件已过期。`USAGE_EVENT_RETENTION_DAYS=0` 可关闭这项清理，与 Workspace 保留期独立。清理后的正文不能用于未来词表重算，已有估算保留原来源；释放的 SQLite 页可复用，文件不会立即缩小。
 
 Agent 详情、Session 详情和会话列表的累计数字统一读取 `/api/usage/*` 新账本；会话列表按当前页批量查询。旧 Session 累计字段和 `/api/agents/:id/usage` 已停用，单次 Run 的用量记录继续保留。来源边界、缺失说明、快照格式及可执行接入示例见[用量分析指南](docs/agent-usage.md)。
 
@@ -353,8 +382,6 @@ POST /integration/v1/endpoints/:slug/webhook
 | --- | --- | --- |
 | GitHub | Payload URL、Secret；支持 JSON 和表单 `payload` | 原始请求体的 `X-Hub-Signature-256` HMAC-SHA256 签名 |
 | GitLab | URL、生成的 Signing token（`whsec_` 开头）；旧版可用 Secret token；保留默认 JSON | `webhook-signature` HMAC-SHA256 签名，或旧版 `X-Gitlab-Token` |
-
-解析器升级不会自动重放未变化的历史 Codex 日志。需要修正已结束会话的旧估算时，可对对应来源调用 `POST /api/usage/sources/:id/collect` 并传入 `{"rebuild":true}`；重建只更新该来源的上下文估算，不重复累计模型上报用量。操作和状态检查见[用量分析指南](docs/agent-usage.md)。
 
 每个端点配置一个来源平台；可分别创建 GitHub 和 GitLab 端点并绑定同一 Agent。业务规则写在端点的固定提示中，例如“检查这次代码变更并给出审查结论”。事件类型和原生 JSON 载荷作为任务正文，进入现有 Task 入库、排队和执行流程。默认将同一 MR / PR 的命中事件在 60 秒静默期后合并为一个 Task 和 Session；其他事件或关闭合并时逐次创建。不会自动按 PR、MR 或分支续接 Conversation。
 

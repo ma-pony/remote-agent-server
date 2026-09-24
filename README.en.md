@@ -2,13 +2,15 @@
 
 [简体中文](README.md) · [MIT License](LICENSE) · Node.js 22 · macOS / Linux
 
-**Connect Claude Code, Codex, and Hermes to your tickets, CI, and business applications.**
+**Connect Claude Code, Codex, and Hermes to your ticketing systems, operations platforms, and internal business applications.**
 
-Deploy on your own machine. Run tasks from the web console, or call familiar command-line agents through an HTTP API or GitHub / GitLab webhooks. Remote Agent Server manages queues, workspaces, sessions, and execution records. Your application receives progress and results through polling, SSE, or signed webhooks.
+Deploy on your own machine. Dispatch tasks from your business applications through an HTTP API, or call familiar command-line agents directly from the web console. Remote Agent Server manages queues, workspaces, sessions, and execution records. Your application receives progress and results through polling, SSE, or signed webhooks.
 
 Prepare repositories and dependencies once, then give each session an independent copy-on-write workspace. Continue the conversation in the same session; submitted tasks keep running when the caller disconnects.
 
-Under the hood, it is a self-hosted execution gateway built on [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol), with Skills, MCP, provider extensions, and model policies. A single Fastify process uses SQLite WAL, with no separate database server or message broker to deploy.
+Beyond task execution, **choose which MCP tools each agent sees** to keep its tool list focused. **Install and update Skills from Git repositories**, preview file changes, and apply or roll back versions per agent to maintain team conventions and business procedures.
+
+The service communicates with agents through [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol), connects external tools through MCP, and provides provider extensions and model policies. A single Fastify process uses SQLite WAL, with no separate database server or message broker to deploy.
 
 [Demo](#business-integration-demo) · [Install and start](#install-and-start) · [Run your first task](#complete-one-agent-run) · [HTTP / webhook integration](#integrating-another-system) · [Features](#features) · [Execution model](#execution-model) · [Configuration](#configuration) · [Deployment guide](docs/deployment.md)
 
@@ -41,10 +43,10 @@ Recorded from the real management console with synthetic tickets, simulated tool
 
 | What you want to do | How to use it |
 | --- | --- |
-| Run and continue agent tasks in a browser | Prepare a project environment, create an agent and session, and inspect messages, tool activity, and results in the console. |
-| Send PR / MR events to a review agent | Configure GitHub / GitLab webhooks and event filters. Query results or receive callbacks; posting comments requires additional tools and permissions. |
 | Dispatch code investigation from a ticketing or operations platform | Submit logs, instructions, or attachments through the Task API, then add context using the same business conversation key. |
 | Call agents from existing shell scripts, CI/CD, or internal tools | Use curl or any HTTP client to submit asynchronous work, store the task ID, and poll for results or receive callbacks. |
+| Run and continue agent tasks in a browser | Prepare a project environment, create an agent and session, and inspect messages, tool activity, and results in the console. |
+| Send PR / MR events to a review agent | Configure GitHub / GitLab webhooks and event filters. Query results or receive callbacks; posting comments requires additional tools and permissions. |
 
 Built for developers and teams already using agent CLIs who want to connect them to ongoing business workflows. Start with one task in the console, then integrate your existing systems. Keep using your scripts, CI, approval rules, and release process.
 
@@ -55,13 +57,13 @@ Providers still own reasoning, tool use, and native sessions; callers own busine
 - **Asynchronous Task API:** submit work over HTTP, prevent duplicate execution with idempotency keys, query or cancel tasks, and continue multi-turn conversations.
 - **Reliable event delivery:** consume incremental event history, resumable SSE, or signed Webhooks without tying task execution to a live connection.
 - **Agent management:** configure providers, instructions, project environments, Skills, and MCP in one place.
+- **MCP tool selection:** expose all tools or only selected tools from each agent's MCP servers. Supports HTTP, stdio, and imports from provider system configuration.
+- **Install and update Skills from Git:** install from Git repositories or marketplaces, preview file changes, and apply or roll back versions per agent. Host discovery and ZIP uploads remain available.
 - **Reusable project environments:** prepare one or more Git repositories and their dependencies before sessions start.
 - **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
 - **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
 - **Recorded executions:** persist user messages, agent output, tool activity, statuses, errors, and results in SQLite.
-- **Skill management:** discover host Skills, upload ZIPs or add Git/marketplace sources, preview changes, and update or roll back each agent independently.
 - **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
-- **MCP management:** configure HTTP and stdio MCP with fixed, session, or runtime values, import MCP from provider system configuration, and inspect exposed tools.
 - **Model policies:** discover models advertised by Agent Core over ACP, follow the Core default, pin one model, or select a model for each new run with UTC weekdays and 24-hour windows.
 - **Runtime, storage, and concurrency control:** adjust run timeout, large idle-session storage retention, and three service concurrency limits from the console, with an optional run limit per agent.
 - **Headed browser support:** run agents in a real desktop session without requiring containers.
@@ -255,9 +257,9 @@ Read this project and explain its directory structure, startup steps, and test c
 
 The agent page also provides:
 
-- **Skills:** discover host Skills, upload a ZIP archive, and enable only the Skills this agent should receive.
+- **Skills:** install from Git repositories, preview updates, and roll back versions, or discover host Skills and upload ZIP archives. Select enabled Skills and versions independently for each agent.
 - **Provider extensions:** review plugins and hooks discovered in the current provider's system configuration and enable the ones this agent needs.
-- **MCP:** add HTTP or stdio servers, check connectivity, inspect their tools, or import a system-global MCP from Codex or Claude Code.
+- **MCP:** add HTTP or stdio servers, check connectivity, and select exposed tools. Use fixed, session, or runtime values, or import a system-global MCP from Codex or Claude Code.
 - **Run concurrency policy:** inherit the system run limit by default, or set an Agent-specific cap. The smaller limit is effective.
 - **Model policy:** model choices come from the current Agent Core; arbitrary model IDs cannot be entered. Follow the Core default, pin one model, or switch by UTC weekday and 24-hour window. The latter two modes are unavailable when the Core does not advertise models.
 
@@ -279,11 +281,19 @@ A policy change affects only runs that start afterward. An active run does not s
 
 Changes to Skills, provider extensions, and MCP apply on the next run. When an existing session detects a configuration change, it refreshes the provider connection. If the provider supports resumption, the original Provider Session and conversation context continue.
 
-Manage shared Git sources from an agent's **Skills** page. Enter a GitHub, GitLab, or other Git HTTPS/SSH URL, with an optional branch, tag, commit SHA, and repository subdirectory. Supported catalogs include ordinary Skill repositories, Claude's `.claude-plugin/marketplace.json`, Codex's `.agents/plugins/marketplace.json`, and Skills declared in `plugin.json`, `.codex-plugin/plugin.json`, or `.claude-plugin/plugin.json`. Local marketplace directories and Git plugin sources resolve to complete package snapshots. Unsupported entries are reported. Importing supplies Skills only; it does not execute plugin hooks, MCP servers, or dependency installation commands.
+### Skills: install and update from Git
+
+Maintain team conventions, business procedures, and operational knowledge in Git, then choose the Skills and versions each agent needs:
+
+1. Open **Agents → target agent → Skills → Manage Git sources**. Add a GitHub, GitLab, or other Git HTTPS/SSH URL, with an optional branch, tag, commit SHA, and repository subdirectory.
+2. After the source finishes syncing, enable the Skills you need in the list to install them for the current agent.
+3. When the repository changes, refresh the source. In **Manage Git sources**, apply all Git Skill updates for the current agent at once, or preview and apply each change individually. Select a historical revision to roll back. Bulk apply skips Skills with local edits and reports individual failures.
 
 The preview first lists changed files, sizes, and permissions. Click a file's **View diff** to load its changed text snippets. Each side supports UTF-8 text up to 1 MiB per file; the displayed diff is capped at 64 KiB with an explicit truncation notice. Files do not share a preview quota. Binary, non-UTF-8, and oversized files each show a specific reason while retaining change metadata. If contents change during inspection, click **Preview changes** again.
 
-Refreshing a source only discovers versions. Enabled agents retain their selections until you apply all Git Skill updates for the current agent in Manage Git sources, or preview and apply a revision individually. Bulk apply skips Skills with local edits and reports individual failures. Historical revisions can be selected for rollback. Uploading a same-name replacement ZIP publishes a version which must also be applied explicitly. Digests cover complete package file contents and executable permissions, including scripts and references. Enabling an already enabled Skill is idempotent, and local edits block overwrites. Removing a Git source preserves installed copies and revision history; agents remain independent.
+Supported catalogs include ordinary Skill repositories, Claude's `.claude-plugin/marketplace.json`, Codex's `.agents/plugins/marketplace.json`, and Skills declared in `plugin.json`, `.codex-plugin/plugin.json`, or `.claude-plugin/plugin.json`. Local marketplace directories and Git plugin sources resolve to complete package snapshots. Unsupported entries are reported. Importing supplies Skills only; it does not execute plugin hooks, MCP servers, or dependency installation commands.
+
+Refreshing a source only discovers versions. Enabled agents retain their selections until you explicitly apply Git updates in bulk or preview and apply a revision individually. Historical revisions can be selected for rollback. Uploading a same-name replacement ZIP publishes a version which must also be applied explicitly. Digests cover complete package file contents and executable permissions, including scripts and references. Enabling an already enabled Skill is idempotent, and local edits block overwrites. Removing a Git source preserves installed copies and revision history; agents remain independent.
 
 Each Run uses its Session's projection, preserving the contents of active Runs. The Run management API records the projected digest as `skillsRevision`; pre-upgrade Runs have `null`. Source and version endpoints use the existing management API Token. See [capability projection](docs/design.en.md#8-agent-capability-projection).
 
@@ -291,9 +301,26 @@ The [2026-09-14 acceptance report](docs/superpowers/validation/2026-09-14-skill-
 
 Known runtime limitation: some Providers return upstream model errors as ordinary output while reporting completion. Acceptance must inspect the actual reply and expected artifacts, not only Run status. This error-status propagation issue remains unresolved; see [deployment troubleshooting](docs/deployment.md#provider-验收与已知限制).
 
+### Provider extensions
+
 Provider extensions follow a discover, select, and runtime projection flow. After a plugin or hook is added to the service user's Codex or Claude Code configuration, it appears on the agent's **Provider extensions** page and remains disabled by default. Enabled items are projected only to that agent. Hermes does not currently support this extension-management flow.
 
 Codex plugins are published as local marketplace snapshots per agent. Sessions with the same selection and content revision share a plugin cache. By default, Sessions of an agent also share the built-in marketplace sync directory; a Session with Codex rollout compression explicitly enabled keeps its own `.tmp` so its compression lock remains independent. Selection changes take effect on the next run; package-file changes take effect after the discovery cache refreshes (within 30 seconds by default). Existing sessions discard old plugin caches and temporary clones when their runtime home is next prepared; idle session homes still follow the existing retention policy. Claude Code plugin projection is unchanged.
+
+### MCP: select tools per agent
+
+One MCP server can provide many business tools. Give each agent a tool list suited to its role—for example, expose only ticket lookup and log-reading tools to a ticket investigation agent.
+
+1. Open **Agents → target agent → MCP** and add an HTTP or stdio server, or import an existing provider-global configuration.
+2. Open the server's **Tool scope** to inspect tool names and descriptions. If the configuration references session parameters, first select a session for the check.
+3. Choose **Selected tools only**, select the required tools, and save. The configuration takes effect on the next run.
+
+| Mode | Tools exposed to the agent |
+| --- | --- |
+| All tools | Includes all current tools and any added later. The management API represents this as `allowedTools: null`. |
+| Selected tools only | Includes only the saved list of tool names. Newly added tools are not included automatically; an empty list exposes no tools. The management API represents `allowedTools` as a string array. |
+
+With **Selected tools only**, the service filters MCP `tools/list` at runtime and rejects calls to unselected tools through that MCP configuration. Each agent can save a different tool selection.
 
 Provider-global MCP uses a separate import flow. Selecting **Import and enable** on the agent's **MCP** page copies the current system configuration into an MCP owned by that agent. The imported configuration can then be edited, checked, restricted to selected tools, or deleted without changing the provider's system configuration. MCP values may come from saved values, declared session parameters, or runtime values such as `agent_id`, `session_id`, `run_id`, `workspace_path`, and `browser_profile_path`. Secrets are encrypted and are never returned in plaintext by management APIs.
 
@@ -327,13 +354,15 @@ The sidebar, Agent and Session pages open one usage analysis view with Agent, Se
 
 Managed Codex/Claude Code logs supplement Runtime evidence, including startup and shutdown harvesting; the MCP observer records executions. Configure `USAGE_CAPTURE_UPSTREAMS` to automatically capture supported API-key model requests and inspect concrete tool definitions, first/repeated result inputs and Skill/plugin attribution. Generic **Context Snapshot** imports remain available. Reported usage, actual executions and context evidence are counted separately without an external telemetry platform. Reset and storage cleanup collect before purging and preserve historical statistics; explicit Session deletion clears its statistics and rejects late replay.
 
+Parser upgrades do not automatically replay unchanged historical Codex logs. To correct an old estimate for a completed Session, send `{"rebuild":true}` to `POST /api/usage/sources/:id/collect` for that source. Rebuilding updates its context estimate without adding reported model usage again. See the [usage analysis guide](docs/agent-usage.md) for the procedure and status checks.
+
 Startup incrementally backfills retained Run tool events in the background, exposing progress and gaps while preserving original event dates and restart deduplication. Counts and cursors commit in batches with idle time between cycles; interrupted recovery resumes from committed progress. Individual large records may still exceed the soft time budget. CLI recognition accepts structured inputs and literal single shell commands, including common env, rtk and shell wrappers; pipelines, compound commands and dynamic expansion remain attributed to the shell. Explicit reads and script execution under projected Skill paths provide Skill/plugin ownership; catalog visibility alone is not usage.
 
-Summary, rankings, trends and sources render independently, so a slow request does not hide loaded sections. Ranking controls refresh independently; queries sort and page using the selected metric before loading the current page's complete metrics. Capability date filters and bounded evidence pages preserve lifetime first/repeat attribution. Summary and trend requests for the same scope share one ledger read and reconciliation, with a bounded projection cache invalidated by database writes. They still read historical measurement metadata for the selected subjects to reconcile cumulative and unplaced usage. Background recovery polls lightweight status and refreshes statistics only after changes; hidden pages pause polling. Managed JSONL logs stream only new records without the former 16 MiB whole-file limit; individual lines remain bounded and incomplete trailing lines stay pending for retry.
+Summary, rankings, trends and sources render independently, so a slow request does not hide loaded sections. Ranking controls refresh independently; queries sort and page using the selected metric before loading the current page's complete metrics. Capability date filters and bounded evidence pages preserve lifetime first/repeat attribution. Request contexts store their deduplicated input total at write time. Background batches fill existing contexts; queries use the original exposure calculation until each row is filled. Summary and trend requests for the same scope share one ledger read and reconciliation, with a bounded projection cache invalidated by database writes. They still read historical measurement metadata for the selected subjects to reconcile cumulative and unplaced usage. Background recovery polls lightweight status and refreshes heavy statistics after collection finishes; hidden pages pause polling. Managed JSONL logs stream only new records without the former 16 MiB whole-file limit; individual lines remain bounded and incomplete trailing lines stay pending for retry.
 
-Source listings and collection polling follow the selected Agent and Session. Switching capabilities or closing the evidence sheet cancels stale detail requests; reopening starts from the first page.
+Source listings and collection polling follow the selected Agent and Session. Lists default to 20 entries per page and do not read the server-only recovery checkpoint. Switching capabilities or closing the evidence sheet cancels stale detail requests; reopening starts from the first page.
 
-File-backed summary, trend and capability queries use a separate read-only Worker with a bounded queue and projection cache to keep heavy aggregation off the management request loop. New conversation counts reference shared tokenizer metadata. After a Run has been finished for 7 days, background batches retire its raw message/tool bodies only when counting and vocabulary backfill have completed, no counts are missing, and the Session is idle. Each step checks only one Run; `/api/usage/status` exposes process-local retirement progress and skip reasons. Final replies, counts, rankings and associations remain available; the console labels expired history. `USAGE_EVENT_RETENTION_DAYS=0` disables this cleanup independently of Workspace retention. Expired bodies cannot be used for future vocabulary replay, so existing estimates keep their original provenance. Freed SQLite pages are reusable; the file does not shrink immediately.
+File-backed summary/trend and capability queries use separate read-only Workers with bounded queues and a shared projection cache to keep heavy aggregation off the management request loop. New conversation counts reference shared tokenizer metadata. After a Run has been finished for 7 days, background batches retire its raw message/tool bodies only when counting and vocabulary backfill have completed, no counts are missing, and the Session is idle. Each step checks only one Run; `/api/usage/status` exposes process-local retirement progress and skip reasons. Final replies, counts, rankings and associations remain available; the console labels expired history. `USAGE_EVENT_RETENTION_DAYS=0` disables this cleanup independently of Workspace retention. Expired bodies cannot be used for future vocabulary replay, so existing estimates keep their original provenance. Freed SQLite pages are reusable; the file does not shrink immediately.
 
 Agent detail, Session detail and the Session list now display cumulative figures from the `/api/usage/*` ledger; the list fetches totals for its current page in one request. Legacy Session cumulative fields and `/api/agents/:id/usage` are retired, while per-Run usage remains available. See the [usage analysis guide](docs/agent-usage.md) for collection boundaries, missing-data semantics and the snapshot contract.
 
@@ -353,8 +382,6 @@ POST /integration/v1/endpoints/:slug/webhook
 | --- | --- | --- |
 | GitHub | Payload URL and Secret; JSON and form `payload` are supported | HMAC-SHA256 over the original request body, using `X-Hub-Signature-256` |
 | GitLab | URL and generated Signing token (`whsec_` prefix), or Secret token for older versions; keep native JSON | `webhook-signature` HMAC-SHA256, or legacy `X-Gitlab-Token` |
-
-Parser upgrades do not automatically replay unchanged historical Codex logs. To correct an old estimate for a completed Session, send `{"rebuild":true}` to `POST /api/usage/sources/:id/collect` for that source. Rebuilding updates its context estimate without adding reported model usage again. See the [usage analysis guide](docs/agent-usage.md) for the procedure and status checks.
 
 Each endpoint has one source platform. Separate GitHub and GitLab endpoints can share an Agent. Set the business instructions in the endpoint's fixed prompt, for example, “Review this code change and report your findings.” The event type and native JSON payload become the task message and use the existing Task persistence, queue, and execution flow. By default, matching events for the same MR / PR merge into one Task and Session after a 60-second quiet period. Other event types, or events with merging disabled, create tasks separately. PRs, MRs, and branches do not automatically share a Conversation.
 

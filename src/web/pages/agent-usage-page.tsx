@@ -183,6 +183,10 @@ export const AgentUsagePage = () => {
   const [sourceTotal, setSourceTotal] = useState(0);
   const revisionRef = useRef<string | undefined>(undefined);
   const lastRefreshRef = useRef(0);
+  const activeCollectionRef = useRef(false);
+  const rankingRequestRef = useRef<AbortController | null>(null);
+  const rankingDirtyRef = useRef(false);
+  const rankingQueryRef = useRef("");
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [ranking, setRanking] = useState<RankingResponse | null>(null);
   const [timeseries, setTimeseries] = useState<TimeseriesResponse | null>(null);
@@ -190,6 +194,8 @@ export const AgentUsagePage = () => {
   const [error, setError] = useState("");
   const [rankingError, setRankingError] = useState("");
   const [reload, setReload] = useState(0);
+  const [autoReload, setAutoReload] = useState(0);
+  const [rankingReload, setRankingReload] = useState(0);
   const [guideOpen, setGuideOpen] = useState(false);
   const [selectedCapability, setSelectedCapability] = useState<Capability | null>(null);
   const sourceQuery = queryString({ agentId: agentId || undefined, sessionId: sessionId || undefined });
@@ -231,7 +237,7 @@ export const AgentUsagePage = () => {
       runtimeKind: runtimeKind || undefined,
       ...bounds
     });
-  }, [agentId, range, runtimeKind, sessionId, timezone, reload]);
+  }, [agentId, range, runtimeKind, sessionId, timezone]);
   const summaryQuery = `${scopeQuery}&capturePage=${capturePage}&failurePage=${failurePage}`;
   const trendQuery = `${scopeQuery}&limit=20&offset=${(trendPage - 1) * 20}`;
   const requestQuery = useMemo(() => [scopeQuery, queryString({ dimension, sort, stageOffset: String(stageOffset), offset: String(offset), limit: String(PAGE_SIZE) })]
@@ -248,11 +254,13 @@ export const AgentUsagePage = () => {
     setSummary(null); setError("");
     void api<SummaryResponse>(`/usage/summary?${summaryQuery}`, { signal: controller.signal }).then(next => {
       if (controller.signal.aborted) return;
-      revisionRef.current = next.revision; setSummary(next);
+      if (next.revision !== undefined) revisionRef.current = next.revision;
+      if ((next.sourceCounts?.collecting ?? 0) > 0 || next.contentBackfill?.status === "pending" || next.contentBackfill?.status === "running") activeCollectionRef.current = true;
+      lastRefreshRef.current = Date.now(); setSummary(next);
     })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [reload, summaryQuery]);
+  }, [reload, autoReload, summaryQuery]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -262,21 +270,28 @@ export const AgentUsagePage = () => {
     })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [reload, trendQuery]);
+  }, [reload, autoReload, trendQuery]);
 
   useEffect(() => {
     const controller = new AbortController();
     setSources(null);
     void api<Page<UsageSource>>(sourceUrl, { signal: controller.signal }).then((next) => {
       if (controller.signal.aborted) return;
+      if (next.items.some((source) => source.status === "collecting")) activeCollectionRef.current = true;
       setSources(next.items); setSourceTotal(next.total);
     }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [reload, sourceUrl]);
+  }, [reload, autoReload, sourceUrl]);
 
   useEffect(() => {
     const controller = new AbortController();
-    setRanking(null); setRankingError("");
+    rankingRequestRef.current = controller;
+    if (rankingQueryRef.current !== requestQuery) {
+      rankingQueryRef.current = requestQuery;
+      rankingDirtyRef.current = false;
+      setRanking(null);
+    }
+    setRankingError("");
     void api<RankingResponse>(`/usage/capabilities?${requestQuery}`, { signal: controller.signal })
       .then((nextRanking) => {
         if (controller.signal.aborted) return;
@@ -289,9 +304,20 @@ export const AgentUsagePage = () => {
           writeSearchParams(next, true); return;
         }
         setRanking(nextRanking);
-      }).catch((reason: unknown) => { if (!controller.signal.aborted) setRankingError(errorMessage(reason)); });
-    return () => controller.abort();
-  }, [reload, requestQuery]);
+      }).catch((reason: unknown) => { if (!controller.signal.aborted) setRankingError(errorMessage(reason)); })
+      .finally(() => {
+        if (rankingRequestRef.current !== controller) return;
+        rankingRequestRef.current = null;
+        if (rankingDirtyRef.current) {
+          rankingDirtyRef.current = false;
+          setRankingReload((value) => value + 1);
+        }
+      });
+    return () => {
+      controller.abort();
+      if (rankingRequestRef.current === controller) rankingRequestRef.current = null;
+    };
+  }, [reload, rankingReload, requestQuery]);
 
   const contentBackfill = summary?.contentBackfill ?? ranking?.contentBackfill;
   const contentBackfillPending = contentBackfill?.status === "pending" || contentBackfill?.status === "running";
@@ -312,20 +338,19 @@ export const AgentUsagePage = () => {
         if (controller.signal.aborted) return;
         const pending = hasPendingRecovery(status);
         const changed = status.revision !== revisionRef.current;
-        // Poll only cheap status metadata. Re-query projections on writes, at most once per five
-        // seconds while work continues; always show the final update when it completes.
-        if (changed && (!pending || Date.now() - lastRefreshRef.current >= 5_000)) {
+        const active = (status.sourceCounts?.collecting ?? 0) > 0
+          || status.contentBackfill?.status === "pending" || status.contentBackfill?.status === "running";
+        const finished = activeCollectionRef.current && !active;
+        activeCollectionRef.current = active;
+        // Checkpoint writes change the revision but do not warrant another full history scan.
+        if (changed && !active && (!pending || finished || Date.now() - lastRefreshRef.current >= 30_000)) {
           lastRefreshRef.current = Date.now();
-          const [nextSummary, nextRanking, nextTimeseries, nextSources] = await Promise.all([
-            api<SummaryResponse>(`/usage/summary?${summaryQuery}`, { signal: controller.signal }),
-            api<RankingResponse>(`/usage/capabilities?${requestQuery}`, { signal: controller.signal }),
-            api<TimeseriesResponse>(`/usage/timeseries?${trendQuery}`, { signal: controller.signal }),
-            api<Page<UsageSource>>(sourceUrl, { signal: controller.signal })
-          ]);
-          if (controller.signal.aborted) return;
           revisionRef.current = status.revision;
-          setSummary(nextSummary); setRanking(nextRanking); setTimeseries(nextTimeseries);
-          setSources(nextSources.items); setSourceTotal(nextSources.total);
+          // The existing section effects fetch independently, so a slow ranking cannot hold
+          // back the reported totals, trend, or source list after collection completes.
+          setAutoReload((value) => value + 1);
+          if (rankingRequestRef.current) rankingDirtyRef.current = true;
+          else setRankingReload((value) => value + 1);
         }
         if (controller.signal.aborted || !pending) return;
         attempts++;
@@ -344,12 +369,13 @@ export const AgentUsagePage = () => {
       controller.abort(); clearTimeout(timeout);
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [collectingSourceIds, recoveryPending, requestQuery, scopeQuery, summaryQuery, sourceUrl, trendQuery, reload]);
+  }, [collectingSourceIds, recoveryPending, scopeQuery, reload]);
 
   const collectSource = async (source: UsageSource) => {
     setError("");
     try {
       const updated = await api<UsageSource>(`/usage/sources/${source.id}/collect`, { method: "POST" });
+      if (updated.status === "collecting") activeCollectionRef.current = true;
       setSources((current) => current?.map((item) => item.id === updated.id ? updated : item) ?? null);
     } catch (reason) { setError(errorMessage(reason)); }
   };

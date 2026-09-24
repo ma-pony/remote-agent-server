@@ -32,6 +32,7 @@ export class HostUsageCollector {
   private lastBackfillMs: number | null = null;
   private lastBackfillAt: string | null = null;
   private nextBackfillCheckAt = 0;
+  private nextContextTotalsCheckAt = 0;
   readonly store: UsageStore;
   readonly sources: UsageSourceCoordinator;
   readonly attribution: AttributionStore;
@@ -198,6 +199,7 @@ export class HostUsageCollector {
     if (!this.recoveryStopped) return;
     this.recoveryStopped = false;
     this.nextBackfillCheckAt = 0;
+    this.nextContextTotalsCheckAt = 0;
     this.setRecoveryPhase("idle");
     this.recoveryController = new AbortController();
     this.queueRecovery(true);
@@ -243,16 +245,24 @@ export class HostUsageCollector {
   private async recoveryBatch(): Promise<void> {
     const started = performance.now();
     try {
-      let contentPending = false;
-      if (performance.now() >= this.nextBackfillCheckAt) {
+      let contentPending = false, contextTotalsPending = false;
+      if (performance.now() >= this.nextBackfillCheckAt || performance.now() >= this.nextContextTotalsCheckAt) {
         this.setRecoveryPhase("backfill");
         const backfillStarted = performance.now();
-        try { contentPending = await this.contentBackfill.step(this.recoveryController?.signal); }
+        try {
+          if (performance.now() >= this.nextBackfillCheckAt) {
+            contentPending = await this.contentBackfill.step(this.recoveryController?.signal);
+            this.nextBackfillCheckAt = contentPending ? 0 : performance.now() + 5_000;
+          }
+          if (!this.recoveryStopped && performance.now() >= this.nextContextTotalsCheckAt) {
+            contextTotalsPending = this.attribution.backfillContextTotals(20);
+            this.nextContextTotalsCheckAt = contextTotalsPending ? 0 : performance.now() + 5_000;
+          }
+        }
         finally {
           this.lastBackfillMs = Math.round((performance.now() - backfillStarted) * 1_000) / 1_000;
           this.lastBackfillAt = new Date().toISOString();
         }
-        this.nextBackfillCheckAt = contentPending ? 0 : performance.now() + 5_000;
       }
       if (this.recoveryStopped) return;
       this.setRecoveryPhase("retention");
@@ -267,7 +277,7 @@ export class HostUsageCollector {
       if (this.recoveryStopped) return;
       // Yield real idle time, not just an event-loop turn. Large individual records can still
       // exceed the soft work budget; the worker keeps their tokenization off the main thread.
-      if (this.recoveryQueue.length > 0 || contentPending || retentionPending) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
+      if (this.recoveryQueue.length > 0 || contentPending || contextTotalsPending || retentionPending) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
       else {
         this.queueRecovery(false);
         this.scheduleRecovery(30_000);

@@ -33,6 +33,33 @@ const context = (): ModelContextInput => ({
 });
 
 describe("agent usage invocation attribution", () => {
+  it("serves context totals without scanning exposures after bounded legacy backfill", async () => {
+    const { db, attribution, binding } = setup();
+    const shared = { ...context(), blocks: [{ ...context().blocks[0]!, capabilities: [
+      { capability, evidence: "direct" as const },
+      { capability: { kind: "skill" as const, id: "fetch", name: "Fetch" }, evidence: "matched" as const }
+    ] }] };
+    await attribution.upsertContext(binding, shared);
+    await attribution.upsertContext(binding, { ...shared, invocationId: "model-3" });
+    const filter = { namespace: "test", sessionId: binding.sessionId };
+    const expected = attribution.contextSummary(filter);
+    expect(expected.estimatedInputTokens).toBe(4);
+    db.prepare("UPDATE agent_usage_contexts SET estimated_input_ready=0, estimated_input_tokens=NULL").run();
+    expect(attribution.contextSummary(filter)).toEqual(expected);
+    expect(attribution.backfillContextTotals(1)).toBe(true);
+    expect(attribution.contextSummary(filter)).toEqual(expected);
+    expect(attribution.backfillContextTotals(1)).toBe(false);
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      if (sql.includes("agent_usage_exposures")) throw new Error("Context summary scanned exposures");
+      return prepare(sql);
+    });
+    try { expect(attribution.contextSummary(filter)).toEqual(expected); }
+    finally { spy.mockRestore(); }
+    await attribution.upsertContext(binding, { ...shared, revision: 2, blocks: [] });
+    expect(attribution.contextSummary(filter).estimatedInputTokens).toBe(2);
+  });
+
   it("adds each request exposure once and filters cumulative occupation by Agent, Session and date", async () => {
     const { usage, attribution, binding } = setup();
     const sameAgent = usage.bindSession("test", "agent-1", "session-2");

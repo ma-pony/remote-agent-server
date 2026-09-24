@@ -195,9 +195,9 @@ describe("usage source management API", () => {
     const registered = await register(app, registration);
     const agentId = manager.collector.binding(session.id).agentId;
     const list = (query: string) => app.inject({ url: `/api/usage/sources?${query}`, headers });
-    expect((await list(`agentId=${agentId}&sessionId=${session.id}`)).json()).toEqual([registered.json()]);
-    expect((await list("agentId=999999")).json()).toEqual([]);
-    expect((await list("sessionId=999999")).json()).toEqual([]);
+    expect((await list(`agentId=${agentId}&sessionId=${session.id}`)).json()).toMatchObject({ items: [registered.json()], total: 1 });
+    expect((await list("agentId=999999")).json()).toMatchObject({ items: [], total: 0 });
+    expect((await list("sessionId=999999")).json()).toMatchObject({ items: [], total: 0 });
     expect((await list("sessionId=invalid")).statusCode).toBe(400);
   });
 
@@ -252,7 +252,8 @@ describe("usage source management API", () => {
     const checkpoint = db.prepare("SELECT checkpoint FROM agent_usage_sources WHERE id=?").get(sourceId) as { checkpoint: string };
     db.prepare("UPDATE agent_usage_sources SET checkpoint=? WHERE id=?")
       .run(JSON.stringify({ ...JSON.parse(checkpoint.checkpoint) as object, version: 2 }), sourceId);
-    db.prepare("UPDATE agent_usage_contexts SET revision=revision/2 WHERE session_id=?").run(String(session.id));
+    db.prepare(`UPDATE agent_usage_contexts SET revision=revision/2,
+      estimated_input_ready=0, estimated_input_tokens=NULL WHERE session_id=?`).run(String(session.id));
     db.prepare(`DELETE FROM agent_usage_exposures WHERE context_id IN
       (SELECT context_id FROM agent_usage_contexts WHERE session_id=?)
       AND json_extract(capability_key,'$[0]')='assistant_thought'`).run(String(session.id));
@@ -391,7 +392,7 @@ describe("usage source management API", () => {
     }
     expect(manager.collector.store.summary().usage.totalTokens).toBeGreaterThan(0);
     const sources = await app.inject({ method: "GET", url: "/api/usage/sources", headers });
-    expect(sources.json()[0].rejectedRecords).toBe(0);
+    expect(sources.json().items[0].rejectedRecords).toBe(0);
     expect(sources.body).not.toContain("codex.jsonl");
     expect(manager.collector.store.records()).not.toHaveLength(0);
   });

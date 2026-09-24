@@ -89,17 +89,21 @@ it("pauses status polling while hidden and refreshes changed data on return", as
   const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
   try {
     const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
-    let revision = "one";
+    let revision = "one", backfill: "pending" | "completed" = "pending";
     fetch.mockImplementation(async (input, init) => String(input).includes("/usage/status")
-      ? response({ revision, contentBackfill: { status: "pending" } })
+      ? response({ revision, contentBackfill: { status: backfill } })
       : String(input).includes("/usage/summary") ? response({ ...summary, revision,
-        contentBackfill: { status: "pending", processedEvents: 1, errorCode: null } }) : original(input, init));
+        contentBackfill: { status: backfill, processedEvents: 1, errorCode: null } }) : original(input, init));
     await act(async () => { mount(); });
     fetch.mockClear(); visibility.mockReturnValue("hidden");
     await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
     expect(fetch).not.toHaveBeenCalled();
     revision = "two"; visibility.mockReturnValue("visible");
     await act(async () => { document.dispatchEvent(new Event("visibilitychange")); });
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/status"))).toHaveLength(1);
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/summary"))).toHaveLength(0);
+    revision = "three"; backfill = "completed";
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
     expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/summary"))).toHaveLength(1);
   } finally { cleanup(); visibility.mockRestore(); vi.useRealTimers(); }
 });
@@ -444,14 +448,16 @@ it("手动采集从 202 collecting 轮询到 completed，并在后台刷新指�
     rejectedRecords: 0, lastSuccessAt: null, mappings: [{ sessionId: "2", state: "active" }] };
   let sourceGets = 0;
   let summaryGets = 0;
-  let resolvePoll!: (value: Response) => void;
+  let collecting = true;
   fetch.mockImplementation(async (input, init) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/api/usage/sources" && (init?.method ?? "GET") === "GET") {
       sourceGets += 1;
       if (sourceGets === 1) return response([idle]);
-      return new Promise<Response>((resolve) => { resolvePoll = resolve; });
+      return response([{ ...idle, status: collecting ? "collecting" : "completed", lastSuccessAt: "2026-09-21T02:00:00Z" }]);
     }
+    if (url.pathname === "/api/usage/status") return response({ revision: collecting ? "collecting" : "completed",
+      sourceCounts: collecting ? { collecting: 1 } : {}, contentBackfill: { status: "completed" } });
     if (url.pathname === "/api/usage/sources/source-1/collect") return response({ ...idle, status: "collecting" }, 202);
     if (url.pathname === "/api/usage/summary") {
       summaryGets += 1;
@@ -463,8 +469,8 @@ it("手动采集从 202 collecting 轮询到 completed，并在后台刷新指�
   fireEvent.click(await screen.findByRole("button", { name: "重新采集" }));
   expect(await screen.findByRole("button", { name: "采集中" })).toBeDisabled();
   expect(screen.getByText("3,300")).toBeInTheDocument();
-  await act(async () => resolvePoll(response([{ ...idle, status: "completed", lastSuccessAt: "2026-09-21T02:00:00Z" }])));
-  expect(await screen.findByText("9,900")).toBeInTheDocument();
+  collecting = false;
+  expect(await screen.findByText("9,900", {}, { timeout: 2_000 })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "重新采集" })).toBeEnabled();
   expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/capabilities")).length).toBe(2);
   expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/timeseries")).length).toBe(2);
@@ -474,7 +480,7 @@ it("手动采集失败后停止轮询并恢复重试入口", async () => {
   const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
   const idle = { id: "source-2", sourceKey: "failed-source", kind: "context_snapshot", status: "idle", errorCode: null,
     rejectedRecords: 0, lastSuccessAt: null, mappings: [{ sessionId: "2", state: "active" }] };
-  let sourceGets = 0;
+  let sourceGets = 0, summaryGets = 0;
   fetch.mockImplementation(async (input, init) => {
     const url = new URL(String(input), "http://localhost");
     if (url.pathname === "/api/usage/sources" && (init?.method ?? "GET") === "GET") {
@@ -482,13 +488,44 @@ it("手动采集失败后停止轮询并恢复重试入口", async () => {
       return response(sourceGets === 1 ? [idle] : [{ ...idle, status: "failed", errorCode: "provider_log_malformed" }]);
     }
     if (url.pathname === "/api/usage/sources/source-2/collect") return response({ ...idle, status: "collecting" }, 202);
+    if (url.pathname === "/api/usage/status") return response({ revision: "failed", sourceCounts: { failed: 1 }, contentBackfill: { status: "completed" } });
+    if (url.pathname === "/api/usage/summary") return response({ ...summary, revision: summaryGets++ === 0 ? "initial" : "failed",
+      usage: { ...usage, totalTokens: summaryGets === 1 ? 3300 : 7700 } });
     return original(input, init);
   });
   mount();
   fireEvent.click(await screen.findByRole("button", { name: "重新采集" }));
   expect(await screen.findByText("provider_log_malformed")).toBeInTheDocument();
+  expect(await screen.findByText("7,700")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "重新采集" })).toBeEnabled();
   await waitFor(() => expect(sourceGets).toBe(2));
+});
+
+it("keeps a slow ranking request alive while pending status revisions change", async () => {
+  vi.useFakeTimers();
+  try {
+    const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+    let rankingSignal: AbortSignal | undefined, resolveRanking!: (value: Response) => void;
+    let revision = 0;
+    fetch.mockImplementation(async (input, init) => {
+      const path = new URL(String(input), "http://localhost").pathname;
+      if (path === "/api/usage/summary") return response({ ...summary, revision: "initial", sourceCounts: { failed: 1 } });
+      if (path === "/api/usage/status") return response({ revision: `revision-${++revision}`, sourceCounts: { failed: 1 }, contentBackfill: { status: "completed" } });
+      if (path === "/api/usage/capabilities") {
+        rankingSignal ??= init?.signal as AbortSignal;
+        if (rankingSignal === init?.signal) return new Promise<Response>((resolve) => { resolveRanking = resolve; });
+      }
+      return original(input, init);
+    });
+    mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(65_000); });
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/summary")).length).toBeGreaterThan(1);
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/capabilities"))).toHaveLength(1);
+    expect(rankingSignal?.aborted).toBe(false);
+    await act(async () => resolveRanking(response({ items: ranks, total: ranks.length })));
+    expect(screen.getByRole("button", { name: "查看 search 的调用" })).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/capabilities"))).toHaveLength(2);
+  } finally { vi.useRealTimers(); }
 });
 
 it("页面卸载会中止仍在进行的采集状态请求", async () => {
@@ -573,6 +610,33 @@ it("等待首次请求时只轮询轻量状态，不反复加载整页", async (
     expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/summary"))).toHaveLength(requests);
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "刷新采集状态" })); await vi.advanceTimersByTimeAsync(0); });
     expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/summary")).length).toBeGreaterThan(requests);
+  } finally { vi.useRealTimers(); }
+});
+
+it("来源持续采集中不因每次游标写入重复排队全量查询", async () => {
+  vi.useFakeTimers();
+  try {
+    const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
+    let collecting = true, revision = 0;
+    fetch.mockImplementation(async (input, init) => {
+      const path = new URL(String(input), "http://localhost").pathname;
+      if (path === "/api/usage/summary") return response({ ...summary, revision: collecting ? "initial" : "final",
+        sourceCounts: collecting ? { collecting: 1 } : {} });
+      if (path === "/api/usage/status") return response({ revision: collecting ? `write-${++revision}` : "final",
+        sourceCounts: collecting ? { collecting: 1 } : {}, contentBackfill: { status: "completed" } });
+      return original(input, init);
+    });
+    mount(); await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    const count = (path: string) => fetch.mock.calls.filter(([input]) => String(input).includes(path)).length;
+    expect(count("/usage/summary")).toBe(1);
+    expect(count("/usage/capabilities")).toBe(1);
+    expect(count("/usage/timeseries")).toBe(1);
+    collecting = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(count("/usage/summary")).toBe(2);
+    expect(count("/usage/capabilities")).toBe(2);
+    expect(count("/usage/timeseries")).toBe(2);
   } finally { vi.useRealTimers(); }
 });
 

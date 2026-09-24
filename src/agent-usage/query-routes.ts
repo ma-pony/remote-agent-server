@@ -42,7 +42,8 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
   const namespace = collector.namespace;
   const cache = new UsageQueryCache(collector.db);
   const reader = new UsageQueryWorker(collector);
-  app.addHook("preClose", async () => { await reader.close(); });
+  const rankingReader = new UsageQueryWorker(collector);
+  app.addHook("preClose", async () => { await Promise.all([reader.close(), rankingReader.close()]); });
   const providerEpoch = (sessionId: string, agentId: string | undefined): string | null => {
     const session = collector.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: number } | undefined;
     if (session === undefined || (agentId !== undefined && String(session.agent_id) !== agentId)) return null;
@@ -112,7 +113,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       }
       if (endpoint === "capabilities") {
         const page = await cache.getAsync(`ranking:${JSON.stringify([filter, query.dimension, query.sort, query.limit, query.offset])}`,
-          () => reader.read("rankings", [filter, query.dimension, query]));
+          () => rankingReader.read("rankings", [filter, query.dimension, query]));
         const stages = cache.get(`stages:${JSON.stringify([filter, query.dimension, query.stageOffset])}`,
           () => collector.runtimeCapabilities.stageCountsPage(filter, { dimension: query.dimension, limit: 20, offset: query.stageOffset }));
         return { ...metadata, measurement: "estimated", dimension: query.dimension, sort: query.sort, total: page.total,

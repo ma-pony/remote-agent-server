@@ -228,7 +228,11 @@ export class UsageSourceCoordinator {
 
   listSources(namespace: string, filter: SourceFilter = {}, pagination?: Pick<PaginationQuery, "page" | "pageSize">): SourceRecord[] {
     const { where, params } = this.sourceWhere(namespace, filter);
-    const rows = this.store.db.prepare(`SELECT s.* FROM agent_usage_sources s WHERE ${where} ORDER BY s.source_key, s.id ${pagination ? "LIMIT ? OFFSET ?" : ""}`)
+    const columns = pagination
+      ? `s.id, s.namespace, s.source_key, s.kind, s.capabilities_json, NULL AS checkpoint,
+        s.status, s.collection_id, s.error_code, s.rejected_records, s.last_success_at`
+      : "s.*";
+    const rows = this.store.db.prepare(`SELECT ${columns} FROM agent_usage_sources s WHERE ${where} ORDER BY s.source_key, s.id ${pagination ? "LIMIT ? OFFSET ?" : ""}`)
       .all(...params, ...(pagination ? [pagination.pageSize, (pagination.page - 1) * pagination.pageSize] : [])) as SourceRow[];
     if (rows.length === 0) return [];
     // Load every mapping of selected sources together; filtering must not truncate a source's public mappings.

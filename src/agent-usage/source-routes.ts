@@ -1,8 +1,9 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
-import { isPagedQuery, paginationQuerySchema } from "../pagination.js";
+import { paginationQuerySchema } from "../pagination.js";
 import { UsageError, type UsageErrorCode } from "./core/errors.js";
 import type { ManagedUsageSources } from "./managed-sources.js";
+import type { SourceRecord } from "./source-coordinator.js";
 
 const id = z.string().regex(/^[1-9]\d*$/).refine((value) => Number.isSafeInteger(Number(value)));
 const path = z.string().min(1).max(2048);
@@ -32,21 +33,22 @@ const errorReply = (reply: FastifyReply, error: unknown) => {
   const code = error instanceof UsageError && status !== undefined ? error.code : "usage_source_failed";
   return reply.code(status ?? 500).send({ error: { code, message: "Usage source operation could not be completed" } });
 };
+const publicSource = ({ checkpoint: _checkpoint, ...source }: SourceRecord) => source;
 
 export const registerUsageSourceRoutes = (app: FastifyInstance, manager: ManagedUsageSources): void => {
   const { collector } = manager;
   app.get("/usage/sources", (request, reply) => {
     const parsed = sourceQuerySchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage source query" } });
-    return isPagedQuery(request.query) ? collector.sources.listSourcesPage(collector.namespace, parsed.data, parsed.data)
-      : collector.sources.listSources(collector.namespace, parsed.data);
+    const page = collector.sources.listSourcesPage(collector.namespace, parsed.data, parsed.data);
+    return { ...page, items: page.items.map(publicSource) };
   });
   app.post("/usage/sources", async (request, reply) => {
     const parsed = sourceSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage source" } });
     try {
       const result = await manager.register(parsed.data);
-      return reply.code(result.created ? 201 : 200).send(result.source);
+      return reply.code(result.created ? 201 : 200).send(publicSource(result.source));
     } catch (error) { return errorReply(reply, error); }
   });
   app.post<{ Params: { id: string } }>("/usage/sources/:id/collect", (request, reply) => {
@@ -57,7 +59,7 @@ export const registerUsageSourceRoutes = (app: FastifyInstance, manager: Managed
       if (!source) throw new UsageError("usage_source_not_found");
       if (source.mappings.every((mapping) => mapping.state === "revoked")) throw new UsageError("usage_mapping_revoked");
       if (parsed.data.rebuild && source.kind !== "codex_log") throw new UsageError("usage_source_unsupported");
-      return reply.code(202).send(collector.sources.startCollect(source.id, parsed.data.rebuild));
+      return reply.code(202).send(publicSource(collector.sources.startCollect(source.id, parsed.data.rebuild)));
     } catch (error) { return errorReply(reply, error); }
   });
 };

@@ -50,7 +50,7 @@
 
 汇总、排名、趋势和来源各自加载展示；汇总慢或失败时，其他已加载区域仍可使用。排名先只计算所选排序指标并分页，再获取当页能力的完整指标。相同主体、日期、时区和分桶的汇总与趋势共享一次账本读取。查询结果缓存最多 32 项，序列化大小合计最多 4 MiB，单项超过 512 KiB 不缓存；只保留无正文的统计投影，不保留原始会话或整份账本。本连接写入或其他连接提交后，下次查询立即失效重算。
 
-`GET /api/usage/status` 使用相同的管理鉴权和主体、日期、Runtime 筛选，返回 `revision`、`sourceCounts`、`collectionFailureTotal`、`captureHealthCounts` 和 `contentBackfill`，不计算模型总量或能力排名。另返回全局进程内的 `recovery` 阶段及 `eventRetention` 清理状态；这两个字段不受主体／日期筛选，进程重启后重新计数。`eventRetention.checkedRuns` 是本进程检查的 Run 次数，`retiredEvents` 是已清理的原始事件数，`skippedByReason` 是检查时跳过的原因计数；它们不是库中剩余待清理量。`eventRetention.lastStepMs` 和 `recovery.lastBackfillMs` 分别显示最近一次清理检查与回填的耗时；`recovery.phase=backfill` 且清理时间不更新可识别补算阶段阻塞。`revision` 是不透明变更标记，数据库中的其他写入也可能使其改变，不表示新增 Token 数。后台采集或补算期间，页面每秒检查轻量状态，一分钟后降为每 30 秒；状态版本不变时不重载统计，持续变化时整页统计最多每 5 秒刷新一次，完成时立即读取最终结果。隐藏页面暂停轮询，重新可见时恢复检查。
+`GET /api/usage/status` 使用相同的管理鉴权和主体、日期、Runtime 筛选，返回 `revision`、`sourceCounts`、`collectionFailureTotal`、`captureHealthCounts` 和 `contentBackfill`，不计算模型总量或能力排名。另返回全局进程内的 `recovery` 阶段及 `eventRetention` 清理状态；这两个字段不受主体／日期筛选，进程重启后重新计数。`eventRetention.checkedRuns` 是本进程检查的 Run 次数，`retiredEvents` 是已清理的原始事件数，`skippedByReason` 是检查时跳过的原因计数；它们不是库中剩余待清理量。`eventRetention.lastStepMs` 和 `recovery.lastBackfillMs` 分别显示最近一次清理检查与回填的耗时；`recovery.phase=backfill` 且清理时间不更新可识别补算阶段阻塞。`revision` 是不透明变更标记，数据库中的其他写入也可能使其改变，不表示新增 Token 数。后台采集或补算期间，页面每秒检查轻量状态，一分钟后降为每 30 秒；活跃采集期间不反复重载统计；状态完成或失败时立即刷新。其他持续变化的状态最多每 30 秒刷新汇总、趋势与来源，排名请求运行中不取消，完成后合并刷新。隐藏页面暂停轮询，重新可见时恢复检查。
 
 - `usage` 是当前筛选范围内可计量的已知部分；同时看 `completeness`、缺失请求数与来源状态。它不证明未观察到的调用为零。
 - 缓存读取／写入属于输入子集，不重复相加。Codex 连续累计记录的可信差额可形成时间区间；当 last_token_usage 与累计增量一致时，首请求和跨日请求可按该报告的完成时间归位；其他初始基线、跨日区间或倒退计数不强行分摊。日期筛选要求完整区间落入范围，按所选时区分桶时也不能跨桶。未定位部分单列，不使用导入日期。

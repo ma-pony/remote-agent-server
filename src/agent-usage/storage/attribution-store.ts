@@ -190,6 +190,14 @@ export class AttributionStore {
       store.db.exec("ALTER TABLE agent_usage_contexts ADD COLUMN basis TEXT NOT NULL DEFAULT 'request'");
       store.db.exec("ALTER TABLE agent_usage_contexts ADD COLUMN reported_input_tokens INTEGER");
     }
+    if (!contextColumns.some(column => column.name === "estimated_input_tokens")) {
+      store.db.exec("ALTER TABLE agent_usage_contexts ADD COLUMN estimated_input_tokens INTEGER");
+    }
+    if (!contextColumns.some(column => column.name === "estimated_input_ready")) {
+      store.db.exec("ALTER TABLE agent_usage_contexts ADD COLUMN estimated_input_ready INTEGER NOT NULL DEFAULT 0");
+    }
+    store.db.exec(`CREATE INDEX IF NOT EXISTS agent_usage_contexts_unmeasured
+      ON agent_usage_contexts(context_id) WHERE estimated_input_ready=0`);
     if (!columns.some(column => column.name === "result_first_use")) {
       store.db.exec("ALTER TABLE agent_usage_exposures ADD COLUMN result_first_use TEXT");
     }
@@ -314,6 +322,7 @@ export class AttributionStore {
          content_key, content_identity_hash, modality, byte_length, token_count, estimate_id, result_first_use)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
       const estimateIds = new Map<string, number>();
+      let estimatedInputTokens = 0, knownBlocks = 0;
       for (const block of blocks) {
         const references = new Map<string, typeof block.capabilities[number]>();
         for (const reference of block.capabilities.slice(0, MAX_CAPABILITY_REFERENCES_PER_BLOCK)) {
@@ -327,6 +336,7 @@ export class AttributionStore {
           : block.content.byteLength ?? null);
         const estimate = estimates.get(block.position)!;
         const { tokens: tokenCount, ...metadata } = estimate;
+        if (tokenCount !== null) { estimatedInputTokens += tokenCount; knownBlocks++; }
         const metadataJson = JSON.stringify(metadata);
         let estimateId = estimateIds.get(metadataJson);
         if (estimateId === undefined) {
@@ -340,6 +350,8 @@ export class AttributionStore {
             contentKey, block.content.modality, byteLength, tokenCount, estimateId, block.resultFirstUse ?? null);
         }
       }
+      this.store.db.prepare(`UPDATE agent_usage_contexts SET estimated_input_tokens=?, estimated_input_ready=1
+        WHERE context_id=?`).run(knownBlocks ? estimatedInputTokens : null, contextId);
       this.firstUses.refresh(contextId);
       if (input.coverage === "full" && exceededBudget) {
         this.store.db.prepare("UPDATE agent_usage_contexts SET coverage = 'partial' WHERE context_id = ?").run(contextId);
@@ -470,18 +482,44 @@ export class AttributionStore {
 
   contextSummary(filter: AttributionFilter) {
     const scope = this.contextWhere(filter);
-    const row = this.store.db.prepare(`WITH scoped AS (
-      SELECT c.* FROM agent_usage_contexts c WHERE ${scope.clauses.length ? scope.clauses.join(" AND ") : "1"}),
-      blocks AS (SELECT e.context_id,e.position,MAX(e.token_count) AS tokens
-        FROM scoped c JOIN agent_usage_exposures e USING(context_id) GROUP BY e.context_id,e.position)
+    const where = scope.clauses.length ? scope.clauses.join(" AND ") : "1";
+    const row = this.store.db.prepare(`
       SELECT COUNT(*) AS requests,COALESCE(SUM(basis='transcript'),0) AS reconstructedRequests,
         COUNT(reported_input_tokens) AS requestsWithReportedInput,SUM(reported_input_tokens) AS reportedInputTokens,
-        (SELECT SUM(tokens) FROM blocks) AS estimatedInputTokens FROM scoped`).get(...scope.params) as {
+        SUM(estimated_input_tokens) AS estimatedInputTokens,
+        COALESCE(SUM(estimated_input_ready=0),0) AS unmeasured FROM agent_usage_contexts c WHERE ${where}`).get(...scope.params) as {
         requests: number; reconstructedRequests: number; requestsWithReportedInput: number;
-        reportedInputTokens: number | null; estimatedInputTokens: number | null
+        reportedInputTokens: number | null; estimatedInputTokens: number | null; unmeasured: number
       };
-    return { ...row, differenceTokens: row.reportedInputTokens === null || row.estimatedInputTokens === null
-      || row.requestsWithReportedInput !== row.requests ? null : row.reportedInputTokens - row.estimatedInputTokens };
+    let estimatedInputTokens = row.estimatedInputTokens;
+    if (row.unmeasured > 0) {
+      const legacy = this.store.db.prepare(`SELECT SUM(tokens) AS tokens FROM (
+        SELECT MAX(e.token_count) AS tokens FROM agent_usage_contexts c
+        JOIN agent_usage_exposures e USING(context_id) WHERE ${where} AND c.estimated_input_ready=0
+        GROUP BY e.context_id,e.position)`).get(...scope.params) as { tokens: number | null };
+      if (legacy.tokens !== null) estimatedInputTokens = (estimatedInputTokens ?? 0) + legacy.tokens;
+    }
+    const { unmeasured: _unmeasured, ...summary } = row;
+    return { ...summary, estimatedInputTokens, differenceTokens: row.reportedInputTokens === null || estimatedInputTokens === null
+      || row.requestsWithReportedInput !== row.requests ? null : row.reportedInputTokens - estimatedInputTokens };
+  }
+
+  /** Fill historical request totals in small transactions without blocking startup. */
+  backfillContextTotals(limit: number): boolean {
+    const rows = this.store.db.prepare(`SELECT context_id FROM agent_usage_contexts
+      WHERE estimated_input_ready=0 LIMIT ?`).all(limit + 1) as Array<{ context_id: string }>;
+    if (rows.length === 0) return false;
+    const totals = this.store.db.prepare(`SELECT SUM(tokens) AS tokens FROM (
+      SELECT MAX(token_count) AS tokens FROM agent_usage_exposures WHERE context_id=? GROUP BY position)`);
+    const update = this.store.db.prepare(`UPDATE agent_usage_contexts SET estimated_input_tokens=?, estimated_input_ready=1
+      WHERE context_id=? AND estimated_input_ready=0`);
+    this.store.db.transaction(() => {
+      for (const { context_id: contextId } of rows.slice(0, limit)) {
+        const total = totals.get(contextId) as { tokens: number | null };
+        update.run(total.tokens, contextId);
+      }
+    })();
+    return rows.length > limit;
   }
 
   rankingsPage(filter: AttributionFilter, dimension: RankingDimension, options: { sort: "observedTotalTokens" | "observedArgumentTokens" | "observedResultTokens" | "totalInputTokens" | "inputBytes" | "calls" | "definitionInputTokens" | "argumentInputTokens" | "firstResultInputTokens" | "repeatedResultInputTokens" | "failures" | "latencyMsP95"; limit: number; offset: number }): { items: AttributionRankRow[]; total: number } {
@@ -492,19 +530,8 @@ export class AttributionStore {
     const execution = this.invocationWhere(filter, "execution", capability);
     const contextCalls = this.invocationWhere(filter, "context", capability);
     const contentGroups = this.runtimeContentGroups(filter, dimension);
-    // Discover identities independently of metrics. Sorting by content must not aggregate
-    // every input exposure or calculate latency percentiles before selecting a page.
-    const base = `WITH executions AS MATERIALIZED (
-      SELECT i.public_id,i.capability_key,i.status,i.started_at,i.ended_at FROM agent_usage_invocations i WHERE ${execution.clauses.join(" AND ")}),
-      runtime_content AS (SELECT json_extract(value,'$.capability_key') AS capability_key,
-        json_extract(value,'$.category') AS category,json_extract(value,'$.tokens') AS tokens FROM json_each(?)),
-      keys AS (SELECT DISTINCT e.capability_key FROM agent_usage_contexts c JOIN agent_usage_exposures e USING(context_id)
-        WHERE ${context.clauses.join(" AND ")}
-        UNION SELECT capability_key FROM executions
-        UNION SELECT i.capability_key FROM agent_usage_invocations i WHERE ${contextCalls.clauses.join(" AND ")}
-        UNION SELECT capability_key FROM runtime_content)`;
-    const params = [...execution.params, JSON.stringify(contentGroups.map(({ capability_key, category, tokens }) => ({ capability_key, category, tokens }))),
-      ...context.params, ...contextCalls.params];
+    // Content/call sorts still discover context-only identities independently. Input sorts
+    // reuse their grouped metric as the key set instead of scanning every exposure twice.
     let metric: string;
     const metricParams: string[] = [];
     if (options.sort.startsWith("observed")) {
@@ -534,11 +561,24 @@ export class AttributionStore {
       if (firstUse) metricParams.push(filter.runtimeKind === undefined ? "" : JSON.stringify(filter.runtimeKind));
       metricParams.push(...context.params);
     }
+    const inputSort = !options.sort.startsWith("observed") && !["calls", "failures", "latencyMsP95"].includes(options.sort);
+    const base = `WITH executions AS MATERIALIZED (
+      SELECT i.public_id,i.capability_key,i.status,i.started_at,i.ended_at FROM agent_usage_invocations i WHERE ${execution.clauses.join(" AND ")}),
+      runtime_content AS (SELECT json_extract(value,'$.capability_key') AS capability_key,
+        json_extract(value,'$.category') AS category,json_extract(value,'$.tokens') AS tokens FROM json_each(?)),
+      metric AS MATERIALIZED (${metric}),
+      keys AS (${inputSort ? "SELECT capability_key FROM metric" : `SELECT DISTINCT e.capability_key FROM agent_usage_contexts c
+        JOIN agent_usage_exposures e USING(context_id) WHERE ${context.clauses.join(" AND ")}`}
+        UNION SELECT capability_key FROM executions
+        UNION SELECT i.capability_key FROM agent_usage_invocations i WHERE ${contextCalls.clauses.join(" AND ")}
+        UNION SELECT capability_key FROM runtime_content)`;
+    const params = [...execution.params, JSON.stringify(contentGroups.map(({ capability_key, category, tokens }) => ({ capability_key, category, tokens }))),
+      ...metricParams, ...(inputSort ? [] : context.params), ...contextCalls.params];
     const order = options.sort === "calls" || options.sort === "failures" ? "COALESCE(metric.value,0)" : "metric.value";
-    const selected = this.store.db.prepare(`${base}, metric AS (${metric})
+    const selected = this.store.db.prepare(`${base}
       SELECT keys.capability_key,COUNT(*) OVER() AS total FROM keys LEFT JOIN metric USING(capability_key)
       ORDER BY ${order} DESC NULLS LAST,json_extract(keys.capability_key,'$[2]'),keys.capability_key LIMIT ? OFFSET ?`)
-      .all(...params, ...metricParams, options.limit, options.offset) as Array<{ capability_key: string; total: number }>;
+      .all(...params, options.limit, options.offset) as Array<{ capability_key: string; total: number }>;
     const total = selected[0]?.total ?? (this.store.db.prepare(`${base} SELECT COUNT(*) AS total FROM keys`).get(...params) as { total: number }).total;
     const keys = selected.map(row => row.capability_key);
     const rows = new Map(this.rankings(filter, dimension, keys, contentGroups.filter(row => keys.includes(row.capability_key)))
@@ -547,10 +587,17 @@ export class AttributionStore {
   }
 
   private runtimeContentGroups(filter: AttributionFilter, dimension: RankingDimension, keys?: string[]): RuntimeContentGroup[] {
-    const scope = runtimeContentScope(this.store.db, filter, { ...(dimension === "all" ? {} : { capabilityKind: dimension }), keys });
-    return this.store.db.prepare(`WITH scoped AS (${scope.sql}) SELECT capability_key,category,estimate_json,
-      SUM(tokens) AS tokens,COUNT(*) AS observations FROM scoped GROUP BY category,estimate_id,legacy_estimate_json`)
-      .all(...scope.params) as RuntimeContentGroup[];
+    const scope = runtimeContentScope(this.store.db, filter,
+      { ...(dimension === "all" ? {} : { capabilityKind: dimension }), keys, deferEstimateJoin: true });
+    // A filtered range can contain millions of content rows but only a handful of
+    // category/estimate profiles. Join the profile table after aggregation.
+    const rows = this.store.db.prepare(`WITH scoped AS (${scope.sql}), grouped AS MATERIALIZED (
+      SELECT category,estimate_id,legacy_estimate_json,SUM(tokens) AS tokens,COUNT(*) AS observations
+      FROM scoped GROUP BY category,estimate_id,legacy_estimate_json)
+      SELECT g.category,COALESCE(t.estimate_json,g.legacy_estimate_json) AS estimate_json,
+        g.tokens,g.observations FROM grouped g LEFT JOIN agent_usage_token_estimates t ON t.id=g.estimate_id`)
+      .all(...scope.params) as Array<Omit<RuntimeContentGroup, "capability_key">>;
+    return rows.map((row) => ({ ...row, capability_key: capabilityKey(contentCapability(row.category)!) }));
   }
 
   rankings(filter: AttributionFilter, dimension: RankingDimension, keys?: string[], preparedContent?: RuntimeContentGroup[]): AttributionRankRow[] {

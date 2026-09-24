@@ -53,6 +53,21 @@ describe("host usage integration", () => {
     } finally { await host.stopRecovery(); }
   });
 
+  it("advances context totals while content backfill and source collection remain active", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { host } = setup();
+    vi.spyOn(host.contentBackfill, "step").mockResolvedValue(true);
+    vi.spyOn(host.sources, "sourceStatusCounts").mockReturnValue({ collecting: 1 });
+    const totals = vi.spyOn(host.attribution, "backfillContextTotals").mockReturnValue(true);
+    host.startRecovery();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(totals.mock.calls.length).toBeGreaterThan(1);
+      expect(totals).toHaveBeenCalledWith(20);
+    } finally { await host.stopRecovery(); }
+  });
+
   it("stops in-flight content measurement without committing it and can resume", async () => {
     const { host, db, runId } = setup();
     db.prepare("UPDATE runs SET status='succeeded' WHERE id=?").run(runId);
