@@ -21,17 +21,105 @@ afterEach(() => { cleanup(); sessionStorage.clear(); localStorage.clear(); vi.un
 
 it("刷新来源只重新发现目录，不会应用版本", async () => {
   const calls: string[] = [];
+  let updateAvailable = false;
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => { const url = String(input); calls.push(`${init?.method ?? "GET"} ${url}`);
     if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
-    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [skill]);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [{ ...skill, updateAvailable, latestRevision: updateAvailable ? latest : current }]);
     if (new URL(url, "http://localhost").pathname === "/api/skill-sources") return pagedManagementResponse(url, [{ id: "team", name: "Team", url: "https://example.test/skills.git", ref: null, path: "", status: "ready", lastSyncedAt: null, error: null, skillCount: 1, warnings: [] }]);
-    if (url === "/api/skill-sources/team/refresh" && init?.method === "POST") return pagedManagementResponse(url, {});
+    if (url === "/api/skill-sources/team/refresh" && init?.method === "POST") { updateAvailable = true; return pagedManagementResponse(url, {}); }
     throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
   }));
   render(<App />); fireEvent.click(await screen.findByRole("button", { name: "管理 Git 来源" }));
+  expect(screen.queryByRole("button", { name: "应用全部更新（1）" })).not.toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "刷新" }));
   await waitFor(() => expect(calls).toContain("POST /api/skill-sources/team/refresh"));
+  expect(await screen.findByRole("button", { name: "应用全部更新（1）" })).toBeInTheDocument();
   expect(calls.some((call) => call.includes("/revision"))).toBe(false);
+});
+
+it("刷新后迟到的旧 Skill 列表不会隐藏批量应用入口", async () => {
+  let finishInitial: ((value: Response) => void) | undefined;
+  let catalogReads = 0;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) {
+      if (url.includes("?")) return pagedManagementResponse(url, [skill]);
+      if (++catalogReads === 1) return new Promise<Response>((resolve) => { finishInitial = resolve; });
+      return response([skill]);
+    }
+    if (new URL(url, "http://localhost").pathname === "/api/skill-sources") return pagedManagementResponse(url, [{ id: "team", name: "Team", url: "https://example.test/skills.git", ref: null, path: "", status: "ready", lastSyncedAt: null, error: null, skillCount: 1, warnings: [] }]);
+    if (url === "/api/skill-sources/team/refresh" && init?.method === "POST") return response({});
+    throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "管理 Git 来源" }));
+  await waitFor(() => expect(finishInitial).toBeDefined());
+  fireEvent.click(await screen.findByRole("button", { name: "刷新" }));
+  expect(await screen.findByRole("button", { name: "应用全部更新（1）" })).toBeInTheDocument();
+  await act(async () => finishInitial?.(response([{ ...skill, latestRevision: current, updateAvailable: false }])));
+  expect(screen.getByRole("button", { name: "应用全部更新（1）" })).toBeInTheDocument();
+});
+
+it("从 Git 来源弹窗批量应用当前智能体所有分页中的更新，并跳过本地修改和 ZIP", async () => {
+  const other = { ...skill, id: "other-review", name: "other-review" };
+  const local = { ...skill, id: "local-review", name: "local-review", locallyModified: true };
+  const upload = { ...skill, id: "zip-review", name: "zip-review", source: "upload" };
+  const fillers = Array.from({ length: 20 }, (_, index) => ({ ...skill, id: `idle-${index}`, name: `idle-${index}`, updateAvailable: false }));
+  let catalog = [skill, ...fillers, other, local, upload];
+  const writes: Array<{ id: string; body: unknown }> = [];
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push(`${init?.method ?? "GET"} ${url}`);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, catalog);
+    if (new URL(url, "http://localhost").pathname === "/api/skill-sources") return pagedManagementResponse(url, []);
+    const match = url.match(new RegExp(`^/api/agents/${agent.id}/skills/([^/]+)/revision$`));
+    if (match && init?.method === "POST") {
+      writes.push({ id: match[1]!, body: JSON.parse(String(init.body)) });
+      catalog = catalog.map((item) => item.id === match[1] ? { ...item, currentRevision: latest, updateAvailable: false } : item);
+      return pagedManagementResponse(url, catalog.find((item) => item.id === match[1]));
+    }
+    throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "管理 Git 来源" }));
+  fireEvent.click(await screen.findByRole("button", { name: "应用全部更新（2）" }));
+  fireEvent.click(screen.getByRole("button", { name: /^应用全部更新$/ }));
+  await waitFor(() => expect(writes).toEqual([
+    { id: "review", body: { revision: latest, expectedRevision: current } },
+    { id: "other-review", body: { revision: latest, expectedRevision: current } }
+  ]));
+  expect(await screen.findByText("已应用 2 个 Git Skill 更新")).toBeInTheDocument();
+  expect(screen.getByText("因本地修改跳过：local-review")).toBeInTheDocument();
+  expect(calls.some((call) => call.includes("/diff"))).toBe(false);
+  expect(screen.queryByRole("button", { name: "应用全部更新（2）" })).not.toBeInTheDocument();
+});
+
+it("批量应用单项失败后继续处理其余更新并报告失败", async () => {
+  const other = { ...skill, id: "other-review", name: "other-review" };
+  let catalog = [skill, other];
+  const writes: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, catalog);
+    if (new URL(url, "http://localhost").pathname === "/api/skill-sources") return pagedManagementResponse(url, []);
+    if (init?.method === "POST" && url.endsWith("/revision")) {
+      writes.push(url);
+      if (url.includes("/skills/review/")) return response({ error: { code: "skill_revision_conflict", message: "The selected version has changed" } }, 409);
+      catalog = [skill, { ...other, currentRevision: latest, updateAvailable: false }];
+      return pagedManagementResponse(url, catalog[1]);
+    }
+    throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "管理 Git 来源" }));
+  fireEvent.click(await screen.findByRole("button", { name: "应用全部更新（2）" }));
+  fireEvent.click(screen.getByRole("button", { name: /^应用全部更新$/ }));
+  expect(await screen.findByText("已应用 1 个 Git Skill 更新")).toBeInTheDocument();
+  expect(screen.getByText("review: The selected version has changed")).toBeInTheDocument();
+  expect(writes).toEqual([`/api/agents/${agent.id}/skills/review/revision`, `/api/agents/${agent.id}/skills/other-review/revision`]);
 });
 
 it("选择版本后必须预览，才用 expectedRevision 明确应用或回滚", async () => {

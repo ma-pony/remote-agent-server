@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useRef, useState } from "react";
 import { GitBranch, Loader2, Plus, RefreshCw } from "lucide-react";
 import { api, errorMessage, type AgentSkill, type SkillDiff, type SkillRevisionHistory, type SkillSource, type Page } from "@/api";
 import { useI18n } from "@/i18n";
@@ -21,6 +21,7 @@ type SourceSummary = Omit<SkillSource, "warnings"> & {warningCount: number};
 
 type RevisionPage = Page<SkillRevisionHistory["revisions"][number]> & Omit<SkillRevisionHistory, "revisions">;
 type DiffPage = Page<SkillDiff["files"][number]> & Omit<SkillDiff, "files">;
+type ApplySummary = { applied: number; skipped: string[]; failed: Array<{ name: string; message: string }> };
 
 const SkillError = ({ message }: { message: string }) => {
   const { text } = useI18n();
@@ -29,7 +30,7 @@ const SkillError = ({ message }: { message: string }) => {
   </Alert>;
 };
 
-export const SkillSourcesDialog = ({ onChanged, disabled }: { onChanged: () => Promise<void>; disabled: boolean }) => {
+export const SkillSourcesDialog = ({ agentId, onChanged, disabled }: { agentId: number; onChanged: () => Promise<void>; disabled: boolean }) => {
   const { text } = useI18n();
   const [open, setOpen] = useState(false);
   const [result, setResult] = useState<Page<SourceSummary> | null>(null);
@@ -42,26 +43,70 @@ export const SkillSourcesDialog = ({ onChanged, disabled }: { onChanged: () => P
   const [path, setPath] = useState("");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [catalog, setCatalog] = useState<AgentSkill[] | null>(null);
+  const [applySummary, setApplySummary] = useState<ApplySummary | null>(null);
+  const [applyProgress, setApplyProgress] = useState<{ done: number; total: number } | null>(null);
+  const catalogRequest = useRef(0);
   const endpoint = `/skill-sources?page=${page}&pageSize=20&query=${encodeURIComponent(query)}`;
   const reload = async () => setResult(await api<Page<SourceSummary>>(endpoint));
+  const reloadCatalog = async (signal?: AbortSignal) => {
+    const request = ++catalogRequest.current;
+    try {
+      const next = await api<AgentSkill[]>(`/agents/${agentId}/skills`, { signal });
+      if (request === catalogRequest.current && !signal?.aborted) setCatalog(next);
+    } catch (reason) {
+      if (request === catalogRequest.current && !signal?.aborted) throw reason;
+    }
+  };
   useEffect(() => {
     if (!open) return;
     const controller = new AbortController();
-    setResult(null); setError("");
+    setResult(null); setCatalog(null); setApplySummary(null); setApplyProgress(null); setError("");
     void api<Page<SourceSummary>>(endpoint, { signal: controller.signal }).then(setResult)
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
-    return () => controller.abort();
-  }, [open, endpoint]);
+    void reloadCatalog(controller.signal)
+      .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    return () => { controller.abort(); catalogRequest.current++; };
+  }, [open, endpoint, agentId]);
   const operate = async (key: string, operation: () => Promise<void>) => {
     setBusy(key); setError("");
+    setApplyProgress(null);
+    if (key !== "apply-all") setApplySummary(null);
     try { await operation(); }
     catch (reason) { setError(errorMessage(reason)); }
     finally {
-      try { await reload(); await onChanged(); }
+      try { await Promise.all([reload(), reloadCatalog(), onChanged()]); }
       catch (reason) { setError(errorMessage(reason)); }
+      setApplyProgress(null);
       setBusy("");
     }
   };
+  const gitUpdates = catalog?.filter((skill) => skill.source === "git" && skill.enabled && skill.available && skill.updateAvailable) ?? [];
+  const applicableUpdates = gitUpdates.filter((skill) => !skill.locallyModified && skill.currentRevision && skill.latestRevision);
+  const blockedUpdates = gitUpdates.filter((skill) => skill.locallyModified);
+  const applyAll = () => void operate("apply-all", async () => {
+    // Re-read every Skill so the action covers updates outside the current list page.
+    const current = await api<AgentSkill[]>(`/agents/${agentId}/skills`);
+    const updates = current.filter((skill) => skill.source === "git" && skill.enabled && skill.available && skill.updateAvailable);
+    const summary: ApplySummary = { applied: 0, skipped: [], failed: [] };
+    setApplyProgress({ done: 0, total: updates.length });
+    for (const [index, skill] of updates.entries()) {
+      if (skill.locallyModified) {
+        summary.skipped.push(skill.name);
+      } else if (!skill.currentRevision || !skill.latestRevision) {
+        summary.failed.push({ name: skill.name, message: text("缺少版本信息", "Revision information unavailable") });
+      } else {
+        try {
+          await api<AgentSkill>(`/agents/${agentId}/skills/${encodeURIComponent(skill.id)}/revision`, {
+            method: "POST", body: JSON.stringify({ revision: skill.latestRevision, expectedRevision: skill.currentRevision })
+          });
+          summary.applied++;
+        } catch (reason) { summary.failed.push({ name: skill.name, message: errorMessage(reason) }); }
+      }
+      setApplyProgress({ done: index + 1, total: updates.length });
+    }
+    setApplySummary(summary);
+  });
   const add = (event: FormEvent) => {
     event.preventDefault();
     void operate("add", async () => {
@@ -79,6 +124,24 @@ export const SkillSourcesDialog = ({ onChanged, disabled }: { onChanged: () => P
         <DialogDescription>{text("刷新只发现可用版本，不会更新任何智能体。移除来源会保留已安装的版本和回滚历史。", "Refreshing only discovers versions; it never updates an Agent. Removing a source keeps installed versions and rollback history.")}</DialogDescription>
       </DialogHeader>
       <SkillError message={error} />
+      {gitUpdates.length > 0 ? <Alert>
+        <AlertTitle>{text(`当前智能体有 ${gitUpdates.length} 个 Git Skill 更新`, `${gitUpdates.length} Git Skill updates for this Agent`)}</AlertTitle>
+        <AlertDescription>{text("批量应用最新版本只影响当前智能体的后续运行；仍可逐项查看差异。", "Applying the latest versions affects only future runs of this Agent. You can still review each diff individually.")}{blockedUpdates.length > 0 ? ` ${text(`${blockedUpdates.length} 个存在本地修改，将跳过。`, `${blockedUpdates.length} with local edits will be skipped.`)}` : ""}</AlertDescription>
+        {busy === "apply-all" ? <p role="status" className="mt-3 flex items-center gap-2 text-sm"><Loader2 className="animate-spin" />{applyProgress === null ? text("正在检查更新…", "Checking updates…") : text(`正在应用 ${applyProgress.done} / ${applyProgress.total}`, `Applying ${applyProgress.done} / ${applyProgress.total}`)}</p> : applicableUpdates.length > 0 ? <AlertDialog>
+          <AlertDialogTrigger asChild><Button className="mt-3" size="sm" disabled={pending}>{text(`应用全部更新（${applicableUpdates.length}）`, `Apply all updates (${applicableUpdates.length})`)}</Button></AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader><AlertDialogTitle>{text("应用全部 Git Skill 更新？", "Apply all Git Skill updates?")}</AlertDialogTitle><AlertDialogDescription>{text(`将当前智能体的 ${applicableUpdates.length} 个 Skill 应用到最新版本。本地修改的 Skill 会跳过；每项更新仍会检查当前版本。`, `Apply the latest versions of ${applicableUpdates.length} Skills to this Agent. Skills with local edits will be skipped, and each current revision will be checked.`)}</AlertDialogDescription></AlertDialogHeader>
+            <AlertDialogFooter><AlertDialogCancel>{text("取消", "Cancel")}</AlertDialogCancel><AlertDialogAction onClick={applyAll}>{text("应用全部更新", "Apply all updates")}</AlertDialogAction></AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog> : null}
+      </Alert> : null}
+      {applySummary !== null ? <Alert variant={applySummary.failed.length > 0 ? "destructive" : "default"}>
+        <AlertTitle>{text(`已应用 ${applySummary.applied} 个 Git Skill 更新`, `${applySummary.applied} Git Skill updates applied`)}</AlertTitle>
+        <AlertDescription>
+          {applySummary.skipped.length > 0 ? <p>{text(`因本地修改跳过：${applySummary.skipped.join("、")}`, `Skipped due to local edits: ${applySummary.skipped.join(", ")}`)}</p> : null}
+          {applySummary.failed.map(({ name, message }) => <p key={name}>{name}: {message}</p>)}
+        </AlertDescription>
+      </Alert> : null}
       <form onSubmit={add}>
         <FieldGroup>
           <Field><FieldLabel htmlFor="skill-source-name">{text("名称", "Name")}</FieldLabel><Input id="skill-source-name" required maxLength={100} value={name} disabled={pending} onChange={(event) => setName(event.target.value)} /></Field>
@@ -88,7 +151,7 @@ export const SkillSourcesDialog = ({ onChanged, disabled }: { onChanged: () => P
         </FieldGroup>
         <div className="mt-4 flex justify-end"><Button type="submit" disabled={pending || !name.trim() || !url.trim()}>{busy === "add" ? <Loader2 className="animate-spin" /> : <Plus />}{text("添加来源", "Add source")}</Button></div>
       </form>
-      <div className="flex justify-end"><Button variant="ghost" size="sm" disabled={busy !== ""} onClick={() => { void reload().catch((reason: unknown) => setError(errorMessage(reason))); }}>{text("重新加载列表", "Reload list")}</Button></div>
+      <div className="flex justify-end"><Button variant="ghost" size="sm" disabled={busy !== ""} onClick={() => { void Promise.all([reload(), reloadCatalog()]).catch((reason: unknown) => setError(errorMessage(reason))); }}>{text("重新加载列表", "Reload list")}</Button></div>
       <Input aria-label={text("搜索 Git 来源", "Search Git sources")} value={query} onChange={event => {setPage(1); setQuery(event.target.value);}} />
       {sources === null ? (error === "" ? <Skeleton className="h-24" /> : null) : sources.length === 0
         ? <p className="text-sm text-muted-foreground">{text("尚未添加 Git 来源。", "No Git sources yet.")}</p>
