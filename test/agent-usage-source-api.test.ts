@@ -229,6 +229,45 @@ describe("usage source management API", () => {
     expect(summary.json().usage.totalTokens).toBe(280);
     expect(response.body).not.toContain("hello world");
   });
+  it("rebuilds an unchanged Codex source on request without duplicating reported usage", async () => {
+    const { app, db, root, manager, registration, session } = await setup([]);
+    await manager.collector.stopRecovery();
+    const line = (type: string, payload: object) => JSON.stringify({ timestamp: "2026-09-24T01:00:00Z", type, payload });
+    const usage = (input: number) => line("event_msg", { type: "token_count", info: {
+      total_token_usage: { input_tokens: input, output_tokens: input / 10, total_tokens: input + input / 10 },
+      last_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 }
+    } });
+    await writeFile(join(root, "codex.jsonl"), [
+      line("session_meta", { id: "codex-session-1" }),
+      line("response_item", { type: "message", role: "user", content: [{ type: "input_text", text: "prompt" }] }),
+      line("response_item", { type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: "thought" }] }),
+      usage(100), usage(200)
+    ].join("\n") + "\n");
+    const registered = await register(app, registration);
+    const sourceId = registered.json().id as string;
+    expect((await app.inject({ method: "POST", url: `/api/usage/sources/${sourceId}/collect`, headers })).statusCode).toBe(202);
+    await vi.waitFor(() => expect(manager.collector.sources.listSources(manager.collector.namespace)[0]?.status).toBe("completed"));
+    const filter = { namespace: manager.collector.namespace, sessionId: String(session.id) };
+    const reported = manager.collector.attribution.contextSummary(filter).reportedInputTokens;
+    const checkpoint = db.prepare("SELECT checkpoint FROM agent_usage_sources WHERE id=?").get(sourceId) as { checkpoint: string };
+    db.prepare("UPDATE agent_usage_sources SET checkpoint=? WHERE id=?")
+      .run(JSON.stringify({ ...JSON.parse(checkpoint.checkpoint) as object, version: 2 }), sourceId);
+    db.prepare("UPDATE agent_usage_contexts SET revision=revision/2 WHERE session_id=?").run(String(session.id));
+    db.prepare(`DELETE FROM agent_usage_exposures WHERE context_id IN
+      (SELECT context_id FROM agent_usage_contexts WHERE session_id=?)
+      AND json_extract(capability_key,'$[0]')='assistant_thought'`).run(String(session.id));
+    const before = manager.collector.attribution.contextSummary(filter).estimatedInputTokens;
+    expect(manager.collector.attribution.rankings(filter, "assistant_thought")).toHaveLength(0);
+    expect((await app.inject({ method: "POST", url: `/api/usage/sources/${sourceId}/collect`, headers })).statusCode).toBe(202);
+    await vi.waitFor(() => expect(manager.collector.sources.listSources(manager.collector.namespace)[0]?.status).toBe("completed"));
+    expect(manager.collector.attribution.contextSummary(filter).estimatedInputTokens).toBe(before);
+    const response = await app.inject({ method: "POST", url: `/api/usage/sources/${sourceId}/collect`, headers,
+      payload: { rebuild: true } });
+    expect(response.statusCode).toBe(202);
+    await vi.waitFor(() => expect(manager.collector.attribution.rankings(filter, "assistant_thought")[0]?.totalInputTokens).toBeGreaterThan(0));
+    expect(manager.collector.attribution.contextSummary(filter).reportedInputTokens).toBe(reported);
+    expect(manager.collector.attribution.contextSummary(filter).estimatedInputTokens).toBeGreaterThan(before!);
+  });
   it("imports and ranks a complete model-tokenized result beyond the old block and context limits", async () => {
     const { app, root, manager, registration } = await setup();
     const snapshot = snapshotFixture();

@@ -307,7 +307,7 @@ USAGE_IMPORT_ROOTS='{"manual":"/srv/remote-agent/usage-imports"}'
 
 目录由运维创建和授权，只放本次需要导入的数据。来源登记要求管理 Token、目录 ID、相对路径、来源 Session 到业务 Session／epoch 的映射；拒绝任意绝对文件路径、远端 URL 和越界符号链接。上下文快照使用本项目的 `context-snapshot-v1` 格式，不宣称兼容某第三方的原生导出。逐步操作、合成示例和查询命令见[用量分析指南](agent-usage.md)。
 
-累计能力占用默认使用 Codex／Claude Code 原生会话日志，兼容现有登录方式，无需清库或增加配置。升级后原生日志采集游标按版本增量重建一次，后续从已提交位置续采；不恢复已删除的原文，也不重复计入上报总量。需要直接请求输入证据时，可配置 `USAGE_CAPTURE_UPSTREAMS`，例如 `{"codex":{"baseUrl":"https://api.openai.com/v1","protocol":"responses","apiKeyEnv":"USAGE_OPENAI_API_KEY"}}`，并由 Secret 管理方式向服务注入对应 key。配置明确切换到指定 API-key 上游，不沿用本机 OAuth／Bedrock／Vertex 凭据。采集入口仅监听 loopback，按 Session／epoch 隔离，无需开放防火墙端口；只在下一次服务启动生效。不要把 key 放入 JSON、命令参数或文档。未启用 HTTP 采集时自动使用日志重建估算。配置 HTTP 采集的 Provider 由请求采集负责归因，原生日志仍补充上报总量，避免两套输入重复相加。
+累计能力占用默认使用 Codex／Claude Code 原生会话日志，兼容现有登录方式，无需清库或增加配置。升级后未变化的已完成日志不会自动全量重放；追加记录时按新解析器重建，已结束 Codex 会话的旧估算可按[用量分析指南](agent-usage.md)对指定来源手动重建。重建保留已提交游标，失败后可继续采集；不恢复已删除的原文，也不重复计入上报总量。需要直接请求输入证据时，可配置 `USAGE_CAPTURE_UPSTREAMS`，例如 `{"codex":{"baseUrl":"https://api.openai.com/v1","protocol":"responses","apiKeyEnv":"USAGE_OPENAI_API_KEY"}}`，并由 Secret 管理方式向服务注入对应 key。配置明确切换到指定 API-key 上游，不沿用本机 OAuth／Bedrock／Vertex 凭据。采集入口仅监听 loopback，按 Session／epoch 隔离，无需开放防火墙端口；只在下一次服务启动生效。不要把 key 放入 JSON、命令参数或文档。未启用 HTTP 采集时自动使用日志重建估算。配置 HTTP 采集的 Provider 由请求采集负责归因，原生日志仍补充上报总量，避免两套输入重复相加。
 
 转发过程中只使用有界内存解析正文，超限、缺失及中断显式显示采集不完整；不会将模型原文写入新账本。服务必须能访问配置的上游，并给受信任的托管 Provider 进程访问本地入口的权限。上线验收应使用专门测试 Session 核对一次真实请求的上报用量和具体 MCP 身份；仓库的受控协议测试不能替代该环境验收。
 

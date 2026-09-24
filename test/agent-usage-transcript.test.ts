@@ -92,6 +92,26 @@ it("resumes body-free state and ignores repeated Codex rate-limit counters", asy
   expect(terminal[0]?.context).toBeUndefined();
 });
 
+it("includes visible Codex reasoning when its summary is empty", async () => {
+  const test = setup();
+  await test.feed(meta);
+  await test.feed(message("user", "prompt"));
+  await test.feed(item({ type: "reasoning", summary: [], content: [{ type: "reasoning_text", text: "thought" }] }));
+  await test.feed(count(100));
+  expect(test.attribution.rankings({ namespace: "test" }, "assistant_thought")).toHaveLength(0);
+  const updated = await test.feed(count(200));
+  expect(test.attribution.rankings({ namespace: "test" }, "assistant_thought")[0]?.totalInputTokens).toBe(7);
+  expect(test.attribution.contextSummary({ namespace: "test" }).estimatedInputTokens).toBe(53);
+  const context = updated.find(entry => entry.context)?.context;
+  expect(context).toBeDefined();
+  test.db.prepare("UPDATE agent_usage_contexts SET revision=revision/2 WHERE invocation_id=?").run(context!.invocationId);
+  test.db.prepare(`DELETE FROM agent_usage_exposures WHERE context_id IN
+    (SELECT context_id FROM agent_usage_contexts WHERE invocation_id=?)
+    AND json_extract(capability_key,'$[0]')='assistant_thought'`).run(context!.invocationId);
+  await test.attribution.upsertContext(test.binding, context!);
+  expect(test.attribution.rankings({ namespace: "test" }, "assistant_thought")[0]?.totalInputTokens).toBe(7);
+});
+
 it("replaces compacted history and stops charging retired tool content", async () => {
   const test = setup();
   await test.feed(meta); await test.feed(call("call")); await test.feed(count(100));

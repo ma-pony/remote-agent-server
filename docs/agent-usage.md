@@ -171,6 +171,15 @@ HTTP 观察副本的请求／响应各限 2 MiB，解压后各限 4 MiB，单 SS
 
    `GET /api/usage/sources` 支持可选 `agentId`、`sessionId`，同时提供时必须匹配同一映射。界面的来源列表与轮询使用当前 Agent／Session 筛选；返回来源时仍保留该来源的完整映射。来源状态不按日期裁剪。
 
+   修正已结束 Codex 会话的旧上下文估算时，先用 `GET /api/usage/sources?sessionId=<id>&page=1&pageSize=20` 分页找到目标 `codex_log` 来源 ID，再执行：
+
+   ```sh
+   usage_api -X POST -H 'Content-Type: application/json' --data '{"rebuild":true}' \
+     "$USAGE_BASE_URL/api/usage/sources/$USAGE_SOURCE_ID/collect"
+   ```
+
+   这只重建指定来源的估算，不重复累计模型上报用量，也不会自动重放全部历史来源。返回 202 后按来源状态核对 `completed`；单次采集超时会保留已提交游标，可用普通 collect 继续。源文件已被清理、轮换或旧前缀改写时不能重建，失败原因会保存在该来源的 `errorCode`。
+
 4. 完成后打开 `/usage?sessionId=1&range=all`（替换 Session ID），或查询：
 
    ```sh

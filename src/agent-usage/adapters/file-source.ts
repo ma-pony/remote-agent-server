@@ -36,12 +36,18 @@ export class FileUsageSource implements UsageSourceAdapter {
     } finally { await handle.close(); }
   }
 
-  async *collect(input: Record<string, string>, checkpoint: string | null, boundaryJson: string, signal: AbortSignal): AsyncGenerator<UsageCollectionEntry> {
+  async *collect(input: Record<string, string>, checkpoint: string | null, boundaryJson: string, signal: AbortSignal,
+    rebuild = false): AsyncGenerator<UsageCollectionEntry> {
     signal.throwIfAborted();
     const boundary = JSON.parse(boundaryJson) as Boundary;
     const saved = checkpoint === null ? null : JSON.parse(checkpoint) as Checkpoint;
-    const previous = saved && (saved.version ?? 1) === (this.options.checkpointVersion ?? 1) ? saved : null;
+    const previous = !rebuild && saved && (saved.version ?? 1) === (this.options.checkpointVersion ?? 1) ? saved : null;
     const version = this.options.checkpointVersion ?? 1;
+    // A parser upgrade need not replay an unchanged historical file. If it later grows,
+    // replay from the start so the new parser can rebuild its body-free history.
+    if (!rebuild && this.options.incremental && this.options.appendOnly !== false && saved && !previous
+      && saved.digest === boundary.digest && saved.identity === boundary.identity
+      && saved.offset === boundary.size) return;
     // freeze already verified this exact digest. No body read or parse for an unchanged completed file.
     if (previous?.digest === boundary.digest && previous.identity === boundary.identity && previous.offset === boundary.size) return;
     const incremental = this.options.appendOnly !== false ? this.options.incremental : undefined;
@@ -49,7 +55,7 @@ export class FileUsageSource implements UsageSourceAdapter {
     const handle = await this.open(input);
     try {
       const { bytes, boundary: verified, stamp: initialStamp } = await this.read(handle, input, boundary.size, signal, incremental ? undefined : 0,
-        this.options.appendOnly !== false ? previous : null);
+        this.options.appendOnly !== false ? saved : null);
       if (verified.identity !== boundary.identity || verified.digest !== boundary.digest) throw new UsageError("usage_source_changed");
       if (!incremental) {
         if (previous?.digest === boundary.digest && previous.identity === boundary.identity && previous.complete) return;

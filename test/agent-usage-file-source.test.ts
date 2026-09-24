@@ -19,9 +19,9 @@ const setup = async () => {
   });
   return { adapter, path };
 };
-const entries = async (adapter: FileUsageSource, boundary: string, checkpoint: string | null = null) => {
+const entries = async (adapter: FileUsageSource, boundary: string, checkpoint: string | null = null, rebuild = false) => {
   const result = [];
-  for await (const entry of adapter.collect({}, checkpoint, boundary, new AbortController().signal)) if (entry.observation) result.push(entry);
+  for await (const entry of adapter.collect({}, checkpoint, boundary, new AbortController().signal, rebuild)) if (entry.observation) result.push(entry);
   return result;
 };
 const claudeRecord = (id: string, tokens = 2) => JSON.stringify({ type: "assistant", sessionId: "native", uuid: id,
@@ -53,6 +53,35 @@ describe("bounded file usage source", () => {
     expect(result.map(({ observation }) => observation.invocationId)).toEqual(["claude-message:one", "claude-message:two"]);
     const appended = await entries(adapter, await adapter.freeze({}), result.at(-1)!.checkpoint);
     expect(appended.map(({ observation }) => observation.invocationId)).toEqual(["claude-message:three"]);
+  });
+  it("defers a parser-version replay until a completed source grows", async () => {
+    const { path } = await setup();
+    await writeFile(path, claudeRecord("one") + "\n");
+    const make = (version: number) => new FileUsageSource({ resolve: async () => path,
+      capabilities: { usage: "model_request", context: "none", identity: "explicit", version: "test" },
+      parse: (value) => parseProviderLog("claude_log", value.split("\n")),
+      incremental: (state) => createProviderLogParser("claude_log", state), checkpointVersion: version });
+    const old = make(2), first = await entries(old, await old.freeze({}));
+    const upgraded = make(3);
+    expect(await entries(upgraded, await upgraded.freeze({}), first.at(-1)!.checkpoint)).toEqual([]);
+    expect((await entries(upgraded, await upgraded.freeze({}), first.at(-1)!.checkpoint, true))
+      .map(({ observation }) => observation.invocationId)).toEqual(["claude-message:one"]);
+    await appendFile(path, claudeRecord("two") + "\n");
+    const replayed = await entries(upgraded, await upgraded.freeze({}), first.at(-1)!.checkpoint);
+    expect(replayed.map(({ observation }) => observation.invocationId)).toEqual(["claude-message:one", "claude-message:two"]);
+  });
+  it("checks the saved prefix before replaying a newer parser version", async () => {
+    const { path } = await setup();
+    const make = (version: number) => new FileUsageSource({ resolve: async () => path,
+      capabilities: { usage: "model_request", context: "none", identity: "explicit", version: "test" },
+      parse: (value) => parseProviderLog("claude_log", value.split("\n")),
+      incremental: (state) => createProviderLogParser("claude_log", state), checkpointVersion: version });
+    await writeFile(path, claudeRecord("old") + "\n");
+    const old = make(2), first = await entries(old, await old.freeze({}));
+    await writeFile(path, claudeRecord("rewritten") + "\n" + claudeRecord("new") + "\n");
+    const upgraded = make(3);
+    await expect(entries(upgraded, await upgraded.freeze({}), first.at(-1)!.checkpoint)).rejects.toThrow("usage_source_changed");
+    await expect(entries(upgraded, await upgraded.freeze({}), first.at(-1)!.checkpoint, true)).rejects.toThrow("usage_source_changed");
   });
   it("honors cancellation between observations from one record and resumes the remaining observation", async () => {
     const { path } = await setup();

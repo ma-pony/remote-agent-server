@@ -68,7 +68,8 @@ export const createTranscriptParser = (kind: ProviderLogKind, options: Transcrip
   const message = async (text: string, role: string): Promise<MeasuredBlock[]> => {
     const category = role === "assistant" ? "assistant_output" : role === "reasoning" ? "assistant_thought"
       : role === "user" ? "user_prompt" : "system_prompt";
-    const blockKind = role === "assistant" ? "assistant_message" : role === "user" ? "user_message" : "system_prompt";
+    const blockKind = role === "assistant" ? "assistant_message" : role === "user" ? "user_message"
+      : role === "reasoning" ? "other" : "system_prompt";
     const instructions = profile.instructions;
     if (instructions && text.includes(instructions)) {
       state.seenConfigured = true;
@@ -121,7 +122,7 @@ export const createTranscriptParser = (kind: ProviderLogKind, options: Transcrip
       const value = item.output ?? item.content;
       return block(textParts(value), "result", call?.capabilities ?? [{ id: "unmatched_tool_result", kind: "unknown", name: "Unmatched tool result" }]);
     }
-    if (type === "reasoning") return message(textParts(item.summary ?? item.content), "reasoning");
+    if (type === "reasoning") return message(textParts(item.content) || textParts(item.summary), "reasoning");
     if (type === "thinking") return message(string(item.thinking) ?? "", "reasoning");
     const role = string(item.role) ?? "assistant";
     if (Array.isArray(item.content)) {
@@ -196,7 +197,7 @@ export const createTranscriptParser = (kind: ProviderLogKind, options: Transcrip
           if (count !== null && count > (state.total ?? 0)) {
             const entry = entries.find(item => item.observation.scope === "provider_session");
             if (entry) {
-              entry.context = await snapshot(`transcript:codex:${state.session}:${lineNumber}`, lineNumber,
+              entry.context = await snapshot(`transcript:codex:${state.session}:${lineNumber}`, lineNumber * 2,
                 typeof last.input_tokens === "number" ? last.input_tokens : state.total === null && typeof total.input_tokens === "number" ? total.input_tokens : null);
               // A matching last-usage report locates this counter increment at its completion time,
               // including the first request and midnight crossings. It does not invent a native request ID.
@@ -209,7 +210,7 @@ export const createTranscriptParser = (kind: ProviderLogKind, options: Transcrip
                   const interval: UsageSourceEntry = { sourceSessionKey: state.session, observation: {
                     ...entry.observation, scope: "interval", semantics: "snapshot", occurredAt, intervalStart: occurredAt,
                     eventId: `codex:${state.session}:transcript-interval:${lineNumber}`, coverageId: `codex-interval:${state.session}:${lineNumber}`,
-                    revision: lineNumber + 1, sourceVersion: "provider-transcript/2", metrics, finality: "final", measurement: "derived"
+                    revision: lineNumber + 1, sourceVersion: "provider-transcript/3", metrics, finality: "final", measurement: "derived"
                   } };
                   const index = entries.findIndex(item => item.observation.scope === "interval");
                   if (index >= 0) entries[index] = interval;

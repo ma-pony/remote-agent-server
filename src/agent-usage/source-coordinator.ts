@@ -19,7 +19,7 @@ export type SourceFilter = {
 export interface UsageSourceAdapter {
   describe(): SourceCapabilities;
   freeze(input: Record<string, string>): Promise<string>;
-  collect(input: Record<string, string>, checkpoint: string | null, boundary: string, signal: AbortSignal): AsyncIterable<UsageCollectionEntry>;
+  collect(input: Record<string, string>, checkpoint: string | null, boundary: string, signal: AbortSignal, rebuild?: boolean): AsyncIterable<UsageCollectionEntry>;
 }
 export type UsageSourceEntry = { sourceSessionKey: string; observation: UsageObservation; context?: ModelContextInput; invocations?: InvocationInput[] };
 export type UsageCollectionEntry = (UsageSourceEntry | { observation?: never }) & { checkpoint: string };
@@ -93,10 +93,10 @@ export class UsageSourceCoordinator {
     })();
   }
 
-  collect(id: string, frozenBoundary?: string): Promise<void> {
+  collect(id: string, frozenBoundary?: string, rebuild = false): Promise<void> {
     if (this.closed) return Promise.reject(new UsageError("usage_collector_closed"));
     const current = this.jobs.get(id);
-    if (current) return current.promise;
+    if (current) return rebuild ? Promise.reject(new UsageError("usage_collection_pending")) : current.promise;
     const source = this.source(id);
     if (!source) return Promise.reject(new UsageError("usage_source_not_found"));
     const adapter = this.adapters[source.kind];
@@ -158,7 +158,7 @@ export class UsageSourceCoordinator {
         lastFlush = Date.now();
       };
       try {
-        for await (const entry of adapter.collect(input, source.checkpoint, boundary, controller.signal)) {
+        for await (const entry of adapter.collect(input, source.checkpoint, boundary, controller.signal, rebuild)) {
           controller.signal.throwIfAborted();
           pending.push(entry);
           if (!entry.observation || pending.length >= COLLECTION_YIELD_INTERVAL || Date.now() - lastFlush >= 1000) {
@@ -186,8 +186,9 @@ export class UsageSourceCoordinator {
   }
 
   /** HTTP callers can return the persisted collection identity immediately. */
-  startCollect(id: string): SourceRecord {
-    void this.collect(id).catch(() => { /* The persisted source state reports the sanitized error. */ });
+  startCollect(id: string, rebuild = false): SourceRecord {
+    if (rebuild && this.jobs.has(id)) throw new UsageError("usage_collection_pending");
+    void this.collect(id, undefined, rebuild).catch(() => { /* The persisted source state reports the sanitized error. */ });
     const row = this.source(id);
     if (!row) throw new UsageError("usage_source_not_found");
     return this.project(row);

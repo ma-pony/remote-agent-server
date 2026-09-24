@@ -27,6 +27,7 @@ export class ManagedUsageSources {
     this.adapters = Object.fromEntries((["codex_log", "claude_log", "context_snapshot"] as const).map((kind) => {
       const snapshot = kind === "context_snapshot";
       const reconstruct = !snapshot && !config.usageCaptureUpstreams?.[kind === "codex_log" ? "codex" : "claude_code"];
+      const transcriptVersion = kind === "codex_log" ? 3 : 2;
       return [kind, new FileUsageSource({
         resolve: (input) => this.resolve(input, kind),
         parse: (text) => kind === "context_snapshot" ? parseContextSnapshot(text) : parseProviderLog(kind, text.split("\n")),
@@ -43,9 +44,10 @@ export class ManagedUsageSources {
             tags: profiles.skillTagger(sessionId)
           }, state);
         },
-        checkpointVersion: reconstruct ? 2 : 1,
+        checkpointVersion: reconstruct ? transcriptVersion : 1,
         capabilities: { usage: kind === "codex_log" ? "provider_session" : "model_request", context: snapshot || reconstruct ? "partial" : "none",
-          identity: "explicit", version: snapshot ? "context-snapshot/1" : reconstruct ? "provider-transcript/2" : "provider-logs/1" }
+          identity: "explicit", version: snapshot ? "context-snapshot/1" : reconstruct
+            ? `provider-transcript/${transcriptVersion}` : "provider-logs/1" }
       })];
     })) as Record<SourceRegistration["kind"], FileUsageSource>;
     this.collector = new HostUsageCollector(db, this.adapters, (sessionId) => this.discover(sessionId),
