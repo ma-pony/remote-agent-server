@@ -217,6 +217,8 @@ curl --fail http://127.0.0.1:3000/api/health
 
 升级时先停止服务、备份数据，再安装依赖和执行 `pnpm build`，最后重新启动。变更 Node 安装路径后同步更新 unit。不要使用 `DynamicUser=yes`：Provider 登录状态、Btrfs 权限和 Provider Home 都依赖稳定的 UID/HOME。已有 unit 的 `EnvironmentFile` 可以继续使用，其变量优先于程序读取的 `.env`。
 
+升级到 Codex 插件共享投影后无需清库。下一次使用某个 Session 时，服务会为该 Agent 发布本地插件 marketplace，并将该 Session 旧的 `plugins/cache/` 替换为指向 Agent 级目录的链接；默认也会替换旧的 `.tmp/`。显式启用 `local_thread_store_compression` 的 Session 保留独立 `.tmp/`，避免跨 Session 的压缩锁冲突，但 Codex 可能为这些 Session 分别保存内置市场仓库。未再使用的 Session Home 按现有空闲保留策略清理。共享快照位于 `DATA_DIR/agents/<id>/provider-home/codex/shared-plugins/`，按内容版本划分的共享插件缓存位于同级 `plugin-caches/`，默认内置市场同步目录为同级 `.tmp/`。这些数据随 Agent 删除，不应在仍有 Session 使用时手动删除。
+
 ## 6. 完成首次任务与可选 Provider 验收
 
 首次启用只需选择一个实际使用的 Provider，完成一条真实任务并核对结果。先打开管理页面的“项目环境”：

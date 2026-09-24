@@ -607,7 +607,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   ) {
     this.extensionProjector = providerExtensionManager === undefined
       ? undefined
-      : new ProviderExtensionProjector(providerExtensionManager);
+      : new ProviderExtensionProjector(providerExtensionManager, config.dataDir);
   }
 
   async ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession> {

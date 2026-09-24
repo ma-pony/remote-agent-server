@@ -1,6 +1,7 @@
 import { pageResult, type PaginationQuery } from "../pagination.js";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { lstat, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -47,6 +48,26 @@ type ProviderExtensionManagerOptions = {
 const fingerprint = (value: unknown): string => createHash("sha256")
   .update(JSON.stringify(value))
   .digest("hex");
+
+const pluginTreeFingerprint = async (root: string): Promise<string> => {
+  const hash = createHash("sha256");
+  const visit = async (directory: string, relativePath: string): Promise<void> => {
+    const entries = (await readdir(directory, { withFileTypes: true }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (let index = 0; index < entries.length; index += 32) {
+      const batch = entries.slice(index, index + 32);
+      const stats = await Promise.all(batch.map((entry) => lstat(join(directory, entry.name))));
+      for (const [offset, entry] of batch.entries()) {
+        const name = join(relativePath, entry.name);
+        const metadata = stats[offset]!;
+        hash.update(JSON.stringify([name, metadata.mode, metadata.size, metadata.mtimeMs]));
+        if (entry.isDirectory()) await visit(join(directory, entry.name), name);
+      }
+    }
+  };
+  await visit(root, "");
+  return hash.digest("hex");
+};
 
 const json = (path: string): unknown => JSON.parse(readFileSync(path, "utf8"));
 
@@ -206,6 +227,7 @@ export class ProviderExtensionManager {
   private readonly claudeHome: string;
   private readonly cacheTtlMs: number;
   private snapshots = new Map<"codex" | "claude_code", { capturedAt: number; items: DiscoveredProviderExtension[] }>();
+  private pluginFingerprints = new Map<string, { capturedAt: number; value: Promise<string> }>();
 
   constructor(private readonly options: ProviderExtensionManagerOptions) {
     this.codexHome = options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
@@ -298,8 +320,26 @@ export class ProviderExtensionManager {
     return this.discover(provider).filter((item) => selected.has(item.id));
   }
 
-  revision(agentId: number): string {
-    return fingerprint(this.enabled(agentId).map(({ id, sourceFingerprint }) => ({ id, sourceFingerprint })));
+  async enabledWithContentFingerprints(agentId: number): Promise<DiscoveredProviderExtension[]> {
+    return Promise.all(this.enabled(agentId).map(async (item) => {
+      if (item.provider !== "codex" || item.kind !== "plugin" || item.sourcePath === null) return item;
+      let cached = this.pluginFingerprints.get(item.sourcePath);
+      if (cached === undefined || Date.now() - cached.capturedAt >= this.cacheTtlMs) {
+        cached = { capturedAt: Date.now(), value: pluginTreeFingerprint(item.sourcePath) };
+        this.pluginFingerprints.set(item.sourcePath, cached);
+      }
+      try {
+        return { ...item, sourceFingerprint: fingerprint([item.sourceFingerprint, await cached.value]) };
+      } catch (error) {
+        this.pluginFingerprints.delete(item.sourcePath);
+        throw error;
+      }
+    }));
+  }
+
+  async revision(agentId: number): Promise<string> {
+    const selected = await this.enabledWithContentFingerprints(agentId);
+    return fingerprint(selected.map(({ id, sourceFingerprint }) => ({ id, sourceFingerprint })));
   }
 
   private discover(provider: "codex" | "claude_code"): DiscoveredProviderExtension[] {

@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join, sep } from "node:path";
 
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { ProviderExtensionManager } from "../src/provider-extensions/provider-extension-manager.js";
 import { ProviderExtensionProjector } from "../src/runtime/provider-extension-projector.js";
+import { SystemProviderSessionCleaner } from "../src/runtime/provider-session-cleaner.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const apiToken = "test-token";
@@ -228,19 +229,23 @@ describe("Provider extensions", () => {
 
     const runtimeHome = join(root, "runtime-codex");
     mkdirSync(join(runtimeHome, "plugins", "cache", "unused", "other", "9.0.0"), { recursive: true });
+    mkdirSync(join(runtimeHome, ".tmp", "plugins", "old-market"), { recursive: true });
     writeFileSync(join(runtimeHome, "config.toml"), [
       "model = \"test\"",
       "[plugins.\"other@unused\"]",
       "enabled = true",
       "[mcp_servers.host-only]",
       "command = \"host-mcp\"",
+      "[marketplaces.host-market]",
+      "source_type = \"git\"",
+      "source = \"https://example.test/host-market.git\"",
       ""
     ].join("\n"));
     writeFileSync(join(runtimeHome, "hooks.json"), JSON.stringify({
       hooks: { Stop: [{ hooks: [{ type: "command", command: "host-only" }] }] }
     }));
 
-    await new ProviderExtensionProjector(manager).prepare({
+    await new ProviderExtensionProjector(manager, join(root, "data")).prepare({
       agentId: codexAgentId,
       provider: "codex",
       home: runtimeHome
@@ -251,23 +256,192 @@ describe("Provider extensions", () => {
     expect(projectedConfig).toContain(`[plugins.\"browser@example-market\"]`);
     expect(projectedConfig).not.toContain("other@unused");
     expect(projectedConfig).not.toContain("mcp_servers");
+    expect(projectedConfig).not.toContain("host-market");
+    expect(projectedConfig).toContain(`[marketplaces.\"example-market\"]`);
+    expect(projectedConfig).toContain('source_type = "local"');
     expect(JSON.parse(readFileSync(join(runtimeHome, "hooks.json"), "utf8"))).toEqual({
       hooks: {
         UserPromptSubmit: [{ hooks: [{ type: "command", command: "/opt/tools/codex-audit" }] }]
       }
     });
-    expect(existsSync(join(
-      runtimeHome,
-      "plugins",
-      "cache",
-      "example-market",
-      "browser",
-      "1.2.3",
-      ".codex-plugin",
-      "plugin.json"
-    ))).toBe(true);
+    const sharedRoot = join(root, "data", "agents", String(codexAgentId), "provider-home", "codex");
+    const cacheRoot = readlinkSync(join(runtimeHome, "plugins", "cache"));
+    expect(cacheRoot.startsWith(`${join(sharedRoot, "plugin-caches")}${sep}`)).toBe(true);
+    expect(basename(cacheRoot)).toMatch(/^[0-9a-f]{20}$/);
+    expect(readlinkSync(join(runtimeHome, ".tmp"))).toBe(join(sharedRoot, ".tmp"));
     expect(existsSync(join(runtimeHome, "plugins", "cache", "unused"))).toBe(false);
+    expect(existsSync(join(runtimeHome, ".tmp", "plugins"))).toBe(false);
+    const marketplaceRoot = join(sharedRoot, "shared-plugins", "example-market",
+      readdirSync(join(sharedRoot, "shared-plugins", "example-market"))[0]!);
+    const installed = join(cacheRoot, "example-market", "browser");
+    const versions = readdirSync(installed);
+    expect(versions).toHaveLength(1);
+    expect(lstatSync(join(installed, versions[0]!)).isDirectory()).toBe(true);
+    expect(readFileSync(join(installed, versions[0]!, ".codex-plugin", "plugin.json"), "utf8"))
+      .toContain("Browser automation");
+    expect(JSON.parse(readFileSync(join(marketplaceRoot, ".agents", "plugins", "marketplace.json"), "utf8")))
+      .toMatchObject({
+        name: "example-market",
+        plugins: [{ name: "browser", source: { source: "local", path: "./plugins/browser" } }]
+      });
 
+  });
+
+  it("同一 Agent 的 Codex 会话共用插件包，清理一个会话不删除共享包", async () => {
+    const { codexAgentId, root, codexHome, claudeHome, db } = await fixture();
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const plugin = manager.list(codexAgentId).find(({ kind }) => kind === "plugin")!;
+    manager.setEnabled(codexAgentId, plugin.id, true);
+    const dataDir = join(root, "data");
+    const projector = new ProviderExtensionProjector(manager, dataDir);
+    const sessionHome = (id: number) => join(dataDir, "agents", String(codexAgentId),
+      "provider-home", "codex", "sessions", String(id));
+    const cache = (id: number) => join(sessionHome(id), "plugins", "cache");
+    const temporary = (id: number) => join(sessionHome(id), ".tmp");
+
+    await Promise.all([31, 32].map((id) => projector.prepare({
+      agentId: codexAgentId, provider: "codex", home: sessionHome(id)
+    })));
+    const shared = readlinkSync(cache(31));
+    expect(readlinkSync(cache(32))).toBe(shared);
+    expect(readlinkSync(temporary(31))).toBe(readlinkSync(temporary(32)));
+    expect(readdirSync(join(dataDir, "agents", String(codexAgentId), "provider-home", "codex",
+      "shared-plugins", "example-market"))).toHaveLength(1);
+    const marketplaceRoot = join(dataDir, "agents", String(codexAgentId), "provider-home", "codex",
+      "shared-plugins", "example-market",
+      readdirSync(join(dataDir, "agents", String(codexAgentId), "provider-home", "codex",
+        "shared-plugins", "example-market"))[0]!);
+    expect(readFileSync(join(marketplaceRoot, "plugins", "browser", ".codex-plugin", "plugin.json"), "utf8"))
+      .toContain("Browser automation");
+    expect(readFileSync(join(sessionHome(31), "config.toml"), "utf8"))
+      .toContain(`source = ${JSON.stringify(marketplaceRoot)}`);
+
+    const installed = join(shared, "example-market", "browser",
+      readdirSync(join(shared, "example-market", "browser"))[0]!);
+    writeFileSync(join(installed, "marker"), "installed once");
+    mkdirSync(join(readlinkSync(temporary(31)), "plugins", ".git"), { recursive: true });
+    writeFileSync(join(readlinkSync(temporary(31)), "plugins.sha"), "test-sha");
+
+    await new SystemProviderSessionCleaner(dataDir).purge({
+      agentId: codexAgentId, provider: "codex", sessionId: 31, providerSessionId: null
+    });
+    expect(existsSync(cache(31))).toBe(false);
+    expect(readFileSync(join(cache(32), "example-market", "browser", basename(installed), "marker"), "utf8"))
+      .toBe("installed once");
+    expect(readFileSync(join(temporary(32), "plugins.sha"), "utf8")).toBe("test-sha");
+
+    manager.setEnabled(codexAgentId, plugin.id, false);
+    await projector.prepare({ agentId: codexAgentId, provider: "codex", home: sessionHome(32) });
+    expect(readlinkSync(cache(32))).not.toBe(shared);
+    expect(existsSync(join(cache(32), "example-market", "browser"))).toBe(false);
+    expect(existsSync(shared)).toBe(true);
+  });
+
+  it("启用 Codex rollout 压缩时保留各 Session 的临时目录", async () => {
+    const { codexAgentId, root, codexHome, claudeHome, db } = await fixture();
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const plugin = manager.list(codexAgentId).find(({ kind }) => kind === "plugin")!;
+    manager.setEnabled(codexAgentId, plugin.id, true);
+    const projector = new ProviderExtensionProjector(manager, join(root, "data"));
+    const sessionHome = (id: number) => join(root, "data", "agents", String(codexAgentId),
+      "provider-home", "codex", "sessions", String(id));
+    for (const id of [51, 52]) {
+      mkdirSync(sessionHome(id), { recursive: true });
+      writeFileSync(join(sessionHome(id), "config.toml"), "[features]\nlocal_thread_store_compression = true\n");
+      await projector.prepare({ agentId: codexAgentId, provider: "codex", home: sessionHome(id) });
+    }
+    expect(readlinkSync(join(sessionHome(51), "plugins", "cache")))
+      .toBe(readlinkSync(join(sessionHome(52), "plugins", "cache")));
+    expect(lstatSync(join(sessionHome(51), ".tmp")).isDirectory()).toBe(true);
+    expect(lstatSync(join(sessionHome(52), ".tmp")).isDirectory()).toBe(true);
+    writeFileSync(join(sessionHome(51), ".tmp", "rollout-compression.lock"), "session 51");
+    expect(existsSync(join(sessionHome(52), ".tmp", "rollout-compression.lock"))).toBe(false);
+    await projector.prepare({ agentId: codexAgentId, provider: "codex", home: sessionHome(51) });
+    expect(readFileSync(join(sessionHome(51), ".tmp", "rollout-compression.lock"), "utf8"))
+      .toBe("session 51");
+  });
+
+  it("Codex 插件正文在版本号不变时更新到新快照与缓存版本", async () => {
+    const { codexAgentId, root, codexHome, claudeHome, db } = await fixture();
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const plugin = manager.list(codexAgentId).find(({ kind }) => kind === "plugin")!;
+    manager.setEnabled(codexAgentId, plugin.id, true);
+    const dataDir = join(root, "data");
+    const agentHome = join(dataDir, "agents", String(codexAgentId), "provider-home", "codex");
+    const home = join(agentHome, "sessions", "41");
+    const oldSessionHome = join(agentHome, "sessions", "42");
+    mkdirSync(join(agentHome, "sessions", "43", "plugins", "cache"), { recursive: true });
+    const projector = new ProviderExtensionProjector(manager, dataDir);
+    const source = join(codexHome, "plugins", "cache", "example-market", "browser", "1.2.3", "SKILL.md");
+    writeFileSync(source, "first revision");
+    await projector.prepare({ agentId: codexAgentId, provider: "codex", home });
+    await projector.prepare({ agentId: codexAgentId, provider: "codex", home: oldSessionHome });
+    await projector.prepare({ agentId: codexAgentId, provider: "codex", home: join(agentHome, "sessions", "0") });
+    const revision = await manager.revision(codexAgentId);
+    const market = join(agentHome, "shared-plugins", "example-market");
+    const first = join(market, readdirSync(market)[0]!);
+    const firstVersion = JSON.parse(readFileSync(join(first, "plugins", "browser", ".codex-plugin", "plugin.json"), "utf8")).version;
+
+    writeFileSync(source, "second revision with more content");
+    expect(await manager.revision(codexAgentId)).not.toBe(revision);
+    await projector.prepare({ agentId: codexAgentId, provider: "codex", home });
+    const second = readdirSync(market).map((entry) => join(market, entry)).find((path) => path !== first)!;
+    const secondVersion = JSON.parse(readFileSync(join(second, "plugins", "browser", ".codex-plugin", "plugin.json"), "utf8")).version;
+    expect(secondVersion).not.toBe(firstVersion);
+    expect(readFileSync(join(second, "plugins", "browser", "SKILL.md"), "utf8"))
+      .toBe("second revision with more content");
+    expect(readFileSync(join(home, "config.toml"), "utf8"))
+      .toContain(`source = ${JSON.stringify(second)}`);
+    expect(existsSync(first)).toBe(true);
+    const currentCache = readlinkSync(join(home, "plugins", "cache"));
+    const installedVersion = readdirSync(join(currentCache, "example-market", "browser"))[0]!;
+    expect(installedVersion).toBe(secondVersion);
+    expect(readFileSync(join(currentCache, "example-market", "browser", installedVersion, "SKILL.md"), "utf8"))
+      .toBe("second revision with more content");
+
+    const now = Date.now();
+    utimesSync(first, new Date(now - 2 * 60 * 60_000), new Date(now - 2 * 60 * 60_000));
+    const oldCache = readlinkSync(join(oldSessionHome, "plugins", "cache"));
+    utimesSync(oldCache, new Date(now - 2 * 60 * 60_000), new Date(now - 2 * 60 * 60_000));
+    try {
+      vi.setSystemTime(new Date(now + 11 * 60_000));
+      await projector.prepare({ agentId: codexAgentId, provider: "codex", home });
+      expect(existsSync(first)).toBe(true);
+      expect(existsSync(oldCache)).toBe(true);
+      await new SystemProviderSessionCleaner(dataDir).purge({
+        agentId: codexAgentId, provider: "codex", sessionId: 42, providerSessionId: null
+      });
+      vi.setSystemTime(new Date(now + 22 * 60_000));
+      await projector.prepare({ agentId: codexAgentId, provider: "codex", home });
+      await vi.waitFor(() => {
+        expect(existsSync(first)).toBe(false);
+        expect(existsSync(oldCache)).toBe(false);
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("清理中断发布留下的旧临时目录", async () => {
+    const { codexAgentId, root, codexHome, claudeHome, db } = await fixture();
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const agentHome = join(root, "data", "agents", String(codexAgentId), "provider-home", "codex");
+    const home = join(agentHome, "sessions", "61");
+    const projector = new ProviderExtensionProjector(manager, join(root, "data"));
+    const temporaryName = "0123456789abcdefabcd.tmp-00000000-0000-4000-8000-000000000000";
+    const snapshotTemporary = join(agentHome, "shared-plugins", "example-market", temporaryName);
+    const cacheTemporary = join(agentHome, "plugin-caches", temporaryName);
+    mkdirSync(snapshotTemporary, { recursive: true });
+    mkdirSync(cacheTemporary, { recursive: true });
+    const now = Date.now();
+    for (const path of [snapshotTemporary, cacheTemporary]) {
+      utimesSync(path, new Date(now - 2 * 60 * 60_000), new Date(now - 2 * 60 * 60_000));
+    }
+    await projector.prepare({ agentId: codexAgentId, provider: "codex", home });
+    await vi.waitFor(() => {
+      expect(existsSync(snapshotTemporary)).toBe(false);
+      expect(existsSync(cacheTemporary)).toBe(false);
+    });
   });
 
   it("Claude Code 只加载 Agent 选中的扩展，并隔离宿主机全局 MCP", async () => {
@@ -288,7 +462,7 @@ describe("Provider extensions", () => {
       mcpServers: { inheritedGlobal: { command: "host-global-mcp" } }
     }));
 
-    await new ProviderExtensionProjector(manager).prepare({
+    await new ProviderExtensionProjector(manager, join(root, "data")).prepare({
       agentId: claudeAgentId,
       provider: "claude_code",
       home: runtimeHome

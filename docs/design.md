@@ -250,6 +250,10 @@ Session 使用可空的内部字段 `pending_operation` 持久化 `cleanup`、`d
 
 配置变化从下一次 Run 生效。已有 Session 会刷新 Runtime 连接；Provider 支持恢复时继续原有 Provider Session。
 
+Codex 的原生插件投影将当前 Agent 选中的包发布到 `agents/<id>/provider-home/codex/shared-plugins/` 下的本地 marketplace 快照；快照先在临时目录生成，再原子发布。它同时预先生成真实插件版本目录，避免 Codex 启动时的本地 marketplace 缓存刷新忽略仅在配置中声明的来源。Session 的 `config.toml` 只声明这些本地 marketplace，`plugins/cache` 链接到 Agent 级、按所选插件内容版本划分的 `plugin-caches/<revision>/`。默认情况下 `.tmp` 链接到 Agent 级内置市场同步目录，Session 共用市场仓库、版本标记和同步锁；显式启用 rollout 压缩时，该 Session 保留独立 `.tmp`。插件文件树元数据指纹会改变快照及内部缓存版本，同版本内容更新可在发现缓存刷新后的下一次 Run 生效。旧 Session 的独立插件缓存在重新准备时移除；未启用压缩的 Session 也会移除旧临时克隆。不再被 Session 引用的旧快照、缓存及中断发布留下的临时目录延迟清理。
+
+Codex 也在 `.tmp` 中保存 rollout 压缩锁。启用压缩的 Session 使用独立 `.tmp`，避免其他 Session 的锁跳过本会话的压缩；代价是 Codex 内置市场仓库可能在这些 Session 各保留一份。各 Session 的 rollout 文件仍保存在自己的 Home 中。
+
 Git 来源的稳定身份来自配置的 URL、ref 和子目录；Skill 身份还包含插件标识和包内路径。刷新操作在进程内串行，使用有截止时间、可取消并回收进程树的 Git 命令。发布前验证路径、文件类型和内容大小，来源索引原子替换，失败保留上一可用版本。来源仓库与 marketplace 引用的插件仓库分别记录实际 commit，外部插件未指定 ref 时跟随自身 HEAD。
 
 Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace 条目的 Skills 声明，并包含默认 `skills/`；当条目指向 marketplace 根目录且明确选择子路径时，仅导入所选路径。`strict: false` 与插件自身 Skills 声明冲突时提示并保留该插件的上一可用版本。Codex 插件按显式声明选择目录，没有声明时才使用默认目录。普通仓库递归发现 Skills；不支持的源类型会显示提示。

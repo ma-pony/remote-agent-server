@@ -293,6 +293,8 @@ Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Sessio
 
 执行器扩展遵循“发现 → Agent 选择 → 运行时投影”流程。在服务运行用户的 Codex 或 Claude Code 配置中安装新插件、添加 Hook 后，它们会出现在 Agent 的 **执行器扩展** 页面，默认不启用。启用的项只投影到当前 Agent。Hermes 目前不提供这项扩展管理能力。
 
+Codex 插件按 Agent 发布为本地 marketplace 快照；选择与内容版本相同的 Session 共用插件缓存。默认情况下，同一 Agent 的 Session 也共用内置市场同步目录；显式启用 Codex rollout 压缩的 Session 保留独立 `.tmp`，使各自的压缩锁互不影响。插件选择变化在下一次 Run 生效；包文件变化在发现缓存刷新后生效（默认最多 30 秒）。已有 Session 的旧插件缓存与临时克隆在下一次准备运行目录时清理，空闲 Session Home 仍按原保留策略清理。Claude Code 的插件投影暂保持现状。
+
 Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选择“导入并启用”后，系统把当前配置复制为 Agent 自己的 MCP。后续可以在 Agent 中单独编辑、检查、限制工具范围或删除，不会直接修改 Provider 的系统配置。MCP 值可以来自固定配置、创建 Session 时提供的参数，或 `agent_id`、`session_id`、`run_id`、`workspace_path`、`browser_profile_path` 等运行时值。敏感值加密保存，管理接口不返回明文。
 
 ### 运行与并发

@@ -219,7 +219,7 @@ export class RunExecutor {
           console.error(`runtime_capability_projection_failed runId=${run.id}`);
         }
       }
-      const extensionsRevision = this.providerExtensionManager.revision(agent.id);
+      const extensionsRevision = await withinRunTimeout(this.providerExtensionManager.revision(agent.id));
       const resolvedModel = resolveModelPolicy(agent.modelPolicy, new Date()) ?? agent.providerDefaultModel ?? undefined;
       this.runRepository.setResolvedModel(run.id, resolvedModel ?? null);
       try { await this.usageCollector.conversationContent.recordRun(run.id, usageController.signal); }

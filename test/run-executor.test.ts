@@ -36,7 +36,7 @@ const setup = (
   prepare = vi.fn(() => ({ memory: "remember this", revision: "skills-v1" })),
   mcpPrepare = vi.fn(async () => []),
   runRepositoryOptions: Record<string, unknown> = {},
-  providerExtensionRevision = vi.fn(() => "extensions-v1"),
+  providerExtensionRevision = vi.fn(async () => "extensions-v1"),
   runTimeoutMs?: number,
   runtimeSettings?: { getRuntime(): { runTimeoutMinutes: number; sessionStorageRetentionHours: number } }
 ) => {
