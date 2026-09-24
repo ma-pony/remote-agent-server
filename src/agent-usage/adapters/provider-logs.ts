@@ -77,7 +77,7 @@ const parseLines = (lines: string[]): ParsedLine[] => {
   return parsed;
 };
 
-const codexMetrics = (value: unknown, lineNumber: number): UsageMetrics => {
+export const codexMetrics = (value: unknown, lineNumber: number): UsageMetrics => {
   const usage = objectAt(value, lineNumber);
   const input = metric(usage.input_tokens, lineNumber, true)!;
   const cacheRead = metric(usage.cached_input_tokens, lineNumber);

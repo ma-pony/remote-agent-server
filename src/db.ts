@@ -264,6 +264,7 @@ const migrateTextIds = (
         "integration_tasks_dispatch_order",
         "webhook_deliveries_due",
         "runs_session_history",
+        "runs_session_started",
         "sessions_recent",
         "events_run_completion",
         "integration_conversations_endpoint_status",
@@ -574,6 +575,9 @@ export const migrate = (
 
     CREATE INDEX IF NOT EXISTS runs_session_history
     ON runs(session_id, created_at, id);
+
+    CREATE INDEX IF NOT EXISTS runs_session_started
+    ON runs(session_id, started_at DESC, id DESC);
 
     CREATE TABLE IF NOT EXISTS events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

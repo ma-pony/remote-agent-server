@@ -9,7 +9,7 @@ type ProbeClient = {
   listTools(
     params: undefined,
     options: { timeout: number; cacheMode: "bypass" }
-  ): Promise<{ tools: Array<{ name: string; description?: string }> }>;
+  ): Promise<{ tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }> }>;
   close(): Promise<void>;
 };
 
@@ -71,7 +71,8 @@ export class SdkMcpChecker implements McpChecker {
         message: `${tools.length} tools available`,
         tools: tools.map((tool) => ({
           name: tool.name,
-          description: tool.description?.trim() ? tool.description : null
+          description: tool.description?.trim() ? tool.description : null,
+          inputSchema: tool.inputSchema
         }))
       };
     } catch (_error) {

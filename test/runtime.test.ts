@@ -35,6 +35,8 @@ import {
 import { BEST_EFFORT_TIMEOUT_MS, settleBestEffort } from "../src/runtime/bounded-operation.js";
 import { SkillProjector } from "../src/runtime/skill-projector.js";
 import { SkillManager } from "../src/skills/skill-manager.js";
+import { ProviderExtensionManager } from "../src/provider-extensions/provider-extension-manager.js";
+import { ProviderExtensionProjector } from "../src/runtime/provider-extension-projector.js";
 
 const AGENT_ID = 1;
 const SECOND_AGENT_ID = 2;
@@ -895,6 +897,27 @@ describe("AcpxAgentRuntime", () => {
     expect(acp.close).toHaveBeenCalledWith({ handle, reason: "session_handle_refreshed" });
     expect(acp.ensureSession).toHaveBeenCalledTimes(2);
     expect(acp.ensureSession.mock.calls[1]?.[0]).toMatchObject({ resumeSessionId: "provider-session-1" });
+  });
+
+  it("preserves native plugin Skill identities when reusing a Runtime handle", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const skills = [{ id: "native", name: "Native", revision: "1", source: "plugin", pluginId: "review@official",
+      pluginName: "Review", skillMdPath: "/plugins/review/SKILL.md", directoryAliases: ["/plugins/review"] }];
+    const prepare = vi.spyOn(ProviderExtensionProjector.prototype, "prepare").mockResolvedValue(skills);
+    const db = new Database(":memory:");
+    const runtime = new AcpxAgentRuntime(makeConfig(root), undefined, new ProviderExtensionManager({ db }));
+    try {
+      const input = sessionInput(root);
+      expect((await runtime.ensureSession(input)).projectedSkills).toEqual(skills);
+      expect((await runtime.ensureSession({ ...input, providerSessionId: "provider-session-1" })).projectedSkills).toEqual(skills);
+      expect(prepare).toHaveBeenCalledTimes(1);
+      prepare.mockResolvedValue([]);
+      expect((await runtime.ensureSession({ ...input, providerSessionId: "provider-session-1", extensionsRevision: "removed" })).projectedSkills)
+        .toBeUndefined();
+      expect(prepare).toHaveBeenCalledTimes(2);
+    } finally { await runtime.shutdown(); prepare.mockRestore(); db.close(); }
   });
 
   it("并发 ensure 按 Session 串行并复用同一 Handle", async () => {

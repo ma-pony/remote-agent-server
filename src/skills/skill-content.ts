@@ -28,8 +28,12 @@ export const readSkillMetadata = (directory: string): { name: string; descriptio
   if (!stat.isFile()) throw new SkillContentError("invalid_skill_content");
   if (stat.size > 1024 * 1024) throw new SkillContentError("skill_content_too_large");
   const contents = readFileSync(path, "utf8");
+  return parseSkillMetadata(contents, basename(directory));
+};
+
+export const parseSkillMetadata = (contents: string, fallbackName: string): { name: string; description: string } => {
   const header = contents.startsWith("---") ? contents.split(/^---\s*$/m)[1] ?? "" : "";
-  return { name: frontmatterValue(header, "name") ?? basename(directory), description: frontmatterValue(header, "description") ?? "" };
+  return { name: frontmatterValue(header, "name") ?? fallbackName, description: frontmatterValue(header, "description") ?? "" };
 };
 
 export type SkillFile = { contents: Buffer; mode: number };

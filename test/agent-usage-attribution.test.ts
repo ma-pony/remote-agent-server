@@ -123,7 +123,8 @@ describe("agent usage invocation attribution", () => {
     await attribution.upsertContext(binding, old);
     await attribution.upsertContext(binding, context());
     db.exec(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x < 32767)
-      INSERT INTO agent_usage_contexts
+      INSERT INTO agent_usage_contexts (context_id,namespace,agent_id,session_id,generation,invocation_id,
+        provider_epoch_id,source_id,revision,occurred_at,runtime_kind,model,coverage,history_complete,evidence_sort_key)
       SELECT 'historical-' || x, namespace, agent_id, session_id, generation, 'historical-' || x,
         provider_epoch_id, source_id, revision, '2026-01-01T00:00:00.000Z', runtime_kind, model, coverage, history_complete, NULL
       FROM n CROSS JOIN (SELECT * FROM agent_usage_contexts LIMIT 1)`);

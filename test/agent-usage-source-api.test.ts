@@ -9,6 +9,8 @@ import { loadConfig } from "../src/config.js";
 import { ManagedUsageSources } from "../src/agent-usage/managed-sources.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 import { snapshotFixture } from "./fixtures/agent-usage/context-snapshot.js";
+import { ProviderExtensionManager } from "../src/provider-extensions/provider-extension-manager.js";
+import { ProviderExtensionProjector } from "../src/runtime/provider-extension-projector.js";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
@@ -32,6 +34,146 @@ const setup = async (usageTokenizers = [fixtureTokenizerConfig()]) => {
 const register = (app: FastifyInstance, payload: unknown) => app.inject({ method: "POST", url: "/api/usage/sources", headers, payload });
 
 describe("usage source management API", () => {
+  it("collects native Claude plugin instructions into cumulative Skill and plugin API rankings", async () => {
+    const { app, db, root, manager, session } = await setup();
+    await manager.collector.stopRecovery();
+    const agentId = Number(manager.collector.binding(session.id).agentId);
+    db.prepare("UPDATE agents SET provider='claude_code' WHERE id=?").run(agentId);
+    db.prepare("UPDATE sessions SET provider_session_id='claude-native' WHERE id=?").run(session.id);
+    const runId = Number(db.prepare(`INSERT INTO runs(session_id,status,input,created_at,started_at,resolved_model)
+      VALUES (?,'succeeded','hello','2026-09-24T00:00:00Z','2026-09-24T00:00:00Z','gpt-4.1')`).run(session.id).lastInsertRowid);
+    const host = join(root, "host-claude"), source = join(host, "plugins", "cache", "official", "review", "1", "skills", "inspect");
+    await mkdir(source, { recursive: true });
+    await writeFile(join(source, "SKILL.md"), "---\nname: inspect\n---\nhello world");
+    await writeFile(join(host, "settings.json"), JSON.stringify({ enabledPlugins: { "review@official": true } }));
+    const extensions = new ProviderExtensionManager({ db, claudeHome: host });
+    extensions.setEnabled(agentId, "plugin:review@official", true);
+    const home = join(root, "agents", String(agentId), "provider-home", "claude");
+    const skills = await new ProviderExtensionProjector(extensions, root).prepare({ agentId, provider: "claude_code", home });
+    manager.collector.runtimeCapabilities.recordRun(runId);
+    manager.collector.runtimeCapabilities.recordProjection(runId, skills);
+    const args = { skill: "review:inspect" }, result = "Launching skill: review:inspect", body = "hello world";
+    const assistant = (id: string, content: object[]) => ({ type: "assistant", uuid: id,
+      message: { id, role: "assistant", model: "gpt-4.1", content, stop_reason: "end_turn",
+        usage: { input_tokens: 1000, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 10 } } });
+    const records = [
+      { type: "user", uuid: "u1", message: { role: "user", content: "hello" } },
+      assistant("m1", [{ type: "tool_use", id: "load", name: "Skill", input: args }]),
+      { type: "user", uuid: "u2", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "load", content: result }] } },
+      { type: "user", uuid: "u3", isMeta: true, sourceToolUseID: "load", message: { role: "user", content: body } },
+      assistant("m2", [{ type: "text", text: "hello" }]),
+      { type: "user", uuid: "u4", message: { role: "user", content: "hello" } },
+      assistant("m3", [{ type: "text", text: "hello" }])
+    ];
+    const logs = join(home, "projects", "workspace");
+    await mkdir(logs, { recursive: true });
+    await writeFile(join(logs, "claude-native.jsonl"), records.map((record, index) => JSON.stringify({ ...record, sessionId: "claude-native",
+      timestamp: new Date(Date.parse("2026-09-24T01:00:00Z") + index * 1000).toISOString() })).join("\n") + "\n");
+    await manager.collector.collectSession(session.id);
+    await manager.collector.collectSession(session.id);
+    const count = async (text: string) => (await manager.collector.attribution.measureContent(text, "result", "gpt-4.1"))!.tokens!;
+    const expected = 2 * (await count(JSON.stringify(args)) + await count(result) + await count(body));
+    const query = `sessionId=${session.id}&from=2026-09-24T00:00:00Z&to=2026-09-25T00:00:00Z`;
+    for (const dimension of ["skill", "plugin"]) {
+      const ranking = (await app.inject({ url: `/api/usage/capabilities?${query}&dimension=${dimension}`, headers })).json();
+      expect(ranking.items).toHaveLength(1);
+      expect(ranking.items[0].totalInputTokens).toBe(expected);
+    }
+    const prompts = (await app.inject({ url: `/api/usage/capabilities?${query}&dimension=user_prompt`, headers })).json();
+    expect(prompts.items[0].totalInputTokens).toBe(4 * await count("hello"));
+    const summary = (await app.inject({ url: `/api/usage/summary?${query}`, headers })).json();
+    expect(summary).toMatchObject({ usage: { totalTokens: 3030 }, contextAnalysis: { requests: 3, estimatedInputTokens: expected + 5 * await count("hello") } });
+  });
+
+  it("stores MCP definitions only when configuration changes and resolves the snapshot for each Run", async () => {
+    const { db, manager, session } = await setup();
+    await manager.collector.stopRecovery();
+    const run = db.prepare(`INSERT INTO runs(session_id,status,input,created_at,started_at)
+      VALUES (?,'succeeded','prompt',?,?)`);
+    const profiles = manager.collector.transcriptProfiles;
+    const servers = [{ type: "stdio" as const, name: "server", command: "unused", args: [], env: [],
+      usageIdentity: { serverId: "12", tools: ["lookup"], definitions: [{ name: "lookup", description: "Lookup" }] } }];
+    for (const [time, tools] of [["2026-09-24T00:00:00Z", servers], ["2026-09-24T01:00:00Z", servers],
+      ["2026-09-24T02:00:00Z", []]] as const) {
+      const id = Number(run.run(session.id, time, time).lastInsertRowid);
+      profiles.record(session.id, id, tools);
+    }
+    expect(db.prepare("SELECT run_id FROM agent_usage_context_profiles").all()).toHaveLength(2);
+    expect(profiles.profile(String(session.id), "2026-09-24T01:30:00Z").tools[0]?.capability.id).toBe("mcp:12:lookup");
+    expect(profiles.profile(String(session.id), "2026-09-24T02:30:00Z").tools).toEqual([]);
+  });
+
+  it("automatically turns managed transcripts and frozen MCP schemas into cumulative rankings and scoped totals", async () => {
+    const { app, db, root, manager, session } = await setup();
+    await manager.collector.stopRecovery();
+    db.prepare("UPDATE sessions SET provider_session_id='transcript-session' WHERE id=?").run(session.id);
+    const runId = Number(db.prepare(`INSERT INTO runs(session_id,status,input,created_at,started_at,resolved_model)
+      VALUES (?,'succeeded','hello','2026-09-24T00:00:00Z','2026-09-24T00:00:00Z','gpt-4.1')`).run(session.id).lastInsertRowid);
+    manager.collector.runtimeCapabilities.recordRun(runId);
+    manager.collector.transcriptProfiles.record(session.id, runId, [{ type: "stdio", name: "server", command: "unused", args: [], env: [],
+      usageIdentity: { serverId: "12", tools: ["lookup"], definitions: [{ name: "lookup", description: "Look up a record", inputSchema: { type: "object" } }] } }]);
+    const home = join(root, "agents", manager.collector.binding(session.id).agentId, "provider-home", "codex", "sessions", String(session.id), "sessions");
+    await mkdir(home, { recursive: true });
+    const records = [
+      { type: "session_meta", payload: { id: "transcript-session" } },
+      { type: "turn_context", payload: { model: "gpt-4.1", turn_id: "turn" } },
+      { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text: "hello" }] } },
+      { type: "response_item", payload: { type: "function_call", call_id: "call", name: "mcp__server__lookup", arguments: "{}" } },
+      ...[1, 2, 3].flatMap(number => [
+        ...(number === 2 ? [{ type: "response_item", payload: { type: "function_call_output", call_id: "call", output: "hello world" } }] : []),
+        { type: "event_msg", payload: { type: "token_count", info: {
+          total_token_usage: { input_tokens: number * 100, output_tokens: number * 10, total_tokens: number * 110 },
+          last_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 }
+        } } }
+      ])
+    ];
+    await writeFile(join(home, "rollout-transcript-session.jsonl"), records.map((record, index) => JSON.stringify({ ...record,
+      timestamp: new Date(Date.parse("2026-09-24T01:00:00Z") + index * 1000).toISOString() })).join("\n") + "\n");
+    await manager.collector.collectSession(session.id);
+    await manager.collector.collectSession(session.id);
+    const query = `sessionId=${session.id}&from=2026-09-24T00:00:00Z&to=2026-09-25T00:00:00Z`;
+    const ranking = (await app.inject({ url: `/api/usage/capabilities?${query}&dimension=mcp_tool`, headers })).json();
+    expect(ranking.items).toHaveLength(1);
+    expect(ranking.items[0]).toMatchObject({ capability: { id: "mcp:12:lookup" }, firstResultInputTokens: 2, repeatedResultInputTokens: 2 });
+    expect(ranking.items[0].definitionInputTokens).toBeGreaterThan(0);
+    const summary = (await app.inject({ url: `/api/usage/summary?${query}`, headers })).json();
+    expect(summary).toMatchObject({ usage: { totalTokens: 330 }, contextAnalysis: { requests: 3, reconstructedRequests: 3, reportedInputTokens: 300 } });
+    expect((await app.inject({ url: `/api/usage/session-summaries?ids=${session.id}`, headers })).json().items[0].summary.usage.totalTokens).toBe(330);
+    expect((await app.inject({ url: `/api/usage/summary?agentId=${manager.collector.binding(session.id).agentId}`, headers })).json().usage.totalTokens).toBe(330);
+    expect((await app.inject({ url: "/api/usage/capabilities?sessionId=99999", headers })).json().items).toEqual([]);
+    const checkpoint = db.prepare("SELECT checkpoint FROM agent_usage_sources").get() as { checkpoint: string };
+    expect(checkpoint.checkpoint).not.toContain("hello world");
+    expect(ranking.items[0].attributionEvidence.inferred).toBeGreaterThan(0);
+  });
+
+  it("reads Skill projections once per Run during collection and refreshes them on the next collection", async () => {
+    const { db, manager, session } = await setup();
+    await manager.collector.stopRecovery();
+    const runIds = ["2026-09-24T00:00:00Z", "2026-09-24T01:00:00Z"].map(time => Number(db.prepare(`
+      INSERT INTO runs(session_id,status,input,created_at,started_at) VALUES (?,'succeeded','hello',?,?)`)
+      .run(session.id, time, time).lastInsertRowid));
+    const skills = runIds.map(id => ({ id: `skill-${id}`, name: `Skill ${id}`, revision: "1", source: "local" as const,
+      skillMdPath: "/workspace/skills/review/SKILL.md", directoryAliases: ["/workspace/skills/review"] }));
+    for (const [index, id] of runIds.entries()) manager.collector.runtimeCapabilities.recordProjection(id, [skills[index]!]);
+    const prepare = vi.spyOn(db, "prepare");
+    const tagger = manager.collector.transcriptProfiles.skillTagger(String(session.id));
+    for (let index = 0; index < 100; index++) {
+      expect(tagger("Read", { file_path: skills[0]!.skillMdPath }, "2026-09-24T00:30:00Z")[0]?.id).toBe(skills[0]!.id);
+    }
+    expect(prepare.mock.calls.filter(([sql]) => sql.includes("SELECT capability_json,plugin_json"))).toHaveLength(1);
+    expect(tagger("Read", { file_path: skills[1]!.skillMdPath }, "2026-09-24T01:30:00Z")[0]?.id).toBe(skills[1]!.id);
+    expect(prepare.mock.calls.filter(([sql]) => sql.includes("SELECT capability_json,plugin_json"))).toHaveLength(2);
+    const runQuery = prepare.mock.calls.find(([sql]) => sql.includes("SELECT r.id,r.resolved_model"))![0];
+    const plan = db.prepare(`EXPLAIN QUERY PLAN ${runQuery}`).all(manager.collector.namespace, String(session.id),
+      String(session.id), "2026-09-24T01:30:00Z") as Array<{ detail: string }>;
+    expect(plan.map(row => row.detail).join(" ")).toContain("runs_session_started");
+    expect(plan.map(row => row.detail).join(" ")).not.toContain("TEMP B-TREE");
+    prepare.mockRestore();
+    manager.collector.runtimeCapabilities.recordProjection(runIds[1]!, []);
+    const refreshed = manager.collector.transcriptProfiles.skillTagger(String(session.id));
+    expect(refreshed("Read", { file_path: skills[1]!.skillMdPath }, "2026-09-24T01:30:00Z")).toEqual([]);
+  });
+
   it("does not treat scanned unsupported events as actual usage evidence", async () => {
     const { app, db, session, manager } = await setup([]);
     await manager.collector.stopRecovery();

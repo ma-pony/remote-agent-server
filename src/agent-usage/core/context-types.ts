@@ -49,6 +49,9 @@ export type ContextBlock = {
   toolInvocationId?: string;
   content: ContextContent;
   capabilities: CapabilityReference[];
+  /** Body-free, already measured transcript groups. Never supplied by public snapshot imports. */
+  measured?: ToolContentEstimate;
+  resultFirstUse?: ResultFirstUse;
 };
 
 export type ModelContextInput = {
@@ -63,6 +66,8 @@ export type ModelContextInput = {
   coverage: ContextCoverage;
   historyComplete: boolean;
   blocks: ContextBlock[];
+  basis?: "request" | "transcript";
+  reportedInputTokens?: number | null;
 };
 
 export type InvocationStatus = "running" | "succeeded" | "tool_error" | "transport_error" | "cancelled";

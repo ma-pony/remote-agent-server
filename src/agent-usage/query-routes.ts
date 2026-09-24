@@ -97,7 +97,9 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
         const { summary } = await cache.getAsync(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
           () => reader.read("overview", [filter, query.timezone, query.bucket]));
         const hasCapabilityEvidence = collector.attribution.hasEvidence(filter);
-        return { ...metadata, ...summary, hasCapabilityEvidence,
+        const contextAnalysis = await cache.getAsync(`context-summary:${JSON.stringify(filter)}`,
+          () => reader.read("contextSummary", [filter]));
+        return { ...metadata, ...summary, hasCapabilityEvidence, contextAnalysis,
           ...(capturePartial && summary.completeness !== "conflict" ? { completeness: "partial" } : {}), ...(query.sessionId === undefined ? {} : { providerEpochId: providerEpoch(query.sessionId, query.agentId) }),
           sourceCounts,
           analysisStatus: sourceCount === 0 && summary.completeness === "none" && failurePage.total === 0 && !capturePage?.total

@@ -184,7 +184,7 @@ export const normalizeCanonicalExchanges = (snapshot: CanonicalSnapshot, calls =
       context: { invocationId, providerEpochId: epoch, sourceId, revision: snapshot.revision, occurredAt,
         runtimeKind: runtime ?? null, model,
         modelProvider: record.modelProvider ?? null,
-        coverage, historyComplete: snapshot.historyComplete, blocks },
+        coverage, historyComplete: snapshot.historyComplete, blocks, reportedInputTokens: accounting.metrics.inputTotalTokens },
       invocations
     };
   });

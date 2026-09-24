@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { cp, lstat, mkdir, readFile, readdir, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { cp, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import type { Provider } from "../domain.js";
+import { parseSkillMetadata } from "../skills/skill-content.js";
+import type { ProjectedSkill } from "./skill-projector.js";
 import type {
   DiscoveredProviderExtension,
   ProviderExtensionManager
@@ -80,6 +82,56 @@ const pluginParts = (extension: DiscoveredProviderExtension): PluginProjection |
 
 const pluginsFrom = (extensions: DiscoveredProviderExtension[]): PluginProjection[] =>
   extensions.map(pluginParts).filter((plugin): plugin is PluginProjection => plugin !== undefined);
+
+/** Describe the published files, so usage never guesses paths from the host installation. */
+const projectedPluginSkills = async (
+  home: string, provider: Provider, plugins: PluginProjection[]
+): Promise<ProjectedSkill[]> => {
+  const skills = new Map<string, ProjectedSkill>();
+  let visited = 0;
+  for (const plugin of plugins) {
+    const version = provider === "codex" ? `ras-${plugin.sourceFingerprint.slice(0, 20)}` : plugin.version;
+    const root = join(home, "plugins", "cache", plugin.marketplace, plugin.name, version);
+    const manifestFile = provider === "codex" && await readText(join(root, "plugin.json")) !== ""
+      ? join(root, "plugin.json") : join(root, provider === "codex" ? ".codex-plugin" : ".claude-plugin", "plugin.json");
+    const manifest = await readJsonObject(manifestFile);
+    const declared = typeof manifest.skills === "string" ? [manifest.skills]
+      : Array.isArray(manifest.skills) ? manifest.skills.filter((path): path is string => typeof path === "string") : [];
+    const roots = provider === "claude_code" || declared.length === 0 ? ["skills", ...declared] : declared;
+    const visit = async (directory: string, depth: number): Promise<void> => {
+      if (depth > 32 || ++visited > 10_000 || skills.size >= 512) return;
+      let entries;
+      try { entries = await readdir(directory, { withFileTypes: true }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+        throw error;
+      }
+      if (entries.some(entry => entry.name === "SKILL.md" && entry.isFile())) {
+        const path = join(directory, "SKILL.md");
+        if ((await lstat(path)).size > 1024 * 1024) return;
+        const { name } = parseSkillMetadata(await readFile(path, "utf8"), basename(directory));
+        const actual = await realpath(directory);
+        const id = `plugin-skill:${provider}:${plugin.id}:${relative(root, directory)}`;
+        skills.set(id, {
+          id, name, revision: plugin.sourceFingerprint, source: "plugin", sourceId: plugin.id,
+          pluginId: plugin.id, pluginName: plugin.name, pluginVersion: plugin.version,
+          skillMdPath: join(actual, "SKILL.md"), directoryAliases: [...new Set([directory, actual])]
+        });
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith(".")) await visit(join(directory, entry.name), depth + 1);
+      }
+    };
+    for (const path of new Set(roots)) {
+      const directory = resolve(root, path);
+      const fromRoot = relative(root, directory);
+      if (fromRoot.startsWith("..") || isAbsolute(fromRoot)) continue;
+      await visit(directory, 0);
+    }
+  }
+  return [...skills.values()];
+};
 
 const safePathPart = (part: string): boolean => part !== "" && part !== "." && part !== ".." && basename(part) === part
   && !part.includes("\\");
@@ -412,12 +464,17 @@ const projectClaude = async (home: string, extensions: DiscoveredProviderExtensi
 export class ProviderExtensionProjector {
   constructor(private readonly manager: ProviderExtensionManager, private readonly dataDir: string) {}
 
-  async prepare({ agentId, provider, home }: ProjectionInput): Promise<void> {
-    if (provider === "hermes") return;
+  async prepare({ agentId, provider, home }: ProjectionInput): Promise<ProjectedSkill[]> {
+    if (provider === "hermes") return [];
     await mkdir(home, { recursive: true });
     const extensions = await this.manager.enabledWithContentFingerprints(agentId);
     if (provider === "codex") await projectCodex(home,
       resolve(this.dataDir, "agents", String(agentId), "provider-home", "codex"), extensions);
     else await projectClaude(home, extensions);
+    try { return await projectedPluginSkills(home, provider, pluginsFrom(extensions)); }
+    catch {
+      console.error("plugin_skill_projection_failed");
+      return [];
+    }
   }
 }

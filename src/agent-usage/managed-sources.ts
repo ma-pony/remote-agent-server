@@ -8,6 +8,7 @@ import { HostUsageCollector } from "./host-collector.js";
 import { FileUsageSource } from "./adapters/file-source.js";
 import { parseProviderLog, createProviderLogParser } from "./adapters/provider-logs.js";
 import { parseContextSnapshot } from "./adapters/context-snapshot.js";
+import { createTranscriptParser } from "./adapters/transcript-context.js";
 import type { SourceConfig, SourceRecord } from "./source-coordinator.js";
 
 export type SourceRegistration = {
@@ -23,14 +24,30 @@ export class ManagedUsageSources {
   readonly collector: HostUsageCollector;
   private readonly adapters: Record<SourceRegistration["kind"], FileUsageSource>;
   constructor(private readonly db: Database.Database, private readonly config: AppConfig) {
-    this.adapters = Object.fromEntries((["codex_log", "claude_log", "context_snapshot"] as const).map((kind) => [kind, new FileUsageSource({
-      resolve: (input) => this.resolve(input, kind),
-      parse: (text) => kind === "context_snapshot" ? parseContextSnapshot(text) : parseProviderLog(kind, text.split("\n")),
-      appendOnly: kind !== "context_snapshot",
-      incremental: kind === "context_snapshot" ? undefined : (state) => createProviderLogParser(kind, state),
-      capabilities: { usage: kind === "codex_log" ? "provider_session" : "model_request", context: kind === "context_snapshot" ? "partial" : "none",
-        identity: "explicit", version: kind === "context_snapshot" ? "context-snapshot/1" : "provider-logs/1" }
-    })])) as Record<SourceRegistration["kind"], FileUsageSource>;
+    this.adapters = Object.fromEntries((["codex_log", "claude_log", "context_snapshot"] as const).map((kind) => {
+      const snapshot = kind === "context_snapshot";
+      const reconstruct = !snapshot && !config.usageCaptureUpstreams?.[kind === "codex_log" ? "codex" : "claude_code"];
+      return [kind, new FileUsageSource({
+        resolve: (input) => this.resolve(input, kind),
+        parse: (text) => kind === "context_snapshot" ? parseContextSnapshot(text) : parseProviderLog(kind, text.split("\n")),
+        appendOnly: kind !== "context_snapshot",
+        incremental: kind === "context_snapshot" ? undefined : (state, input, signal) => {
+          // A configured request relay owns attribution. Native counters still reconcile its reported totals.
+          if (!reconstruct) return createProviderLogParser(kind, state);
+          const profiles = this.collector.transcriptProfiles;
+          const sessionId = input.providerSessionRef ?? "";
+          return createTranscriptParser(kind, {
+            initialModel: profiles.model(sessionId),
+            measure: async (text, model) => (await this.collector.attribution.measureContent(text, "result", model, signal))!,
+            profile: time => profiles.profile(sessionId, time),
+            tags: profiles.skillTagger(sessionId)
+          }, state);
+        },
+        checkpointVersion: reconstruct ? 2 : 1,
+        capabilities: { usage: kind === "codex_log" ? "provider_session" : "model_request", context: snapshot || reconstruct ? "partial" : "none",
+          identity: "explicit", version: snapshot ? "context-snapshot/1" : reconstruct ? "provider-transcript/2" : "provider-logs/1" }
+      })];
+    })) as Record<SourceRegistration["kind"], FileUsageSource>;
     this.collector = new HostUsageCollector(db, this.adapters, (sessionId) => this.discover(sessionId),
       loadModelTokenizers(config.usageTokenizers, resolve(config.dataDir, "tokenizers")), config.usageEventRetentionMs);
   }

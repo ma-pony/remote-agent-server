@@ -1,6 +1,7 @@
 import type { Provider, TokenUsage } from "../domain.js";
 import type { RuntimeMcpServer } from "../mcp/mcp-types.js";
 import type { UsageObservation } from "../agent-usage/core/types.js";
+import type { ProjectedSkill } from "./skill-projector.js";
 
 export type RuntimeSessionInput = {
   sessionId: number;
@@ -17,7 +18,7 @@ export type RuntimeSessionInput = {
   model?: string;
 };
 
-export type RuntimeSession = { providerSessionId: string | null };
+export type RuntimeSession = { providerSessionId: string | null; projectedSkills?: ProjectedSkill[] };
 export type RuntimeTurnInput = { sessionId: number; requestId: number; text: string; attachments?: Array<{ mediaType: string; data: string }> };
 export type RuntimeEvent =
   | { type: "message"; stream: "output" | "thought"; text: string }

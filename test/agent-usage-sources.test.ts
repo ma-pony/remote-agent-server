@@ -58,6 +58,21 @@ describe("usage source coordinator", () => {
     expect(store.summary().usage.totalTokens).toBe(3300);
     expect(db.prepare("SELECT value FROM checkpoint_writes").all()).toEqual([{ value: "4" }]);
   });
+  it("persists sparse transcript progress before a later tokenizer timeout", async () => {
+    const sparse = adapter();
+    sparse.collect = async function* (_input, _checkpoint, _boundary, signal) {
+      yield { checkpoint: "metadata-100" };
+      await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+      signal.throwIfAborted();
+    };
+    const { store, config } = setup(sparse);
+    const coordinator = new UsageSourceCoordinator(store, { fixture: sparse }, 20);
+    const source = coordinator.registerSource(config);
+    await expect(coordinator.collect(source.id)).rejects.toThrow("usage_collection_timeout");
+    expect(coordinator.listSources("test")[0]?.checkpoint).toBe("metadata-100");
+    expect(store.summary().observedModelRequests).toBe(0);
+  });
+
   it("registers an explicit mapping, collects and resumes without double counting", async () => {
     const { db, store, coordinator, config } = setup(adapter());
     const source = coordinator.registerSource(config);

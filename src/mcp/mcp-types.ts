@@ -21,7 +21,7 @@ export type RuntimeMcpServer = (
       args: string[];
       env: Array<{ name: string; value: string }>;
     }
-  ) & { startupTimeoutSeconds?: number; allowedTools?: string[]; usageIdentity?: { serverId: string; tools: string[] } };
+) & { startupTimeoutSeconds?: number; allowedTools?: string[]; usageIdentity?: { serverId: string; tools: string[]; definitions?: McpToolSummary[] } };
 
 export type ResolvedMcpServer = {
   id: number;
@@ -174,7 +174,7 @@ export type SessionMcpStatus = {
   mcpParameters: SessionMcpParameterStatus[];
 };
 
-export type McpToolSummary = { name: string; description: string | null };
+export type McpToolSummary = { name: string; description: string | null; inputSchema?: Record<string, unknown> };
 
 export type McpCheckResult =
   | { status: "passed"; toolCount: number; message: string; tools?: McpToolSummary[] }

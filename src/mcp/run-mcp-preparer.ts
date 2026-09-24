@@ -34,12 +34,13 @@ export class RunMcpPreparer {
       let observer;
       try { observer = await this.dependencies.observer?.configuration(context.sessionId, item.id); }
       catch { console.error("usage_observer_unavailable"); }
+      const tools = result.status === "passed" ? (result.tools ?? []).filter(tool => allowedTools === undefined || allowedTools.includes(tool.name)) : [];
       return {
         server: allowedTools === undefined && observer === undefined
           ? { ...upstream, startupTimeoutSeconds }
           : wrapMcpServerWithToolFilter(upstream, allowedTools ?? null, startupTimeoutSeconds, observer),
         result,
-        usageIdentity: { serverId: String(item.id), tools: result.status === "passed" ? (result.tools ?? []).map((tool) => tool.name) : [] }
+        usageIdentity: { serverId: String(item.id), tools: tools.map(tool => tool.name), definitions: tools }
       };
     })).then((results) => {
       const failed = results.find(({ result }) => result.status === "failed");

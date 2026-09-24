@@ -1,6 +1,5 @@
 import { pageResult, type PaginationQuery } from "../../pagination.js";
 import { randomUUID } from "node:crypto";
-import { isAbsolute, normalize, relative, resolve } from "node:path";
 
 import type { Provider } from "../../domain.js";
 import type { RuntimeMcpServer } from "../../mcp/mcp-types.js";
@@ -8,7 +7,8 @@ import type { HostUsageCollector } from "../host-collector.js";
 import type { UsageBinding, UsageFilter } from "../core/types.js";
 import type { Capability } from "../core/context-types.js";
 import { MAX_CONTEXT_BLOCKS } from "../core/context.js";
-import { capturedToolCapability, commandFiles, toolInput } from "../core/tool-capabilities.js";
+import { capturedToolCapability } from "../core/tool-capabilities.js";
+import { createProjectedSkillTagger } from "../transcript-profiles.js";
 import { normalizeCanonicalExchanges, type CanonicalCall } from "../adapters/context-snapshot.js";
 import { UsageHttpRelay, type CapturedExchange, type RelayRoute } from "./http-relay.js";
 import { decodeExchange } from "./protocol.js";
@@ -155,7 +155,8 @@ export class HostUsageCapture {
               session_id: intent.epoch, timestamp: intent.startedAt, provider: subject.provider, agent: subject.provider,
               modelProvider: this.upstreams[subject.provider]?.modelProvider,
               endpoint: exchange.endpoint, context_fidelity: issue ? "partial" : "complete", response_complete: decoded.complete } }] }, calls, {
-            callTags: (name, args) => this.skillTags(intent, name, args),
+            callTags: createProjectedSkillTagger(this.host.db, intent.binding.namespace, intent.binding.sessionId, intent.epoch,
+              String(intent.runId), subject.provider, subject.workspacePath),
             capability: (name, args) => capturedToolCapability(subject.provider, name, args)
           }) : [];
       const entry = entries[0];
@@ -235,35 +236,6 @@ export class HostUsageCapture {
       }
     }
     return [...aliases.values()].filter((entry) => !conflicts.has(entry.runtimeName));
-  }
-  private skillTags(intent: Intent, name: string, args: unknown): Capability[] {
-    const input = toolInput(args);
-    const path = input?.path ?? input?.file_path ?? input?.filePath;
-    const files = capturedToolCapability(intent.subject.provider, name, args)?.kind === "cli"
-      ? commandFiles(input) : { readPaths: [], scriptPaths: [] };
-    const paths = [
-      ...(["Read", "read_file"].includes(name) && typeof path === "string" && path.length <= 4096 ? [path] : []),
-      ...files.readPaths, ...files.scriptPaths
-    ];
-    if (paths.length === 0) return [];
-    const cwd = "cwd" in files && files.cwd ? resolve(intent.subject.workspacePath, files.cwd) : intent.subject.workspacePath;
-    const targets = paths.map((item) => normalize(isAbsolute(item) ? item : resolve(cwd, item)));
-    const projections = this.host.db.prepare(`SELECT capability_json, plugin_json, directory_aliases_json FROM agent_usage_runtime_skill_projections
-      WHERE namespace=? AND session_id=? AND provider_epoch_id=? AND execution_id=? LIMIT 512`)
-      .all(intent.binding.namespace, intent.binding.sessionId, intent.epoch, String(intent.runId)) as Array<{ capability_json: string; plugin_json: string | null; directory_aliases_json: string }>;
-    const tags = new Map<string, Capability>();
-    for (const row of projections) {
-      const directories = JSON.parse(row.directory_aliases_json) as string[];
-      const matches = targets.some((target) => directories.some((directory) => {
-        const rel = relative(normalize(directory), target);
-        return rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
-      }));
-      if (matches) for (const capability of [JSON.parse(row.capability_json) as Capability,
-        ...(row.plugin_json ? [JSON.parse(row.plugin_json) as Capability] : [])]) {
-        tags.set(JSON.stringify([capability.kind, capability.id, capability.version]), capability);
-      }
-    }
-    return [...tags.values()];
   }
   private healthQuery(filter: UsageFilter) {
     return { sql: `SELECT s.session_id AS sessionId, s.runtime_kind AS runtimeKind,

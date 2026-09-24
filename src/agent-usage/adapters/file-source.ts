@@ -6,9 +6,9 @@ import { UsageError } from "../core/errors.js";
 import type { SourceCapabilities, UsageSourceAdapter, UsageSourceEntry, UsageCollectionEntry } from "../source-coordinator.js";
 
 export type ParsedSourceEntry = UsageSourceEntry;
-export type IncrementalUsageParser = { parseLine(text: string, lineNumber: number): ParsedSourceEntry[]; snapshot(): unknown; validate(): void };
+export type IncrementalUsageParser = { parseLine(text: string, lineNumber: number): ParsedSourceEntry[] | Promise<ParsedSourceEntry[]>; snapshot(): unknown; validate(): void };
 type Boundary = { identity: string; size: number; digest: string };
-type Checkpoint = Boundary & { index: number; offset?: number; line?: number; state?: unknown; unterminated?: boolean; complete?: boolean };
+type Checkpoint = Boundary & { index: number; offset?: number; line?: number; state?: unknown; unterminated?: boolean; complete?: boolean; version?: number };
 const MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024;
 const MAX_LINE_BYTES = 16 * 1024 * 1024;
 const CHUNK_BYTES = 64 * 1024;
@@ -22,7 +22,8 @@ export class FileUsageSource implements UsageSourceAdapter {
     parse(text: string): ParsedSourceEntry[];
     capabilities: SourceCapabilities;
     appendOnly?: boolean;
-    incremental?: (state?: unknown) => IncrementalUsageParser;
+    incremental?: (state: unknown, input: Record<string, string>, signal: AbortSignal) => IncrementalUsageParser;
+    checkpointVersion?: number;
   }) {}
 
   describe(): SourceCapabilities { return this.options.capabilities; }
@@ -38,7 +39,9 @@ export class FileUsageSource implements UsageSourceAdapter {
   async *collect(input: Record<string, string>, checkpoint: string | null, boundaryJson: string, signal: AbortSignal): AsyncGenerator<UsageCollectionEntry> {
     signal.throwIfAborted();
     const boundary = JSON.parse(boundaryJson) as Boundary;
-    const previous = checkpoint === null ? null : JSON.parse(checkpoint) as Checkpoint;
+    const saved = checkpoint === null ? null : JSON.parse(checkpoint) as Checkpoint;
+    const previous = saved && (saved.version ?? 1) === (this.options.checkpointVersion ?? 1) ? saved : null;
+    const version = this.options.checkpointVersion ?? 1;
     // freeze already verified this exact digest. No body read or parse for an unchanged completed file.
     if (previous?.digest === boundary.digest && previous.identity === boundary.identity && previous.offset === boundary.size) return;
     const incremental = this.options.appendOnly !== false ? this.options.incremental : undefined;
@@ -59,7 +62,7 @@ export class FileUsageSource implements UsageSourceAdapter {
         }
         return;
       }
-      const parser = incremental(previous?.offset === undefined ? undefined : previous.state);
+      const parser = incremental(previous?.offset === undefined ? undefined : previous.state, input, signal);
       if (!Number.isSafeInteger(offset) || offset < 0 || offset > boundary.size) throw new UsageError("usage_source_changed");
       let line = previous?.line ?? 0, cursor = offset, skip = previous?.offset === undefined ? 0 : previous.index;
       let lastCheckpoint = checkpoint;
@@ -85,23 +88,27 @@ export class FileUsageSource implements UsageSourceAdapter {
           try { JSON.parse(text); } catch { break; }
         }
         const state = parser.snapshot();
-        const entries = parser.parseLine(text, line + 1);
+        const entries = await parser.parseLine(text, line + 1);
         const after = parser.snapshot();
         for (let index = skip; index < entries.length; index++) {
           signal.throwIfAborted();
           const complete = index === entries.length - 1;
-          lastCheckpoint = JSON.stringify({ ...boundary,
+          lastCheckpoint = JSON.stringify({ ...boundary, version,
             offset: complete ? end : cursor, line: complete ? line + 1 : line,
             state: complete ? after : state, index: complete ? 0 : index + 1,
             unterminated: complete && !record.terminated } satisfies Checkpoint);
           yield { ...entries[index]!, checkpoint: lastCheckpoint };
         }
         cursor = end; line++; skip = 0; unterminated = !record.terminated;
+        if (!entries.length && line % 100 === 0) {
+          lastCheckpoint = JSON.stringify({ ...boundary, version, offset: cursor, line, state: after, index: 0, unterminated } satisfies Checkpoint);
+          yield { checkpoint: lastCheckpoint };
+        }
         if (line % 256 === 0) await setImmediate(undefined, { signal });
       }
       // Metadata-only lines advance the parser state without inventing a usage observation.
       if (cursor === boundary.size) parser.validate();
-      const finalCheckpoint = JSON.stringify({ ...boundary, offset: cursor, line,
+      const finalCheckpoint = JSON.stringify({ ...boundary, version, offset: cursor, line,
         state: parser.snapshot(), index: skip, unterminated } satisfies Checkpoint);
       if (finalCheckpoint !== lastCheckpoint) yield { checkpoint: finalCheckpoint };
       if (cursor < boundary.size) throw new UsageError("usage_source_incomplete");

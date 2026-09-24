@@ -6,6 +6,7 @@ export type UsageQueries = {
   overview: { args: Parameters<UsageStore["overview"]>; result: ReturnType<UsageStore["overview"]> };
   sessionSummaries: { args: Parameters<UsageStore["summariesBySession"]>; result: ReturnType<UsageStore["summariesBySession"]> };
   rankings: { args: Parameters<AttributionStore["rankingsPage"]>; result: ReturnType<AttributionStore["rankingsPage"]> };
+  contextSummary: { args: Parameters<AttributionStore["contextSummary"]>; result: ReturnType<AttributionStore["contextSummary"]> };
 };
 export type UsageQuery = { [K in keyof UsageQueries]: { kind: K; args: UsageQueries[K]["args"] } }[keyof UsageQueries];
 
@@ -16,6 +17,7 @@ export const openUsageQueryReader = (filename: string) => {
   const store = new UsageStore(db), attribution = new AttributionStore(store);
   const read = db.transaction((query: UsageQuery) => query.kind === "overview"
     ? store.overview(...query.args) : query.kind === "sessionSummaries"
-      ? store.summariesBySession(...query.args) : attribution.rankingsPage(...query.args));
+      ? store.summariesBySession(...query.args) : query.kind === "contextSummary"
+        ? attribution.contextSummary(...query.args) : attribution.rankingsPage(...query.args));
   return { read, close: () => db.close() };
 };

@@ -49,6 +49,27 @@ beforeEach(() => {
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 const mount = () => render(<I18nProvider><BrowserRouter><AgentUsagePage /></BrowserRouter></I18nProvider>);
 
+it("shows transcript attribution and a deduplicated input comparison without changing reported totals", async () => {
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => {
+    if (String(input).includes("/usage/summary")) return response({ ...summary, contextAnalysis: {
+      requests: 4, reconstructedRequests: 4, requestsWithReportedInput: 4,
+      reportedInputTokens: 3000, estimatedInputTokens: 1800, differenceTokens: 1200
+    } });
+    if (String(input).includes("/usage/capabilities")) return response({ items: [{ ...ranks[0],
+      attributionEvidence: { direct: 0, matched: 0, inferred: 3 } }], total: 1 });
+    return original(input, init);
+  });
+  mount();
+  expect(await screen.findByText("输入占用对照")).toBeInTheDocument();
+  expect(screen.getByText("会话重建估算")).toBeInTheDocument();
+  expect(screen.getByText("1,800")).toBeInTheDocument();
+  expect(screen.getByText("1,200")).toBeInTheDocument();
+  expect(screen.getByText("3,300")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab", { name: "观测内容" }));
+  expect(screen.queryByText("输入占用对照")).not.toBeInTheDocument();
+});
+
 it("renders available rankings and sources while summary is still loading or fails", async () => {
   const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
   let resolveSummary!: (value: Response) => void;

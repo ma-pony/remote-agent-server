@@ -144,6 +144,8 @@ it("reports failed capture health through the management summary without persist
   expect(result.analysisStatus).toBe("partial"); expect(result.completeness).toBe("partial");
 });
 it.each([
+  ["Skill", { skill: "Review" }],
+  ["Skill", { skill: "Review plugin:Review" }],
   ["Read", { path: "/workspace/skills/review/SKILL.md" }],
   ["exec_command", { command: "rtk proxy cat SKILL.md", workdir: "/workspace/skills/review" }],
   ["exec_command", { command: "python /workspace/skills/review/scripts/check.py" }]

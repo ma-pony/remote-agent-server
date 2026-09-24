@@ -38,7 +38,8 @@ export class UsageQueryWorker {
     if (this.collector.db.memory) return (query.kind === "overview"
       ? this.collector.store.overview(...query.args) : query.kind === "sessionSummaries"
         ? this.collector.store.summariesBySession(...query.args)
-        : this.collector.attribution.rankingsPage(...query.args)) as UsageQueries[K]["result"];
+        : query.kind === "contextSummary" ? this.collector.attribution.contextSummary(...query.args)
+          : this.collector.attribution.rankingsPage(...query.args)) as UsageQueries[K]["result"];
     if (this.pending.length >= 16) throw new UsageQueryWorkerError("usage_query_busy");
     return new Promise((resolve, reject) => {
       this.pending.push({ query, resolve: value => resolve(value as UsageQueries[K]["result"]), reject });

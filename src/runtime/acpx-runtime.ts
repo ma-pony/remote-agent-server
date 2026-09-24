@@ -26,6 +26,7 @@ import type { Provider, TokenUsage } from "../domain.js";
 import { SystemProviderSessionCleaner } from "./provider-session-cleaner.js";
 import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 import { SkillManager } from "../skills/skill-manager.js";
+import type { ProjectedSkill } from "./skill-projector.js";
 import type {
   AgentRuntime,
   RuntimeDoctor,
@@ -338,7 +339,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     return name;
   }
 
-  async prepare(agentName: string): Promise<void> {
+  async prepare(agentName: string): Promise<ProjectedSkill[]> {
     const target = this.targets.get(agentName);
     if (target === undefined) {
       throw new AgentRuntimeError("invalid_runtime_target", "Unknown Runtime target");
@@ -347,6 +348,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     const providerHome = join(this.dataDir, "agents", String(target.agentId), "provider-home");
     const environment = [`REMOTE_AGENT_BROWSER_PROFILE=${shellQuote(target.browserProfilePath)}`];
     const capture = target.captureRoute ? captureRuntimeEnvironment(target.provider, target.captureRoute) : undefined;
+    let projectedSkills: ProjectedSkill[] = [];
     if (target.provider === "hermes") {
       const legacyHome = join(providerHome, "hermes");
       const home = join(legacyHome, "sessions", String(target.sessionId));
@@ -358,7 +360,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const home = join(agentHome, "sessions", String(target.sessionId));
       const hostHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
       await this.prepareProviderHome(hostHome, home);
-      await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home });
+      projectedSkills = await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home }) ?? [];
       const disabledSkills = this.skillManager.hostSkillFiles().map((path) => [
         "[[skills.config]]",
         `path = ${JSON.stringify(path)}`,
@@ -376,7 +378,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const home = join(providerHome, "claude");
       const hostHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
       await this.prepareProviderHome(hostHome, home);
-      await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home });
+      projectedSkills = await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home }) ?? [];
       if (capture) {
         await rm(join(home, ".credentials.json"), { force: true });
         const settingsPath = join(home, "settings.json");
@@ -391,6 +393,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     if (capture) environment.push(...Object.entries(capture.values).map(([key, value]) => `${key}=${shellQuote(value)}`));
     const unset = capture?.unset.map((key) => `-u ${key}`).join(" ") ?? "";
     this.commands.set(agentName, `env ${unset ? `${unset} ` : ""}${environment.join(" ")} ${acpCommand(target.provider)}`);
+    return projectedSkills;
   }
 
   resolve(agentName: string): string {
@@ -467,6 +470,7 @@ type ManagedSession = {
   configurationFingerprint: string;
   target: string;
   model?: string;
+  projectedSkills: ProjectedSkill[];
 };
 
 type ActiveTurn = {
@@ -626,7 +630,10 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const reusable = existing !== undefined && this.canReuse(existing, input);
     if (reusable) {
       await this.applyModel(existing, input.model);
-      return { providerSessionId: existing.providerSessionId };
+      return {
+        providerSessionId: existing.providerSessionId,
+        ...(existing.projectedSkills.length ? { projectedSkills: existing.projectedSkills } : {})
+      };
     }
     if (existing !== undefined) {
       await existing.runtime.close({
@@ -653,7 +660,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions
     });
-    try { await registry.prepare(agent); } catch (error) { await this.usageCapture?.release(input.sessionId); throw error; }
+    let projectedSkills: ProjectedSkill[];
+    try { projectedSkills = await registry.prepare(agent); }
+    catch (error) { await this.usageCapture?.release(input.sessionId); throw error; }
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
     const sessionOptions = {
       ...(input.model === undefined ? {} : { model: input.model }),
@@ -688,6 +697,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
           instructions: input.instructions,
           configurationFingerprint: configurationFingerprint(input),
           target: agent,
+          projectedSkills,
           ...(input.model === undefined ? {} : { model: input.model })
         });
         this.recordShutdownFailure("late_handle_close", input.sessionId, outcome.reason);
@@ -728,9 +738,10 @@ export class AcpxAgentRuntime implements AgentRuntime {
       instructions: input.instructions,
       configurationFingerprint: configurationFingerprint(input),
       target: agent,
+      projectedSkills,
       ...(input.model === undefined ? {} : { model: input.model })
     });
-    return { providerSessionId };
+    return { providerSessionId, ...(projectedSkills.length ? { projectedSkills } : {}) };
   }
 
   startTurn(input: RuntimeTurnInput): RuntimeTurn {

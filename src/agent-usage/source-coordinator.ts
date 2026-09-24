@@ -101,6 +101,8 @@ export class UsageSourceCoordinator {
     if (!source) return Promise.reject(new UsageError("usage_source_not_found"));
     const adapter = this.adapters[source.kind];
     if (!adapter) return Promise.reject(new UsageError("usage_source_unsupported"));
+    this.store.db.prepare("UPDATE agent_usage_sources SET capabilities_json=? WHERE id=? AND capabilities_json!=?")
+      .run(canonical(adapter.describe()), id, canonical(adapter.describe()));
     const collectionId = source.status === "collecting" && source.collection_id !== null ? source.collection_id : randomUUID();
     this.store.db.prepare("UPDATE agent_usage_sources SET status = 'collecting', collection_id = ?, error_code = NULL WHERE id = ?").run(collectionId, id);
     const controller = new AbortController();
@@ -114,6 +116,7 @@ export class UsageSourceCoordinator {
       const boundary = frozenBoundary ?? await adapter.freeze(input);
       controller.signal.throwIfAborted();
       let pending: UsageCollectionEntry[] = [];
+      let lastFlush = Date.now();
       const flush = async () => {
         if (!pending.length) return;
         const batch = pending; pending = [];
@@ -152,12 +155,13 @@ export class UsageSourceCoordinator {
           this.store.db.prepare(`UPDATE agent_usage_sources SET checkpoint = ?, rejected_records = rejected_records + ?
             WHERE id = ? AND collection_id = ?`).run(batch.at(-1)!.checkpoint, rejectedRecords, id, collectionId);
         })();
+        lastFlush = Date.now();
       };
       try {
         for await (const entry of adapter.collect(input, source.checkpoint, boundary, controller.signal)) {
           controller.signal.throwIfAborted();
           pending.push(entry);
-          if (pending.length >= COLLECTION_YIELD_INTERVAL) {
+          if (!entry.observation || pending.length >= COLLECTION_YIELD_INTERVAL || Date.now() - lastFlush >= 1000) {
             await flush(); await yieldToEventLoop(); controller.signal.throwIfAborted();
           }
         }
@@ -173,7 +177,7 @@ export class UsageSourceCoordinator {
       this.store.db.prepare(`UPDATE agent_usage_sources SET status = 'completed', last_success_at = ?, error_code = NULL
         WHERE id = ? AND collection_id = ?`).run(new Date().toISOString(), id, collectionId);
     }).catch((error: unknown) => {
-      const code = error instanceof UsageError && error.code === "usage_collection_timeout" ? error.code : "usage_source_failed";
+      const code = error instanceof UsageError && ["usage_collection_timeout", "usage_tokenizer_pending"].includes(error.code) ? error.code : "usage_source_failed";
       this.store.db.prepare("UPDATE agent_usage_sources SET status = 'failed', error_code = ? WHERE id = ? AND collection_id = ?").run(code, id, collectionId);
       throw new UsageError(code, { cause: error });
     }).finally(() => { clearTimeout(timer); this.jobs.delete(id); });

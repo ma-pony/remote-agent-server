@@ -172,8 +172,9 @@ describe("RunExecutor", () => {
       expect(result.runRepository.get(result.run.id)).toMatchObject({ status: "succeeded", skillsRevision: "skills-v1" });
     } finally { result.db.close(); }
   });
-  it("registers projected Skills before Runtime execution and feeds tool evidence", async () => {
+  it("registers managed and native plugin Skills before the turn and feeds tool evidence", async () => {
     const skillDirectory = "/projected/skills/review";
+    const nativeDirectory = "/projected/plugins/review/skills/native";
     const runtime = createFakeRuntime({ events: [
       { type: "tool", content: {
         toolCallId: "read-skill", kind: "read", status: "in_progress",
@@ -181,6 +182,10 @@ describe("RunExecutor", () => {
       } },
       { type: "tool", content: {
         toolCallId: "read-skill", status: "completed", rawOutput: "done"
+      } },
+      { type: "tool", content: {
+        toolCallId: "read-native-skill", kind: "read", status: "completed",
+        rawInput: { path: `${nativeDirectory}/SKILL.md` }, rawOutput: "native"
       } }
     ] });
     const prepare = vi.fn(() => ({
@@ -199,12 +204,21 @@ describe("RunExecutor", () => {
     runtime.ensureSession = vi.fn(async () => {
       expect(result.usageCollector.runtimeCapabilities.stageCounts({ namespace: result.usageCollector.namespace }))
         .toContainEqual(expect.objectContaining({ stage: "catalog_visible", count: 1 }));
-      return { providerSessionId: null };
+      return { providerSessionId: null, projectedSkills: [{
+        id: "native", name: "Native", revision: "native-v1", source: "plugin",
+        pluginId: "review@official", pluginName: "Review plugin",
+        skillMdPath: `${nativeDirectory}/SKILL.md`, directoryAliases: [nativeDirectory]
+      }] };
     });
     try {
       await result.executor.execute(result.run.id);
       expect(result.usageCollector.attribution.rankings({ namespace: result.usageCollector.namespace }, "skill"))
-        .toEqual([expect.objectContaining({ calls: 1, successes: 1, rawResultBytes: 4 })]);
+        .toEqual(expect.arrayContaining([
+          expect.objectContaining({ capability: expect.objectContaining({ id: "review" }), calls: 1, successes: 1, rawResultBytes: 4 }),
+          expect.objectContaining({ capability: expect.objectContaining({ id: "native" }), calls: 1, successes: 1, rawResultBytes: 6 })
+        ]));
+      expect(result.usageCollector.attribution.rankings({ namespace: result.usageCollector.namespace }, "plugin"))
+        .toEqual([expect.objectContaining({ calls: 1, rawResultBytes: 6 })]);
       expect(result.usageCollector.runtimeCapabilities.stageCounts({ namespace: result.usageCollector.namespace }))
         .toEqual(expect.arrayContaining([
           expect.objectContaining({ stage: "catalog_visible", count: 1 }),

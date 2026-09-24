@@ -41,7 +41,7 @@ export class ResultFirstUseIndex {
                 CASE WHEN scopes.specific=0 THEN '' ELSE json_quote(c.runtime_kind) END, e.capability_key, e.content_key
                 ORDER BY c.occurred_at IS NULL, c.occurred_at, c.context_id, e.position) AS ordinal
             FROM agent_usage_contexts c JOIN agent_usage_exposures e USING(context_id)
-            CROSS JOIN (SELECT 0 AS specific UNION ALL SELECT 1) scopes WHERE e.block_kind='result'
+            CROSS JOIN (SELECT 0 AS specific UNION ALL SELECT 1) scopes WHERE e.block_kind='result' AND e.result_first_use IS NULL
           ) WHERE ordinal=1`);
       }
     })();
@@ -59,7 +59,7 @@ export class ResultFirstUseIndex {
         SELECT c.namespace, c.session_id, c.provider_epoch_id, ?, e.capability_key, e.content_key,
           c.context_id, e.position, c.occurred_at IS NULL, COALESCE(c.occurred_at, '')
         FROM agent_usage_exposures e JOIN agent_usage_contexts c USING(context_id)
-        WHERE c.namespace=? AND c.session_id=? AND c.provider_epoch_id=?
+        WHERE c.namespace=? AND c.session_id=? AND c.provider_epoch_id=? AND e.result_first_use IS NULL
           AND (?='' OR json_quote(c.runtime_kind)=?) AND e.capability_key=? AND e.content_key=? AND e.block_kind='result'
         ORDER BY c.occurred_at IS NULL, c.occurred_at, c.context_id, e.position LIMIT 1`)
         .run(key.runtime_scope, key.namespace, key.session_id, key.provider_epoch_id,
@@ -71,13 +71,14 @@ export class ResultFirstUseIndex {
         e.capability_key, e.content_key, c.context_id, e.position, c.occurred_at IS NULL, COALESCE(c.occurred_at, '')
       FROM agent_usage_contexts c JOIN agent_usage_exposures e USING(context_id)
       CROSS JOIN (SELECT 0 AS specific UNION ALL SELECT 1) scopes
-      WHERE c.context_id=? AND e.block_kind='result' ${conflict}`).run(contextId);
+      WHERE c.context_id=? AND e.block_kind='result' AND e.result_first_use IS NULL ${conflict}`).run(contextId);
   }
 
   static join = `LEFT JOIN agent_usage_result_first f ON e.block_kind='result' AND f.namespace=c.namespace
     AND f.session_id=c.session_id AND f.provider_epoch_id=c.provider_epoch_id
     AND f.capability_key=e.capability_key AND f.content_key=e.content_key AND f.runtime_scope=?`;
   static classification = `CASE WHEN e.block_kind!='result' THEN NULL
+    WHEN e.result_first_use IS NOT NULL THEN e.result_first_use
     WHEN f.context_id=e.context_id AND f.position=e.position THEN CASE WHEN c.history_complete=1 THEN 'first' ELSE 'unknown' END
     WHEN f.context_id IS NOT NULL THEN 'repeat' ELSE 'unknown' END`;
 }

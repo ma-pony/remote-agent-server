@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, sep } from "node:path";
 
@@ -125,6 +125,30 @@ afterEach(async () => {
 });
 
 describe("Provider extensions", () => {
+  it.each(["codex", "claude_code"] as const)("returns the enabled %s plugin's actual Skill projection", async provider => {
+    const { root, codexHome, claudeHome, codexAgentId, claudeAgentId, db } = await fixture();
+    const agentId = provider === "codex" ? codexAgentId : claudeAgentId;
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const name = provider === "codex" ? "browser" : "review";
+    const plugin = manager.list(agentId).find(item => item.name === name)!;
+    manager.setEnabled(agentId, plugin.id, true);
+    const source = manager.enabled(agentId)[0]!.sourcePath!;
+    const directory = join(source, "skills", "inspect");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Inspect changes\n---\nPrivate skill body");
+    const home = join(root, `runtime-${provider}`);
+    const projector = new ProviderExtensionProjector(manager, join(root, "data"));
+    const skills = await projector.prepare({ agentId, provider, home });
+    expect(skills).toEqual([expect.objectContaining({ name: "inspect", pluginName: name, source: "plugin" })]);
+    const skill = skills[0]!;
+    expect(skill.directoryAliases).toContain(realpathSync(skill.skillMdPath).slice(0, -"/SKILL.md".length));
+    expect(skill.directoryAliases.some(path => path.startsWith(home))).toBe(true);
+    expect(readFileSync(skill.skillMdPath, "utf8")).toContain("Private skill body");
+    expect(JSON.stringify(skill)).not.toContain("Private skill body");
+    manager.setEnabled(agentId, plugin.id, false);
+    expect(await projector.prepare({ agentId, provider, home })).toEqual([]);
+  });
+
   it("pages and searches cached Provider catalogs", async () => {
     const {app, codexAgentId} = await fixture();
     const result = await app.inject({url: `/api/agents/${codexAgentId}/extensions?page=2&pageSize=1`, headers: authHeaders});

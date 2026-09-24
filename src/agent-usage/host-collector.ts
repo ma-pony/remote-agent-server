@@ -13,6 +13,7 @@ import { RuntimeCapabilityCollector } from "./runtime-capabilities.js";
 import { RuntimeContentBackfill } from "./runtime-backfill.js";
 import { RuntimeEventRetention } from "./runtime-retention.js";
 import { RuntimeConversationCollector } from "./runtime-conversation.js";
+import { TranscriptProfiles } from "./transcript-profiles.js";
 
 /** The only layer that translates business-table IDs into the reusable usage module. */
 export class HostUsageCollector {
@@ -38,6 +39,7 @@ export class HostUsageCollector {
   readonly contentBackfill: RuntimeContentBackfill;
   readonly conversationContent: RuntimeConversationCollector;
   readonly eventRetention: RuntimeEventRetention;
+  readonly transcriptProfiles: TranscriptProfiles;
   constructor(readonly db: Database.Database, adapters: Record<string, UsageSourceAdapter> = {},
     private readonly discoverManagedSources?: (sessionId: number) => Promise<void>, tokenizers = new ModelTokenizers(), eventRetentionMs = 7 * 24 * 60 * 60 * 1000) {
     this.store = new UsageStore(db);
@@ -47,6 +49,7 @@ export class HostUsageCollector {
     )`);
     this.attribution = new AttributionStore(this.store, tokenizers);
     this.runtimeCapabilities = new RuntimeCapabilityCollector(this.store, this.attribution, this.namespace);
+    this.transcriptProfiles = new TranscriptProfiles(db, this.namespace);
     this.conversationContent = new RuntimeConversationCollector(this.store, this.attribution, this.namespace);
     this.contentBackfill = new RuntimeContentBackfill(db, this.namespace,
       (runId, content, event, signal) => this.runtimeCapabilities.prepareTool(runId, content, event, signal), this.conversationContent, tokenizers.knownModels());
@@ -340,6 +343,7 @@ export class HostUsageCollector {
       this.runtimeCapabilities.deleteSession(this.namespace, String(sessionId));
       this.contentBackfill.deleteSession(String(sessionId));
       this.conversationContent.deleteSession(String(sessionId));
+      this.db.prepare("DELETE FROM agent_usage_context_profiles WHERE namespace=? AND session_id=?").run(this.namespace, String(sessionId));
       this.sources.revokeSubject(this.namespace, String(sessionId));
     })();
     this.observer?.revokeSession(sessionId);

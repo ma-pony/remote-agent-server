@@ -208,6 +208,7 @@ export class RunExecutor {
       this.runRepository.setSkillsRevision(run.id, skillsRevision);
       try {
         this.usageCollector.runtimeCapabilities.recordRun(run.id);
+        this.usageCollector.transcriptProfiles.record(session.id, run.id, mcpServers);
       } catch {
         console.error(`runtime_capability_run_failed runId=${run.id}`);
       }
@@ -255,6 +256,13 @@ export class RunExecutor {
         throw error;
       }
       this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
+      if (runtimeSession.projectedSkills?.length) {
+        try {
+          this.usageCollector.runtimeCapabilities.recordProjection(run.id, [...(projectedSkills ?? []), ...runtimeSession.projectedSkills]);
+        } catch {
+          console.error(`runtime_capability_projection_failed runId=${run.id}`);
+        }
+      }
 
       if (this.cancellationIntents.has(run.id)) {
         return this.finishRun(run.id, { status: "cancelled" }, usage);
