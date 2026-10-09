@@ -75,6 +75,9 @@ export type AgentSkill = {
   latestRevision?: string;
   updateAvailable?: boolean;
   locallyModified?: boolean;
+  managedByPlugin?: boolean;
+  pluginVersion?: string | null;
+  legacyPluginCopy?: boolean;
 };
 
 export type SkillSource = {

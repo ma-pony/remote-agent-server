@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, expect, it } from "vitest";
@@ -7,6 +7,65 @@ import { SkillManager } from "../src/skills/skill-manager.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+
+it("retires a confirmed plugin takeover without resurrecting the copy after disabling its plugin", () => {
+  const root = mkdtempSync(join(tmpdir(), "skill-projection-")); roots.push(root);
+  const dataDir = join(root, "data");
+  const source = join(dataDir, "agents", "1", "skills", "legacy-plugin");
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, "SKILL.md"), "Legacy plugin instructions");
+  writeFileSync(join(source, ".remote-agent-revision.json"), JSON.stringify({
+    id: "legacy-plugin", name: "inspect", description: "Legacy", source: "plugin", skillPath: ".", sourceId: "browser@market",
+    revision: "a".repeat(64), createdAt: "2026-09-16T00:00:00.000Z"
+  }));
+  const activeWorkspace = join(root, "active");
+  const previous = join(activeWorkspace, ".agents", "skills", "_remote-agent-managed-legacy-plugin", "SKILL.md");
+  mkdirSync(dirname(previous), { recursive: true });
+  writeFileSync(previous, "Active Run instructions");
+  const projector = new SkillProjector(dataDir);
+  const native = { id: "plugin-skill:codex:browser@market:skills/inspect", name: "inspect", description: "Current",
+    source: "plugin" as const, sourceId: "browser@market", packageName: "browser", enabled: true, available: true, managedByPlugin: true };
+  const next = projector.prepare({ id: 1, provider: "codex" }, { id: 2, workspacePath: join(root, "next") }, [native]);
+  expect(next.projectedSkills).toEqual([]);
+  expect(readFileSync(previous, "utf8")).toBe("Active Run instructions");
+  projector.prepare({ id: 1, provider: "codex" }, { id: 1, workspacePath: activeWorkspace });
+  expect(existsSync(previous)).toBe(false);
+  expect(readFileSync(join(source, "SKILL.md"), "utf8")).toBe("Legacy plugin instructions");
+  expect(projector.prepare({ id: 1, provider: "codex" }, { id: 3, workspacePath: join(root, "disabled") },
+    [{ ...native, enabled: false }]).projectedSkills).toEqual([]);
+  expect(new SkillManager({ dataDir, roots: [] }).list(1)).toEqual([]);
+});
+
+it.each([
+  { provider: "hermes" as const, owner: "browser@market", native: "missing" },
+  { provider: "codex" as const, owner: "browser@market", native: "disabled" },
+  { provider: "claude_code" as const, owner: "browser@market", native: "missing" },
+  { provider: "codex" as const, owner: undefined, native: "enabled" },
+  { provider: "codex" as const, owner: "different@market", native: "enabled" }
+])("keeps an enabled legacy Skill without a verified replacement ($provider/$native/$owner)", ({ provider, owner, native }) => {
+  const root = mkdtempSync(join(tmpdir(), "skill-projection-")); roots.push(root);
+  const dataDir = join(root, "data");
+  const source = join(dataDir, "agents", "1", "skills", "legacy-plugin");
+  mkdirSync(source, { recursive: true });
+  writeFileSync(join(source, "SKILL.md"), "---\nname: inspect\ndescription: Legacy\n---\nLegacy plugin instructions");
+  writeFileSync(join(source, ".remote-agent-revision.json"), JSON.stringify({
+    id: "legacy-plugin", name: "inspect", description: "Legacy", source: "plugin", skillPath: ".", sourceId: owner,
+    revision: "a".repeat(64), createdAt: "2026-09-16T00:00:00.000Z"
+  }));
+  const replacement = { id: "plugin-skill:codex:browser@market:skills/inspect", name: "inspect", description: "Current",
+    source: "plugin" as const, sourceId: "browser@market", packageName: "browser", enabled: native === "enabled",
+    available: true, managedByPlugin: true };
+  const pluginSkills = native === "missing" ? [] : [replacement];
+  const result = new SkillProjector(dataDir).prepare({ id: 1, provider }, { id: 1, workspacePath: join(root, "workspace") }, pluginSkills);
+  expect(result.projectedSkills).toEqual([expect.objectContaining({ id: "legacy-plugin", name: "inspect" })]);
+  expect(readFileSync(result.projectedSkills![0]!.skillMdPath, "utf8")).toContain("Legacy plugin instructions");
+  const manager = new SkillManager({ dataDir, roots: [] });
+  expect(manager.list(1, undefined, pluginSkills)).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: "legacy-plugin", source: "plugin", enabled: true, available: true, legacyPluginCopy: true })
+  ]));
+  expect(manager.listPage(1, { page: 1, pageSize: 20 }, pluginSkills).items.some(skill => skill.id === "legacy-plugin")).toBe(true);
+  expect(manager.setEnabled(1, "legacy-plugin", false)?.enabled).toBe(false);
+});
 
 it("projects an entire selected package while preserving sibling resources and active Session copies", () => {
   const root = mkdtempSync(join(tmpdir(), "skill-projection-")); roots.push(root);

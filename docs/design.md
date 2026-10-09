@@ -246,6 +246,10 @@ Session 使用可空的内部字段 `pending_operation` 持久化 `cleanup`、`d
 - **执行器扩展**：发现 Codex、Claude Code 插件和 Hook，按 Agent 投影。
 - **MCP**：管理 HTTP 和 stdio Server、固定值、Session 参数、运行时参数、密钥和工具过滤。
 
+原生插件提供的 Skills 归所属插件管理，启用状态来自当前 Agent 的执行器扩展选择，版本跟随宿主当前发现的插件包。技能目录列表与运行时投影共用有界的 manifest/Skills 读取逻辑，身份为 `plugin-skill:<provider>:<plugin-id>:<package-relative-path>`，不依赖缓存版本目录。技能页返回 `managedByPlugin: true`、所属插件的 `sourceId` / `packageName` 与 `pluginVersion`；独立启停、删除、版本预览、应用或 ZIP 替换接口返回 `409 skill_managed_by_plugin`，统一通过执行器扩展管理。插件来源缓存默认最多 30 秒，Codex 和 Claude Code 均将所选插件文件树纳入扩展指纹；同版本内容或技能清单变化也会在下一次 Run 刷新 Runtime Handle，并保留 Provider Session 上下文，运行中的 Session 投影保持原内容。
+
+旧 `source: plugin` 副本通过已记录的插件标识和 Skill 名称匹配当前 Agent 已启用、可用且唯一的原生技能，确认后在下一次 Run 接管并清理该 Session 的旧托管入口。接管以原子、幂等的目录标记保存在 `agents/<id>/skills/.plugin-managed/<legacy-skill-id>/`，随 Agent 克隆及备份保留；插件之后停用或移除也不恢复该旧选择。缺少归属、匹配不明确、没有可用或已选替代，以及 Hermes 场景，继续展示和投影旧副本，返回 `legacyPluginCopy: true` 并允许独立管理。运行前只读取已选插件的技能，不由未选插件触发接管。Agent 副本和不可变版本历史保留，既有插件选择不自动启用或变更，不删除 Session/Run 元数据与用量统计。Git 来源导入的插件 Skills 仍是 `source: git`，继续由独立版本选择流程管理。
+
 Codex 的原生插件投影将当前 Agent 选中的包发布到 `agents/<id>/provider-home/codex/shared-plugins/` 下的本地 marketplace 快照；快照先在临时目录生成，再原子发布。它同时预先生成真实插件版本目录，避免 Codex 启动时的本地 marketplace 缓存刷新忽略仅在配置中声明的来源。Session 的 `config.toml` 只声明这些本地 marketplace，`plugins/cache` 链接到 Agent 级、按所选插件内容版本划分的 `plugin-caches/<revision>/`。默认情况下 `.tmp` 链接到 Agent 级内置市场同步目录，Session 共用市场仓库、版本标记和同步锁；显式启用 rollout 压缩时，该 Session 保留独立 `.tmp`。插件文件树元数据指纹会改变快照及内部缓存版本，同版本内容更新可在发现缓存刷新后的下一次 Run 生效。旧 Session 的独立插件缓存在重新准备时移除；未启用压缩的 Session 也会移除旧临时克隆。不再被 Session 引用的旧快照、缓存及中断发布留下的临时目录延迟清理。
 
 Codex 也在 `.tmp` 中保存 rollout 压缩锁。启用压缩的 Session 使用独立 `.tmp`，避免其他 Session 的锁跳过本会话的压缩；代价是 Codex 内置市场仓库可能在这些 Session 各保留一份。各 Session 的 rollout 文件仍保存在自己的 Home 中。
@@ -277,7 +281,7 @@ Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace �
 | `POST /agents/:id/skills/:skillId/revision` | 用 `{revision, expectedRevision}` 明确应用或回退 |
 | `POST /agents/:id/skills/:skillId/upload` | 用原 ZIP 请求格式发布同名新版，不自动应用 |
 
-版本检查和应用是不同操作；来源删除、刷新失败、版本不变均不会改动运行中的投影。本期不提供自动更新、仓库写回、包管理器安装或版本垃圾回收。
+版本检查和应用是不同操作；来源删除、刷新失败、版本不变均不会改动运行中的投影。独立 Skill 版本流程不提供自动更新、仓库写回、包管理器安装或版本垃圾回收；原生插件 Skills 按上述插件生命周期自动跟随。
 
 `skillsRevision` 证明该 Run 使用的投影内容，不证明模型成功读取或执行了 Skill。已观察到部分上游模型错误作为普通输出返回且 Runtime 报告 `completed`；当前服务未修复这一状态传递问题。业务验收须核对实际回复或产物。[实测记录](superpowers/validation/2026-09-14-skill-source-updates.md)分别列出通过项与 Provider 环境阻塞。
 

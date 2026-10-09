@@ -18,7 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "../src/config.js";
 import type { RuntimeSessionInput } from "../src/runtime/agent-runtime.js";
 import type { RuntimeMcpServer } from "../src/mcp/mcp-types.js";
-import { createFakeRuntime } from "./helpers.js";
+import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const acpxMocks = vi.hoisted(() => ({
   createAcpRuntime: vi.fn(),
@@ -897,6 +897,41 @@ describe("AcpxAgentRuntime", () => {
     expect(acp.close).toHaveBeenCalledWith({ handle, reason: "session_handle_refreshed" });
     expect(acp.ensureSession).toHaveBeenCalledTimes(2);
     expect(acp.ensureSession.mock.calls[1]?.[0]).toMatchObject({ resumeSessionId: "provider-session-1" });
+  });
+
+  it("refreshes a resumed Claude Session when plugin contents change without a version bump", async () => {
+    const root = makeRoot();
+    const claudeHome = join(root, "host-claude");
+    const source = join(claudeHome, "plugins", "cache", "market", "review", "1.0.0");
+    const directory = join(source, "skills", "inspect");
+    mkdirSync(join(source, ".claude-plugin"), { recursive: true });
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(claudeHome, "settings.json"), JSON.stringify({ enabledPlugins: { "review@market": true } }));
+    writeFileSync(join(source, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "review", version: "1.0.0" }));
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Before\n---\nBefore plugin update");
+    vi.stubEnv("CLAUDE_CONFIG_DIR", claudeHome);
+    const { db } = createTestDatabase();
+    db.prepare("UPDATE agents SET provider='claude_code' WHERE id=?").run(AGENT_ID);
+    const manager = new ProviderExtensionManager({ db, claudeHome, codexHome: join(root, "codex"), cacheTtlMs: 0 });
+    manager.setEnabled(AGENT_ID, "plugin:review@market", true);
+    const acp = runtimeStub();
+    const handle = await acp.ensureSession();
+    acp.ensureSession.mockReset(); acp.ensureSession.mockResolvedValue(handle);
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root), undefined, manager);
+    try {
+      const input = sessionInput(root, { provider: "claude_code", extensionsRevision: await manager.revision(AGENT_ID) });
+      const first = await runtime.ensureSession(input);
+      expect(readFileSync(first.projectedSkills![0]!.skillMdPath, "utf8")).toContain("Before plugin update");
+      writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: After\n---\nAfter plugin update with new instructions");
+      const extensionsRevision = await manager.revision(AGENT_ID);
+      expect(extensionsRevision).not.toBe(input.extensionsRevision);
+      const next = await runtime.ensureSession({ ...input, providerSessionId: first.providerSessionId, extensionsRevision });
+      expect(readFileSync(next.projectedSkills![0]!.skillMdPath, "utf8")).toContain("After plugin update");
+      expect(acp.close).toHaveBeenCalledWith({ handle, reason: "session_handle_refreshed" });
+      expect(acp.ensureSession).toHaveBeenCalledTimes(2);
+      expect(acp.ensureSession.mock.calls[1]?.[0]).toMatchObject({ resumeSessionId: first.providerSessionId });
+    } finally { await runtime.shutdown(); db.close(); }
   });
 
   it("preserves native plugin Skill identities when reusing a Runtime handle", async () => {

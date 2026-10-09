@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { pagedManagementResponse } from "./paged-management-response.js";
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { App } from "../src/web/app.js";
 
@@ -18,6 +18,59 @@ const revisions = { currentRevision: current, latestRevision: latest, revisions:
 beforeAll(async () => { await import("../src/web/pages/agent-pages.js"); });
 beforeEach(() => { sessionStorage.setItem("apiToken", "test"); window.history.replaceState({}, "", `/agents/${agent.id}/skills`); });
 afterEach(() => { cleanup(); sessionStorage.clear(); localStorage.clear(); vi.unstubAllGlobals(); });
+
+it.each([true, false])("插件自带技能展示自动更新状态，并通过插件统一管理（enabled=%s）", async enabled => {
+  const native = {
+    id: "plugin-skill:codex:browser@example:skills/inspect", name: "inspect", description: "Inspect changes",
+    source: "plugin", enabled, available: true, managedByPlugin: true, packageName: "browser", pluginVersion: "9.0.0"
+  };
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push(`${init?.method ?? "GET"} ${url}`);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [native]);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/extensions`) return pagedManagementResponse(url, [{
+      id: "plugin:browser@example", name: "browser", provider: "codex", kind: "plugin", description: "Browser",
+      version: "9.0.0", enabled, available: true
+    }]);
+    throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
+  }));
+  render(<App />);
+  expect(await screen.findByText("随插件更新")).toBeInTheDocument();
+  expect(screen.getByText("插件 · browser")).toBeInTheDocument();
+  expect(screen.getByText("v9.0.0")).toBeInTheDocument();
+  expect(within(screen.getByRole("group", { name: "inspect 技能" })).getByText(enabled ? "已启用" : "未启用")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "版本" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: enabled ? "停用" : "启用", exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "删除 inspect" })).not.toBeInTheDocument();
+  const manage = screen.getByRole("link", { name: "管理 browser 插件" });
+  expect(manage).toHaveAttribute("href", `/agents/${agent.id}/extensions`);
+  fireEvent.click(manage);
+  expect(await screen.findByRole("heading", { name: "执行器扩展" })).toBeInTheDocument();
+  expect(calls.every(call => call.startsWith("GET "))).toBe(true);
+});
+
+it("保留未被原生插件接管的旧副本，并允许单独停用", async () => {
+  let enabled = true;
+  const legacy = { ...skill, id: "legacy-copy", name: "inspect", source: "plugin", enabled, available: true,
+    legacyPluginCopy: true, updateAvailable: false, latestRevision: undefined };
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input); calls.push(`${init?.method ?? "GET"} ${url}`);
+    if (url === `/api/agents/${agent.id}`) return pagedManagementResponse(url, agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/skills`) return pagedManagementResponse(url, [{ ...legacy, enabled }]);
+    if (url === `/api/agents/${agent.id}/skills/${legacy.id}` && init?.method === "PUT") {
+      enabled = false; return response({ ...legacy, enabled, source: "missing", available: false, legacyPluginCopy: undefined });
+    }
+    throw new Error(`unexpected ${init?.method ?? "GET"} ${url}`);
+  }));
+  render(<App />);
+  expect(await screen.findByText("旧插件独立副本")).toBeInTheDocument();
+  expect(screen.queryByText("随插件更新")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "停用", exact: true }));
+  await waitFor(() => expect(calls).toContain(`PUT /api/agents/${agent.id}/skills/${legacy.id}`));
+  expect(await screen.findByRole("button", { name: "启用", exact: true })).toBeDisabled();
+});
 
 it("刷新来源只重新发现目录，不会应用版本", async () => {
   const calls: string[] = [];

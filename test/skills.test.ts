@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { SkillManager } from "../src/skills/skill-manager.js";
+import { ProviderExtensionManager } from "../src/provider-extensions/provider-extension-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const apiToken = "skills-test-token";
@@ -48,7 +49,7 @@ describe("SkillManager", () => {
     expect(manager.listPage(1, {page: 1, pageSize: 1}).items[0]).toMatchObject({id: selected.id, enabled: true});
   });
 
-  it("扫描主机和插件 Skills，读取描述并按来源优先级去重", () => {
+  it("扫描主机 Skills，插件文件只用于发现记录而不作为独立副本提供", () => {
     const root = makeRoot();
     writeSkill(join(root, "codex", "review"), "code-review", "Codex review skill");
     writeSkill(join(root, "agents", "review-copy"), "code-review", "Duplicate skill");
@@ -59,9 +60,8 @@ describe("SkillManager", () => {
 
     const skills = manager.list("agent-1");
 
-    expect(skills).toHaveLength(2);
+    expect(skills).toHaveLength(1);
     expect(skills).toEqual(expect.arrayContaining([
-      expect.objectContaining({ name: "browser", description: "Browser control for local applications", source: "plugin", enabled: false, available: true }),
       expect.objectContaining({ name: "code-review", description: "Codex review skill", source: "codex", enabled: false, available: true })
     ]));
     expect(manager.hostSkillFiles()).toEqual([
@@ -224,7 +224,8 @@ describe("Agent Skills API", () => {
       },
       db,
       runtime: createFakeRuntime(),
-      skillManager: new SkillManager({ dataDir, roots: [] })
+      skillManager: new SkillManager({ dataDir, roots: [] }),
+      providerExtensionManager: new ProviderExtensionManager({ db, codexHome: join(root, "codex"), claudeHome: join(root, "claude") })
     });
     await app.ready();
     try {
@@ -301,7 +302,8 @@ describe("Agent Skills API", () => {
       },
       db,
       runtime: createFakeRuntime(),
-      skillManager
+      skillManager,
+      providerExtensionManager: new ProviderExtensionManager({ db, codexHome: join(root, "codex"), claudeHome: join(root, "claude") })
     });
     await app.ready();
 

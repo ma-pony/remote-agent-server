@@ -5,6 +5,8 @@ import { join } from "node:path";
 import type { Provider } from "../domain.js";
 import { readInstallation } from "../skills/skill-revisions.js";
 import { skillTreeDigest } from "../skills/skill-content.js";
+import type { SkillCatalogItem } from "../skills/skill-manager.js";
+import { pluginSkillReplacement, pluginSkillTakeoverPath } from "../provider-extensions/plugin-skills.js";
 
 export type SkillProjectionAgent = {
   id: number;
@@ -71,7 +73,7 @@ export class SkillProjector {
     this.fileSystem = { ...nodeFileSystem, ...fileSystem };
   }
 
-  prepare(agent: SkillProjectionAgent, session: SkillProjectionSession): SkillProjection {
+  prepare(agent: SkillProjectionAgent, session: SkillProjectionSession, pluginSkills: readonly SkillCatalogItem[] = []): SkillProjection {
     const agentDirectory = join(this.dataDir, "agents", String(agent.id));
     const memoryPath = join(agentDirectory, "MEMORY.md");
     const memory = this.fileSystem.exists(memoryPath) ? this.fileSystem.read(memoryPath) : "";
@@ -98,6 +100,14 @@ export class SkillProjector {
       for (const name of enabledSkills) {
         const sourceDirectory = join(source, name);
         const record = readInstallation(sourceDirectory);
+        if (record?.source === "plugin") {
+          const takeover = pluginSkillTakeoverPath(this.dataDir, agent.id, name);
+          if (this.fileSystem.exists(takeover)) continue;
+          if (pluginSkillReplacement(record, pluginSkills) !== undefined) {
+            this.fileSystem.mkdir(takeover);
+            continue;
+          }
+        }
         const skillPath = record?.skillPath ?? ".";
         if (skillPath === ".") {
           const destination = join(temporary, `${managedPrefix}${name}`);

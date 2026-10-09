@@ -8,6 +8,8 @@ import { basename, join } from "node:path";
 import type Database from "better-sqlite3";
 
 import type { Provider } from "../domain.js";
+import type { SkillCatalogItem } from "../skills/skill-manager.js";
+import { readPluginSkills } from "./plugin-skills.js";
 
 export type ProviderExtensionKind = "plugin" | "hook";
 
@@ -228,6 +230,9 @@ export class ProviderExtensionManager {
   private readonly cacheTtlMs: number;
   private snapshots = new Map<"codex" | "claude_code", { capturedAt: number; items: DiscoveredProviderExtension[] }>();
   private pluginFingerprints = new Map<string, { capturedAt: number; value: Promise<string> }>();
+  private skillSnapshots = new Map<"codex" | "claude_code", {
+    capturedAt: number; sourceFingerprint: string; value: Promise<SkillCatalogItem[]>
+  }>();
 
   constructor(private readonly options: ProviderExtensionManagerOptions) {
     this.codexHome = options.codexHome ?? process.env.CODEX_HOME ?? join(homedir(), ".codex");
@@ -277,6 +282,50 @@ export class ProviderExtensionManager {
     return pageResult(items.slice(offset, offset + input.pageSize), items.length, input);
   }
 
+  async listSkills(agentId: number): Promise<SkillCatalogItem[]> {
+    const provider = this.agentProvider(agentId);
+    if (provider === "hermes") return [];
+    const plugins = this.discover(provider).filter(item => item.kind === "plugin" && item.sourcePath !== null);
+    const sourceFingerprint = fingerprint(plugins.map(item => [item.id, item.sourceFingerprint]));
+    let snapshot = this.skillSnapshots.get(provider);
+    if (snapshot === undefined || snapshot.sourceFingerprint !== sourceFingerprint || Date.now() - snapshot.capturedAt >= this.cacheTtlMs) {
+      const value = this.readSkills(provider, plugins);
+      snapshot = { capturedAt: Date.now(), sourceFingerprint, value };
+      this.skillSnapshots.set(provider, snapshot);
+    }
+    try {
+      const skills = await snapshot.value;
+      const selected = this.assignmentRows(agentId);
+      return skills.map(skill => ({ ...skill, enabled: selected.has(`plugin:${skill.sourceId}`) }));
+    } catch (error) {
+      if (this.skillSnapshots.get(provider) === snapshot) this.skillSnapshots.delete(provider);
+      throw error;
+    }
+  }
+
+  async enabledSkills(agentId: number): Promise<SkillCatalogItem[]> {
+    const provider = this.agentProvider(agentId);
+    if (provider === "hermes") return [];
+    const skills = await this.readSkills(provider, this.enabled(agentId));
+    const selected = this.assignmentRows(agentId);
+    return skills.filter(skill => selected.has(`plugin:${skill.sourceId}`)).map(skill => ({ ...skill, enabled: true }));
+  }
+
+  private async readSkills(provider: "codex" | "claude_code", extensions: DiscoveredProviderExtension[]): Promise<SkillCatalogItem[]> {
+    const skills: SkillCatalogItem[] = [];
+    for (const plugin of extensions) {
+      if (skills.length >= 512) break;
+      if (plugin.kind !== "plugin" || plugin.sourcePath === null) continue;
+      const sourceId = plugin.id.slice("plugin:".length);
+      const found = await readPluginSkills(plugin.sourcePath, provider, sourceId, 512 - skills.length);
+      skills.push(...found.map(({ id, name, description }) => ({
+        id, name, description, source: "plugin" as const, enabled: false, available: true,
+        sourceId, packageName: plugin.name, managedByPlugin: true, pluginVersion: plugin.version
+      })));
+    }
+    return skills;
+  }
+
   setEnabled(agentId: number, id: string, enabled: boolean): ProviderExtensionCatalogItem | undefined {
     const provider = this.agentProvider(agentId);
     if (provider === "hermes") return undefined;
@@ -322,7 +371,7 @@ export class ProviderExtensionManager {
 
   async enabledWithContentFingerprints(agentId: number): Promise<DiscoveredProviderExtension[]> {
     return Promise.all(this.enabled(agentId).map(async (item) => {
-      if (item.provider !== "codex" || item.kind !== "plugin" || item.sourcePath === null) return item;
+      if (item.kind !== "plugin" || item.sourcePath === null) return item;
       let cached = this.pluginFingerprints.get(item.sourcePath);
       if (cached === undefined || Date.now() - cached.capturedAt >= this.cacheTtlMs) {
         cached = { capturedAt: Date.now(), value: pluginTreeFingerprint(item.sourcePath) };

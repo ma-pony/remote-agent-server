@@ -188,12 +188,15 @@ export const registerAgentRoutes = (
     }
   });
 
-  app.get<{ Params: { id: string } }>("/agents/:id/skills", (request, reply) => {
+  app.get<{ Params: { id: string } }>("/agents/:id/skills", async (request, reply) => {
     const id = parseId(request.params.id);
     if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
     const parsed = paginationQuerySchema.strict().safeParse(request.query);
     if (!parsed.success) return badRequest(reply, "Invalid Skill pagination");
-    try { return isPagedQuery(request.query) ? skillManager.listPage(id, parsed.data) : skillManager.list(id); }
+    try {
+      const pluginSkills = await providerExtensionManager.listSkills(id);
+      return isPagedQuery(request.query) ? skillManager.listPage(id, parsed.data, pluginSkills) : skillManager.list(id, undefined, pluginSkills);
+    }
     catch (error) { return handleSkillError(reply, error); }
   });
 
@@ -239,7 +242,9 @@ export const registerAgentRoutes = (
       if (id === undefined || agentManager.get(id) === undefined) return notFound(reply);
       const parsed = deleteSkillQuerySchema.safeParse(request.query);
       if (!parsed.success) return badRequest(reply, "Invalid Skill delete scope");
-      const result = skillManager.remove(id, request.params.skillId, parsed.data.scope);
+      let result;
+      try { result = skillManager.remove(id, request.params.skillId, parsed.data.scope); }
+      catch (error) { return handleSkillError(reply, error); }
       if (result === "not_found") {
         return reply.code(404).send({ error: { code: "skill_not_found", message: "Skill not found" } });
       }

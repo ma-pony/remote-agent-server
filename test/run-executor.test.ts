@@ -75,7 +75,7 @@ const setup = (
     eventStore,
     sessionManager,
     mcpPreparer: { prepare: mcpPrepare },
-    providerExtensionManager: { revision: providerExtensionRevision },
+    providerExtensionManager: { revision: providerExtensionRevision, enabledSkills: vi.fn(async () => []) },
     runtimeSettings,
     runTimeoutMs,
     usageCollector
@@ -784,7 +784,8 @@ describe("RunExecutor", () => {
     });
     expect(prepare).toHaveBeenCalledWith(
       expect.objectContaining({ id: expect.any(Number), provider: "codex" }),
-      expect.objectContaining({ workspacePath: setupResult.workspacePath })
+      expect.objectContaining({ workspacePath: setupResult.workspacePath }),
+      []
     );
     setupResult.db.close();
   });

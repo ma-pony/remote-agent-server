@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { buildApp } from "../src/app.js";
 import { SkillManager } from "../src/skills/skill-manager.js";
 import { SkillSourceManager } from "../src/skills/skill-source-manager.js";
+import { ProviderExtensionManager } from "../src/provider-extensions/provider-extension-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const roots: string[] = [];
@@ -28,7 +29,8 @@ it("authenticates source management and explicitly applies a previewed revision 
     projectEnvironmentsRoot: join(root, "environments"), sessionsRoot: join(root, "sessions"),
     maxConcurrentRuns: 1, maxConcurrentWebhookDeliveries: 1, maxConcurrentEnvironmentBuilds: 1,
     projectEnvironmentCheckIntervalMs: 0, projectPrepareTimeoutMs: 30_000, sessionRetentionMs: 0
-  }, db, runtime: createFakeRuntime(), skillSourceManager: sources, skillManager: skills });
+  }, db, runtime: createFakeRuntime(), skillSourceManager: sources, skillManager: skills,
+    providerExtensionManager: new ProviderExtensionManager({ db, codexHome: join(root, "codex"), claudeHome: join(root, "claude") }) });
   const headers = { authorization: "Bearer test-token" };
   try {
     expect((await app.inject({ url: "/api/skill-sources" })).statusCode).toBe(401);

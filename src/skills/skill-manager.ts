@@ -18,6 +18,7 @@ import { unzipSync } from "fflate";
 import { SkillContentError, readSkillMetadata as metadata, readSkillTree, skillFilesDigest, skillTreeDigest } from "./skill-content.js";
 import { previewSkillFile, skillPreviewFileLimit, skillPreviewKind, type SkillFilePreview, type SkillPreviewKind } from "./skill-diff.js";
 import { installationFile, installedSkillDirectory, readInstallation, SkillRevisions, type SkillPackage, type SkillRevision } from "./skill-revisions.js";
+import { isPluginSkillId, pluginSkillReplacement, pluginSkillTakeoverPath } from "../provider-extensions/plugin-skills.js";
 
 export type SkillSource = "codex" | "agents" | "claude" | "plugin" | "upload" | "git" | "missing";
 
@@ -34,6 +35,9 @@ export type SkillCatalogItem = {
   latestRevision?: string;
   updateAvailable?: boolean;
   locallyModified?: boolean;
+  managedByPlugin?: boolean;
+  pluginVersion?: string | null;
+  legacyPluginCopy?: boolean;
 };
 
 export type SkillRoot = {
@@ -119,7 +123,7 @@ export class SkillManager {
     this.recoverInstallations();
   }
 
-  list(agentId: number, selectedIds?: Set<string>): SkillCatalogItem[] {
+  list(agentId: number, selectedIds?: Set<string>, pluginSkills: SkillCatalogItem[] = []): SkillCatalogItem[] {
     const catalog = this.availableCatalog();
     const availableIds = new Set(catalog.map((skill) => skill.id));
     const result: SkillCatalogItem[] = catalog.filter(skill => selectedIds === undefined || selectedIds.has(skill.id)).map((skill) => {
@@ -139,26 +143,32 @@ export class SkillManager {
         })
       };
     });
-    for (const installed of this.installed(agentId, selectedIds)) {
+    for (const installed of this.installed(agentId, selectedIds, pluginSkills)) {
       if (!availableIds.has(installed.id)) result.push(installed);
     }
+    result.push(...pluginSkills.filter(skill => selectedIds === undefined || selectedIds.has(skill.id)));
     return result.sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
   }
 
-  listPage(agentId: number, input: PaginationQuery) {
+  listPage(agentId: number, input: PaginationQuery, pluginSkills: SkillCatalogItem[] = []) {
     const candidates = new Map(this.availableCatalog().map(skill => [skill.id, {id: skill.id, name: skill.name, description: skill.description}]));
-    const enabledIds = new Set<string>();
+    for (const skill of pluginSkills) candidates.set(skill.id, skill);
+    const enabledIds = new Set(pluginSkills.filter(skill => skill.enabled).map(skill => skill.id));
     const installedRoot = join(this.dataDir, "agents", String(agentId), "skills");
     if (existsSync(installedRoot)) for (const entry of readdirSync(installedRoot, {withFileTypes: true})) {
       if (entry.name.startsWith(".") || (!entry.isDirectory() && !entry.isSymbolicLink())) continue;
-      try { candidates.set(entry.name, {id: entry.name, ...this.selectedMetadata(agentId, entry.name)}); enabledIds.add(entry.name); } catch { /* Broken installations are not catalog entries. */ }
+      try {
+        const record = readInstallation(join(installedRoot, entry.name));
+        if (this.pluginManaged(agentId, entry.name, record, pluginSkills)) continue;
+        candidates.set(entry.name, {id: entry.name, ...this.selectedMetadata(agentId, entry.name)}); enabledIds.add(entry.name);
+      } catch { /* Broken installations are not catalog entries. */ }
     }
     const matches = [...candidates.values()].filter(item => `${item.name} ${item.description}`.toLowerCase().includes(input.query?.toLowerCase() ?? ""))
       .sort((a, b) => Number(enabledIds.has(b.id)) - Number(enabledIds.has(a.id)) || a.name.localeCompare(b.name) || a.id.localeCompare(b.id));
     const offset = (input.page - 1) * input.pageSize;
     const ids = new Set(matches.slice(offset, offset + input.pageSize).map(item => item.id));
     const order = [...ids];
-    return pageResult(this.list(agentId, ids).sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)), matches.length, input);
+    return pageResult(this.list(agentId, ids, pluginSkills).sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)), matches.length, input);
   }
 
   invalidatePaginationSnapshots(): void { this.paginationSnapshots.clear(); }
@@ -190,6 +200,7 @@ export class SkillManager {
   }
 
   setEnabled(agentId: number, id: string, enabled: boolean): SkillCatalogItem | undefined {
+    this.assertIndependent(agentId, id);
     this.invalidatePaginationSnapshots();
     const available = this.availableCatalog().find((skill) => skill.id === id);
     const current = this.list(agentId).find((skill) => skill.id === id);
@@ -208,6 +219,7 @@ export class SkillManager {
   }
 
   revisionHistory(agentId: number, id: string): { currentRevision: string | null; latestRevision: string | null; revisions: SkillRevision[] } {
+    this.assertIndependent(agentId, id);
     const available = this.availableCatalog().find((skill) => skill.id === id);
     const current = this.current(agentId, id);
     if (available === undefined && current === undefined) throw new SkillManagerError("skill_not_found");
@@ -246,6 +258,7 @@ export class SkillManager {
   }
 
   private comparison(agentId: number, id: string, revision: string) {
+    this.assertIndependent(agentId, id);
     const target = this.resolveRevision(id, revision);
     const current = this.current(agentId, id);
     if (current === undefined) throw new SkillManagerError("skill_not_enabled");
@@ -256,6 +269,7 @@ export class SkillManager {
   }
 
   applyRevision(agentId: number, id: string, revision: string, expectedRevision: string): SkillCatalogItem {
+    this.assertIndependent(agentId, id);
     this.invalidatePaginationSnapshots();
     const current = this.current(agentId, id);
     if (current === undefined) throw new SkillManagerError("skill_not_enabled");
@@ -325,6 +339,7 @@ export class SkillManager {
   }
 
   remove(agentId: number, id: string, scope: SkillRemoveScope): SkillRemoveResult {
+    this.assertIndependent(agentId, id);
     this.invalidatePaginationSnapshots();
     const current = this.list(agentId).find((skill) => skill.id === id);
     if (current === undefined) return "not_found";
@@ -347,6 +362,7 @@ export class SkillManager {
   }
 
   upload(agentId: number, fileName: string, archive: Uint8Array, replaceId?: string): SkillCatalogItem {
+    if (replaceId !== undefined) this.assertIndependent(agentId, replaceId);
     this.invalidatePaginationSnapshots();
     if (!fileName.toLowerCase().endsWith(".zip")) throw new SkillManagerError("invalid_skill_archive");
     if (archive.byteLength > maxArchiveBytes) throw new SkillManagerError("skill_archive_too_large");
@@ -465,7 +481,7 @@ export class SkillManager {
   }
 
   private catalog(): AvailableSkill[] {
-    return this.hostSkills().catalog.filter(({ directory }) => existsSync(join(directory, "SKILL.md")));
+    return this.hostSkills().catalog.filter(({ directory, source }) => source !== "plugin" && existsSync(join(directory, "SKILL.md")));
   }
 
   private availableCatalog(): AvailableSkill[] {
@@ -508,7 +524,7 @@ export class SkillManager {
     return [...found.values()];
   }
 
-  private installed(agentId: number, selectedIds?: Set<string>): SkillCatalogItem[] {
+  private installed(agentId: number, selectedIds?: Set<string>, pluginSkills: readonly SkillCatalogItem[] = []): SkillCatalogItem[] {
     const root = join(this.dataDir, "agents", String(agentId), "skills");
     if (!existsSync(root)) return [];
     return readdirSync(root, { withFileTypes: true })
@@ -517,15 +533,17 @@ export class SkillManager {
       .flatMap((entry) => {
         const directory = join(root, entry.name);
         try {
+          const record = readInstallation(directory);
+          if (this.pluginManaged(agentId, entry.name, record, pluginSkills)) return [];
           const current = this.current(agentId, entry.name);
           if (current === undefined) return [];
-          const record = readInstallation(directory);
           return [{
             id: entry.name,
             ...this.selectedMetadata(agentId, entry.name),
-            source: "missing" as const,
+            source: record?.source === "plugin" ? "plugin" as const : "missing" as const,
             enabled: true,
-            available: false,
+            available: record?.source === "plugin" && existsSync(join(installedSkillDirectory(directory), "SKILL.md")),
+            ...(record?.source === "plugin" ? { legacyPluginCopy: true } : {}),
             currentRevision: current.revision,
             locallyModified: current.locallyModified,
             ...(record?.sourceId === undefined ? {} : { sourceId: record.sourceId }),
@@ -596,6 +614,16 @@ export class SkillManager {
     return join(this.dataDir, "agents", String(agentId), "skills", id);
   }
 
+  private assertIndependent(agentId: number, id: string): void {
+    const takenOver = /^[a-zA-Z0-9_-]{1,100}$/.test(id) && existsSync(pluginSkillTakeoverPath(this.dataDir, agentId, id));
+    if (isPluginSkillId(id) || takenOver) throw new SkillManagerError("skill_managed_by_plugin");
+  }
+
+  private pluginManaged(agentId: number, id: string, record: SkillRevision | undefined, pluginSkills: readonly SkillCatalogItem[]): boolean {
+    return record?.source === "plugin" && (existsSync(pluginSkillTakeoverPath(this.dataDir, agentId, id))
+      || pluginSkillReplacement(record, pluginSkills) !== undefined);
+  }
+
   private recoverInstallations(): void {
     const agents = join(this.dataDir, "agents");
     if (!existsSync(agents)) return;
@@ -626,7 +654,7 @@ export type SkillDiff = {
 };
 
 export class SkillManagerError extends Error {
-  constructor(readonly code: "invalid_skill_archive" | "skill_archive_too_large" | "skill_name_conflict" | "skill_not_found" | "skill_revision_not_found" | "skill_revision_conflict" | "skill_locally_modified" | "skill_not_enabled" | "skill_file_not_found" | "skill_preview_failed") {
+  constructor(readonly code: "invalid_skill_archive" | "skill_archive_too_large" | "skill_name_conflict" | "skill_not_found" | "skill_revision_not_found" | "skill_revision_conflict" | "skill_locally_modified" | "skill_not_enabled" | "skill_file_not_found" | "skill_preview_failed" | "skill_managed_by_plugin") {
     super(code);
     this.name = "SkillManagerError";
   }

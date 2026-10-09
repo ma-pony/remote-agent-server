@@ -1,6 +1,7 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, sep } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +10,9 @@ import { buildApp } from "../src/app.js";
 import { ProviderExtensionManager } from "../src/provider-extensions/provider-extension-manager.js";
 import { ProviderExtensionProjector } from "../src/runtime/provider-extension-projector.js";
 import { SystemProviderSessionCleaner } from "../src/runtime/provider-session-cleaner.js";
+import { installationFile, SkillRevisions } from "../src/skills/skill-revisions.js";
+import { SkillManager } from "../src/skills/skill-manager.js";
+import { SkillProjector } from "../src/runtime/skill-projector.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const apiToken = "test-token";
@@ -108,7 +112,12 @@ const fixture = async (): Promise<{
       sessionRetentionMs: 0
     },
     db,
-    runtime: createFakeRuntime()
+    runtime: createFakeRuntime(),
+    skillManager: new SkillManager({ dataDir, roots: [
+      { path: join(codexHome, "plugins", "cache"), source: "plugin", recursive: true },
+      { path: join(claudeHome, "plugins", "cache"), source: "plugin", recursive: true }
+    ] }),
+    providerExtensionManager: new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 })
   });
   await app.ready();
   cleanup.push(async () => {
@@ -125,6 +134,152 @@ afterEach(async () => {
 });
 
 describe("Provider extensions", () => {
+  it.each(["hermes", "missing", "disabled", "unknown-owner"] as const)("preserves independently enabled plugin Skills through the API when replacement is %s", async scenario => {
+    const { app, root, codexHome, claudeHome, codexAgentId, db } = await fixture();
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const plugin = manager.list(codexAgentId).find(item => item.name === "browser")!;
+    manager.setEnabled(codexAgentId, plugin.id, true);
+    const source = manager.enabled(codexAgentId).find(item => item.id === plugin.id)!.sourcePath!;
+    const directory = join(source, "skills", "inspect");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Legacy instructions\n---\nOriginal body");
+    const dataDir = join(root, "data");
+    const details = new SkillRevisions(dataDir).save({
+      id: "legacy-copy", name: "inspect", description: "Legacy instructions", source: "plugin", directory,
+      ...(scenario === "unknown-owner" ? {} : { sourceId: plugin.id.slice("plugin:".length) })
+    });
+    const installed = join(dataDir, "agents", String(codexAgentId), "skills", details.id);
+    cpSync(directory, installed, { recursive: true });
+    writeFileSync(join(installed, installationFile), JSON.stringify(details));
+    if (scenario === "hermes") db.prepare("UPDATE agents SET provider='hermes' WHERE id=?").run(codexAgentId);
+    if (scenario === "missing") rmSync(source, { recursive: true });
+    if (scenario === "disabled") manager.setEnabled(codexAgentId, plugin.id, false);
+    const url = `/api/agents/${codexAgentId}/skills`;
+    for (const suffix of ["", "?page=1&pageSize=20"]) {
+      const response = await app.inject({ url: url + suffix, headers: authHeaders });
+      expect(response.statusCode).toBe(200);
+      const items = suffix === "" ? response.json() : response.json().items;
+      expect(items).toEqual(expect.arrayContaining([expect.objectContaining({
+        id: details.id, enabled: true, available: true, legacyPluginCopy: true
+      })]));
+    }
+    const history = await app.inject({ url: `${url}/${details.id}/revisions`, headers: authHeaders });
+    expect(history.statusCode).toBe(200);
+    expect(history.json().currentRevision).toBe(details.revision);
+    const disabled = await app.inject({ method: "PUT", url: `${url}/${details.id}`, headers: authHeaders, payload: { enabled: false } });
+    expect(disabled.statusCode).toBe(200);
+    expect(disabled.json().enabled).toBe(false);
+  });
+
+  it.each(["codex", "claude_code"] as const)("keeps %s plugin Skills owned by the plugin across cache-version upgrades", async provider => {
+    const { app, root, codexHome, claudeHome, codexAgentId, claudeAgentId, db } = await fixture();
+    const agentId = provider === "codex" ? codexAgentId : claudeAgentId;
+    const otherAgentId = provider === "codex" ? claudeAgentId : codexAgentId;
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const plugin = manager.list(agentId).find(item => item.name === (provider === "codex" ? "browser" : "review"))!;
+    manager.setEnabled(agentId, plugin.id, true);
+    const originalRoot = manager.enabled(agentId).find(item => item.id === plugin.id)!.sourcePath!;
+    manager.setEnabled(agentId, plugin.id, false);
+    const directory = join(originalRoot, "skills", "inspect");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "SKILL.md"), "---\nname: inspect\ndescription: Original instructions\n---\nOriginal plugin body");
+
+    // Reproduce an enabled copy from a removed, version-specific plugin source.
+    const dataDir = join(root, "data");
+    const oldId = createHash("sha256").update(directory).digest("hex").slice(0, 20);
+    const revision = new SkillRevisions(dataDir).save({
+      id: oldId, name: "inspect", description: "Original instructions", source: "plugin", directory,
+      sourceId: plugin.id.slice("plugin:".length), packageName: plugin.name
+    });
+    const installed = join(dataDir, "agents", String(agentId), "skills", oldId);
+    cpSync(directory, installed, { recursive: true });
+    writeFileSync(join(installed, installationFile), JSON.stringify(revision));
+    const catalog = async () => (await app.inject({ url: `/api/agents/${agentId}/skills`, headers: authHeaders })).json();
+    const original = await catalog();
+    expect(original).toEqual(expect.arrayContaining([expect.objectContaining({
+      name: "inspect", source: "plugin", managedByPlugin: true, enabled: false, available: true,
+      sourceId: plugin.id.slice("plugin:".length), packageName: plugin.name, pluginVersion: plugin.version
+    }), expect.objectContaining({ id: oldId, enabled: true, available: true, legacyPluginCopy: true })]));
+    expect((await app.inject({ url: `/api/agents/${otherAgentId}/skills`, headers: authHeaders })).json()).toEqual([]);
+    expect(existsSync(join(installed, installationFile))).toBe(true);
+    const id = original.find((item: { managedByPlugin?: boolean }) => item.managedByPlugin)!.id;
+    const skillUrl = `/api/agents/${agentId}/skills/${encodeURIComponent(id)}`;
+    const legacyUrl = `/api/agents/${agentId}/skills/${oldId}`;
+    for (const operation of [
+      { method: "PUT", url: skillUrl, payload: { enabled: true } },
+      { method: "DELETE", url: skillUrl },
+      { method: "GET", url: `${skillUrl}/revisions` },
+      { method: "POST", url: `${skillUrl}/revision`, payload: { revision: "a".repeat(64), expectedRevision: "b".repeat(64) } },
+      { method: "POST", url: `${skillUrl}/upload`, payload: { fileName: "inspect.zip", contentBase64: Buffer.from("unused").toString("base64") } }
+    ] as const) {
+      const response = await app.inject({ ...operation, headers: authHeaders });
+      expect(response.statusCode).toBe(409);
+      expect(response.json().error.code).toBe("skill_managed_by_plugin");
+    }
+    await app.inject({ method: "PUT", url: `/api/agents/${agentId}/extensions/${encodeURIComponent(plugin.id)}`,
+      headers: authHeaders, payload: { enabled: true } });
+    expect((await catalog())[0]).toMatchObject({ id, enabled: true });
+    new SkillProjector(dataDir).prepare({ id: agentId, provider }, { id: 71, workspacePath: join(root, "workspace") },
+      await manager.enabledSkills(agentId));
+    const oldUpdate = await app.inject({ method: "POST", url: `${legacyUrl}/revision`, headers: authHeaders,
+      payload: { revision: revision.revision, expectedRevision: revision.revision } });
+    expect(oldUpdate.statusCode).toBe(409);
+    expect(oldUpdate.json().error.code).toBe("skill_managed_by_plugin");
+    const projector = new ProviderExtensionProjector(manager, dataDir);
+    const home = (session: number) => join(dataDir, "agents", String(agentId), "provider-home",
+      provider === "codex" ? "codex" : "claude", "sessions", String(session));
+    const firstProjection = await projector.prepare({ agentId, provider, home: home(71) });
+    expect(firstProjection[0]!.id).toBe(id);
+
+    const nextRoot = join(originalRoot, "..", "9.0.0");
+    renameSync(originalRoot, nextRoot);
+    const manifestPath = join(nextRoot, provider === "codex" ? ".codex-plugin" : ".claude-plugin", "plugin.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    writeFileSync(manifestPath, JSON.stringify({ ...manifest, version: "9.0.0" }));
+    writeFileSync(join(nextRoot, "skills", "inspect", "SKILL.md"), "---\nname: inspect\ndescription: Updated instructions\n---\nUpdated plugin body");
+    expect(await catalog()).toEqual([expect.objectContaining({
+      id, name: "inspect", description: "Updated instructions", managedByPlugin: true,
+      pluginVersion: "9.0.0", enabled: true, available: true
+    })]);
+    const page = await app.inject({ url: `/api/agents/${agentId}/skills?page=1&pageSize=1&query=inspect`, headers: authHeaders });
+    expect(page.json()).toMatchObject({ total: 1, items: [expect.objectContaining({ id, enabled: true })] });
+    const nextProjection = await projector.prepare({ agentId, provider, home: home(72) });
+    expect(nextProjection).toEqual([expect.objectContaining({ id, pluginVersion: "9.0.0" })]);
+    expect(readFileSync(nextProjection[0]!.skillMdPath, "utf8")).toContain("Updated plugin body");
+    expect(readFileSync(firstProjection[0]!.skillMdPath, "utf8")).toContain("Original plugin body");
+    expect(readFileSync(join(installed, "SKILL.md"), "utf8")).toContain("Original plugin body");
+    await app.inject({ method: "PUT", url: `/api/agents/${agentId}/extensions/${encodeURIComponent(plugin.id)}`,
+      headers: authHeaders, payload: { enabled: false } });
+    expect((await catalog())[0]).toMatchObject({ id, enabled: false });
+    expect(await projector.prepare({ agentId, provider, home: home(73) })).toEqual([]);
+  });
+
+  it("follows declared plugin Skill inventory changes without a version bump or independent selection", async () => {
+    const { app, root, codexHome, claudeHome, codexAgentId, db } = await fixture();
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const plugin = manager.list(codexAgentId).find(item => item.name === "browser")!;
+    manager.setEnabled(codexAgentId, plugin.id, true);
+    const source = manager.enabled(codexAgentId).find(item => item.id === plugin.id)!.sourcePath!;
+    const manifest = join(source, ".codex-plugin", "plugin.json");
+    writeFileSync(manifest, JSON.stringify({ name: "browser", version: "1.2.3", skills: ["./custom", relative(source, join(root, "outside"))] }));
+    const writeSkill = (directory: string, name: string) => {
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(join(directory, "SKILL.md"), `---\nname: ${name}\ndescription: Plugin instructions\n---\n${name}`);
+    };
+    writeSkill(join(source, "custom", "first"), "first");
+    writeSkill(join(source, "skills", "ignored"), "ignored");
+    writeSkill(join(root, "outside"), "outside");
+    const catalog = async () => (await app.inject({ url: `/api/agents/${codexAgentId}/skills`, headers: authHeaders })).json();
+    expect(await catalog()).toEqual([expect.objectContaining({ name: "first", pluginVersion: "1.2.3", enabled: true })]);
+    writeSkill(join(source, "custom", "second"), "second");
+    rmSync(join(source, "custom", "first"), { recursive: true });
+    const current = await catalog();
+    expect(current).toEqual([expect.objectContaining({ name: "second", pluginVersion: "1.2.3", enabled: true })]);
+    const projected = await new ProviderExtensionProjector(manager, join(root, "data"))
+      .prepare({ agentId: codexAgentId, provider: "codex", home: join(root, "runtime") });
+    expect(projected).toEqual([expect.objectContaining({ id: current[0].id, name: "second" })]);
+  });
+
   it.each(["codex", "claude_code"] as const)("returns the enabled %s plugin's actual Skill projection", async provider => {
     const { root, codexHome, claudeHome, codexAgentId, claudeAgentId, db } = await fixture();
     const agentId = provider === "codex" ? codexAgentId : claudeAgentId;

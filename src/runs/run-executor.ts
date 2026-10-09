@@ -22,7 +22,7 @@ export type RunExecutorDependencies = {
   eventStore: EventStore;
   sessionManager: SessionManager;
   mcpPreparer: Pick<RunMcpPreparer, "prepare">;
-  providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
+  providerExtensionManager: Pick<ProviderExtensionManager, "revision" | "enabledSkills">;
   runtimeSettings?: Pick<ConcurrencySettingsStore, "getRuntime">;
   runTimeoutMs?: number;
   usageCollector?: HostUsageCollector;
@@ -74,7 +74,7 @@ export class RunExecutor {
   private readonly eventStore: EventStore;
   private readonly sessionManager: SessionManager;
   private readonly mcpPreparer: Pick<RunMcpPreparer, "prepare">;
-  private readonly providerExtensionManager: Pick<ProviderExtensionManager, "revision">;
+  private readonly providerExtensionManager: Pick<ProviderExtensionManager, "revision" | "enabledSkills">;
   private readonly runtimeSettings: Pick<ConcurrencySettingsStore, "getRuntime"> | undefined;
   private readonly runTimeoutMs: number;
   private readonly usageCollector: HostUsageCollector;
@@ -204,7 +204,8 @@ export class RunExecutor {
         publicNoticeCode = "mcp_preflight_failed";
         throw error;
       }
-      const { memory, revision: skillsRevision, projectedSkills } = this.skillProjector.prepare(agent, session);
+      const pluginSkills = await withinRunTimeout(this.providerExtensionManager.enabledSkills(agent.id));
+      const { memory, revision: skillsRevision, projectedSkills } = this.skillProjector.prepare(agent, session, pluginSkills);
       this.runRepository.setSkillsRevision(run.id, skillsRevision);
       try {
         this.usageCollector.runtimeCapabilities.recordRun(run.id);

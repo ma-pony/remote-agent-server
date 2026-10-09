@@ -461,6 +461,8 @@ Webhook 投递历史查询的升级会在启动迁移时自动创建 `webhook_de
 
 ### Skills Git 来源与版本升级
 
+原生插件的 Skills 在升级后自动跟随当前已安装插件，从下一次 Run 生效。请在 Agent 的“执行器扩展”中检查插件选择，技能页的“随插件更新”项无需单独启用或选择版本。发现缓存默认最多 30 秒。升级前的独立插件 Skill 副本与版本历史继续保留。记录了明确插件归属、且已有已启用原生技能承接的副本，在下一次 Run 接管；旧 Session 托管入口届时清理，接管标记保存在 Agent 的 `skills/.plugin-managed/` 下，备份与恢复时应随整个 `agents/` 保留。未确认接管的副本（包括 Hermes）仍可独立使用和停用，技能页标记为“旧插件独立副本”；确认原生技能可用后可手动停用未关联的旧副本。Codex 与 Claude Code 同版本内容变更也会刷新下一次 Run，并续用原有 Provider Session。服务不会因旧副本已启用而自动启用整个插件。只通过 Git 来源导入的 Skills 仍需显式应用更新。
+
 Skills 来源复用服务用户的 Git/SSH 凭证。先为该用户配置无交互 Git 访问、SSH 主机信任和只读仓库权限；URL 中不要嵌入 Token 或密码。管理台支持 HTTPS、SSH 和 `git@host:group/repository.git`，不接受本机目录或 `file://` 来源。来源刷新不运行安装命令，Git Hook 被禁用。Git 地址、可选 ref 和路径保存在管理数据中，凭证仍由宿主 Git 管理。
 
 备份和恢复时，除了 SQLite 与 `secret.key`，还应保留 `DATA_DIR/skill-sources/`、`skill-revisions/`、`skill-library/` 和 `agents/` 中的配置及安装内容。版本历史暂不自动回收，需为完整包副本预留磁盘空间。升级会自动添加可空的 `runs.skills_revision`，不会补写旧 Run 的版本。

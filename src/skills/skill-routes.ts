@@ -29,12 +29,13 @@ export const handleSkillError = (reply: FastifyReply, error: unknown) => {
       skill_not_enabled: "Enable the Skill before changing its revision",
       skill_revision_conflict: "The selected version has changed; refresh the preview",
       skill_locally_modified: "The installed Skill has local changes. Preserve them before disabling and enabling the Skill again.",
+      skill_managed_by_plugin: "This Skill follows its plugin. Manage it through Provider extensions.",
       skill_name_conflict: "Another Skill uses this name", invalid_skill_archive: "Skill ZIP is invalid or does not match the selected Skill",
       skill_archive_too_large: "Skill ZIP exceeds the upload limit", invalid_skill_content: "Skill package contains unsupported files",
       skill_content_too_large: "Skill package exceeds the content limit"
     };
     const status = error.code === "skill_preview_failed" ? 503 : error.code.endsWith("not_found") ? 404
-      : ["skill_revision_conflict", "skill_locally_modified", "skill_not_enabled", "skill_name_conflict"].includes(error.code) ? 409 : 400;
+      : ["skill_revision_conflict", "skill_locally_modified", "skill_not_enabled", "skill_name_conflict", "skill_managed_by_plugin"].includes(error.code) ? 409 : 400;
     return reply.code(status).send({ error: { code: error.code, message: messages[error.code] ?? "Skill operation failed" } });
   }
   if (error instanceof SkillSourceError) {
