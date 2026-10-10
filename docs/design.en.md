@@ -256,7 +256,7 @@ Codex-native plugin projection publishes selected packages into local marketplac
 
 Codex also stores its rollout compression lock under `.tmp`. A Session with compression enabled keeps that lock private so another Session cannot cause its compression pass to be skipped. Codex may keep a separate built-in marketplace checkout for each such Session. Rollout files remain in their respective Session homes.
 
-Provider Home initialization excludes host conversation history, logs, and caches. When upgrading a legacy business conversation, Hermes migrates only the target conversation and its parent lineage, as described below. `DATA_DIR/secret.key` encrypts sensitive configuration saved through management APIs, which do not return plaintext secrets; native Provider authentication files retain their own format.
+Provider Home initialization excludes host conversation history, logs, and caches, as well as Codex's `app-server-daemon` and `app-server-control` runtime directories, so daemon sockets and metadata are not copied. When upgrading a legacy business conversation, Hermes migrates only the target conversation and its parent lineage, as described below. `DATA_DIR/secret.key` encrypts sensitive configuration saved through management APIs, which do not return plaintext secrets; native Provider authentication files retain their own format.
 
 Configuration changes take effect on the next run. Existing sessions refresh their runtime connection and keep the provider session when the provider supports resumption.
 

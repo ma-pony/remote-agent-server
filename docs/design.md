@@ -254,7 +254,7 @@ Codex 的原生插件投影将当前 Agent 选中的包发布到 `agents/<id>/pr
 
 Codex 也在 `.tmp` 中保存 rollout 压缩锁。启用压缩的 Session 使用独立 `.tmp`，避免其他 Session 的锁跳过本会话的压缩；代价是 Codex 内置市场仓库可能在这些 Session 各保留一份。各 Session 的 rollout 文件仍保存在自己的 Home 中。
 
-初始化 Provider Home 时排除宿主的历史会话、日志和缓存。升级旧业务会话时，Hermes 仅迁移目标会话及其父链，见下文。服务通过管理接口保存的敏感配置使用 `DATA_DIR/secret.key` 加密，管理 API 不返回明文；原生 Provider 的认证文件继续使用其自身格式。
+初始化 Provider Home 时排除宿主的历史会话、日志和缓存，以及 Codex 的 `app-server-daemon` 和 `app-server-control` 运行态目录，避免复制 daemon 的 socket 和元数据。升级旧业务会话时，Hermes 仅迁移目标会话及其父链，见下文。服务通过管理接口保存的敏感配置使用 `DATA_DIR/secret.key` 加密，管理 API 不返回明文；原生 Provider 的认证文件继续使用其自身格式。
 
 配置变化从下一次 Run 生效。已有 Session 会刷新 Runtime 连接；Provider 支持恢复时继续原有 Provider Session。
 

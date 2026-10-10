@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -417,6 +418,52 @@ describe("AcpxAgentRuntime", () => {
     expect(existsSync(join(home, "logs"))).toBe(false);
     expect(existsSync(join(home, "history.jsonl"))).toBe(false);
     expect(existsSync(join(home, "state.db"))).toBe(false);
+  });
+
+  it.each([
+    ["app-server-daemon", "daemon-updater.sock"],
+    ["app-server-control", "app-server-control.sock"]
+  ])("Codex Provider Home 排除 %s 的 Unix socket 和 daemon 元数据", async (directory, socketName) => {
+    // macOS tmpdir paths can exceed the Unix socket path length limit.
+    const root = mkdtempSync("/tmp/remote-agent-socket-");
+    tempDirs.push(root);
+    const config = makeConfig(root);
+    const hostHome = join(root, "host");
+    const daemonHome = join(hostHome, directory);
+    mkdirSync(daemonHome, { recursive: true });
+    writeFileSync(join(hostHome, "auth.json"), "fixture auth");
+    writeFileSync(join(hostHome, "config.toml"), 'model = "test-model"\n');
+    writeFileSync(join(daemonHome, "settings.json"), '{"enabled":true}');
+    vi.stubEnv("CODEX_HOME", hostHome);
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(config);
+    const socketPath = join(daemonHome, socketName);
+    const server = createServer();
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(socketPath, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+
+      await expect(runtime.ensureSession(sessionInput(root)))
+        .resolves.toEqual({ providerSessionId: "provider-session-1" });
+
+      const home = join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", SESSION_PATH_ID);
+      expect(acp.ensureSession).toHaveBeenCalledTimes(1);
+      expect(readFileSync(join(home, "auth.json"), "utf8")).toBe("fixture auth");
+      expect(readFileSync(join(home, "config.toml"), "utf8")).toContain('model = "test-model"');
+      expect(existsSync(join(home, directory))).toBe(false);
+      expect(lstatSync(socketPath).isSocket()).toBe(true);
+      expect(readFileSync(join(daemonHome, "settings.json"), "utf8")).toBe('{"enabled":true}');
+    } finally {
+      await runtime.shutdown();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 
   it("Hermes 为每个 Session 隔离 Home，并在首次恢复时迁移对应旧会话", async () => {

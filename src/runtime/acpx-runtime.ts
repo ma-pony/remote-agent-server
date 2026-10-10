@@ -90,6 +90,8 @@ const acpCommand = (provider: Provider): string => provider === "codex"
   : ACP_COMMAND[ACP_AGENT[provider]];
 
 const runtimeProviderEntries = new Set([
+  "app-server-control",
+  "app-server-daemon",
   "archived_sessions",
   "attachments",
   "browser",
