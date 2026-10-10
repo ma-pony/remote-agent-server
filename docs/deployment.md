@@ -4,6 +4,8 @@ Remote Agent Server 是面向业务系统的自托管 ACP Agent 执行网关。�
 
 服务支持两种原生写时复制 Workspace：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。运行时会根据操作系统自动选择，不提供普通目录复制回退。它以 acpx 的 `approve-all` 模式运行 Claude Code、Codex 或 Hermes。`approve-all` 只减少 Provider 的交互确认，**不是安全沙箱**；Workspace 中的代码、网络和该用户能访问的文件都应视为 Agent 可操作范围。
 
+Codex 默认 `agent` 模式允许普通命令联网，继续采用 `workspace-write` 文件沙箱和原有临时目录规则。平台的 ACP adapter 每轮显式下发网络策略，主机 `config.toml` 的 `sandbox_workspace_write.network_access` 不会覆盖该预设；`approve-all` 仍会自动批准越界提权。升级时按本指南完成 `pnpm install --frozen-lockfile`、构建和服务重启后生效，运行中的进程不会热更新依赖。已有业务 Session 可以恢复，无需清空 Workspace 或会话历史。
+
 ## macOS：APFS 原生部署
 
 macOS 部署应使用实际登录桌面的普通用户，不使用 root，也不放入无图形会话的系统级 Daemon。这样 Claude Code、Codex、Hermes 的登录状态和有头浏览器都属于同一个用户会话。

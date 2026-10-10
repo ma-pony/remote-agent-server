@@ -1,8 +1,17 @@
 diff --git a/dist/index.js b/dist/index.js
-index 9a0fc7cdf0f739d314c2178452efe32920265fbe..e7200704da6bd857a13a9cf70dc60d5f26b1bc66 100755
+index 9a0fc7cdf0f739d314c2178452efe32920265fbe..274946f387128d9c519b60af0faef618522e53b5 100755
 --- a/dist/index.js
 +++ b/dist/index.js
-@@ -26896,8 +26896,8 @@ class CodexAcpClient {
+@@ -26086,7 +26086,7 @@ var AgentMode = class _AgentMode {
+     {
+       type: "workspaceWrite",
+       writableRoots: [],
+-      networkAccess: false,
++      networkAccess: true,
+       excludeTmpdirEnvVar: false,
+       excludeSlashTmp: false
+     },
+@@ -26896,8 +26896,8 @@ var CodexAcpClient = class {
        });
      });
    }

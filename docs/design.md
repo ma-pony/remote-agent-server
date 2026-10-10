@@ -353,6 +353,8 @@ HTTP 中已知 Provider 工具名通过显式适配映射到与 Runtime 事件�
 
 Agent 运行在服务操作系统用户权限下，可以执行命令、修改 Workspace、调用 MCP 和访问该用户能够访问的网络与文件。`approve-all` 是 Provider 交互策略，不是安全沙箱。生产部署必须使用专用无特权用户、可信仓库和 MCP，并把服务放在可信网络或 TLS 反向代理后。
 
+打包的 Codex ACP adapter 将默认 `agent` 模式设为 `workspaceWrite`、`networkAccess: true`，保留原有可写目录和临时目录规则。新建、加载或恢复 Provider Session 都采用同一预设，后续普通 Run 每轮显式发送该策略，不依赖模型申请联网提权，也不依赖主机 `sandbox_workspace_write.network_access` 默认值。`read-only` 和 `agent-full-access` 预设保持各自原有策略。默认命令的文件沙箱不构成不可提权的隔离保证，因为 `approve-all` 仍会批准越界权限请求。
+
 ## 11. 部署边界
 
 当前版本面向单机、单进程、自托管部署：

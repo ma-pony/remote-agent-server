@@ -357,6 +357,8 @@ Management routes use one global `API_TOKEN`. The general Task API uses a separa
 
 Agents run with the operating-system permissions of the service user. They can execute commands, modify their workspace, call MCP tools, and reach files and networks available to that user. `approve-all` is a provider interaction policy and provides no sandbox boundary. Production deployments use a dedicated unprivileged user, trusted repositories and MCP servers, plus a trusted network or TLS reverse proxy.
 
+The bundled Codex ACP adapter defaults `agent` mode to `workspaceWrite` with `networkAccess: true`, retaining the existing writable-root and temporary-directory rules. New, loaded, and resumed Provider Sessions use this preset, and subsequent ordinary Runs explicitly send it on every turn. Networking does not depend on model-requested escalation or the host's `sandbox_workspace_write.network_access` default. The `read-only` and `agent-full-access` presets retain their existing policies. The default command sandbox is not an isolation guarantee against escalation: `approve-all` still approves requests to operate beyond it.
+
 ## 11. Deployment boundary
 
 `pnpm run init` generates a private `0600` `.env`, defaults to a loopback listener, and expands one storage root into database, environment, and Session paths. It reuses WorkspaceManager to verify native creation, cloning/snapshotting, independent writes, and cleanup before exclusively creating the configuration file. Existing files and tokens are preserved. `pnpm run doctor` reuses those checks without writing configuration, creating business records, or invoking a Provider. Both commands may create missing base directories and remove their temporary probe directories afterward.

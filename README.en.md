@@ -217,6 +217,8 @@ Authenticate and configure models only for the providers you intend to use, unde
 
 At startup, the server reads the login-shell PATH and merges it with the current Node directory and process PATH. Each agent has its own Provider Home. The server prepares baseline configuration, authentication, and model information from the service user's Provider Home while excluding session history, logs, and temporary runtime data. System plugins, hooks, and global MCP from Codex and Claude Code are optional configuration sources; agents never inherit them implicitly.
 
+Codex defaults to `agent` mode: ordinary commands run in the `workspace-write` sandbox with network access enabled, without requesting escalation for networking. The platform's ACP adapter explicitly sends this network policy on every turn; `sandbox_workspace_write.network_access` in the host's `config.toml` does not override it. The existing `approve-all` policy still approves permission requests automatically; see the [security boundary](#security-boundary).
+
 ### 2. Create a project environment
 
 Open **Project environments → New project environment**:

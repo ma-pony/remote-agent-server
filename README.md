@@ -217,6 +217,8 @@ hermes --version
 
 服务启动时读取登录 Shell 的 PATH，并合并当前 Node 目录和进程 PATH。每个 Agent 使用独立的 Provider Home。服务会从运行用户的 Provider Home 准备基础配置、认证与模型信息，不复制历史会话、日志和临时运行数据。Codex 和 Claude Code 的系统插件、Hook 与全局 MCP 只作为可选配置来源，不会被 Agent 隐式继承。
 
+Codex 默认使用 `agent` 模式，普通命令在 `workspace-write` 沙箱中执行并允许联网，联网无需先申请提权。平台的 ACP adapter 每轮显式下发这一网络策略，主机 `config.toml` 中的 `sandbox_workspace_write.network_access` 不会覆盖它。现有 `approve-all` 仍会自动批准权限请求，详见[安全边界](#安全边界)。
+
 ### 2. 创建项目环境
 
 进入 **项目环境 → 新建项目环境**：
