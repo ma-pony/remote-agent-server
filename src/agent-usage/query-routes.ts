@@ -76,7 +76,9 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       const revision = cache.revision();
       const status = cache.get(`status:${JSON.stringify(filter)}`, () => ({
         sourceCounts: collector.sources.sourceStatusCounts(namespace, filter),
+        sourceRecoveryCounts: collector.sources.sourceStatusCounts(namespace, { ...filter, mappingState: "active" }),
         collectionFailureTotal: collector.collectionFailureCount(filter),
+        retryableCollectionFailureTotal: collector.collectionFailureCount(filter, true),
         captureHealthCounts: collector.capture?.healthCounts(filter) ?? {},
         contentBackfill: collector.contentBackfill.status(filter)
       }));
@@ -92,6 +94,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       const captureHealth = capturePage?.items ?? [];
       const capturePartial = Object.entries(captureHealthCounts).some(([status, count]) => status !== "observed" && count > 0);
       const metadata = { collectionFailures, collectionFailureTotal: failurePage.total,
+        retryableCollectionFailureTotal: status.retryableCollectionFailureTotal, sourceRecoveryCounts: status.sourceRecoveryCounts,
         captureHealth, captureHealthTotal: capturePage?.total ?? 0, captureHealthCounts,
         contentBackfill, revision, asOf: new Date().toISOString(), timezone: query.timezone, from: query.from ?? null, to: query.to ?? null,
         subagents: "self", timeBasis: "source_timestamp", bodyStatus: "not_retained",

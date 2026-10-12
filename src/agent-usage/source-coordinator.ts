@@ -252,18 +252,35 @@ export class UsageSourceCoordinator {
     return rows.map((row) => this.project(row, bySource.get(row.id) ?? []));
   }
 
-  async prepareMaintenance(binding: UsageBinding, operation: "reset" | "cleanup", id: string): Promise<void> {
+  async prepareMaintenance(binding: UsageBinding, operation: "reset" | "cleanup", id: string,
+    beforeCollect?: (signal: AbortSignal) => Promise<void>): Promise<boolean> {
     this.store.assertBinding(binding);
     let pending = this.maintenance(binding);
     if (pending && (pending.id !== id || pending.operation !== operation)) throw new UsageError("usage_maintenance_conflict");
-    if (pending?.state === "ready") return;
+    if (pending?.state === "ready") return true;
     pending ??= { id, operation, state: "draining", boundaries: {} };
-    this.saveMaintenance(binding, pending);
+    let collected = true, sourceId: string | undefined;
     try {
+      // Drain admitted captures while their subject still accepts the final usage record.
+      if (beforeCollect) {
+        const controller = new AbortController();
+        let timer: ReturnType<typeof setTimeout>;
+        try {
+          await Promise.race([
+            beforeCollect(controller.signal),
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => { controller.abort(); reject(new UsageError("usage_collection_timeout")); }, this.timeoutMs);
+              timer.unref();
+            })
+          ]);
+        } finally { clearTimeout(timer!); }
+      }
+      this.saveMaintenance(binding, pending);
       const sources = this.store.db.prepare(`SELECT DISTINCT s.* FROM agent_usage_sources s
         JOIN agent_usage_source_mappings m ON m.source_id = s.id
         WHERE m.namespace = ? AND m.session_id = ? AND m.state = 'active'`).all(binding.namespace, binding.sessionId) as SourceRow[];
       for (const source of sources) {
+        sourceId = source.id;
         // The host must have stopped the producer without discarding its files before this entrypoint.
         if (this.jobs.has(source.id)) await this.jobs.get(source.id)!.promise;
         if (pending.boundaries[source.id] === undefined) {
@@ -280,9 +297,19 @@ export class UsageSourceCoordinator {
         }
         await this.collect(source.id, pending.boundaries[source.id]);
       }
-      pending.state = "ready";
-      this.saveMaintenance(binding, pending);
-    } catch { throw new UsageError("usage_collection_pending"); }
+    } catch (error) {
+      if (sourceId) {
+        const code = error instanceof UsageError && ["usage_collection_timeout", "usage_tokenizer_pending"].includes(error.code)
+          ? error.code : "usage_source_failed";
+        this.store.db.prepare("UPDATE agent_usage_sources SET status='failed',error_code=? WHERE id=?").run(code, sourceId);
+      }
+      if (operation !== "cleanup") throw new UsageError("usage_collection_pending", { cause: error });
+      collected = false;
+    }
+    // For cleanup, ready means the bounded collection attempt ended, even if statistics are incomplete.
+    pending.state = "ready";
+    this.saveMaintenance(binding, pending);
+    return collected;
   }
 
   maintenance(binding: UsageBinding): Maintenance | null {

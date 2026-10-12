@@ -8,7 +8,8 @@ export type CapturedExchange = { request: Buffer; response: Buffer; requestEncod
   contentType: string; endpoint: string; status: number; issue: string | null };
 export type RelayRoute = { baseUrl: string; credential: string; revoke(): Promise<void> };
 type Upstream = { baseUrl: string; protocol: CaptureProtocol; apiKey: string };
-type Route = { upstream: Upstream; begin(): unknown; finish(binding: unknown, exchange: CapturedExchange): void | Promise<void> };
+type Route = { upstream: Upstream; work: Set<Promise<void>>; begin(): unknown;
+  finish(binding: unknown, exchange: CapturedExchange, signal: AbortSignal): void | Promise<void> };
 const hopHeaders = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host"]);
 function headers(input: IncomingHttpHeaders, credentials: boolean): IncomingHttpHeaders {
   const excluded = new Set([...hopHeaders, ...String(input.connection ?? "").toLowerCase().split(",").map((key) => key.trim())]);
@@ -25,12 +26,13 @@ export class UsageHttpRelay {
   private readonly work = new Set<Promise<void>>();
   private observedWork = 0;
   constructor(private readonly limits: { maxBodyBytes?: number; maxObservedRequests?: number } = {}) {}
-  async register<T>(upstream: Upstream, begin: () => T, finish: (binding: T, exchange: CapturedExchange) => void | Promise<void>): Promise<RelayRoute> {
+  async register<T>(upstream: Upstream, begin: () => T, finish: (binding: T, exchange: CapturedExchange, signal: AbortSignal) => void | Promise<void>): Promise<RelayRoute> {
     if (this.closed) throw new Error("capture_closed");
     await this.start();
     if (this.closed) throw new Error("capture_closed");
     const token = randomBytes(32).toString("hex");
-    this.routes.set(token, { upstream, begin, finish: (binding, exchange) => finish(binding as T, exchange) });
+    const route: Route = { upstream, begin, work: new Set(), finish: (binding, exchange, signal) => finish(binding as T, exchange, signal) };
+    this.routes.set(token, route);
     const port = (this.server!.address() as { port: number }).port;
     return { baseUrl: `http://127.0.0.1:${port}/${token}`, credential: randomBytes(32).toString("hex"), revoke: async () => {
       this.routes.delete(token);
@@ -39,7 +41,7 @@ export class UsageHttpRelay {
         item.finish("interrupted");
         request.destroy();
       }
-      await this.drain();
+      await Promise.all(route.work);
     } };
   }
   private start(): Promise<void> {
@@ -94,11 +96,22 @@ export class UsageHttpRelay {
           exchange.issue ??= reason ?? null;
           exchange.request = Buffer.concat(chunks.request);
           exchange.response = Buffer.concat(chunks.response);
-          const work = Promise.resolve().then(() => route.finish(binding, exchange)).catch(() => {}).then(() => {
+          const controller = new AbortController();
+          let timer: ReturnType<typeof setTimeout>;
+          // Observation must not hold a released runtime or relay shutdown indefinitely.
+          const timeout = new Promise<void>(resolve => {
+            timer = setTimeout(() => { controller.abort(); resolve(); }, 30_000);
+            timer.unref();
+          });
+          const work = Promise.race([Promise.resolve().then(() => route.finish(binding, exchange, controller.signal)), timeout])
+            .catch(() => {}).finally(() => {
+            clearTimeout(timer);
             if (reserved) this.observedWork--;
             this.work.delete(work);
+            route.work.delete(work);
           });
           this.work.add(work);
+          route.work.add(work);
         };
         const upstream = (base.protocol === "https:" ? httpsRequest : httpRequest)(base, { method: req.method, headers: outbound }, (response) => {
           exchange.status = response.statusCode ?? 502;

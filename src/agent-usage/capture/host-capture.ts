@@ -94,7 +94,7 @@ export class HostUsageCapture {
       aliases: this.aliases(input.mcpServers), calls, controller: new AbortController()
     };
     const route = await this.relay.register({ ...upstream, apiKey: this.keys.get(input.provider)! }, () => this.begin(subject),
-      (intent, exchange) => this.finish(intent, exchange, upstream.protocol));
+      (intent, exchange, signal) => this.finish(intent, exchange, upstream.protocol, signal));
     this.subjects.set(input.sessionId, Object.assign(subject, { route }));
     this.host.db.prepare("INSERT OR IGNORE INTO agent_usage_capture_sessions VALUES (?, ?, ?, ?, ?, 'waiting')")
       .run(binding.namespace, binding.agentId, binding.sessionId, epoch, input.provider);
@@ -122,23 +122,39 @@ export class HostUsageCapture {
         intent.runId === null ? null : String(intent.runId), subject.provider, intent.startedAt);
     return intent;
   }
-  private assertIntent(intent: Intent): void {
+  private assertIntent(intent: Intent, signal?: AbortSignal): void {
+    signal?.throwIfAborted();
     this.host.store.assertBinding(intent.binding);
     const row = this.host.db.prepare("SELECT epoch, state FROM agent_usage_subjects WHERE namespace=? AND kind='session' AND subject_id=?")
       .get(intent.binding.namespace, intent.binding.sessionId) as { epoch: number; state: string } | undefined;
     if (row?.state !== "active" || intent.epoch !== `session:${intent.binding.sessionId}:epoch:${row.epoch}`) throw new Error("capture_binding_stale");
   }
-  private async finish(intent: Intent | undefined, exchange: CapturedExchange, protocol: CaptureProtocol): Promise<void> {
+  private async finish(intent: Intent | undefined, exchange: CapturedExchange, protocol: CaptureProtocol, signal: AbortSignal): Promise<void> {
     if (!intent) return;
-    const processing = (intent.subject.processing ?? Promise.resolve()).then(() => this.finishExchange(intent, exchange, protocol));
+    const processing = (intent.subject.processing ?? Promise.resolve()).then(() => this.finishExchange(intent, exchange, protocol, signal));
     intent.subject.processing = processing;
-    try { await processing; }
-    finally { if (intent.subject.processing === processing) intent.subject.processing = undefined; }
+    let abort!: () => void;
+    const expired = new Promise<never>((_resolve, reject) => {
+      abort = () => reject(new Error("capture_processing_timeout"));
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) abort();
+    });
+    try { await Promise.race([processing, expired]); }
+    catch (error) {
+      if (!signal.aborted) throw error;
+      intent.subject.historyComplete = false;
+      this.host.db.prepare("UPDATE agent_usage_captures SET status='incomplete', error_code='capture_processing_timeout' WHERE id=? AND status='pending'")
+        .run(intent.id);
+    } finally {
+      signal.removeEventListener("abort", abort);
+      if (intent.subject.processing === processing) intent.subject.processing = undefined;
+    }
   }
 
-  private async finishExchange(intent: Intent, exchange: CapturedExchange, protocol: CaptureProtocol): Promise<void> {
+  private async finishExchange(intent: Intent, exchange: CapturedExchange, protocol: CaptureProtocol, signal: AbortSignal): Promise<void> {
     let issue = exchange.issue;
     try {
+      signal.throwIfAborted();
       const decoded = await decodeExchange(exchange, protocol);
       issue ??= decoded.issue;
       if (intent.runId === null) issue ??= "outside_run";
@@ -146,7 +162,7 @@ export class HostUsageCapture {
       const native = typeof decoded.response?.id === "string" && decoded.response.id.length <= 512 ? decoded.response.id : null;
       const protocolIdentity = protocol === "anthropic_messages" ? "claude-message" : protocol;
       const invocationId = native ? `${protocolIdentity}:${native}` : `capture-unresolved:${intent.id}`;
-      this.assertIntent(intent);
+      this.assertIntent(intent, signal);
       const subject = intent.subject;
       const calls = new Map(subject.calls);
       const entries = decoded.request && intent.runId !== null
@@ -173,9 +189,10 @@ export class HostUsageCapture {
       if (entry && intent.runId !== null) this.host.store.observe(intent.binding,
         { ...entry.observation, sourceId: "http_capture", sourcePriority: 10,
           eventId: intent.id, providerEpochId: intent.epoch, executionId: String(intent.runId), ...(issue ? { issues: [issue] } : {}) });
-      const estimates = entry?.context ? await this.host.attribution.prepareContext(entry.context, subject.controller.signal) : undefined;
+      const estimates = entry?.context ? await this.host.attribution.prepareContext(entry.context, AbortSignal.any([subject.controller.signal, signal])) : undefined;
+      signal.throwIfAborted();
       this.host.db.transaction(() => {
-        this.assertIntent(intent);
+        this.assertIntent(intent, signal);
         if (entry && intent.runId !== null) {
           if (entry.context) {
             this.host.attribution.commitContext(intent.binding, { ...entry.context, sourceId: "http_capture", providerEpochId: intent.epoch }, estimates!);
@@ -197,6 +214,7 @@ export class HostUsageCapture {
       })();
       if (entry) intent.subject.calls = calls;
     } catch {
+      if (signal.aborted) return;
       intent.subject.historyComplete = false;
       this.host.db.prepare("UPDATE agent_usage_captures SET status='incomplete', error_code='capture_processing_failed' WHERE id=? AND status='pending'").run(intent.id);
     }

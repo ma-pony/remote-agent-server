@@ -126,16 +126,16 @@ describe("usage source coordinator", () => {
     expect(store.summary({ namespace: "test" }).usage.totalTokens).toBe(3300);
   });
 
-  it("leaves failed maintenance pending and completes it after retry", async () => {
+  it("leaves failed reset pending and completes it after retry", async () => {
     const failing = adapter();
     failing.freeze = async () => { throw new Error("unreadable"); };
     const { db, store, coordinator, config } = setup(failing);
     coordinator.registerSource(config);
     const binding = store.bindSession("test", "agent-1", "session-1");
-    await expect(coordinator.prepareMaintenance(binding, "cleanup", "maintenance-2")).rejects.toThrow("usage_collection_pending");
+    await expect(coordinator.prepareMaintenance(binding, "reset", "maintenance-2")).rejects.toThrow("usage_collection_pending");
     expect(coordinator.maintenance(binding)).toMatchObject({ id: "maintenance-2", state: "draining" });
     const resumed = new UsageSourceCoordinator(new UsageStore(db), { fixture: adapter() });
-    await resumed.prepareMaintenance(binding, "cleanup", "maintenance-2");
+    await resumed.prepareMaintenance(binding, "reset", "maintenance-2");
     expect(resumed.maintenance(binding)?.state).toBe("ready");
   });
 

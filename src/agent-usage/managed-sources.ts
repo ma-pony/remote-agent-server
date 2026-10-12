@@ -50,11 +50,12 @@ export class ManagedUsageSources {
             ? `provider-transcript/${transcriptVersion}` : "provider-logs/1" }
       })];
     })) as Record<SourceRegistration["kind"], FileUsageSource>;
-    this.collector = new HostUsageCollector(db, this.adapters, (sessionId) => this.discover(sessionId),
+    this.collector = new HostUsageCollector(db, this.adapters, (sessionId, signal) => this.discover(sessionId, signal),
       loadModelTokenizers(config.usageTokenizers, resolve(config.dataDir, "tokenizers")), config.usageEventRetentionMs);
   }
 
-  private async discover(sessionId: number): Promise<void> {
+  private async discover(sessionId: number, signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted();
     const session = this.session(String(sessionId));
     if (!session.provider_session_id || !["codex", "claude_code"].includes(session.provider)) return;
     const nativeSessionId = session.provider_session_id;
@@ -71,6 +72,7 @@ export class ManagedUsageSources {
       try { entries = await readdir(directory, { withFileTypes: true }); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
       for (const entry of entries) {
+        signal?.throwIfAborted();
         if (++visited > 5000) throw new UsageError("usage_discovery_limit");
         if (entry.isDirectory()) { await walk(join(directory, entry.name), depth + 1); continue; }
         if (!entry.isFile() || !(entry.name === `${nativeSessionId}.jsonl`
@@ -79,13 +81,14 @@ export class ManagedUsageSources {
         const sourceKey = `managed:${epoch}:${path}`;
         if (existing.has(sourceKey)) continue;
         await this.register({ sourceKey, kind, inputRef: { providerSessionRef: String(sessionId), relativePath: path },
-          mappings: [{ sourceSessionKey: nativeSessionId, sessionId: String(sessionId), providerEpochId: epoch }] });
+          mappings: [{ sourceSessionKey: nativeSessionId, sessionId: String(sessionId), providerEpochId: epoch }] }, signal);
       }
     };
     await walk(kind === "codex_log" ? join(root, "sessions") : join(root, "projects"), 0);
   }
 
-  async register(request: SourceRegistration): Promise<{ source: SourceRecord; created: boolean }> {
+  async register(request: SourceRegistration, signal?: AbortSignal): Promise<{ source: SourceRecord; created: boolean }> {
+    signal?.throwIfAborted();
     const mappings = request.mappings.map((mapping) => {
       const sessionId = Number(mapping.sessionId);
       const session = this.session(mapping.sessionId);
@@ -103,6 +106,7 @@ export class ManagedUsageSources {
     });
     const inputRef: Record<string, string> = { ...request.inputRef };
     const boundary = JSON.parse(await this.adapters[request.kind].freeze(inputRef)) as { identity: string };
+    signal?.throwIfAborted();
     inputRef.fileIdentity = boundary.identity;
     const config: SourceConfig = { ...request, namespace: this.collector.namespace, mappings, inputRef };
     const existed = this.collector.sources.listSources(this.collector.namespace, { sourceKey: request.sourceKey }).length > 0;

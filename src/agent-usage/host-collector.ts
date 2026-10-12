@@ -18,12 +18,15 @@ import { UsageQueryWorker } from "./query-worker.js";
 import { trackUsageQueryChanges } from "./storage/query-version.js";
 import type { AccountingProjectionJob } from "./storage/accounting-projection.js";
 
+type CollectionFailure = { sessionId: string; status: string; errorCode: string | null; retryable: boolean };
+
 /** The only layer that translates business-table IDs into the reusable usage module. */
 export class HostUsageCollector {
   readonly namespace = "remote-agent-server";
   capture?: HostUsageCapture;
   observer?: McpUsageObserver;
   private readonly producers = new Set<number>();
+  private readonly harvests = new Set<{ sessionId: number; controller: AbortController }>();
   private recoveryTimer?: ReturnType<typeof setTimeout>;
   private compactionTimer?: ReturnType<typeof setTimeout>;
   private recoveryWork?: Promise<void>;
@@ -52,7 +55,7 @@ export class HostUsageCollector {
   readonly eventRetention: RuntimeEventRetention;
   readonly transcriptProfiles: TranscriptProfiles;
   constructor(readonly db: Database.Database, adapters: Record<string, UsageSourceAdapter> = {},
-    private readonly discoverManagedSources?: (sessionId: number) => Promise<void>, tokenizers = new ModelTokenizers(), eventRetentionMs = 7 * 24 * 60 * 60 * 1000) {
+    private readonly discoverManagedSources?: (sessionId: number, signal?: AbortSignal) => Promise<void>, tokenizers = new ModelTokenizers(), eventRetentionMs = 7 * 24 * 60 * 60 * 1000) {
     this.store = new UsageStore(db);
     db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_harvests (
       namespace TEXT NOT NULL, session_id TEXT NOT NULL, status TEXT NOT NULL,
@@ -143,25 +146,37 @@ export class HostUsageCollector {
   }
 
   async prepareMaintenance(sessionId: number, operation: "reset" | "cleanup"): Promise<void> {
+    this.cancelHarvests(sessionId);
     const binding = this.binding(sessionId);
     const pending = this.sources.maintenance(binding);
     if (pending && pending.operation !== operation) throw new UsageError("usage_maintenance_conflict");
-    // A ready barrier already captured the stopped producer. Its files may now be partially purged.
+    // A ready barrier already attempted collection. Its files may now be partially purged.
     if (pending?.state === "ready") return;
-    await this.capture?.release(sessionId);
-    await this.discover(sessionId);
-    await this.sources.prepareMaintenance(binding, operation, pending?.id ?? `${this.epoch(sessionId)}:${operation}`);
+    const collected = await this.sources.prepareMaintenance(binding, operation, pending?.id ?? `${this.epoch(sessionId)}:${operation}`, async signal => {
+      await this.capture?.release(sessionId);
+      signal.throwIfAborted();
+      this.importLegacy(sessionId);
+      await this.discover(sessionId, signal);
+    });
+    if (!collected) {
+      this.db.prepare(`INSERT INTO agent_usage_harvests (namespace,session_id,status,error_code,attempted_at)
+        VALUES (?,?,'failed','usage_collection_failed',?) ON CONFLICT(namespace,session_id) DO UPDATE SET
+        status='failed',error_code=COALESCE(agent_usage_harvests.error_code,excluded.error_code)`)
+        .run(this.namespace, String(sessionId), new Date().toISOString());
+      console.warn(`usage_cleanup_collection_failed sessionId=${sessionId}`);
+    }
   }
 
-  private async discover(sessionId: number): Promise<void> {
+  private async discover(sessionId: number, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted();
     this.binding(sessionId);
     this.db.prepare(`INSERT INTO agent_usage_harvests (namespace, session_id, status, attempted_at)
       VALUES (?, ?, 'pending', ?) ON CONFLICT(namespace, session_id) DO UPDATE SET
       status = 'pending', error_code = NULL, attempted_at = excluded.attempted_at`)
       .run(this.namespace, String(sessionId), new Date().toISOString());
-    try { await this.discoverManagedSources?.(sessionId); }
+    try { await this.discoverManagedSources?.(sessionId, signal); signal.throwIfAborted(); }
     catch (error) {
-      this.db.prepare("UPDATE agent_usage_harvests SET status = 'failed', error_code = 'usage_discovery_failed' WHERE namespace = ? AND session_id = ?")
+      if (!signal.aborted) this.db.prepare("UPDATE agent_usage_harvests SET status = 'failed', error_code = 'usage_discovery_failed' WHERE namespace = ? AND session_id = ?")
         .run(this.namespace, String(sessionId));
       throw error;
     }
@@ -173,17 +188,30 @@ export class HostUsageCollector {
   }
 
   private async harvestSession(sessionId: number): Promise<void> {
-    await this.discover(sessionId);
+    if (!this.db.prepare("SELECT 1 FROM sessions WHERE id=? AND storage_cleaned_at IS NULL AND pending_operation IS NULL").get(sessionId)) return;
+    const harvest = { sessionId, controller: new AbortController() };
+    this.harvests.add(harvest);
+    const { signal } = harvest.controller;
     try {
+      await this.discover(sessionId, signal);
+      signal.throwIfAborted();
       const sources = this.sources.listSources(this.namespace, { sessionId: String(sessionId), mappingState: "active" });
-      for (const source of sources) await this.sources.collect(source.id);
+      for (const source of sources) {
+        await this.sources.collect(source.id);
+        signal.throwIfAborted();
+      }
       this.db.prepare("UPDATE agent_usage_harvests SET status = 'completed', error_code = NULL WHERE namespace = ? AND session_id = ?")
         .run(this.namespace, String(sessionId));
     } catch (error) {
-      this.db.prepare("UPDATE agent_usage_harvests SET status = 'failed', error_code = 'usage_collection_failed' WHERE namespace = ? AND session_id = ?")
+      if (signal.aborted) return;
+      this.db.prepare("UPDATE agent_usage_harvests SET status = 'failed', error_code = COALESCE(error_code,'usage_collection_failed') WHERE namespace = ? AND session_id = ?")
         .run(this.namespace, String(sessionId));
       throw error;
-    }
+    } finally { this.harvests.delete(harvest); }
+  }
+
+  private cancelHarvests(sessionId: number): void {
+    for (const harvest of this.harvests) if (harvest.sessionId === sessionId) harvest.controller.abort();
   }
 
   private eligibleSessions(includeCompleted = true): Array<{ id: number }> {
@@ -242,7 +270,9 @@ export class HostUsageCollector {
     this.recoveryQueue.push(...sessions.map(({ id }) => () => this.harvestSession(id)));
     // Registered imports without managed discovery are owned by the same continuation.
     this.recoveryQueue.push(...this.sources.recoverySources().filter((source) => !source.sessionIds.some((id) => managedIds.has(id)))
-      .map((source) => () => this.sources.collect(source.id)));
+      .map((source) => async () => {
+        if (this.sources.listSources(this.namespace, { id: source.id, mappingState: "active" }).length) await this.sources.collect(source.id);
+      }));
   }
 
   private scheduleRecovery(delay: number): void {
@@ -283,8 +313,6 @@ export class HostUsageCollector {
         }
       }
       if (this.recoveryStopped) return;
-      this.setRecoveryPhase("retention");
-      const retentionPending = this.eventRetention.step() !== "idle";
       const rankingInputsPending = this.attribution.backfillRankingInputs(5);
       this.setRecoveryPhase("sources");
       const deadline = performance.now() + 25;
@@ -308,7 +336,7 @@ export class HostUsageCollector {
       }
       // Yield real idle time, not just an event-loop turn. Large individual records can still
       // exceed the soft work budget; the worker keeps their tokenization off the main thread.
-      if (this.recoveryQueue.length > 0 || contentPending || contextTotalsPending || retentionPending || rankingInputsPending || projectionJob) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
+      if (this.recoveryQueue.length > 0 || contentPending || contextTotalsPending || rankingInputsPending || projectionJob) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
       else {
         this.queueRecovery(false);
         this.scheduleRecovery(30_000);
@@ -326,11 +354,12 @@ export class HostUsageCollector {
       if (this.recoveryStopped) return;
       const started = performance.now();
       try {
+        const retentionPending = this.eventRetention.step() !== "idle";
         this.compactedEventPayloads += this.store.compactEventPayloads(100);
         this.compactedExposureIdentities += this.attribution.compactExposureIdentities(250);
         this.reclaimedEstimateProfiles += this.attribution.cleanupUnusedEstimates(100);
         this.compactedRevokedSources += this.sources.compactRevokedSources(100);
-        const pending = this.store.eventPayloadCompactionPending() || this.attribution.exposureIdentityCompactionPending();
+        const pending = retentionPending || this.store.eventPayloadCompactionPending() || this.attribution.exposureIdentityCompactionPending();
         this.scheduleCompaction(pending ? Math.max(50,Math.min(1_000,(performance.now()-started)*3)) : 30_000);
       } catch {
         this.lastRecoveryErrorAt = new Date().toISOString();
@@ -369,40 +398,49 @@ export class HostUsageCollector {
     return {
       from: `FROM agent_usage_harvests h JOIN sessions s ON CAST(s.id AS TEXT) = h.session_id
         JOIN agents a ON a.id = s.agent_id WHERE h.namespace = ? AND h.status != 'completed'
-        AND s.storage_cleaned_at IS NULL AND (? IS NULL OR h.session_id = ?)
+        AND (? IS NULL OR h.session_id = ?)
         AND (? IS NULL OR CAST(s.agent_id AS TEXT) = ?) AND (? IS NULL OR a.provider = ?)`,
       parameters: [this.namespace, filter.sessionId ?? null, filter.sessionId ?? null, filter.agentId ?? null,
         filter.agentId ?? null, filter.runtimeKind ?? null, filter.runtimeKind ?? null]
     };
   }
 
-  collectionFailures(filter: UsageFilter = {}): Array<{ sessionId: string; status: string; errorCode: string | null }> {
+  collectionFailures(filter: UsageFilter = {}): CollectionFailure[] {
     const query = this.collectionFailureQuery(filter);
-    return this.db.prepare(`SELECT h.session_id AS sessionId, h.status, h.error_code AS errorCode ${query.from} ORDER BY s.id`)
-      .all(...query.parameters) as Array<{ sessionId: string; status: string; errorCode: string | null }>;
+    const rows = this.db.prepare(`SELECT h.session_id AS sessionId, h.status, h.error_code AS errorCode,
+      s.storage_cleaned_at IS NULL AS retryable ${query.from} ORDER BY s.id`)
+      .all(...query.parameters) as Array<Omit<CollectionFailure, "retryable"> & { retryable: number }>;
+    return rows.map(row => ({ ...row, retryable: Boolean(row.retryable) }));
   }
 
-  collectionFailureCount(filter: UsageFilter = {}): number {
+  collectionFailureCount(filter: UsageFilter = {}, retryableOnly = false): number {
     const query = this.collectionFailureQuery(filter);
-    return (this.db.prepare(`SELECT COUNT(*) AS total ${query.from}`).get(...query.parameters) as { total: number }).total;
+    return (this.db.prepare(`SELECT COUNT(*) AS total ${query.from} ${retryableOnly ? "AND s.storage_cleaned_at IS NULL" : ""}`)
+      .get(...query.parameters) as { total: number }).total;
   }
 
   collectionFailurePage(filter: UsageFilter, pagination: Pick<PaginationQuery, "page" | "pageSize">) {
     const query = this.collectionFailureQuery(filter);
-    const items = this.db.prepare(`SELECT h.session_id AS sessionId, h.status, h.error_code AS errorCode
-      ${query.from} ORDER BY s.id LIMIT ? OFFSET ?`).all(...query.parameters, pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as Array<{ sessionId: string; status: string; errorCode: string | null }>;
-    return pageResult(items, this.collectionFailureCount(filter), pagination);
+    const rows = this.db.prepare(`SELECT h.session_id AS sessionId, h.status, h.error_code AS errorCode,
+      s.storage_cleaned_at IS NULL AS retryable ${query.from} ORDER BY s.id LIMIT ? OFFSET ?`)
+      .all(...query.parameters, pagination.pageSize, (pagination.page - 1) * pagination.pageSize) as Array<Omit<CollectionFailure, "retryable"> & { retryable: number }>;
+    return pageResult(rows.map(row => ({ ...row, retryable: Boolean(row.retryable) })), this.collectionFailureCount(filter), pagination);
   }
 
   finishMaintenance(sessionId: number): void {
     this.db.transaction(() => {
-      this.sources.finishMaintenance(this.binding(sessionId));
-      this.db.prepare("UPDATE agent_usage_harvests SET status = 'completed', error_code = NULL WHERE namespace = ? AND session_id = ?")
-        .run(this.namespace, String(sessionId));
+      const binding = this.binding(sessionId);
+      const cleanup = this.sources.maintenance(binding)?.operation === "cleanup";
+      this.sources.finishMaintenance(binding);
+      this.db.prepare(`UPDATE agent_usage_harvests SET status = 'completed', error_code = NULL
+        WHERE namespace = ? AND session_id = ? AND (? = 0 OR status != 'failed')`)
+        .run(this.namespace, String(sessionId), Number(cleanup));
     })();
+    this.producers.delete(sessionId);
     this.observer?.revokeSession(sessionId);
   }
   deleteSession(sessionId: number): void {
+    this.cancelHarvests(sessionId);
     this.producers.delete(sessionId);
     this.capture?.deleteSession(sessionId);
     this.db.transaction(() => {

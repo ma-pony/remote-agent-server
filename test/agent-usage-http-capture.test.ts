@@ -1,4 +1,4 @@
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { gzipSync, zstdCompressSync } from "node:zlib";
 import { loadConfig } from "../src/config.js";
@@ -20,6 +20,27 @@ it("validates complete API-key-only routing before startup", () => {
   expect(loadConfig(env).usageCaptureUpstreams?.codex?.protocol).toBe("responses");
   for (const value of [{ codex: { baseUrl: "http://evil.test", protocol: "responses", apiKeyEnv: "CAPTURE_KEY" } }, { codex: { baseUrl: "https://api.test?secret=x", protocol: "responses", apiKeyEnv: "CAPTURE_KEY" } }, { codex: { baseUrl: "https://api.test", protocol: "chat_completions", apiKeyEnv: "CAPTURE_KEY" } }, { hermes: { baseUrl: "https://api.test", protocol: "chat_completions", apiKeyEnv: "CAPTURE_KEY" } }]) expect(() => loadConfig({ ...env, USAGE_CAPTURE_UPSTREAMS: JSON.stringify(value) })).toThrow();
   expect(() => loadConfig({ ...env, CAPTURE_KEY: undefined })).toThrow();
+});
+it("revokes only its own route while another route is still processing usage", async () => {
+  const baseUrl = await upstream((_req, res) => res.end("{}"));
+  const relay = new UsageHttpRelay(); relays.push(relay);
+  let releaseA!: () => void, releaseB!: () => void;
+  const waitingA = new Promise<void>(resolve => { releaseA = resolve; });
+  const waitingB = new Promise<void>(resolve => { releaseB = resolve; });
+  const routeA = await relay.register({ baseUrl, protocol: "responses", apiKey: "test" }, () => true, () => waitingA);
+  const routeB = await relay.register({ baseUrl, protocol: "responses", apiKey: "test" }, () => true, () => waitingB);
+  try {
+    await (await fetch(routeA.baseUrl + "/responses")).text();
+    await (await fetch(routeB.baseUrl + "/responses")).text();
+    let revoked = false;
+    const revoking = routeA.revoke().then(() => { revoked = true; });
+    await Promise.resolve();
+    expect(revoked).toBe(false);
+    releaseA();
+    await vi.waitFor(() => expect(revoked).toBe(true), { timeout: 100 });
+    await revoking;
+    expect((await fetch(routeA.baseUrl + "/responses")).status).toBe(404);
+  } finally { releaseA(); releaseB(); }
 });
 it("forwards compressed request and split UTF-8 SSE bytes unchanged with fixed authentication", async () => {
   const events = `data: ${JSON.stringify({ type: "response.completed", response: { id: "resp_1", output: [{ type: "message", content: [{ text: "你好" }] }], usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 } } })}\n\n`;

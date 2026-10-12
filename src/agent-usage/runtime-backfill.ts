@@ -36,7 +36,8 @@ export class RuntimeContentBackfill {
     if (!columns.some(({ name }) => name === "tokenizer_model")) db.exec("ALTER TABLE agent_usage_runtime_backfills ADD COLUMN tokenizer_model TEXT");
     // Tool-only checkpoints predate conversation content. Replay them once; both sinks are idempotent.
     if (conversation) db.prepare(`UPDATE agent_usage_runtime_backfills SET content_version=2,
-      last_seq=0,processed_events=0,status='pending',error_code=NULL WHERE namespace=? AND content_version<2`).run(namespace);
+      last_seq=0,processed_events=0,status='pending',error_code=NULL WHERE namespace=? AND content_version<2
+      AND run_id IN (SELECT id FROM runs WHERE events_pruned_through_seq=0)`).run(namespace);
     // Replay retained content once for models that now have a vocabulary. Other history is untouched.
     if (knownModels.length) db.prepare(`UPDATE agent_usage_runtime_backfills SET content_version=3,
       last_seq=0,processed_events=0,status='pending',error_code=NULL,retry_after=0,
@@ -112,7 +113,9 @@ export class RuntimeContentBackfill {
     }
     signal?.throwIfAborted();
     // Commit projections and their cursor together. No tokenization or other await holds the lock.
-    this.db.transaction(() => {
+    const committed = this.db.transaction(() => {
+      // Retention can run while tokenization awaits. Never revive a retired job or commit its late projections.
+      if (!this.db.prepare("SELECT 1 FROM runs WHERE id=? AND events_pruned_through_seq=0").get(job.run_id)) return false;
       let sequence = job.last_seq, processed = 0;
       try { prompt?.commit(); } catch { errorCode ??= "usage_runtime_prompt_failed"; }
       for (const item of batch) {
@@ -130,7 +133,9 @@ export class RuntimeContentBackfill {
       this.db.prepare(`UPDATE agent_usage_runtime_backfills SET last_seq = ?, processed_events = processed_events + ?,
         status=?,error_code=?,retry_after=? WHERE namespace=? AND run_id=?`)
         .run(sequence, processed, status, errorCode, pending ? Date.now() + 60_000 : 0, this.namespace, job.run_id);
+      return true;
     })();
+    if (!committed) return false;
     await setImmediate(undefined, { signal });
     return pending || this.db.prepare(`SELECT 1 ${scope.sql} AND (j.run_id IS NULL OR (j.status IN ('pending', 'running') AND j.retry_after<=?)) LIMIT 1`)
       .get(...scope.params, Date.now()) !== undefined;
@@ -141,7 +146,8 @@ export class RuntimeContentBackfill {
     this.db.prepare(`INSERT INTO agent_usage_runtime_backfills
       (namespace,run_id,session_id,content_version,status,error_code,retry_after,tokenizer_model)
       SELECT ?,id,CAST(session_id AS TEXT),3,'pending',?,?,
-        CASE WHEN resolved_model IN (SELECT value FROM json_each(?)) THEN resolved_model ELSE NULL END FROM runs WHERE id=?
+        CASE WHEN resolved_model IN (SELECT value FROM json_each(?)) THEN resolved_model ELSE NULL END FROM runs
+        WHERE id=? AND events_pruned_through_seq=0
       ON CONFLICT(namespace,run_id) DO UPDATE SET status='pending',
         error_code=COALESCE(agent_usage_runtime_backfills.error_code,excluded.error_code),
         retry_after=MIN(agent_usage_runtime_backfills.retry_after,excluded.retry_after)`)
@@ -150,10 +156,12 @@ export class RuntimeContentBackfill {
 
   status(filter: UsageFilter = {}): RuntimeBackfillStatus {
     if (filter.namespace !== undefined && filter.namespace !== this.namespace) return { status: "completed", processedEvents: 0, errorCode: null };
-    const scope = this.scope(filter);
+    const scope = this.scope(filter, true);
     const row = this.db.prepare(`SELECT COALESCE(SUM(j.processed_events), 0) AS processed,
-      SUM(CASE WHEN j.run_id IS NULL OR j.status = 'pending' THEN 1 ELSE 0 END) AS pending,
-      SUM(CASE WHEN j.status = 'running' THEN 1 ELSE 0 END) AS running, MIN(j.error_code) AS error
+      SUM(CASE WHEN r.events_pruned_through_seq=0 AND (j.run_id IS NULL OR j.status = 'pending') THEN 1 ELSE 0 END) AS pending,
+      SUM(CASE WHEN r.events_pruned_through_seq=0 AND j.status = 'running' THEN 1 ELSE 0 END) AS running,
+      MIN(CASE WHEN r.events_pruned_through_seq>0 AND (j.run_id IS NULL OR j.status IN ('pending','running'))
+        THEN COALESCE(j.error_code,'usage_runtime_events_expired') ELSE j.error_code END) AS error
       ${scope.sql}`).get(...scope.params) as { processed: number; pending: number | null; running: number | null; error: string | null };
     return { status: row.running ? "running" : row.pending ? "pending" : row.error ? "failed" : "completed",
       processedEvents: row.processed, errorCode: row.error };
@@ -166,12 +174,13 @@ export class RuntimeContentBackfill {
     })();
   }
 
-  private scope(filter: UsageFilter = {}): { sql: string; params: string[] } {
+  private scope(filter: UsageFilter = {}, includeExpired = false): { sql: string; params: string[] } {
     const params = [this.namespace, this.namespace, this.namespace];
     const conditions = ["(r.status NOT IN ('queued', 'running') OR (r.status='running' AND j.run_id IS NOT NULL))", `NOT EXISTS (SELECT 1 FROM agent_usage_subjects u
       WHERE u.namespace = ? AND u.state != 'active' AND ((u.kind = 'session' AND u.subject_id = CAST(s.id AS TEXT))
         OR (u.kind = 'agent' AND u.subject_id = CAST(a.id AS TEXT))))`,
     `NOT EXISTS (SELECT 1 FROM agent_usage_runtime_backfill_deleted_sessions d WHERE d.namespace = ? AND d.session_id = CAST(s.id AS TEXT))`];
+    if (!includeExpired) conditions.push("r.events_pruned_through_seq=0");
     for (const [field, column] of [["sessionId", "s.id"], ["agentId", "a.id"], ["runtimeKind", "a.provider"]] as const) {
       if (filter[field] !== undefined) { conditions.push(`${column} = ?`); params.push(filter[field]); }
     }

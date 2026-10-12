@@ -49,8 +49,94 @@ describe("host usage integration", () => {
       expect(backfill).toHaveBeenCalledTimes(1);
       elapsed = 5_000;
       await vi.advanceTimersByTimeAsync(50);
+      expect(backfill).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(30_000);
       expect(backfill).toHaveBeenCalledTimes(2);
     } finally { await host.stopRecovery(); }
+  });
+
+  it("continues retention while content backfill is blocked", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { host } = setup();
+    vi.spyOn(host.contentBackfill, "step").mockImplementation(signal => new Promise(resolve => {
+      signal!.addEventListener("abort", () => resolve(false), { once: true });
+    }));
+    const retention = vi.spyOn(host.eventRetention, "step").mockReturnValue("scanned");
+    host.startRecovery();
+    try {
+      await vi.advanceTimersByTimeAsync(200);
+      expect(retention.mock.calls.length).toBeGreaterThan(1);
+    } finally { await host.stopRecovery(); }
+  });
+
+  it("settles failed cleanup discovery once and preserves the error after deleting storage", async () => {
+    const { db, session } = setup();
+    const discover = vi.fn(async () => { throw new Error("private path"); });
+    const host = new HostUsageCollector(db, {}, discover);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await host.prepareMaintenance(session.id, "cleanup");
+    await host.prepareMaintenance(session.id, "cleanup");
+    expect(discover).toHaveBeenCalledOnce();
+    host.finishMaintenance(session.id);
+    db.prepare("UPDATE sessions SET storage_cleaned_at=? WHERE id=?").run(new Date().toISOString(), session.id);
+    await host.collectSession(session.id);
+    expect(discover).toHaveBeenCalledOnce();
+    expect(db.prepare("SELECT status,error_code FROM agent_usage_harvests WHERE session_id=?").get(String(session.id)))
+      .toEqual({ status: "failed", error_code: "usage_discovery_failed" });
+    expect(host.collectionFailures()).toEqual([
+      { sessionId: String(session.id), status: "failed", errorCode: "usage_discovery_failed", retryable: false }
+    ]);
+    expect(host.collectionFailureCount({ sessionId: String(session.id) })).toBe(1);
+  });
+
+  it("does not block cleanup when importing legacy statistics fails", async () => {
+    const { host, session } = setup();
+    vi.spyOn(host, "importLegacy").mockImplementation(() => { throw new Error("invalid legacy counter"); });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await expect(host.prepareMaintenance(session.id, "cleanup")).resolves.toBeUndefined();
+    expect(() => host.finishMaintenance(session.id)).not.toThrow();
+  });
+
+  it.each([false, true])("preserves a cleanup gap when an earlier discovery settles late (reject=%s)", async reject => {
+    const { db, session } = setup();
+    let resume!: () => void;
+    const delayed = new Promise<void>(resolve => { resume = resolve; });
+    const discover = vi.fn().mockImplementationOnce(async () => {
+      await delayed;
+      if (reject) throw new Error("late discovery failure");
+    }).mockRejectedValue(new Error("cleanup discovery failure"));
+    const host = new HostUsageCollector(db, {}, discover);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const stale = host.collectSession(session.id).catch(() => undefined);
+    db.prepare("UPDATE sessions SET pending_operation='cleanup' WHERE id=?").run(session.id);
+    await host.prepareMaintenance(session.id, "cleanup");
+    host.finishMaintenance(session.id);
+    db.prepare("UPDATE sessions SET pending_operation=NULL,storage_cleaned_at=? WHERE id=?").run(new Date().toISOString(), session.id);
+    const gap = () => db.prepare("SELECT status,error_code FROM agent_usage_harvests WHERE session_id=?").get(String(session.id));
+    expect(gap()).toEqual({ status: "failed", error_code: "usage_discovery_failed" });
+    resume();
+    await stale;
+    expect(gap()).toEqual({ status: "failed", error_code: "usage_discovery_failed" });
+  });
+
+  it("times out cleanup discovery and ignores its late result", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const { db, session } = setup();
+    let resume!: () => void;
+    const discover = vi.fn(() => new Promise<void>(resolve => { resume = resolve; }));
+    const host = new HostUsageCollector(db, {}, discover);
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let settled = false;
+    const maintenance = host.prepareMaintenance(session.id, "cleanup").then(() => { settled = true; });
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(settled).toBe(true);
+      host.finishMaintenance(session.id);
+      db.prepare("UPDATE sessions SET storage_cleaned_at=? WHERE id=?").run(new Date().toISOString(), session.id);
+      resume();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.collectionFailures()).toEqual([expect.objectContaining({ status: "failed", errorCode: "usage_collection_failed" })]);
+    } finally { resume(); await maintenance; }
   });
 
   it("advances context totals while content backfill and source collection remain active", async () => {

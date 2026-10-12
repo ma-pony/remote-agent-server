@@ -7,6 +7,7 @@ import type { FastifyInstance } from "fastify";
 import { buildApp } from "../src/app.js";
 import { loadConfig } from "../src/config.js";
 import { ManagedUsageSources } from "../src/agent-usage/managed-sources.js";
+import { FileUsageSource } from "../src/agent-usage/adapters/file-source.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 import { snapshotFixture } from "./fixtures/agent-usage/context-snapshot.js";
 import { ProviderExtensionManager } from "../src/provider-extensions/provider-extension-manager.js";
@@ -34,6 +35,56 @@ const setup = async (usageTokenizers = [fixtureTokenizerConfig()]) => {
 const register = (app: FastifyInstance, payload: unknown) => app.inject({ method: "POST", url: "/api/usage/sources", headers, payload });
 
 describe("usage source management API", () => {
+  it("does not register a managed source after cleanup discovery times out", async () => {
+    const { db, root, manager, session } = await setup();
+    await manager.collector.stopRecovery();
+    db.prepare("UPDATE sessions SET provider_session_id='codex-session-1',pending_operation='cleanup' WHERE id=?").run(session.id);
+    const home = join(root, "agents", manager.collector.binding(session.id).agentId, "provider-home", "codex", "sessions", String(session.id), "sessions");
+    await mkdir(home, { recursive: true });
+    await copyFile(join(root, "codex.jsonl"), join(home, "rollout-codex-session-1.jsonl"));
+    let resume!: () => void, started!: () => void;
+    const waiting = new Promise<void>(resolve => { resume = resolve; });
+    const freezing = new Promise<void>(resolve => { started = resolve; });
+    const freeze = FileUsageSource.prototype.freeze;
+    const delayed = vi.spyOn(FileUsageSource.prototype, "freeze").mockImplementationOnce(async function (...args) {
+      const boundary = await freeze.apply(this, args);
+      started(); await waiting; return boundary;
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const maintenance = manager.collector.prepareMaintenance(session.id, "cleanup");
+    try {
+      await freezing;
+      await vi.advanceTimersByTimeAsync(30_000);
+      await maintenance;
+      manager.collector.finishMaintenance(session.id);
+      db.prepare("UPDATE sessions SET pending_operation=NULL,storage_cleaned_at=? WHERE id=?").run(new Date().toISOString(), session.id);
+      resume();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(manager.collector.sources.listSources(manager.collector.namespace)).toEqual([]);
+      expect(manager.collector.collectionFailures()).toEqual([expect.objectContaining({ retryable: false, errorCode: "usage_collection_failed" })]);
+    } finally { resume(); await maintenance; delayed.mockRestore(); warn.mockRestore(); vi.useRealTimers(); }
+  });
+
+  it("separates retained collection gaps from retryable failures in status and summary", async () => {
+    const { app, db, manager, registration, session } = await setup();
+    await manager.collector.stopRecovery();
+    const source = (await register(app, registration)).json();
+    db.prepare("UPDATE agent_usage_sources SET status='failed',error_code='usage_source_failed' WHERE id=?").run(source.id);
+    db.prepare("INSERT OR REPLACE INTO agent_usage_harvests(namespace,session_id,status,error_code) VALUES (?,?,'failed','usage_collection_failed')")
+      .run(manager.collector.namespace, String(session.id));
+    const status = async () => (await app.inject({ url: `/api/usage/status?sessionId=${session.id}`, headers })).json();
+    expect(await status()).toMatchObject({ sourceCounts: { failed: 1 }, sourceRecoveryCounts: { failed: 1 },
+      collectionFailureTotal: 1, retryableCollectionFailureTotal: 1 });
+    db.prepare("UPDATE agent_usage_source_mappings SET state='retained' WHERE source_id=?").run(source.id);
+    db.prepare("UPDATE sessions SET storage_cleaned_at=? WHERE id=?").run(new Date().toISOString(), session.id);
+    expect(await status()).toMatchObject({ sourceCounts: { failed: 1 }, sourceRecoveryCounts: {},
+      collectionFailureTotal: 1, retryableCollectionFailureTotal: 0 });
+    const summary = (await app.inject({ url: `/api/usage/summary?sessionId=${session.id}`, headers })).json();
+    expect(summary).toMatchObject({ analysisStatus: "partial", collectionFailureTotal: 1, retryableCollectionFailureTotal: 0,
+      sourceRecoveryCounts: {}, collectionFailures: [{ sessionId: String(session.id), retryable: false }] });
+  });
+
   it("collects native Claude plugin instructions into cumulative Skill and plugin API rankings", async () => {
     const { app, db, root, manager, session } = await setup();
     await manager.collector.stopRecovery();

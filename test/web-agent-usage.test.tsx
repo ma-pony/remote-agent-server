@@ -525,8 +525,8 @@ it("keeps a slow ranking request alive while pending status revisions change", a
     let revision = 0;
     fetch.mockImplementation(async (input, init) => {
       const path = new URL(String(input), "http://localhost").pathname;
-      if (path === "/api/usage/summary") return response({ ...summary, revision: "initial", sourceCounts: { failed: 1 } });
-      if (path === "/api/usage/status") return response({ revision: `revision-${++revision}`, sourceCounts: { failed: 1 }, contentBackfill: { status: "completed" } });
+      if (path === "/api/usage/summary") return response({ ...summary, revision: "initial", sourceCounts: { failed: 1 }, sourceRecoveryCounts: { failed: 1 } });
+      if (path === "/api/usage/status") return response({ revision: `revision-${++revision}`, sourceCounts: { failed: 1 }, sourceRecoveryCounts: { failed: 1 }, contentBackfill: { status: "completed" } });
       if (path === "/api/usage/capabilities") {
         rankingSignal ??= init?.signal as AbortSignal;
         if (rankingSignal === init?.signal) return new Promise<Response>((resolve) => { resolveRanking = resolve; });
@@ -569,7 +569,7 @@ it("页面卸载会中止仍在进行的采集状态请求", async () => {
 it("把上下文证据数与实际调用分开并显示待恢复会话", async () => {
   const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
   fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary") ? response({ ...summary,
-    accountingBasis: "interval_totals", collectionFailures: [{ sessionId: "2", status: "failed", errorCode: "usage_discovery_failed" }] })
+    accountingBasis: "interval_totals", collectionFailures: [{ sessionId: "2", status: "failed", errorCode: "usage_discovery_failed", retryable: true }] })
     : String(input).includes("/usage/capabilities") ? response({ items: [{ ...ranks[0], contextOnlyCalls: 3 }], total: 1 })
     : original(input, init));
   mount();
@@ -584,17 +584,58 @@ it("后台发现失败在没有来源注册时仍刷新到恢复成功", async (
   const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
   let gets = 0;
   fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary")
-    ? response(++gets === 1 ? { ...summary, collectionFailures: [{ sessionId: "2", status: "failed", errorCode: "usage_discovery_failed" }] }
+    ? response(++gets === 1 ? { ...summary, collectionFailures: [{ sessionId: "2", status: "failed", errorCode: "usage_discovery_failed", retryable: true }] }
       : { ...summary, collectionFailures: [], usage: { ...usage, totalTokens: 8800 } }) : original(input, init));
   mount();
   expect(await screen.findByText("8,800", {}, { timeout: 2000 })).toBeInTheDocument();
   expect(screen.queryByText("采集尚未完成")).not.toBeInTheDocument();
 });
 
+it("已清理会话保留统计缺口且不再自动重试或轮询", async () => {
+  vi.useFakeTimers();
+  try {
+    const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+    const metadata = { revision: "retired", sourceCounts: { failed: 1 }, sourceRecoveryCounts: {},
+      collectionFailureTotal: 1, retryableCollectionFailureTotal: 0,
+      collectionFailures: [{ sessionId: "2", status: "failed", errorCode: "usage_discovery_failed", retryable: false }],
+      contentBackfill: { status: "failed", processedEvents: 1, errorCode: "usage_tokenizer_pending" } };
+    fetch.mockImplementation(async (input, init) => {
+      const path = new URL(String(input), "http://localhost").pathname;
+      if (path === "/api/usage/summary") return response({ ...summary, ...metadata });
+      if (path === "/api/usage/status") return response(metadata);
+      if (path === "/api/usage/sources") return response([{ id: "retired", sourceKey: "retired", kind: "codex_log",
+        status: "failed", errorCode: "usage_collection_failed", rejectedRecords: 0, lastSuccessAt: null,
+        mappings: [{ sessionId: "2", state: "retained" }] }]);
+      return original(input, init);
+    });
+    mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText(/会话 2.*存储已清理，统计不完整/)).toBeInTheDocument();
+    expect(screen.queryByText(/等待重试|失败后自动重试/)).not.toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(65_000); });
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/status"))).toHaveLength(0);
+  } finally { vi.useRealTimers(); }
+});
+
+it("可重试失败在其他分页时仍轮询恢复状态", async () => {
+  vi.useFakeTimers();
+  try {
+    const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+    const metadata = { revision: "mixed", collectionFailureTotal: 21, retryableCollectionFailureTotal: 1,
+      collectionFailures: [{ sessionId: "2", status: "failed", errorCode: "usage_discovery_failed", retryable: false }] };
+    fetch.mockImplementation(async (input, init) => String(input).includes("/usage/summary") ? response({ ...summary, ...metadata })
+      : String(input).includes("/usage/status") ? response(metadata) : original(input, init));
+    mount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(screen.getByText(/会话 2.*存储已清理，统计不完整/)).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/status")).length).toBeGreaterThan(0);
+  } finally { vi.useRealTimers(); }
+});
+
 it("失败来源后台恢复时无需等到 collecting 就刷新指标", async () => {
   const fetch = vi.mocked(globalThis.fetch); const original = fetch.getMockImplementation()!;
   let gets = 0; let summaries = 0;
-  const source = { id: "retry", sourceKey: "retry", kind: "claude_log", status: "failed", errorCode: "usage_collection_failed", mappings: [], rejectedRecords: 0, lastSuccessAt: null };
+  const source = { id: "retry", sourceKey: "retry", kind: "claude_log", status: "failed", errorCode: "usage_collection_failed", mappings: [{ sessionId: "2", state: "active" }], rejectedRecords: 0, lastSuccessAt: null };
   fetch.mockImplementation(async (input, init) => String(input).includes("/usage/sources?")
     ? response([{ ...source, status: ++gets === 1 ? "failed" : "completed", errorCode: null }])
     : String(input).includes("/usage/summary") ? response({ ...summary, usage: { ...usage, totalTokens: ++summaries === 1 ? 3300 : 7700 } }) : original(input, init));

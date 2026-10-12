@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AgentManager } from "../src/agents/agent-manager.js";
 import { accountingRequests } from "./fixtures/agent-usage/accounting.js";
@@ -20,7 +20,7 @@ import { SessionManager } from "../src/sessions/session-manager.js";
 import { createFakeRuntime, createTestDatabase } from "./helpers.js";
 
 const cleanups: Array<() => void> = [];
-afterEach(() => { cleanups.splice(0).forEach((cleanup) => cleanup()); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); cleanups.splice(0).forEach((cleanup) => cleanup()); });
 
 const harness = (options: { beforeDelete?: () => Promise<void>; usageAdapters?: Record<string, UsageSourceAdapter> } = {}) => {
   const { db, seed } = createTestDatabase();
@@ -82,6 +82,49 @@ describe("durable Session maintenance", () => {
     await expect(h.manager.resetProviderSession(h.session.id)).rejects.toMatchObject({ code: "usage_collection_pending" });
     expect(existsSync(h.workspace)).toBe(true);
     expect(h.db.prepare("SELECT status, pending_operation FROM sessions WHERE id = ?").get(h.session.id)).toEqual({ status: "running", pending_operation: "reset" });
+  });
+
+  it.each(["failure", "timeout", "restart"])("cleans expired storage despite collection %s and retains partial statistics", async mode => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    if (mode === "timeout") vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const collect = vi.fn();
+    const h = harness({ usageAdapters: { fixture: {
+      describe: () => ({ usage: "model_request", context: "none", identity: "explicit", version: "1" }),
+      freeze: async () => "end",
+      async *collect() {
+        collect();
+        yield { sourceSessionKey: "capture", observation: accountingRequests()[0]!, checkpoint: "partial" };
+        // A checkpoint flushes the completed prefix before a later failure or timeout.
+        yield { checkpoint: "partial" };
+        if (mode === "timeout") await new Promise<void>(() => undefined);
+        throw new Error("private source data");
+      }
+    } } });
+    const host = h.manager.usageCollector;
+    host.sources.registerSource({ namespace: host.namespace, sourceKey: "tail", kind: "fixture", inputRef: {},
+      mappings: [{ sourceSessionKey: "capture", agentId: String(h.seed.agent.id), sessionId: String(h.session.id), providerEpochId: host.epoch(h.session.id) }] });
+    const providerPath = join(h.root, "agents", String(h.seed.agent.id), "provider-home", "codex", "sessions", String(h.session.id));
+    mkdirSync(providerPath, { recursive: true });
+    writeFileSync(join(providerPath, "rollout.jsonl"), "private history");
+    if (mode === "restart") h.db.prepare("UPDATE sessions SET status='running',pending_operation='cleanup' WHERE id=?").run(h.session.id);
+    const work = mode === "restart" ? recoverSessionMaintenance({ ...h, usageCollector: host })
+      : h.manager.cleanupStorage(h.session.id, "2099-01-01T00:00:00Z");
+    const completion = work.then(() => null, error => error);
+    if (mode === "timeout") {
+      await vi.waitFor(() => expect(collect).toHaveBeenCalledOnce());
+      await vi.advanceTimersByTimeAsync(30_000);
+    }
+    expect(await completion).toBeNull();
+    expect(h.manager.get(h.session.id)).toMatchObject({ status: "idle", storageCleanedAt: expect.any(String) });
+    expect(existsSync(h.workspace)).toBe(false);
+    expect(existsSync(providerPath)).toBe(false);
+    expect(host.store.summary({ namespace: host.namespace }).usage.totalTokens).toBe(1100);
+    expect(host.sources.listSources(host.namespace)[0]).toMatchObject({ status: "failed", checkpoint: "partial",
+      errorCode: mode === "timeout" ? "usage_collection_timeout" : "usage_source_failed", mappings: [{ state: "retained" }] });
+    expect(host.sources.recoverySources()).toEqual([]);
+    expect(collect).toHaveBeenCalledOnce();
+    expect(h.db.prepare("SELECT status,error_code FROM agent_usage_harvests WHERE session_id=?").get(String(h.session.id)))
+      .toMatchObject({ status: "failed", error_code: "usage_collection_failed" });
   });
   it("Hermes 存储清理只删除目标 Session Home，并清理匹配的旧历史", async () => {
     const root = mkdtempSync(join(tmpdir(), "hermes-session-cleanup-"));

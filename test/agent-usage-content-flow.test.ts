@@ -28,7 +28,9 @@ const setup = async (withMcpMirror = false, legacyObserver = false) => {
     (agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, 'Claude history', 'idle', ?, ?, ?)`)
     .run(claudeAgentId, join(root, "sessions", "claude"), at, at).lastInsertRowid);
   const config = loadConfig({ API_TOKEN: "content-flow-token", DATA_DIR: root, DATABASE_PATH: databasePath,
-    PROJECT_ENVIRONMENTS_ROOT: join(root, "environments"), SESSIONS_ROOT: join(root, "sessions"), SESSION_RETENTION_HOURS: "0" });
+    PROJECT_ENVIRONMENTS_ROOT: join(root, "environments"), SESSIONS_ROOT: join(root, "sessions"), SESSION_RETENTION_HOURS: "0",
+    // These tests verify accounting of retained historical fixtures, independently of their age.
+    USAGE_EVENT_RETENTION_DAYS: "0" });
   const retainedCall = (sessionId: number, day: string, id: string, kind: string, rawInput: unknown, rawOutput: unknown) => {
     const started = `${day}T01:00:00.000Z`, ended = `${day}T01:00:01.000Z`;
     const runId = Number(db.prepare(`INSERT INTO runs (session_id, status, input, created_at, started_at, finished_at)

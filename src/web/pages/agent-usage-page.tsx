@@ -51,18 +51,22 @@ type UsageMetadata = {
   contentBackfill?: { status: "pending" | "running" | "completed" | "failed"; processedEvents: number; errorCode: string | null };
   captureHealth?: Array<{ sessionId: string; runtimeKind: string; status: string; observed: number; incomplete: number; errorCode: string | null }>;
   collectionFailureTotal?: number;
+  retryableCollectionFailureTotal?: number;
+  sourceRecoveryCounts?: Record<string, number>;
   captureHealthTotal?: number;
   captureHealthCounts?: Record<string, number>;
-  collectionFailures?: Array<{ sessionId: string; status: string; errorCode: string | null }>;
+  collectionFailures?: Array<{ sessionId: string; status: string; errorCode: string | null; retryable: boolean }>;
 };
 type SummaryResponse = UsageSummary & UsageMetadata & { sourceCounts?: Record<string, number>;
   contextAnalysis?: { requests: number; reconstructedRequests: number; requestsWithReportedInput: number;
     reportedInputTokens: number | null; estimatedInputTokens: number | null; differenceTokens: number | null } };
-type StatusResponse = Pick<SummaryResponse, "revision" | "sourceCounts" | "contentBackfill" | "collectionFailureTotal" | "captureHealthCounts" | "collectionFailures" | "captureHealth">;
+type StatusResponse = Pick<SummaryResponse, "revision" | "sourceCounts" | "sourceRecoveryCounts" | "contentBackfill" | "retryableCollectionFailureTotal" | "captureHealthCounts" | "collectionFailures" | "captureHealth">;
+const retryableFailures = (status: StatusResponse | null | undefined) => status?.retryableCollectionFailureTotal
+  ?? status?.collectionFailures?.filter(failure => failure.retryable).length ?? 0;
 const hasPendingRecovery = (status: StatusResponse | null | undefined): boolean => {
   const backfill = status?.contentBackfill?.status;
   return backfill === "pending" || backfill === "running" || (status?.sourceCounts?.collecting ?? 0) > 0
-    || (status?.sourceCounts?.failed ?? 0) > 0 || (status?.collectionFailureTotal ?? status?.collectionFailures?.length ?? 0) > 0
+    || (status?.sourceRecoveryCounts?.failed ?? 0) > 0 || retryableFailures(status) > 0
     || (status?.captureHealthCounts ? (status.captureHealthCounts.waiting ?? 0) + (status.captureHealthCounts.pending ?? 0) > 0
       : (status?.captureHealth ?? []).some(item => item.status === "waiting" || item.status === "pending"));
 };
@@ -246,7 +250,7 @@ export const AgentUsagePage = () => {
     .filter(Boolean).join("&"), [scopeQuery, dimension, sort, stageOffset, offset]);
 
   const collectingSourceIds = (sources ?? [])
-    .filter((source) => source.status === "collecting" || source.status === "failed")
+    .filter((source) => source.status === "collecting" || source.status === "failed" && source.mappings.some(mapping => mapping.state === "active"))
     .map((source) => source.id)
     .sort()
     .join(",");
@@ -444,7 +448,7 @@ export const AgentUsagePage = () => {
 
       {contentBackfillPending || contentBackfill?.status === "failed" ? <Alert variant={contentBackfill?.status === "failed" ? "destructive" : "default"}>
         <Database /><AlertTitle>{contentBackfill?.status === "failed" ? text("历史内容回填失败", "Historical content backfill failed") : text("历史内容回填中", "Historical content backfill in progress")}</AlertTitle>
-        <AlertDescription>{text(`已处理 ${formatNumber(contentBackfill?.processedEvents)} 条事件；历史内容估算可能尚不完整。`, `${formatNumber(contentBackfill?.processedEvents)} events processed; historical content estimates may still be incomplete.`)}{contentBackfill?.errorCode === "usage_tokenizer_pending" ? <span className="ml-2">{text("正在获取词表，失败后自动重试并补算。", "Fetching vocabulary; failures retry and measurements resume automatically.")}</span> : contentBackfill?.errorCode ? <span className="ml-2 font-mono">{contentBackfill.errorCode}</span> : null}</AlertDescription>
+        <AlertDescription>{text(`已处理 ${formatNumber(contentBackfill?.processedEvents)} 条事件；历史内容估算可能尚不完整。`, `${formatNumber(contentBackfill?.processedEvents)} events processed; historical content estimates may still be incomplete.`)}{contentBackfillPending && contentBackfill?.errorCode === "usage_tokenizer_pending" ? <span className="ml-2">{text("正在获取词表，失败后自动重试并补算。", "Fetching vocabulary; failures retry and measurements resume automatically.")}</span> : contentBackfill?.errorCode ? <span className="ml-2 font-mono">{contentBackfill.errorCode}</span> : null}</AlertDescription>
       </Alert> : null}
 
       {(summary.captureHealthTotal ?? summary.captureHealth?.length ?? 0) > 0 && <Alert>
@@ -459,7 +463,20 @@ export const AgentUsagePage = () => {
             {item.incomplete > 0 && <span>{text(`${item.incomplete} 次采集不完整`, `${item.incomplete} incomplete captures`)} · {item.errorCode}</span>}
           </div>)}<Button type="button" size="sm" variant="outline" className="self-start" onClick={() => setReload((value) => value + 1)}><RefreshCw />{text("刷新采集状态", "Refresh capture status")}</Button></div><ListPagination page={capturePage} pageSize={20} total={summary.captureHealthTotal ?? 0} totalPages={Math.ceil((summary.captureHealthTotal ?? 0) / 20)} onPageChange={(value) => updateFilter("capturePage", String(value), false)} /></AlertDescription>
       </Alert>}
-      {(summary.collectionFailureTotal ?? summary.collectionFailures?.length ?? 0) > 0 ? <Alert><TriangleAlert /><AlertTitle>{text("采集尚未完成", "Collection is incomplete")}</AlertTitle><AlertDescription><p>{text("后台会继续处理待采集会话并重试失败来源。", "Background recovery continues pending sessions and retries failed sources.")}</p><div className="mt-2 flex flex-wrap gap-2">{summary.collectionFailures?.map((failure) => <Badge variant="outline" key={failure.sessionId}>{text(`会话 ${failure.sessionId}`, `Session ${failure.sessionId}`)} · {failure.status === "failed" ? text("采集失败，等待重试", "Collection failed; retry pending") : text("等待采集", "Collection pending")}</Badge>)}</div><ListPagination page={failurePage} pageSize={20} total={summary.collectionFailureTotal ?? 0} totalPages={Math.ceil((summary.collectionFailureTotal ?? 0) / 20)} onPageChange={(value) => updateFilter("failurePage", String(value), false)} /></AlertDescription></Alert> : null}
+      {(summary.collectionFailureTotal ?? summary.collectionFailures?.length ?? 0) > 0 ? <Alert><TriangleAlert />
+        <AlertTitle>{retryableFailures(summary) > 0 ? text("采集尚未完成", "Collection is incomplete") : text("统计存在缺口", "Usage data has gaps")}</AlertTitle>
+        <AlertDescription>
+          {retryableFailures(summary) > 0 ? <p>{text("后台会继续处理待采集会话并重试仍可恢复的来源。", "Background recovery continues pending sessions and retries available sources.")}</p> : null}
+          {(summary.collectionFailureTotal ?? summary.collectionFailures?.length ?? 0) > retryableFailures(summary)
+            ? <p>{text("部分会话的存储已清理，保留已知统计和缺口记录，不再自动补采。", "Some sessions have had their storage cleaned. Known statistics and gaps are retained; automatic collection has ended.")}</p> : null}
+          <div className="mt-2 flex flex-wrap gap-2">{summary.collectionFailures?.map((failure) => <Badge variant="outline" key={failure.sessionId}>
+            {text(`会话 ${failure.sessionId}`, `Session ${failure.sessionId}`)} · {!failure.retryable
+              ? text("存储已清理，统计不完整", "Storage cleaned; usage incomplete") : failure.status === "failed"
+              ? text("采集失败，等待重试", "Collection failed; retry pending") : text("等待采集", "Collection pending")}
+          </Badge>)}</div>
+          <ListPagination page={failurePage} pageSize={20} total={summary.collectionFailureTotal ?? 0} totalPages={Math.ceil((summary.collectionFailureTotal ?? 0) / 20)} onPageChange={(value) => updateFilter("failurePage", String(value), false)} />
+        </AlertDescription>
+      </Alert> : null}
 
       <section aria-labelledby="reported-usage-title"><div className="mb-3 flex flex-wrap items-end justify-between gap-3"><div><h2 id="reported-usage-title" className="font-heading text-lg font-medium">{text("模型上报用量", "Model-reported usage")}</h2><p className="mt-1 text-sm text-muted-foreground">{text("来自模型请求、轮次或 Provider 范围总量的去重台账；与下方估算值不是同一口径。", "A reconciled ledger reported by model requests, turns, or provider ranges; it is separate from the estimates below.")}</p></div><Badge variant={summary.analysisStatus === "collecting" ? "secondary" : summary.completeness === "complete" ? "default" : "outline"}>{summary.analysisStatus === "collecting" ? text("采集中", "Collecting") : summary.completeness === "complete" ? text("完整", "Complete") : text("部分", "Partial")}</Badge></div>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">

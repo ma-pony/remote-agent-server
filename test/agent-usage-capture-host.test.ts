@@ -56,6 +56,38 @@ it("marks server-side conversation history as partial even after a complete HTTP
   expect(host.attribution.rankings({}, "mcp_tool")[0]?.contextCoverage)
     .toEqual({ full: 0, partial: 1, opaque: 0, none: 0 });
 });
+it("bounds capture release and preserves its gap when tokenization ignores cancellation", async () => {
+  const { db, host, capture, route, session, run } = await setup();
+  capture.startRun(session.id, run);
+  let resume!: () => void, started!: () => void;
+  const waiting = new Promise<void>(resolve => { resume = resolve; });
+  const preparing = new Promise<void>(resolve => { started = resolve; });
+  const prepare = host.attribution.prepareContext.bind(host.attribution);
+  vi.spyOn(host.attribution, "prepareContext").mockImplementation(async (...args) => {
+    const estimates = await prepare(...args);
+    started();
+    await waiting;
+    return estimates;
+  });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  let releasing: Promise<void> | undefined;
+  try {
+    await (await fetch(route.baseUrl + "/responses", { method: "POST", body: JSON.stringify({ model: "fixture-model",
+      tools: [{ type: "function", name: "mcp__docs__search", parameters: {} }], input: [] }) })).text();
+    await preparing;
+    let released = false;
+    releasing = capture.release(session.id).then(() => { released = true; });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(released).toBe(true);
+    expect(capture.health({})[0]).toMatchObject({ status: "incomplete", errorCode: "capture_processing_timeout" });
+    expect(host.store.summary().usage.totalTokens).toBe(12);
+    resume();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(db.prepare("SELECT * FROM agent_usage_exposures").all()).toEqual([]);
+    expect(capture.health({})[0]).toMatchObject({ status: "incomplete", errorCode: "capture_processing_timeout" });
+    await capture.drain();
+  } finally { resume(); await releasing; vi.useRealTimers(); }
+});
 it.each(["ready", "close"])("keeps reported usage while vocabulary is pending and handles %s without persisting fallback counts", async outcome => {
   const { db, host, capture, route, session, run } = await setup(); capture.startRun(session.id, run);
   let ready = false;
