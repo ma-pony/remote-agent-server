@@ -4,11 +4,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect, it, vi } from "vitest";
 import { UsageQueryCache } from "../src/agent-usage/query-cache.js";
+import { trackUsageQueryChanges } from "../src/agent-usage/storage/query-version.js";
+import { UsageStore } from "../src/agent-usage/storage/usage-store.js";
 
 it("invalidates projections on local and external commits without caching raw history", () => {
   const root = mkdtempSync(join(tmpdir(), "usage-cache-"));
   const db = new Database(join(root, "usage.sqlite"));
   db.pragma("journal_mode=WAL"); db.exec("CREATE TABLE values_table (n INTEGER)");
+  trackUsageQueryChanges(db, "values_table");
   const other = new Database(join(root, "usage.sqlite"));
   try {
     const cache = new UsageQueryCache(db);
@@ -49,6 +52,7 @@ it("shares concurrent reads but never caches a result across a write during that
   const db = new Database(":memory:");
   try {
     db.exec("CREATE TABLE values_table(n INTEGER)");
+    trackUsageQueryChanges(db, "values_table");
     const cache = new UsageQueryCache(db);
     let finish!: (value: number) => void;
     const compute = vi.fn(() => new Promise<number>(resolve => { finish = resolve; }));
@@ -61,5 +65,70 @@ it("shares concurrent reads but never caches a result across a write during that
     expect(await cache.getAsync("summary", current)).toBe(1);
     expect(await cache.getAsync("summary", current)).toBe(1);
     expect(current).toHaveBeenCalledTimes(1);
+  } finally { db.close(); }
+});
+
+it("keeps expensive projections across unrelated writes and bounds stale snapshots after usage changes", async () => {
+  const db = new Database(":memory:");
+  vi.useFakeTimers();
+  try {
+    db.exec("CREATE TABLE values_table(n INTEGER); CREATE TABLE runtime_events(n INTEGER)");
+    trackUsageQueryChanges(db, "values_table");
+    const cache = new UsageQueryCache(db);
+    const compute = vi.fn(async () => db.prepare("SELECT SUM(n) AS total FROM values_table").get());
+    const revision = cache.revision();
+    expect(await cache.getAsync("ranking", compute, 30_000)).toEqual({ total: null });
+    db.exec("INSERT INTO runtime_events VALUES(1)");
+    expect(cache.revision()).toBe(revision);
+    await cache.getAsync("ranking", compute, 30_000);
+    expect(compute).toHaveBeenCalledTimes(1);
+    db.exec("INSERT INTO values_table VALUES(10)");
+    expect(cache.revision()).not.toBe(revision);
+    expect(await cache.getAsync("ranking", compute, 30_000)).toEqual({ total: null });
+    vi.advanceTimersByTime(30_000);
+    expect(await cache.getAsync("ranking", compute, 30_000)).toEqual({ total: 10 });
+    expect(compute).toHaveBeenCalledTimes(2);
+  } finally { vi.useRealTimers(); db.close(); }
+});
+
+it("shares an in-flight read across usage revisions and retains its bounded snapshot", async () => {
+  const db = new Database(":memory:");
+  try {
+    db.exec("CREATE TABLE values_table(n INTEGER)");
+    trackUsageQueryChanges(db, "values_table");
+    const cache = new UsageQueryCache(db);
+    let finish!: (value: number) => void;
+    const compute = vi.fn(() => new Promise<number>(resolve => { finish = resolve; }));
+    const first = cache.getAsync("ranking", compute, 30_000);
+    db.exec("INSERT INTO values_table VALUES(10)");
+    const second = cache.getAsync("ranking", compute, 30_000);
+    expect(compute).toHaveBeenCalledTimes(1);
+    finish(0);
+    expect(await Promise.all([first, second])).toEqual([0, 0]);
+    expect(await cache.getAsync("ranking", compute, 30_000)).toBe(0);
+    expect(compute).toHaveBeenCalledTimes(1);
+  } finally { db.close(); }
+});
+
+it("invalidates stale snapshots immediately when a Session is deleted", async () => {
+  const db = new Database(":memory:");
+  try {
+    const store = new UsageStore(db);
+    store.bindSession("test", "1", "1");
+    const cache = new UsageQueryCache(db), compute = vi.fn(async () => 1);
+    await cache.getAsync("ranking", compute, 30_000);
+    store.deleteSession("test", "1");
+    await cache.getAsync("ranking", compute, 30_000);
+    expect(compute).toHaveBeenCalledTimes(2);
+  } finally { db.close(); }
+});
+
+it("explicit refresh bypasses an unchanged completed snapshot", async () => {
+  const db = new Database(":memory:");
+  try {
+    const cache = new UsageQueryCache(db), compute = vi.fn(async () => compute.mock.calls.length);
+    expect(await cache.getAsync("ranking",compute,30_000)).toBe(1);
+    expect(await cache.getAsync("ranking",compute,30_000)).toBe(1);
+    expect(await cache.getAsync("ranking",compute,30_000,true)).toBe(2);
   } finally { db.close(); }
 });

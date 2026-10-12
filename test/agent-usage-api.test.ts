@@ -119,7 +119,10 @@ it("shares summary and trend accounting and polls status without rerunning histo
   expect(records).toHaveBeenCalledTimes(1); expect(rankings).toHaveBeenCalledTimes(1);
   observe(manager, bindings.first, { id: "two", at: "2026-09-20T01:00:00Z", total: 40 });
   expect((await get(app, "/status")).json().revision).not.toBe(first.revision);
-  expect((await get(app, "/summary")).json().usage.totalTokens).toBe(70);
+  const stale = (await get(app, "/summary")).json();
+  expect(stale).toMatchObject({ usage: { totalTokens: 30 }, stale: true, asOf: first.asOf, revision: first.revision });
+  expect(records).toHaveBeenCalledTimes(1);
+  expect((await get(app, "/summary?fresh=1")).json()).toMatchObject({ usage: { totalTokens: 70 }, stale: false });
   expect((await get(app, "/timeseries")).json().items[0].usage.totalTokens).toBe(70);
   expect(records).toHaveBeenCalledTimes(2);
   expect((await app.inject({ url: "/api/usage/status" })).statusCode).toBe(401);
@@ -286,7 +289,7 @@ describe("usage query API", () => {
     expect(summary).toMatchObject({ usage: { totalTokens: null }, unplacedUsage: { totalTokens: 70 }, completeness: "partial" });
     manager.collector.store.observe(bindings.first, { ...base, eventId: "parent", scope: "provider_session", intervalStart: undefined,
       coverageId: "parent", occurredAt: null, semantics: "cumulative", metrics: { totalTokens: 190 } });
-    const crossing = "/summary?from=2026-09-21T16%3A00%3A00Z&to=2026-09-22T16%3A00%3A00Z";
+    const crossing = "/summary?from=2026-09-21T16%3A00%3A00Z&to=2026-09-22T16%3A00%3A00Z&fresh=1";
     expect((await get(app, crossing)).json().unplacedUsage.totalTokens).toBe(190);
     expect((await get(app, crossing.replace("summary", "timeseries"))).json().unplacedUsage.totalTokens).toBe(190);
     expect((await get(app, "/summary?from=2026-09-23T00%3A00%3A00Z")).json().unplacedUsage.totalTokens).toBe(120);

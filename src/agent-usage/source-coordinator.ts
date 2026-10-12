@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { UsageError } from "./core/errors.js";
 import type { UsageBinding, UsageObservation } from "./core/types.js";
 import type { UsageStore } from "./storage/usage-store.js";
+import { trackUsageQueryChanges } from "./storage/query-version.js";
 import type { TokenCount } from "./core/tokenizers.js";
 import type { ModelContextInput, InvocationInput } from "./core/context-types.js";
 export type SourceCapabilities = { usage: string; context: "full" | "partial" | "opaque" | "none"; identity: "explicit" | "partial"; version: string };
@@ -64,6 +65,8 @@ export class UsageSourceCoordinator {
       );
       CREATE INDEX IF NOT EXISTS agent_usage_source_mapping_session ON agent_usage_source_mappings(namespace, session_id);
     `);
+    trackUsageQueryChanges(store.db,"agent_usage_sources",["status","error_code"]);
+    trackUsageQueryChanges(store.db,"agent_usage_source_mappings",["state"]);
   }
 
   registerSource(config: SourceConfig): SourceRecord {
@@ -99,6 +102,7 @@ export class UsageSourceCoordinator {
     if (current) return rebuild ? Promise.reject(new UsageError("usage_collection_pending")) : current.promise;
     const source = this.source(id);
     if (!source) return Promise.reject(new UsageError("usage_source_not_found"));
+    if (source.config_json === "{}") return Promise.reject(new UsageError("usage_mapping_revoked"));
     const adapter = this.adapters[source.kind];
     if (!adapter) return Promise.reject(new UsageError("usage_source_unsupported"));
     this.store.db.prepare("UPDATE agent_usage_sources SET capabilities_json=? WHERE id=? AND capabilities_json!=?")
@@ -321,6 +325,21 @@ export class UsageSourceCoordinator {
 
   cancelCollections(): void {
     for (const job of this.jobs.values()) job.controller.abort();
+  }
+
+  /** Retained mappings can still be rebuilt; only fully revoked sources lose replay state. */
+  compactRevokedSources(limit: number): number {
+    const rows = this.store.db.prepare(`SELECT s.id FROM agent_usage_sources s
+      WHERE (s.checkpoint IS NOT NULL OR s.input_json!='{}' OR s.config_json!='{}')
+        AND EXISTS (SELECT 1 FROM agent_usage_source_mappings m WHERE m.source_id=s.id)
+        AND NOT EXISTS (SELECT 1 FROM agent_usage_source_mappings m WHERE m.source_id=s.id AND m.state!='revoked')
+      ORDER BY s.id LIMIT ?`).all(limit) as Array<{ id: string }>;
+    const update = this.store.db.prepare("UPDATE agent_usage_sources SET checkpoint=NULL,input_json='{}',config_json='{}' WHERE id=?");
+    let count = 0;
+    this.store.db.transaction(() => {
+      for (const row of rows) if (!this.jobs.has(row.id)) { update.run(row.id); count++; }
+    })();
+    return count;
   }
 
   async close(): Promise<void> {

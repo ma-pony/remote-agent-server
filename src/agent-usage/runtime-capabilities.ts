@@ -9,6 +9,7 @@ import type { AttributionStore } from "./storage/attribution-store.js";
 import type { UsageStore } from "./storage/usage-store.js";
 import { RuntimeMcpReplay } from "./runtime-mcp-replay.js";
 import { commitRuntimeContent, type PreparedRuntimeContent } from "./runtime-content.js";
+import { trackUsageQueryChanges } from "./storage/query-version.js";
 
 export type SkillActivityStage = "catalog_visible" | "body_read" | "reference_read" | "script_executed";
 
@@ -127,6 +128,7 @@ export class RuntimeCapabilityCollector {
       store.db.exec("ALTER TABLE agent_usage_runtime_activity ADD COLUMN native_call_id TEXT");
     }
     this.mcpReplay = new RuntimeMcpReplay(store, attribution);
+    trackUsageQueryChanges(store.db,"agent_usage_runtime_activity");
     store.db.exec(`CREATE INDEX IF NOT EXISTS agent_usage_runtime_activity_call
       ON agent_usage_runtime_activity(namespace, session_id, provider_epoch_id, execution_id, native_call_id)`);
     store.db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_runtime_runs (

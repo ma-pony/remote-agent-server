@@ -50,6 +50,7 @@ describe("persisted tokenizer provenance", () => {
   it("migrates the old schema once without relabeling historical estimates as model-specific", async () => {
     const { store, usage, db, binding } = setup();
     await store.upsertContext(binding, context("old"));
+    db.exec("DROP TRIGGER agent_usage_exposures_query_update"); // The historical schema had no revision trigger.
     db.exec("ALTER TABLE agent_usage_exposures DROP COLUMN estimate_json");
     if ((db.prepare("PRAGMA table_info(agent_usage_exposures)").all() as Array<{ name: string }>).some((column) => column.name === "estimate_id")) {
       db.exec("ALTER TABLE agent_usage_exposures DROP COLUMN estimate_id");

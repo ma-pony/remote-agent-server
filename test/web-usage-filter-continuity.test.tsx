@@ -22,7 +22,7 @@ beforeEach(() => {
     if (url.pathname === "/api/usage/capabilities") return json({items: [], total: 0, stages: [], stageTotal: 0});
     if (url.pathname === "/api/usage/summary") return json({usage: {totalTokens: null}, locatedUsage: {totalTokens: null}, unplacedUsage: {totalTokens: null},
       completeness: "partial", observedModelRequests: 0, requestsWithCompleteUsage: 0, requestsWithMissingUsage: 0, requestsWithPartialUsage: 0,
-      unverifiedObservations: 0, conflictingRanges: 0, analysisStatus: "ready", hasCapabilityEvidence: true});
+      unverifiedObservations: 0, conflictingRanges: 0, asOf: "2026-10-12T00:00:00Z", analysisStatus: "ready", hasCapabilityEvidence: true});
     throw Error(`Unexpected request ${url}`);
   }));
 });

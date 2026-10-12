@@ -48,7 +48,17 @@ export class ResultFirstUseIndex {
   }
 
   /** Runs in the context upsert transaction, including when an old first result was removed. */
-  refresh(contextId: string): void {
+  refresh(contextId: string): Set<string> {
+    const affected = new Set([contextId]);
+    const related = this.db.prepare(`SELECT DISTINCT f.context_id FROM agent_usage_exposures e
+      JOIN agent_usage_contexts c ON c.context_id=e.context_id JOIN agent_usage_result_first f
+      ON f.namespace=c.namespace AND f.session_id=c.session_id AND f.provider_epoch_id=c.provider_epoch_id
+        AND f.runtime_scope IN ('',json_quote(c.runtime_kind))
+        AND f.capability_key=e.capability_key AND f.content_key=e.content_key
+      WHERE e.context_id=? AND e.block_kind='result' AND e.result_first_use IS NULL
+        AND (c.occurred_at IS NULL,COALESCE(c.occurred_at,''),c.context_id,e.position)
+          < (f.time_missing,f.time_key,f.context_id,f.position)`).all(contextId) as Array<{ context_id: string }>;
+    for (const row of related) affected.add(row.context_id);
     const previous = this.db.prepare(`SELECT ${columns} FROM agent_usage_result_first WHERE context_id=?`)
       .all(contextId) as FirstUseKey[];
     const remove = this.db.prepare(`DELETE FROM agent_usage_result_first WHERE namespace=? AND session_id=?
@@ -64,6 +74,10 @@ export class ResultFirstUseIndex {
         ORDER BY c.occurred_at IS NULL, c.occurred_at, c.context_id, e.position LIMIT 1`)
         .run(key.runtime_scope, key.namespace, key.session_id, key.provider_epoch_id,
           key.runtime_scope, key.runtime_scope, key.capability_key, key.content_key);
+      const next = this.db.prepare(`SELECT context_id FROM agent_usage_result_first WHERE namespace=? AND session_id=?
+        AND provider_epoch_id=? AND runtime_scope=? AND capability_key=? AND content_key=?`)
+        .get(key.namespace,key.session_id,key.provider_epoch_id,key.runtime_scope,key.capability_key,key.content_key) as { context_id: string } | undefined;
+      if (next) affected.add(next.context_id);
     }
     this.db.prepare(`INSERT INTO agent_usage_result_first
       SELECT c.namespace, c.session_id, c.provider_epoch_id,
@@ -72,6 +86,7 @@ export class ResultFirstUseIndex {
       FROM agent_usage_contexts c JOIN agent_usage_exposures e USING(context_id)
       CROSS JOIN (SELECT 0 AS specific UNION ALL SELECT 1) scopes
       WHERE c.context_id=? AND e.block_kind='result' AND e.result_first_use IS NULL ${conflict}`).run(contextId);
+    return affected;
   }
 
   static join = `LEFT JOIN agent_usage_result_first f ON e.block_kind='result' AND f.namespace=c.namespace

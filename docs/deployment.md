@@ -518,3 +518,11 @@ Session 存储清理成功时，也会删除通过 Task 关联的全部 Webhook 
 统计查询通过两个只读 Worker 访问原 SQLite，未迁移到新数据库，无需改变备份路径；汇总／趋势和能力排名各允许一个执行查询与最多 16 个排队查询，过载返回 503，空闲 60 秒释放。每个 Worker 的 SQLite 页缓存预算为 8 MiB，两个同时运行时合计最多 16 MiB，此外仍有运行时、结果与查询临时内存。长读事务暂时保留 WAL 快照，Worker 不消除统计本身的 CPU／I/O 成本。清理释放的数据库页用于复用，不会自动执行 `VACUUM` 或强制截断 WAL；不要把逻辑清理完成等同于磁盘文件已缩小。
 
 未配置 `USAGE_TOKENIZERS` 时仍可使用工具 token 排名：内置已知模型自动获取词表，其余模型使用带明确标记的通用文本兜底。手动配置可增加未内置模型；新获得词表的模型会触发有保留原文的 Runtime 旧记录补算。
+
+## 用量查询投影与无用副本回收升级
+
+本版本增加统计修订号、epoch 计量投影、能力输入计数及清理游标，并增加匹配实际调用时间筛选的索引。按既有备份和升级流程操作，预留新表、索引和 WAL 所需空间；不清空现有账本。启动后后台最新优先分批准备能力输入，在独立只读 Worker 中核对 epoch。未准备完成的范围继续使用原明细／账本路径，较大查询可能返回 `503 usage_query_timeout`；等待准备完成或缩小范围后再刷新。
+
+通过管理鉴权读取 `/api/usage/status` 的 `recovery.accountingProjectionPending`、`rankingInputProjectionPending`、`eventPayloadCompactionPending` 与 `exposureIdentityCompactionPending`，以及各 `compacted*`／`reclaimedEstimateProfiles` 计数。pending 标记检查已登记工作，计数只表示本进程已处理数。旧 event payload 和重复哈希按升级时的主键上界分批压缩，未来新写入不再复制；无引用估算及 fully revoked 来源的重放状态持续回收。去重和撤销身份、计量结果与历史证据保留。
+
+统计 API 默认允许最多 30 秒旧快照，保留实际 `asOf`／`revision` 并报告 `stale`。人工核对可对 summary、timeseries 或 capabilities 传 `fresh=1`。本版本只释放可复用页与行内空间，不承诺数据库文件立即缩小，也不自动在线 VACUUM；物理瘦身仍应安排单独的维护窗口。

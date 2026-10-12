@@ -49,6 +49,22 @@ beforeEach(() => {
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 const mount = () => render(<I18nProvider><BrowserRouter><AgentUsagePage /></BrowserRouter></I18nProvider>);
 
+it("手动刷新读取最新统计并显示实际统计时间", async () => {
+  mount();
+  expect(await screen.findByText(/统计截至/)).toBeInTheDocument();
+  const fetch = vi.mocked(globalThis.fetch);
+  fetch.mockClear();
+  fireEvent.click(screen.getByRole("button", { name: "刷新统计" }));
+  await waitFor(() => {
+    for (const endpoint of ["summary","timeseries","capabilities"]) {
+      expect(fetch.mock.calls.some(([input]) => {
+        const url = new URL(String(input),"http://localhost");
+        return url.pathname === `/api/usage/${endpoint}` && url.searchParams.get("fresh") === "1";
+      })).toBe(true);
+    }
+  });
+});
+
 it("shows transcript attribution and a deduplicated input comparison without changing reported totals", async () => {
   const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
   fetch.mockImplementation(async (input, init) => {

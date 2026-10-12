@@ -14,6 +14,9 @@ import { RuntimeContentBackfill } from "./runtime-backfill.js";
 import { RuntimeEventRetention } from "./runtime-retention.js";
 import { RuntimeConversationCollector } from "./runtime-conversation.js";
 import { TranscriptProfiles } from "./transcript-profiles.js";
+import { UsageQueryWorker } from "./query-worker.js";
+import { trackUsageQueryChanges } from "./storage/query-version.js";
+import type { AccountingProjectionJob } from "./storage/accounting-projection.js";
 
 /** The only layer that translates business-table IDs into the reusable usage module. */
 export class HostUsageCollector {
@@ -22,6 +25,7 @@ export class HostUsageCollector {
   observer?: McpUsageObserver;
   private readonly producers = new Set<number>();
   private recoveryTimer?: ReturnType<typeof setTimeout>;
+  private compactionTimer?: ReturnType<typeof setTimeout>;
   private recoveryWork?: Promise<void>;
   private recoveryStopped = true;
   private recoveryController?: AbortController;
@@ -33,6 +37,12 @@ export class HostUsageCollector {
   private lastBackfillAt: string | null = null;
   private nextBackfillCheckAt = 0;
   private nextContextTotalsCheckAt = 0;
+  private projectionReader?: UsageQueryWorker;
+  private lastAccountingJob?: AccountingProjectionJob;
+  private compactedEventPayloads = 0;
+  private reclaimedEstimateProfiles = 0;
+  private compactedRevokedSources = 0;
+  private compactedExposureIdentities = 0;
   readonly store: UsageStore;
   readonly sources: UsageSourceCoordinator;
   readonly attribution: AttributionStore;
@@ -48,6 +58,7 @@ export class HostUsageCollector {
       namespace TEXT NOT NULL, session_id TEXT NOT NULL, status TEXT NOT NULL,
       error_code TEXT, attempted_at TEXT, PRIMARY KEY(namespace, session_id)
     )`);
+    trackUsageQueryChanges(db,"agent_usage_harvests",["status","error_code"]);
     this.attribution = new AttributionStore(this.store, tokenizers);
     this.runtimeCapabilities = new RuntimeCapabilityCollector(this.store, this.attribution, this.namespace);
     this.transcriptProfiles = new TranscriptProfiles(db, this.namespace);
@@ -204,12 +215,19 @@ export class HostUsageCollector {
     this.recoveryController = new AbortController();
     this.queueRecovery(true);
     this.scheduleRecovery(0);
+    this.scheduleCompaction(0);
   }
 
   recoveryStatus() {
     return { phase: this.recoveryPhase, phaseSince: this.recoveryPhaseSince,
       pendingSources: this.recoveryQueue.length, lastErrorAt: this.lastRecoveryErrorAt,
-      lastBackfillMs: this.lastBackfillMs, lastBackfillAt: this.lastBackfillAt };
+      lastBackfillMs: this.lastBackfillMs, lastBackfillAt: this.lastBackfillAt,
+      accountingProjectionPending: this.store.nextAccountingProjection() !== undefined,
+      rankingInputProjectionPending: this.attribution.rankingInputProjectionPending(),
+      eventPayloadCompactionPending: this.store.eventPayloadCompactionPending(),
+      exposureIdentityCompactionPending: this.attribution.exposureIdentityCompactionPending(),
+      compactedEventPayloads: this.compactedEventPayloads, reclaimedEstimateProfiles: this.reclaimedEstimateProfiles,
+      compactedRevokedSources: this.compactedRevokedSources, compactedExposureIdentities: this.compactedExposureIdentities };
   }
 
   private setRecoveryPhase(phase: typeof this.recoveryPhase): void {
@@ -267,6 +285,7 @@ export class HostUsageCollector {
       if (this.recoveryStopped) return;
       this.setRecoveryPhase("retention");
       const retentionPending = this.eventRetention.step() !== "idle";
+      const rankingInputsPending = this.attribution.backfillRankingInputs(5);
       this.setRecoveryPhase("sources");
       const deadline = performance.now() + 25;
       let admitted = 0;
@@ -275,9 +294,21 @@ export class HostUsageCollector {
         await work().catch(() => undefined);
       }
       if (this.recoveryStopped) return;
+      const projectionJob = this.store.nextAccountingProjection(this.lastAccountingJob);
+      if (projectionJob) {
+        this.lastAccountingJob = projectionJob;
+        this.projectionReader ??= new UsageQueryWorker(this);
+        this.setRecoveryPhase("backfill");
+        const projectionStarted = performance.now();
+        const batch = await this.projectionReader.read("accountingProjection",[projectionJob]);
+        this.lastBackfillMs = Math.round((performance.now()-projectionStarted)*1_000)/1_000;
+        this.lastBackfillAt = new Date().toISOString();
+        if (this.recoveryStopped) return;
+        this.store.commitAccountingProjection(batch);
+      }
       // Yield real idle time, not just an event-loop turn. Large individual records can still
       // exceed the soft work budget; the worker keeps their tokenization off the main thread.
-      if (this.recoveryQueue.length > 0 || contentPending || contextTotalsPending || retentionPending) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
+      if (this.recoveryQueue.length > 0 || contentPending || contextTotalsPending || retentionPending || rankingInputsPending || projectionJob) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
       else {
         this.queueRecovery(false);
         this.scheduleRecovery(30_000);
@@ -287,14 +318,40 @@ export class HostUsageCollector {
     }
   }
 
+  /** Cleanup has its own budget so a slow read-only accounting job cannot starve it. */
+  private scheduleCompaction(delay: number): void {
+    if (this.recoveryStopped) return;
+    this.compactionTimer = setTimeout(() => {
+      this.compactionTimer = undefined;
+      if (this.recoveryStopped) return;
+      const started = performance.now();
+      try {
+        this.compactedEventPayloads += this.store.compactEventPayloads(100);
+        this.compactedExposureIdentities += this.attribution.compactExposureIdentities(250);
+        this.reclaimedEstimateProfiles += this.attribution.cleanupUnusedEstimates(100);
+        this.compactedRevokedSources += this.sources.compactRevokedSources(100);
+        const pending = this.store.eventPayloadCompactionPending() || this.attribution.exposureIdentityCompactionPending();
+        this.scheduleCompaction(pending ? Math.max(50,Math.min(1_000,(performance.now()-started)*3)) : 30_000);
+      } catch {
+        this.lastRecoveryErrorAt = new Date().toISOString();
+        this.scheduleCompaction(30_000);
+      }
+    },delay);
+    this.compactionTimer.unref();
+  }
+
   async stopRecovery(): Promise<void> {
     this.recoveryStopped = true;
     this.setRecoveryPhase("stopped");
     this.recoveryController?.abort();
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    if (this.compactionTimer) clearTimeout(this.compactionTimer);
     this.recoveryTimer = undefined;
+    this.compactionTimer = undefined;
     this.recoveryQueue = [];
     this.sources.cancelCollections();
+    const reader = this.projectionReader; this.projectionReader = undefined;
+    await reader?.close();
     await this.recoveryWork;
   }
 

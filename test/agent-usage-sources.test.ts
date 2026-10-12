@@ -27,6 +27,19 @@ const adapter = (): UsageSourceAdapter => ({
 });
 
 describe("usage source coordinator", () => {
+  it("clears replay state only after all mappings are revoked and keeps revocation identities", async () => {
+    const { db,coordinator,config } = setup(adapter());
+    const source = coordinator.registerSource(config);
+    await coordinator.collect(source.id);
+    expect(coordinator.compactRevokedSources(100)).toBe(0);
+    coordinator.revokeSubject("test","session-1");
+    expect(coordinator.compactRevokedSources(100)).toBe(1);
+    expect(coordinator.listSources("test")[0]).toMatchObject({ checkpoint:null,mappings:[{state:"revoked"}] });
+    expect(db.prepare("SELECT input_json,config_json FROM agent_usage_sources WHERE id=?").get(source.id))
+      .toEqual({input_json:"{}",config_json:"{}"});
+    await expect(coordinator.collect(source.id)).rejects.toMatchObject({code:"usage_mapping_revoked"});
+    expect(() => coordinator.registerSource(config)).toThrow("usage_mapping_revoked");
+  });
   it("queries scoped sources in a fixed number of reads and preserves all mappings", () => {
     const { db, coordinator, config } = setup(adapter());
     const shared = coordinator.registerSource({ ...config, mappings: [...config.mappings,

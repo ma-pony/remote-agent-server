@@ -119,7 +119,7 @@ export const accountingRows = (records: UsageRecord[]): UsageRecord[] => {
   });
 };
 
-export const isLocated = (row: UsageRecord): boolean => row.occurredAt !== null && row.scope !== "provider_session";
+export const isLocated = (row: Pick<UsageRecord, "occurredAt" | "scope">): boolean => row.occurredAt !== null && row.scope !== "provider_session";
 const epochKey = (row: UsageRecord): string => JSON.stringify([row.namespace, row.sessionId, row.providerEpochId]);
 
 type EpochRanges = {
@@ -203,7 +203,7 @@ export const intervalOverlapConflicts = (records: UsageRecord[]): number => {
     .map((row) => JSON.stringify([row.namespace, row.sessionId, row.providerEpochId]))).size;
 };
 
-export const intervalIntersects = (row: UsageRecord, filter: import("./types.js").UsageFilter): boolean =>
+export const intervalIntersects = (row: Pick<UsageRecord, "scope" | "intervalStart" | "occurredAt">, filter: import("./types.js").UsageFilter): boolean =>
   row.scope === "interval" && row.intervalStart !== undefined && row.occurredAt !== null
   && (filter.from === undefined || Date.parse(row.occurredAt) >= Date.parse(filter.from))
   && (filter.to === undefined || Date.parse(row.intervalStart) < Date.parse(filter.to));

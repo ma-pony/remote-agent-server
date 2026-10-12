@@ -42,6 +42,7 @@ type AnalysisStatus = "ready" | "collecting" | "partial" | "empty";
 type UsageMetadata = {
   revision?: string;
   asOf: string;
+  stale?: boolean;
   timezone: string;
   from: string | null;
   to: string | null;
@@ -194,6 +195,7 @@ export const AgentUsagePage = () => {
   const [error, setError] = useState("");
   const [rankingError, setRankingError] = useState("");
   const [reload, setReload] = useState(0);
+  const summaryRefreshRef = useRef("0:0"), trendRefreshRef = useRef("0:0"), rankingRefreshRef = useRef("0:0");
   const [autoReload, setAutoReload] = useState(0);
   const [rankingReload, setRankingReload] = useState(0);
   const [guideOpen, setGuideOpen] = useState(false);
@@ -252,7 +254,9 @@ export const AgentUsagePage = () => {
   useEffect(() => {
     const controller = new AbortController();
     setSummary(null); setError("");
-    void api<SummaryResponse>(`/usage/summary?${summaryQuery}`, { signal: controller.signal }).then(next => {
+    const refreshVersion = `${reload}:${autoReload}`, fresh = summaryRefreshRef.current !== refreshVersion;
+    summaryRefreshRef.current = refreshVersion;
+    void api<SummaryResponse>(`/usage/summary?${summaryQuery}${fresh ? "&fresh=1" : ""}`, { signal: controller.signal }).then(next => {
       if (controller.signal.aborted) return;
       if (next.revision !== undefined) revisionRef.current = next.revision;
       if ((next.sourceCounts?.collecting ?? 0) > 0 || next.contentBackfill?.status === "pending" || next.contentBackfill?.status === "running") activeCollectionRef.current = true;
@@ -265,7 +269,9 @@ export const AgentUsagePage = () => {
   useEffect(() => {
     const controller = new AbortController();
     setTimeseries(null);
-    void api<TimeseriesResponse>(`/usage/timeseries?${trendQuery}`, { signal: controller.signal }).then(next => {
+    const refreshVersion = `${reload}:${autoReload}`, fresh = trendRefreshRef.current !== refreshVersion;
+    trendRefreshRef.current = refreshVersion;
+    void api<TimeseriesResponse>(`/usage/timeseries?${trendQuery}${fresh ? "&fresh=1" : ""}`, { signal: controller.signal }).then(next => {
       if (!controller.signal.aborted) setTimeseries(next);
     })
       .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
@@ -292,7 +298,9 @@ export const AgentUsagePage = () => {
       setRanking(null);
     }
     setRankingError("");
-    void api<RankingResponse>(`/usage/capabilities?${requestQuery}`, { signal: controller.signal })
+    const refreshVersion = `${reload}:${rankingReload}`, fresh = rankingRefreshRef.current !== refreshVersion;
+    rankingRefreshRef.current = refreshVersion;
+    void api<RankingResponse>(`/usage/capabilities?${requestQuery}${fresh ? "&fresh=1" : ""}`, { signal: controller.signal })
       .then((nextRanking) => {
         if (controller.signal.aborted) return;
         const lastOffset = Math.max(0, Math.ceil(nextRanking.total / PAGE_SIZE) - 1) * PAGE_SIZE;
@@ -412,7 +420,11 @@ export const AgentUsagePage = () => {
 
   return <PageContainer width="wide">
     <PageHeader eyebrow={text("可核验用量台账", "VERIFIABLE USAGE LEDGER")} title={text("用量分析", "Usage analysis")}
-      description={text("核对模型上报用量，统一分析提示词、对话与工具内容及模型输入上下文。", "Reconcile model-reported usage and analyze prompts, conversation, tool content and model-input context together.")} />
+      description={text("核对模型上报用量，统一分析提示词、对话与工具内容及模型输入上下文。", "Reconcile model-reported usage and analyze prompts, conversation, tool content and model-input context together.")}
+      action={<Button type="button" variant="outline" disabled={summary === null || rankingRequestRef.current !== null}
+        onClick={() => setReload(value => value + 1)}><RefreshCw data-icon="inline-start" />{text("刷新统计", "Refresh statistics")}</Button>} />
+    {summary === null ? null : <p className="mb-5 text-xs text-muted-foreground">{text("统计截至：", "Statistics as of: ")}{formatDate(summary.asOf)}
+      {summary.stale ? text(" · 有新数据，可刷新统计", " · New data available; refresh statistics") : ""}</p>}
 
     <Card className="mb-5"><CardHeader><CardTitle>{text("分析范围", "Analysis scope")}</CardTitle><CardDescription>{text("日期按所选时区的自然日换算；结束时间为下一日零点，不假设每天固定 24 小时。", "Dates use calendar boundaries in the selected timezone; the end is the next local midnight without assuming a fixed 24-hour day.")}</CardDescription></CardHeader><CardContent><FieldGroup className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
       <Field><FieldLabel htmlFor="usage-agent">{text("智能体", "Agent")}</FieldLabel><PagedResourceSelect<Agent> key="usage-agent" endpoint="/agents" id="usage-agent" ariaLabel={text("智能体筛选", "Agent filter")} value={agentId} onValueChange={(value) => updateFilter("agentId", value)} emptyLabel={text("全部智能体", "All agents")} getOption={(agent) => ({ value: String(agent.id), label: agent.name })} /></Field>

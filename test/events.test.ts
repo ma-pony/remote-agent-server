@@ -306,9 +306,9 @@ describe("Event API", () => {
     vi.useFakeTimers();
     try {
       const { usageSources, eventStore, runId } = await createEventApp();
-      // App readiness owns the recovery continuation; stream cleanup must remove only its own timers.
+      // App readiness owns recovery and storage compaction; stream cleanup removes only its own timers.
       const backgroundTimers = vi.getTimerCount();
-      expect(backgroundTimers).toBe(1);
+      expect(backgroundTimers).toBe(2);
       const writer = new FakeSseWriter();
       writer.write.mockReturnValue(false);
       const originalSubscribe = eventStore.subscribe.bind(eventStore);
@@ -332,7 +332,7 @@ describe("Event API", () => {
       expect(writer.end).toHaveBeenCalledTimes(1);
       expect(vi.getTimerCount()).toBe(backgroundTimers);
       await usageSources.collector.stopRecovery();
-      // Stopping the actual recovery owner removes its timer; an orphan SSE timer would remain.
+      // Stopping the background owner removes both timers; an orphan SSE timer would remain.
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();

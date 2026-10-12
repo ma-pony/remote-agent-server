@@ -370,7 +370,7 @@ describe("usage source management API", () => {
     await writeFile(join(root, "snapshot.json"), JSON.stringify(updated));
     await app.inject({ method: "POST", url: `/api/usage/sources/${id}/collect`, headers });
     await vi.waitFor(() => expect(manager.collector.sources.listSources(manager.collector.namespace)[0]?.status).toBe("completed"));
-    const revised = await app.inject({ method: "GET", url: "/api/usage/capabilities?dimension=mcp_tool", headers });
+    const revised = await app.inject({ method: "GET", url: "/api/usage/capabilities?dimension=mcp_tool&fresh=1", headers });
     expect(revised.json().items[0]).toMatchObject({ calls: 0, contextOnlyCalls: 1, firstResultInputTokens: 2, repeatedResultInputTokens: 2 });
     expect(manager.collector.store.summary().usage.totalTokens).toBe(280);
   });

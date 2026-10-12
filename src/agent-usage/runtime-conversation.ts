@@ -2,6 +2,7 @@ import type { TokenEstimate } from "./core/context-types.js";
 import { commitRuntimeContent, type PreparedRuntimeContent } from "./runtime-content.js";
 import type { UsageStore } from "./storage/usage-store.js";
 import type { AttributionStore } from "./storage/attribution-store.js";
+import { trackUsageQueryChanges } from "./storage/query-version.js";
 
 export type ConversationCategory = "user_prompt" | "configured_instructions" | "assistant_output" | "assistant_thought";
 
@@ -26,6 +27,9 @@ export class RuntimeConversationCollector {
     // Retirement probes must not reread every counted fragment on each deletion batch.
     store.db.exec(`CREATE INDEX IF NOT EXISTS agent_usage_conversation_uncounted
       ON agent_usage_conversation_content(namespace,run_id) WHERE tokens IS NULL`);
+    trackUsageQueryChanges(store.db,"agent_usage_conversation_content");
+    store.db.exec(`CREATE INDEX IF NOT EXISTS agent_usage_conversation_estimate
+      ON agent_usage_conversation_content(estimate_id) WHERE estimate_id IS NOT NULL`);
   }
 
   async recordRun(runId: number, signal?: AbortSignal): Promise<void> {

@@ -1,54 +1,59 @@
-import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import { ensureUsageQueryVersion, usageQueryVersion } from "./storage/query-version.js";
 
-/** Caches bounded, body-free query projections until this or another connection writes. */
+/** Bounded projections; lightweight metadata stays live and expensive reads share one task. */
 export class UsageQueryCache {
-  private version = "";
-  private token = "";
+  private generation = -1;
   private bytes = 0;
-  private readonly entries = new Map<string, { value: unknown; bytes: number }>();
-  private readonly pending = new Map<string, { revision: string; promise: Promise<unknown> }>();
+  private readonly entries = new Map<string, { value: unknown; bytes: number; revision: string; createdAt: number }>();
+  private readonly pending = new Map<string, { generation: number; promise: Promise<unknown> }>();
 
-  constructor(private readonly db: Database.Database) {}
+  constructor(private readonly db: Database.Database) { ensureUsageQueryVersion(db); }
 
   revision(): string {
-    const changes = this.db.prepare("SELECT total_changes() AS n").get() as { n: number };
-    const version = `${changes.n}:${this.db.pragma("data_version", { simple: true })}`;
-    if (version !== this.version) {
-      this.version = version; this.token = randomUUID();
+    const version = usageQueryVersion(this.db);
+    if (version.generation !== this.generation) {
+      this.generation = version.generation;
       this.entries.clear(); this.bytes = 0;
     }
-    return this.token;
+    return version.revision;
   }
 
   get<T>(key: string, compute: () => T): T {
     this.revision();
+    const changes = this.db.prepare("SELECT total_changes() AS n").get() as { n: number };
+    const revision = `metadata:${changes.n}:${this.db.pragma("data_version", { simple: true })}`;
     const cached = this.entries.get(key);
-    if (cached) {
+    if (cached?.revision === revision) {
       this.entries.delete(key); this.entries.set(key, cached);
       return cached.value as T;
     }
     const value = compute();
-    return this.remember(key, value);
+    return this.remember(key, value, revision, Date.now());
   }
 
-  async getAsync<T>(key: string, compute: () => Promise<T>): Promise<T> {
+  async getAsync<T>(key: string, compute: () => Promise<T>, maxAgeMs = 0, forceFresh = false): Promise<T> {
     const revision = this.revision();
+    const generation = this.generation, startedAt = Date.now();
     const cached = this.entries.get(key);
-    if (cached) return this.get(key, () => cached.value as T);
+    if (!forceFresh && cached && (cached.revision === revision || startedAt - cached.createdAt < maxAgeMs)) {
+      this.entries.delete(key); this.entries.set(key, cached);
+      return cached.value as T;
+    }
     const pending = this.pending.get(key);
-    if (pending?.revision === revision) return pending.promise as Promise<T>;
+    if (pending?.generation === generation) return pending.promise as Promise<T>;
     const promise = compute().then(value => {
-      if (this.revision() === revision) this.remember(key, value);
+      this.revision();
+      if (this.generation === generation) this.remember(key, value, revision, startedAt);
       return value;
     }).finally(() => {
       if (this.pending.get(key)?.promise === promise) this.pending.delete(key);
     });
-    this.pending.set(key, { revision, promise });
+    this.pending.set(key, { generation, promise });
     return promise;
   }
 
-  private remember<T>(key: string, value: T): T {
+  private remember<T>(key: string, value: T, revision: string, createdAt: number): T {
     const bytes = Buffer.byteLength(JSON.stringify(value));
     if (bytes > 512 * 1024) return value;
     const previous = this.entries.get(key);
@@ -58,7 +63,7 @@ export class UsageQueryCache {
       this.bytes -= this.entries.get(oldest)!.bytes;
       this.entries.delete(oldest);
     }
-    this.entries.set(key, { value, bytes }); this.bytes += bytes;
+    this.entries.set(key, { value, bytes, revision, createdAt }); this.bytes += bytes;
     return value;
   }
 }

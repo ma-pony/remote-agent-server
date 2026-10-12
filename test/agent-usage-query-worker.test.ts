@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Worker } from "node:worker_threads";
 import { afterEach, expect, it, vi } from "vitest";
 import { HostUsageCollector } from "../src/agent-usage/host-collector.js";
 import { UsageQueryWorker } from "../src/agent-usage/query-worker.js";
@@ -57,4 +58,49 @@ it("redacts SQL errors while allowing another supported query to continue", asyn
   const expected = host.store.overview({ namespace: host.namespace }, "UTC", "day");
   expect(await worker.read("overview", [{ namespace: host.namespace }, "UTC", "day"]))
     .toEqual({ ...expected, summary: { ...expected.summary, asOf: expect.any(String) } });
+});
+
+it("rejects an over-budget worker request without preventing later writes", async () => {
+  const { db,host } = await setup();
+  const worker = new UsageQueryWorker(host,1);
+  try {
+    await expect(worker.read("rankings",[{ namespace:host.namespace },"all",options])).rejects.toMatchObject({code:"usage_query_timeout"});
+    db.prepare("UPDATE agent_usage_conversation_content SET tokens=5").run();
+    expect(db.prepare("SELECT SUM(tokens) AS n FROM agent_usage_conversation_content").get()).toEqual({n:1000});
+  } finally { await worker.close(); }
+});
+
+it("waits for a timed-out worker to exit before replacing it or completing shutdown", async () => {
+  const { host } = await setup();
+  vi.useFakeTimers();
+  const terminate = Worker.prototype.terminate;
+  let finishTermination!: () => void;
+  const gate = new Promise<void>(resolve => { finishTermination = resolve; });
+  const termination = vi.spyOn(Worker.prototype,"terminate").mockImplementation(async function (this: Worker) {
+    await gate;
+    return terminate.call(this);
+  });
+  // Keep the native worker idle; the deferred termination models a native call still unwinding.
+  const post = vi.spyOn(Worker.prototype,"postMessage").mockImplementation(() => undefined);
+  const worker = new UsageQueryWorker(host,100);
+  try {
+    const first = worker.read("overview",[{namespace:host.namespace},"UTC","day"]).catch(error => error.code);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await first).toBe("usage_query_timeout");
+    const second = worker.read("overview",[{namespace:host.namespace},"UTC","day"]).catch(error => error.code);
+    let closed = false;
+    const closing = worker.close().then(() => { closed = true; });
+    await Promise.resolve();
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(termination).toHaveBeenCalledTimes(1);
+    expect(closed).toBe(false);
+    expect(await second).toBe("usage_query_closed");
+    finishTermination();
+    await closing;
+    expect(closed).toBe(true);
+  } finally {
+    finishTermination();
+    await worker.close();
+    vi.useRealTimers();
+  }
 });

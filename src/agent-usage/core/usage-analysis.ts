@@ -2,7 +2,15 @@ import { metricNames, type UsageFilter, type UsageMetrics, type UsageRecord, typ
 import { accountingRows, completeUsage, emptyUsage, intervalIntersects, intervalOverlapConflicts, isAccountable,
   isLocated, rangeConflicts, reconcileSources, sumUsage, UsageRangeIndex } from "./usage.js";
 
-const withinPeriod = (filter: UsageFilter): ((row: UsageRecord) => boolean) => {
+type BasisRow = Pick<UsageRecord, "scope" | "occurredAt" | "intervalStart" | "metrics">;
+type QualityRow = Pick<UsageRecord, "scope" | "occurredAt" | "intervalStart"> & {
+  complete: boolean; missing: boolean; unknown: boolean; partial: boolean;
+};
+export type UsageAnalysisProjection = {
+  allBasis: BasisRow[]; datedBasis: BasisRow[]; quality: QualityRow[];
+  unplacedUsage: UsageMetrics; conflicts: number;
+};
+const withinPeriod = (filter: UsageFilter): ((row: Pick<UsageRecord, "scope" | "occurredAt" | "intervalStart">) => boolean) => {
   if (filter.from === undefined && filter.to === undefined) return () => true;
   const from = filter.from === undefined ? -Infinity : Date.parse(filter.from);
   const to = filter.to === undefined ? Infinity : Date.parse(filter.to);
@@ -12,31 +20,57 @@ const withinPeriod = (filter: UsageFilter): ((row: UsageRecord) => boolean) => {
 
 /** One consistent accounting projection for each query. No retained history cache or database writes. */
 export class UsageAnalysis {
-  private readonly reconciled: ReturnType<typeof reconcileSources>;
-  private readonly ranges: UsageRangeIndex;
-  private readonly allBasis: UsageRecord[];
-  private readonly datedBasis: UsageRecord[];
+  private readonly projection: UsageAnalysisProjection;
 
-  constructor(records: UsageRecord[]) {
-    this.reconciled = reconcileSources(records);
-    this.ranges = new UsageRangeIndex(this.reconciled.records);
-    this.allBasis = accountingRows(this.reconciled.records);
-    this.datedBasis = accountingRows(this.reconciled.records.filter(isLocated));
+  constructor(input: UsageRecord[] | UsageAnalysisProjection) {
+    if (!Array.isArray(input)) { this.projection = input; return; }
+    const reconciled = reconcileSources(input), records = reconciled.records;
+    const ranges = new UsageRangeIndex(records), allBasis = accountingRows(records);
+    const basis = (row: UsageRecord): BasisRow => ({ scope: row.scope, occurredAt: row.occurredAt,
+      ...(row.intervalStart === undefined ? {} : { intervalStart: row.intervalStart }), metrics: row.metrics });
+    const unplaced = allBasis.filter(row => !isLocated(row)).map(parent => {
+      const detail = ranges.detailUsage(parent, true), metrics = { ...parent.metrics };
+      for (const key of metricNames) if (metrics[key] !== null && detail[key] !== null) {
+        const residual = metrics[key]! - detail[key]!;
+        metrics[key] = residual >= 0 ? residual : null;
+      }
+      return { metrics };
+    });
+    this.projection = {
+      allBasis: allBasis.map(basis), datedBasis: accountingRows(records.filter(isLocated)).map(basis),
+      quality: records.map(row => ({ scope: row.scope, occurredAt: row.occurredAt,
+        ...(row.intervalStart === undefined ? {} : { intervalStart: row.intervalStart }),
+        complete: completeUsage(row), unknown: !isAccountable(row),
+        missing: !isAccountable(row) || Object.values(row.metrics).every(value => value === null),
+        partial: !completeUsage(row) || row.finality !== "final" || !!row.issues?.includes("cumulative_fields_missing") })),
+      unplacedUsage: sumUsage(unplaced),
+      conflicts: reconciled.conflicts + rangeConflicts(records, ranges) + intervalOverlapConflicts(records)
+        + records.filter(row => row.issues?.some(issue => issue !== "cumulative_fields_missing")).length
+    };
+  }
+
+  project(): UsageAnalysisProjection { return this.projection; }
+
+  /** Epochs are independent accounting domains; their reconciled facts can be combined. */
+  static combine(projections: UsageAnalysisProjection[]): UsageAnalysis {
+    return new UsageAnalysis({ allBasis: projections.flatMap(row => row.allBasis),
+      datedBasis: projections.flatMap(row => row.datedBasis), quality: projections.flatMap(row => row.quality),
+      unplacedUsage: sumUsage(projections.map(row => ({ metrics: row.unplacedUsage }))),
+      conflicts: projections.reduce((sum, row) => sum + row.conflicts, 0) });
   }
 
   summary(filter: UsageFilter = {}): UsageSummary {
-    const all = this.reconciled;
+    const all = this.projection;
     const inPeriod = withinPeriod(filter);
-    const records = all.records.filter(inPeriod);
-    const dated = this.datedBasis.filter(inPeriod);
-    const selected = filter.from === undefined && filter.to === undefined ? this.allBasis : dated;
-    const ambiguous = this.datedBasis.filter((row) => intervalIntersects(row, filter) && !inPeriod(row));
-    const conflicts = all.conflicts + rangeConflicts(all.records, this.ranges) + intervalOverlapConflicts(all.records)
-      + all.records.filter((row) => row.issues?.some((issue) => issue !== "cumulative_fields_missing")).length;
+    const records = all.quality.filter(inPeriod);
+    const dated = all.datedBasis.filter(inPeriod);
+    const selected = filter.from === undefined && filter.to === undefined ? all.allBasis : dated;
+    const ambiguous = all.datedBasis.filter((row) => intervalIntersects(row, filter) && !inPeriod(row));
+    const conflicts = all.conflicts;
     const requests = records.filter((row) => row.scope === "model_request");
-    const complete = requests.filter(completeUsage).length;
-    const missing = requests.filter((row) => !isAccountable(row) || Object.values(row.metrics).every((value) => value === null)).length;
-    const unknown = records.filter((row) => !isAccountable(row)).length;
+    const complete = requests.filter(row => row.complete).length;
+    const missing = requests.filter(row => row.missing).length;
+    const unknown = records.filter(row => row.unknown).length;
     const totalRows = selected.filter((row) => row.metrics.totalTokens !== null);
     const scopes = new Set((totalRows.length > 0 ? totalRows : selected).map((row) => row.scope));
     const basis = scopes.size === 0 ? "none" : scopes.size > 1 ? "mixed" : scopes.has("provider_session") ? "range_totals"
@@ -47,8 +81,7 @@ export class UsageAnalysis {
       unplacedUsage: this.unplacedUsage(ambiguous),
       accountingBasis: basis,
       completeness: conflicts > 0 ? "conflict" : ambiguous.length > 0 ? "partial" : records.length === 0 ? "none"
-        : unknown > 0 || complete < requests.length || records.some((row) => !completeUsage(row) || row.finality !== "final"
-          || row.issues?.includes("cumulative_fields_missing")) ? "partial" : "complete",
+        : unknown > 0 || complete < requests.length || records.some(row => row.partial) ? "partial" : "complete",
       observedModelRequests: requests.length,
       requestsWithCompleteUsage: complete,
       requestsWithMissingUsage: missing,
@@ -74,8 +107,8 @@ export class UsageAnalysis {
       return date.toISOString().slice(0, 10);
     };
     const groups = new Map<string, { usage: UsageMetrics; observedRanges: number }>();
-    const ambiguous = this.datedBasis.filter((row) => intervalIntersects(row, filter) && !inPeriod(row));
-    for (const row of this.datedBasis) {
+    const ambiguous = this.projection.datedBasis.filter((row) => intervalIntersects(row, filter) && !inPeriod(row));
+    for (const row of this.projection.datedBasis) {
       if (!inPeriod(row)) continue;
       const key = periodKey(row.occurredAt!);
       if (row.intervalStart !== undefined && periodKey(row.intervalStart) !== key) {
@@ -98,18 +131,7 @@ export class UsageAnalysis {
     };
   }
 
-  private unplacedUsage(ambiguous: UsageRecord[]): UsageMetrics {
-    const unplaced = this.allBasis.filter((row) => !isLocated(row)).map((parent) => {
-      const detail = this.ranges.detailUsage(parent, true);
-      const metrics = { ...parent.metrics };
-      for (const key of metricNames) {
-        if (metrics[key] !== null && detail[key] !== null) {
-          const residual = metrics[key]! - detail[key]!;
-          metrics[key] = residual >= 0 ? residual : null;
-        }
-      }
-      return { metrics };
-    });
-    return sumUsage([...unplaced, ...ambiguous]);
+  private unplacedUsage(ambiguous: BasisRow[]): UsageMetrics {
+    return sumUsage([{ metrics: this.projection.unplacedUsage }, ...ambiguous]);
   }
 }

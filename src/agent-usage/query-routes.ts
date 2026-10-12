@@ -23,6 +23,7 @@ const querySchema = z.object({
   capabilityKind: z.enum(capabilityKinds).optional(),
   capabilityId: z.string().min(1).max(500).optional(), capabilityServerId: z.string().min(1).max(500).optional(),
   cursor: z.string().max(500).optional(),
+  fresh: z.enum(["0","1"]).default("0").transform(value => value === "1"),
   origin: z.enum(["counted", "execution", "context"]).default("counted")
 }).strict().refine((query) => !query.from || !query.to || Date.parse(query.from) < Date.parse(query.to));
 
@@ -59,14 +60,16 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
     if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
     const ids = [...new Set(parsed.data.ids.split(","))];
     if (ids.length > 100) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
-    return { revision: cache.revision(), items: await cache.getAsync(`session-totals:${ids.join(",")}`,
-      () => reader.read("sessionSummaries", [namespace, ids])) };
+    const snapshot = await cache.getAsync(`session-totals:${ids.join(",")}`,
+      () => reader.readSnapshot("sessionSummaries", [namespace, ids]));
+    return { revision: snapshot.revision, asOf: snapshot.asOf, items: snapshot.value };
   });
   for (const endpoint of ["status", "summary", "timeseries", "capabilities", "invocations", "context-evidence", "content-evidence"] as const) {
     app.get(`/usage/${endpoint}`, { errorHandler: queryError }, async (request, reply) => {
       const parsed = querySchema.safeParse(request.query);
       if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
       const query = parsed.data;
+      const maxAgeMs = query.fresh ? 0 : 30_000;
       const filter: UsageFilter = { namespace, agentId: query.agentId, sessionId: query.sessionId,
         from: query.from === undefined ? undefined : new Date(query.from).toISOString(),
         to: query.to === undefined ? undefined : new Date(query.to).toISOString(), runtimeKind: query.runtimeKind };
@@ -95,28 +98,32 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
         analysisStatus: sourceCounts.collecting || contentBackfill.status === "pending" || contentBackfill.status === "running" ? "collecting"
           : capturePartial || contentBackfill.status === "failed" || failurePage.total > 0 || sourceCounts.failed ? "partial" : "ready" };
       if (endpoint === "summary") {
-        const { summary } = await cache.getAsync(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
-          () => reader.read("overview", [filter, query.timezone, query.bucket]));
+        const snapshot = await cache.getAsync(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
+          () => reader.readSnapshot("overviewWithContext", [filter, query.timezone, query.bucket]),maxAgeMs,query.fresh);
+        const { summary, contextAnalysis } = snapshot.value;
         const hasCapabilityEvidence = collector.attribution.hasEvidence(filter);
-        const contextAnalysis = await cache.getAsync(`context-summary:${JSON.stringify(filter)}`,
-          () => reader.read("contextSummary", [filter]));
-        return { ...metadata, ...summary, hasCapabilityEvidence, contextAnalysis,
+        return { ...metadata, ...summary, revision: snapshot.revision, asOf: snapshot.asOf,
+          stale: snapshot.revision !== cache.revision(), hasCapabilityEvidence, contextAnalysis,
           ...(capturePartial && summary.completeness !== "conflict" ? { completeness: "partial" } : {}), ...(query.sessionId === undefined ? {} : { providerEpochId: providerEpoch(query.sessionId, query.agentId) }),
           sourceCounts,
           analysisStatus: sourceCount === 0 && summary.completeness === "none" && failurePage.total === 0 && !capturePage?.total
             && contentBackfill.status === "completed" && !hasCapabilityEvidence ? "empty" : metadata.analysisStatus };
       }
       if (endpoint === "timeseries") {
-        const { timeseries: series } = await cache.getAsync(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
-          () => reader.read("overview", [filter, query.timezone, query.bucket]));
-        return { ...metadata, ...series, total: series.items.length, items: series.items.slice(query.offset, query.offset + query.limit) };
+        const snapshot = await cache.getAsync(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
+          () => reader.readSnapshot("overviewWithContext", [filter, query.timezone, query.bucket]),maxAgeMs,query.fresh);
+        const series = snapshot.value.timeseries;
+        return { ...metadata, ...series, revision: snapshot.revision, asOf: snapshot.asOf,
+          stale: snapshot.revision !== cache.revision(), total: series.items.length, items: series.items.slice(query.offset, query.offset + query.limit) };
       }
       if (endpoint === "capabilities") {
-        const page = await cache.getAsync(`ranking:${JSON.stringify([filter, query.dimension, query.sort, query.limit, query.offset])}`,
-          () => rankingReader.read("rankings", [filter, query.dimension, query]));
+        const snapshot = await cache.getAsync(`ranking:${JSON.stringify([filter, query.dimension, query.sort, query.limit, query.offset])}`,
+          () => rankingReader.readSnapshot("rankings", [filter, query.dimension, query]),maxAgeMs,query.fresh);
+        const page = snapshot.value;
         const stages = cache.get(`stages:${JSON.stringify([filter, query.dimension, query.stageOffset])}`,
           () => collector.runtimeCapabilities.stageCountsPage(filter, { dimension: query.dimension, limit: 20, offset: query.stageOffset }));
-        return { ...metadata, measurement: "estimated", dimension: query.dimension, sort: query.sort, total: page.total,
+        return { ...metadata, revision: snapshot.revision, asOf: snapshot.asOf, stale: snapshot.revision !== cache.revision(),
+          measurement: "estimated", dimension: query.dimension, sort: query.sort, total: page.total,
           stages: stages.items, stageTotal: stages.total,
           items: page.items.map((row) => ({ ...row, insights: insights(row) })) };
       }

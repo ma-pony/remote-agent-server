@@ -3,13 +3,16 @@ import { UsageError } from "../core/errors.js";
 import { metricNames, type UsageBinding, type UsageFilter, type UsageObservation, type UsageRecord, type UsageSummary, type UsageTimeseries } from "../core/types.js";
 import { normalizeUsage, sumUsage } from "../core/usage.js";
 import { UsageAnalysis } from "../core/usage-analysis.js";
+import { trackUsageQueryChanges } from "./query-version.js";
+import { AccountingProjectionStore, type AccountingProjectionJob, type AccountingProjectionBatch } from "./accounting-projection.js";
 
 type SubjectRow = { agent_id: string | null; generation: number; state: "active" | "draining" | "deleted" };
 
 /** Small, independently migratable SQLite module; no foreign keys to host business tables. */
 export class UsageStore {
+  private readonly projections: AccountingProjectionStore;
   constructor(readonly db: Database.Database) {
-    if (db.readonly) return;
+    if (db.readonly) { this.projections = new AccountingProjectionStore(db); return; }
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_usage_migrations (version INTEGER PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS agent_usage_subjects (
@@ -34,6 +37,11 @@ export class UsageStore {
       CREATE INDEX IF NOT EXISTS agent_usage_events_session ON agent_usage_events(namespace, session_id);
       INSERT OR IGNORE INTO agent_usage_migrations VALUES (1);
     `);
+    trackUsageQueryChanges(db, "agent_usage_ledger");
+    db.exec(`CREATE TRIGGER IF NOT EXISTS agent_usage_subject_deleted AFTER UPDATE OF state ON agent_usage_subjects
+      WHEN NEW.state='deleted' AND OLD.state!='deleted'
+      BEGIN UPDATE agent_usage_query_version SET revision=revision+1,generation=generation+1 WHERE id=1; END`);
+    this.projections = new AccountingProjectionStore(db);
   }
 
   bindSession(namespace: string, agentId: string, sessionId: string): UsageBinding {
@@ -68,7 +76,7 @@ export class UsageStore {
       const inserted = this.db.prepare(`INSERT INTO agent_usage_events
         (namespace, source_id, event_id, agent_id, session_id, observed_at, payload_json)
         VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`).run(binding.namespace, observation.sourceId, observation.eventId,
-        binding.agentId, binding.sessionId, new Date().toISOString(), JSON.stringify({ ...observation, ...binding }));
+        binding.agentId, binding.sessionId, new Date().toISOString(), "{}");
       if (inserted.changes === 0) return;
       const key = [binding.namespace, observation.sourceId, binding.sessionId, observation.providerEpochId, observation.scope, observation.coverageId];
       const old = this.db.prepare(`SELECT payload_json FROM agent_usage_ledger WHERE
@@ -124,20 +132,31 @@ export class UsageStore {
   }
 
   summary(filter: UsageFilter = {}): UsageSummary {
-    return new UsageAnalysis(this.records(filter)).summary(filter);
+    return this.analysis(filter).summary(filter);
   }
 
   timeseries(filter: UsageFilter, timezone: string, bucket: "day" | "week" | "month"): UsageTimeseries {
-    return new UsageAnalysis(this.records(filter)).timeseries(filter, timezone, bucket);
+    return this.analysis(filter).timeseries(filter, timezone, bucket);
   }
 
   overview(filter: UsageFilter, timezone: string, bucket: "day" | "week" | "month"): { summary: UsageSummary; timeseries: UsageTimeseries } {
-    const analysis = new UsageAnalysis(this.records(filter));
+    const analysis = this.analysis(filter);
     return { summary: analysis.summary(filter), timeseries: analysis.timeseries(filter, timezone, bucket) };
   }
 
+  private analysis(filter: UsageFilter): UsageAnalysis {
+    return this.projections.hasProjection() ? this.projections.read(filter) : new UsageAnalysis(this.records(filter));
+  }
+
+  nextAccountingProjection(after?: AccountingProjectionJob): AccountingProjectionJob | undefined { return this.projections.next(after); }
+  projectEpoch(job: AccountingProjectionJob): AccountingProjectionBatch { return this.projections.project(job); }
+  commitAccountingProjection(batch: AccountingProjectionBatch): boolean { return this.projections.commit(batch); }
+  compactEventPayloads(limit: number): number { return this.projections.compactEventPayloads(limit); }
+  eventPayloadCompactionPending(): boolean { return this.projections.eventPayloadCompactionPending(); }
+
   summariesBySession(namespace: string, sessionIds: string[]): Array<{ sessionId: string; summary: UsageSummary }> {
     if (sessionIds.length === 0) return [];
+    if (this.projections.hasProjection()) return this.projections.summariesBySession(namespace,sessionIds);
     const rows = this.db.prepare(`SELECT session_id, payload_json FROM agent_usage_ledger
       WHERE namespace=? AND session_id IN (${sessionIds.map(() => "?").join(",")})`)
       .all(namespace, ...sessionIds) as Array<{ session_id: string; payload_json: string }>;
@@ -158,6 +177,7 @@ export class UsageStore {
         generation = generation + 1, state = 'deleted', agent_id = NULL, maintenance_json = NULL`).run(namespace, sessionId);
       this.db.prepare("DELETE FROM agent_usage_events WHERE namespace = ? AND session_id = ?").run(namespace, sessionId);
       this.db.prepare("DELETE FROM agent_usage_ledger WHERE namespace = ? AND session_id = ?").run(namespace, sessionId);
+      this.projections.deleteSession(namespace,sessionId);
     })();
   }
 
