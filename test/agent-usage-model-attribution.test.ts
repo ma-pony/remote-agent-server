@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AttributionStore } from "../src/agent-usage/storage/attribution-store.js";
 import { UsageStore } from "../src/agent-usage/storage/usage-store.js";
 import { ModelTokenizers } from "../src/agent-usage/core/tokenizers.js";
@@ -63,5 +63,26 @@ describe("persisted tokenizer provenance", () => {
     expect(db.prepare("SELECT estimate_json FROM agent_usage_exposures").get()).toEqual(before);
     await migrated.upsertContext(binding, context("new"));
     expect(migrated.rankings({}, "mcp_tool")[0]?.tokenizationStatus).toBe("mixed");
+  });
+
+  it("rolls back the estimate completion marker on failure so the next startup retries", async () => {
+    const { store, usage, db, binding } = setup();
+    await store.upsertContext(binding, context("old"));
+    db.exec("DROP TRIGGER agent_usage_exposures_query_update");
+    db.exec("ALTER TABLE agent_usage_exposures DROP COLUMN estimate_id");
+    const exec = db.exec.bind(db);
+    const spy = vi.spyOn(db, "exec").mockImplementation((sql: string) => {
+      if (sql.includes("INSERT OR IGNORE INTO agent_usage_token_estimates(estimate_json)")) {
+        throw new Error("interrupted estimate migration");
+      }
+      return exec(sql);
+    });
+    try { expect(() => new AttributionStore(usage, fixtureTokenizers())).toThrow("interrupted estimate migration"); }
+    finally { spy.mockRestore(); }
+    expect((db.prepare("PRAGMA table_info(agent_usage_exposures)").all() as Array<{ name: string }>)
+      .some(column => column.name === "estimate_id")).toBe(false);
+    const recovered = new AttributionStore(usage, fixtureTokenizers());
+    expect(recovered.rankings({}, "mcp_tool")[0]).toMatchObject({ totalInputTokens: 2,
+      tokenEstimates: [expect.objectContaining({ method: "legacy_reference" })] });
   });
 });

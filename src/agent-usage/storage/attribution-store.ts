@@ -223,7 +223,8 @@ export class AttributionStore {
     }
     // Store tokenizer provenance once per distinct estimate profile, not once per exposure.
     store.db.transaction(() => {
-      if (!columns.some((column) => column.name === "estimate_id")) store.db.exec("ALTER TABLE agent_usage_exposures ADD COLUMN estimate_id INTEGER");
+      const migrateEstimates = !columns.some((column) => column.name === "estimate_id");
+      if (migrateEstimates) store.db.exec("ALTER TABLE agent_usage_exposures ADD COLUMN estimate_id INTEGER");
       store.db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_token_estimates (
         id INTEGER PRIMARY KEY, estimate_json TEXT NOT NULL UNIQUE)`);
       store.db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_invocation_payloads (
@@ -232,7 +233,9 @@ export class AttributionStore {
         byte_length INTEGER NOT NULL, token_count INTEGER, estimate_id INTEGER NOT NULL,
         partial INTEGER NOT NULL, PRIMARY KEY(public_id, part)
       )`);
-      if (store.db.prepare("SELECT 1 FROM agent_usage_exposures WHERE estimate_id IS NULL LIMIT 1").get()) {
+      // Column creation and conversion commit together. Its presence is the completion marker;
+      // probing for missing IDs on every open would scan the entire historical exposure table.
+      if (migrateEstimates) {
         store.db.prepare(`UPDATE agent_usage_exposures SET estimate_json = json_set(?,
           '$.model', (SELECT model FROM agent_usage_contexts c WHERE c.context_id = agent_usage_exposures.context_id),
           '$.reason', CASE WHEN token_count IS NULL THEN 'legacy_unavailable' ELSE NULL END)

@@ -927,4 +927,18 @@ export const migrate = (
   }
   if (!hasColumn("runs", "events_pruned_at")) db.exec("ALTER TABLE runs ADD COLUMN events_pruned_at TEXT");
   if (!hasColumn("runs", "events_pruned_through_seq")) db.exec("ALTER TABLE runs ADD COLUMN events_pruned_through_seq INTEGER NOT NULL DEFAULT 0");
+  // Recovery and legacy accounting must not read historical prompt/result bodies.
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS runs_status_queue ON runs(status, created_at, id, session_id);
+    CREATE INDEX IF NOT EXISTS runs_legacy_usage ON runs(
+      session_id, id, started_at, input_tokens, output_tokens, total_tokens,
+      cached_read_tokens, cached_write_tokens, thought_tokens)
+      WHERE input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR total_tokens IS NOT NULL
+        OR cached_read_tokens IS NOT NULL OR cached_write_tokens IS NOT NULL OR thought_tokens IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS sessions_legacy_usage ON sessions(
+      agent_id, id, input_tokens, output_tokens, total_tokens,
+      cached_read_tokens, cached_write_tokens, thought_tokens)
+      WHERE input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR total_tokens IS NOT NULL
+        OR cached_read_tokens IS NOT NULL OR cached_write_tokens IS NOT NULL OR thought_tokens IS NOT NULL;
+  `);
 };

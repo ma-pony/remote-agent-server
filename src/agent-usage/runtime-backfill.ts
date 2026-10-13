@@ -34,16 +34,21 @@ export class RuntimeContentBackfill {
     if (!columns.some(({ name }) => name === "content_version")) db.exec("ALTER TABLE agent_usage_runtime_backfills ADD COLUMN content_version INTEGER NOT NULL DEFAULT 1");
     if (!columns.some(({ name }) => name === "retry_after")) db.exec("ALTER TABLE agent_usage_runtime_backfills ADD COLUMN retry_after INTEGER NOT NULL DEFAULT 0");
     if (!columns.some(({ name }) => name === "tokenizer_model")) db.exec("ALTER TABLE agent_usage_runtime_backfills ADD COLUMN tokenizer_model TEXT");
+    db.exec(`CREATE INDEX IF NOT EXISTS agent_usage_runtime_backfills_old_content
+      ON agent_usage_runtime_backfills(namespace) WHERE content_version<2;
+      CREATE INDEX IF NOT EXISTS agent_usage_runtime_backfills_missing_tokenizer
+      ON agent_usage_runtime_backfills(namespace) WHERE tokenizer_model IS NULL`);
     // Tool-only checkpoints predate conversation content. Replay them once; both sinks are idempotent.
     if (conversation) db.prepare(`UPDATE agent_usage_runtime_backfills SET content_version=2,
       last_seq=0,processed_events=0,status='pending',error_code=NULL WHERE namespace=? AND content_version<2
-      AND run_id IN (SELECT id FROM runs WHERE events_pruned_through_seq=0)`).run(namespace);
+      AND EXISTS (SELECT 1 FROM runs WHERE id=agent_usage_runtime_backfills.run_id AND events_pruned_through_seq=0)`).run(namespace);
     // Replay retained content once for models that now have a vocabulary. Other history is untouched.
     if (knownModels.length) db.prepare(`UPDATE agent_usage_runtime_backfills SET content_version=3,
       last_seq=0,processed_events=0,status='pending',error_code=NULL,retry_after=0,
       tokenizer_model=(SELECT resolved_model FROM runs WHERE id=agent_usage_runtime_backfills.run_id)
-      WHERE namespace=? AND tokenizer_model IS NULL AND run_id IN (
-        SELECT id FROM runs WHERE events_pruned_through_seq=0 AND resolved_model IN (SELECT value FROM json_each(?)))`).run(namespace, JSON.stringify(knownModels));
+      WHERE namespace=? AND tokenizer_model IS NULL AND EXISTS (
+        SELECT 1 FROM runs WHERE id=agent_usage_runtime_backfills.run_id
+          AND events_pruned_through_seq=0 AND resolved_model IN (SELECT value FROM json_each(?)))`).run(namespace, JSON.stringify(knownModels));
   }
 
   async step(signal?: AbortSignal): Promise<boolean> {

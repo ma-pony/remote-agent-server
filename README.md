@@ -129,6 +129,7 @@ nvm install
 corepack enable
 pnpm install --frozen-lockfile
 pnpm run init
+pnpm build
 pnpm start
 ```
 
@@ -149,7 +150,7 @@ pnpm run doctor
 
 `doctor` 检查现有配置和工作区操作，清理探测文件，不创建或修改 `.env`，不运行真实 Agent。它也支持完全由进程环境提供配置的部署；目录检查通过不代表 Provider 已登录或模型可用。
 
-`pnpm start` 会先构建服务端和 Web 管理台，再以生产模式启动。若直接执行构建后的 Node 入口但 Web 构建不完整，服务会明确报错退出。
+安装或更新源码后先执行 `pnpm build`，成功后再启动服务。`pnpm start` 直接运行已有的 `dist` 产物，日常重启不再重复构建；未重新构建的源码修改不会生效。若服务端产物缺失或 Web 构建不完整，启动会报错退出。
 
 检查服务：
 

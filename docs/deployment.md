@@ -37,10 +37,11 @@ pnpm run init --root "/Volumes/AgentData/remote-agent-server"
 ### 3. 启动并打开管理台
 
 ```bash
+pnpm build
 pnpm start
 ```
 
-`pnpm start` 先构建服务端和管理台，再启动服务。程序自动读取工作目录的 `.env`，无需 `source`；已有进程环境变量优先。打开 `http://127.0.0.1:3000`，从 `.env` 复制 `API_TOKEN` 的值到登录页，按“项目环境 → 智能体 → 会话”完成首次任务。新配置仅监听本机。
+安装或更新源码后先用 `pnpm build` 构建服务端和管理台；`pnpm start` 只运行已有产物，日常重启无需重新构建。程序自动读取工作目录的 `.env`，无需 `source`；已有进程环境变量优先。打开 `http://127.0.0.1:3000`，从 `.env` 复制 `API_TOKEN` 的值到登录页，按“项目环境 → 智能体 → 会话”完成首次任务。新配置仅监听本机。
 
 以后排查安装环境可以执行 `pnpm run doctor`：它检查配置、Git、Provider 命令路径和工作区操作，可能创建缺少的基础目录，并在完成后清理探测目录；不修改 `.env`、创建业务记录或调用模型。检查通过不代表 Provider 已登录。
 
@@ -218,6 +219,10 @@ curl --fail http://127.0.0.1:3000/api/health
 健康检查失败时使用 `sudo journalctl -u remote-agent -n 100 --no-pager` 查看原因。若默认本机监听需要从另一台电脑访问，可通过 `ssh -L 3000:127.0.0.1:3000 <服务用户>@<服务器>` 转发后打开本机管理台；直接对外提供服务时再配置 TLS 反向代理和监听地址。
 
 升级时先停止服务、备份数据，再安装依赖和执行 `pnpm build`，最后重新启动。变更 Node 安装路径后同步更新 unit。不要使用 `DynamicUser=yes`：Provider 登录状态、Btrfs 权限和 Provider Home 都依赖稳定的 UID/HOME。已有 unit 的 `EnvironmentFile` 可以继续使用，其变量优先于程序读取的 `.env`。
+
+普通重启直接复用构建产物；源码更新必须先构建成功，启动命令不会自动补建。
+
+重启优化会首次为 Session／Run 用量快照、Run 状态及待升级的回补记录创建索引，这次升级仍需读取相关表并预留磁盘空间；后续启动复用索引。已完成的估算元数据迁移不再扫描历史归因表，旧用量导入只读取尚未导入的计数，不加载输入或结果正文。必要的 Session 维护与中断 Run 恢复仍在调度和监听前完成。首次建索引、未完成维护和异常终止后的 WAL 恢复仍可能延长启动；允许服务正常关闭，不删除 WAL 来缩短恢复。
 
 升级到 Codex 插件共享投影后无需清库。下一次使用某个 Session 时，服务会为该 Agent 发布本地插件 marketplace，并将该 Session 旧的 `plugins/cache/` 替换为指向 Agent 级目录的链接；默认也会替换旧的 `.tmp/`。显式启用 `local_thread_store_compression` 的 Session 保留独立 `.tmp/`，避免跨 Session 的压缩锁冲突，但 Codex 可能为这些 Session 分别保存内置市场仓库。未再使用的 Session Home 按现有空闲保留策略清理。共享快照位于 `DATA_DIR/agents/<id>/provider-home/codex/shared-plugins/`，按内容版本划分的共享插件缓存位于同级 `plugin-caches/`，默认内置市场同步目录为同级 `.tmp/`。这些数据随 Agent 删除，不应在仍有 Session 使用时手动删除。
 

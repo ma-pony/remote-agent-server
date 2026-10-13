@@ -916,8 +916,9 @@ export class IntegrationStore {
       SELECT run.*
       FROM runs run
       JOIN integration_tasks task ON task.run_id = run.id
-      WHERE (run.status = 'running' AND task.status = 'queued')
-         OR (run.status IN ('succeeded', 'failed', 'cancelled') AND task.status IN ('queued', 'running'))
+      WHERE task.status IN ('queued', 'running')
+        AND ((run.status = 'running' AND task.status = 'queued')
+          OR run.status IN ('succeeded', 'failed', 'cancelled'))
       ORDER BY run.created_at ASC, run.id ASC
     `).all() as LinkedRunRow[];
     return rows.map(toRun);

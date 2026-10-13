@@ -324,6 +324,60 @@ describe("host usage integration", () => {
     expect(host.store.summary({ namespace: host.namespace }).usage.totalTokens).toBeNull();
   });
 
+  it("does not reprocess imported snapshots on restart and still imports late zero counters", () => {
+    const { host, db, session, seed } = setup();
+    const later = seed.session();
+    seed.run(later.id, "succeeded");
+    db.prepare("UPDATE sessions SET total_tokens=123 WHERE id=?").run(session.id);
+    db.prepare("UPDATE runs SET total_tokens=50 WHERE session_id=?").run(session.id);
+    host.importLegacy();
+    const before = host.store.records();
+
+    const restarted = new HostUsageCollector(db);
+    const observe = vi.spyOn(restarted.store, "observe");
+    restarted.importLegacy();
+    restarted.importLegacy(session.id);
+    expect(observe).not.toHaveBeenCalled();
+    expect(restarted.store.records()).toEqual(before);
+
+    db.prepare("UPDATE sessions SET cached_read_tokens=0 WHERE id=?").run(later.id);
+    db.prepare("UPDATE runs SET thought_tokens=0 WHERE session_id=?").run(later.id);
+    restarted.importLegacy();
+    expect(observe).toHaveBeenCalledTimes(2);
+    const imported = restarted.store.records().filter(row => row.sessionId === String(later.id));
+    expect(imported).toHaveLength(2);
+    expect(imported.find(row => row.sourceId === "legacy_session_snapshot")?.metrics.cacheReadTokens).toBe(0);
+    expect(imported.find(row => row.sourceId === "legacy_run_snapshot")?.metrics.reasoningOutputTokens).toBe(0);
+  });
+
+  it("reads legacy counters without materializing historical prompts or results", () => {
+    const { host, db, session } = setup();
+    db.prepare("UPDATE sessions SET total_tokens=123, instructions_snapshot=? WHERE id=?").run("large instructions", session.id);
+    db.prepare("UPDATE runs SET total_tokens=50, input=?, result=? WHERE session_id=?")
+      .run("large input", "large result", session.id);
+    const prepare = db.prepare.bind(db);
+    const returned: Record<string, unknown>[] = [];
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      const statement = prepare(sql);
+      if (/SELECT[\s\S]*FROM (sessions s|runs r)/.test(sql)) {
+        const all = statement.all.bind(statement);
+        statement.all = (...params: unknown[]) => {
+          const rows = all(...params) as Record<string, unknown>[];
+          returned.push(...rows);
+          return rows;
+        };
+      }
+      return statement;
+    });
+    try { host.importLegacy(); } finally { spy.mockRestore(); }
+    expect(returned).toHaveLength(2);
+    for (const row of returned) {
+      expect(row).not.toHaveProperty("input");
+      expect(row).not.toHaveProperty("result");
+      expect(row).not.toHaveProperty("instructions_snapshot");
+    }
+  });
+
   it("retains legacy Run evidence independently of overlapping Session snapshots", () => {
     const { host, db, session, runId } = setup();
     db.prepare("UPDATE sessions SET total_tokens = 1234 WHERE id = ?").run(session.id);

@@ -20,7 +20,6 @@
     "dev:server": "NODE_ENV=development tsx watch src/main.ts",
     "dev:web": "vite --host 127.0.0.1",
     "build": "tsc -p tsconfig.server.json && vite build",
-    "prestart": "pnpm build",
     "start": "NODE_ENV=production node dist/server/main.js",
     "smoke:integrations": "tsx scripts/smoke-integrations.ts",
     "smoke:providers": "tsx scripts/smoke-providers.ts",

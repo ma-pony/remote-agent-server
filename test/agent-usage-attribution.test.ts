@@ -33,6 +33,21 @@ const context = (): ModelContextInput => ({
 });
 
 describe("agent usage invocation attribution", () => {
+  it("does not rescan historical exposures after the estimate migration has completed", async () => {
+    const { db, usage, attribution, binding } = setup();
+    await attribution.upsertContext(binding, context());
+    const before = attribution.rankings({}, "mcp_tool");
+    const prepare = db.prepare.bind(db);
+    const spy = vi.spyOn(db, "prepare").mockImplementation((sql: string) => {
+      if (/\bFROM agent_usage_exposures\b/.test(sql)) throw new Error("Startup rescanned historical exposures");
+      return prepare(sql);
+    });
+    let reopened: AttributionStore;
+    try { reopened = new AttributionStore(usage, fixtureTokenizers()); }
+    finally { spy.mockRestore(); }
+    expect(reopened.rankings({}, "mcp_tool")).toEqual(before);
+  });
+
   it("serves context totals without scanning exposures after bounded legacy backfill", async () => {
     const { db, attribution, binding } = setup();
     const shared = { ...context(), blocks: [{ ...context().blocks[0]!, capabilities: [

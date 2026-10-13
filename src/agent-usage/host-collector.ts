@@ -108,10 +108,14 @@ export class HostUsageCollector {
 
   importLegacy(sessionId?: number): void {
     const params = sessionId === undefined ? [] : [sessionId];
-    const rows = this.db.prepare(`SELECT s.*, a.provider FROM sessions s JOIN agents a ON a.id = s.agent_id
+    const rows = this.db.prepare(`SELECT s.id, s.input_tokens, s.output_tokens, s.total_tokens,
+      s.cached_read_tokens, s.cached_write_tokens, s.thought_tokens, a.provider
+      FROM sessions s JOIN agents a ON a.id = s.agent_id
       WHERE ${sessionId === undefined ? "" : "s.id = ? AND "}(s.input_tokens IS NOT NULL OR s.output_tokens IS NOT NULL OR s.total_tokens IS NOT NULL
-        OR s.cached_read_tokens IS NOT NULL OR s.cached_write_tokens IS NOT NULL OR s.thought_tokens IS NOT NULL)`)
-      .all(...params) as Array<{ id: number; provider: string } & LegacyMetrics>;
+        OR s.cached_read_tokens IS NOT NULL OR s.cached_write_tokens IS NOT NULL OR s.thought_tokens IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM agent_usage_events e WHERE e.namespace=?
+          AND e.source_id='legacy_session_snapshot' AND e.event_id='session:' || s.id)`)
+      .all(...params, this.namespace) as Array<{ id: number; provider: string } & LegacyMetrics>;
     for (const row of rows) {
       try {
         this.store.observe(this.binding(row.id), {
@@ -125,11 +129,14 @@ export class HostUsageCollector {
         if (!(error instanceof UsageError) || error.code !== "usage_subject_deleted") throw error;
       }
     }
-    const runs = this.db.prepare(`SELECT r.*, a.provider FROM runs r
+    const runs = this.db.prepare(`SELECT r.id, r.session_id, r.started_at, r.input_tokens, r.output_tokens, r.total_tokens,
+      r.cached_read_tokens, r.cached_write_tokens, r.thought_tokens, a.provider FROM runs r
       JOIN sessions s ON s.id = r.session_id JOIN agents a ON a.id = s.agent_id
       WHERE ${sessionId === undefined ? "" : "r.session_id = ? AND "}(r.input_tokens IS NOT NULL OR r.output_tokens IS NOT NULL OR r.total_tokens IS NOT NULL
-        OR r.cached_read_tokens IS NOT NULL OR r.cached_write_tokens IS NOT NULL OR r.thought_tokens IS NOT NULL)`)
-      .all(...params) as Array<{ id: number; session_id: number; started_at: string | null; provider: string } & LegacyMetrics>;
+        OR r.cached_read_tokens IS NOT NULL OR r.cached_write_tokens IS NOT NULL OR r.thought_tokens IS NOT NULL)
+        AND NOT EXISTS (SELECT 1 FROM agent_usage_events e WHERE e.namespace=?
+          AND e.source_id='legacy_run_snapshot' AND e.event_id='run:' || r.id)`)
+      .all(...params, this.namespace) as Array<{ id: number; session_id: number; started_at: string | null; provider: string } & LegacyMetrics>;
     for (const row of runs) {
       try {
         this.store.observe(this.binding(row.session_id), {

@@ -129,6 +129,7 @@ nvm install
 corepack enable
 pnpm install --frozen-lockfile
 pnpm run init
+pnpm build
 pnpm start
 ```
 
@@ -149,7 +150,7 @@ pnpm run doctor
 
 `doctor` checks existing configuration and workspace operations, removes its probe files, and never creates or modifies `.env` or starts a real Agent. Environment-only deployments are supported. Passing the workspace check does not establish Provider authentication or model availability.
 
-`pnpm start` builds both the server and web console before starting in production mode. A directly invoked compiled Node entrypoint exits with a clear error when the web build is missing.
+Run `pnpm build` after installation or source updates, and start the service only after it succeeds. `pnpm start` runs the existing `dist` artifacts without rebuilding on ordinary restarts; source edits take effect only after another build. Startup fails if the server artifacts or web build are missing.
 
 Check the server:
 

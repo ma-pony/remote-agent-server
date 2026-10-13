@@ -236,6 +236,10 @@ A nullable internal `pending_operation` field records `cleanup`, `delete`, or `r
 
 Startup retries incomplete-creation cleanup, recovers maintenance, then recovers and schedules Runs. Unfinished cleanup and deletion retain their marker and busy state. Later cleanup passes retry admitted storage cleanup even after retention changes or automatic cleanup is disabled; the delete API can retry a pending deletion. Both failed-creation compensation and startup recovery remove pending Session records only after directory deletion succeeds. Reset recovery removes the old local Provider/ACP conversation while preserving the Workspace, Run history and independent usage ledger. The next Run creates a new Provider context.
 
+Build and startup are separate: `pnpm start` runs existing build artifacts. Run recovery and queue reads use a status index; Integration recovery starts from queued/running Tasks to find Runs needing projection. Required recovery completes before listening.
+
+Legacy usage import uses covering indexes containing only counters and relationship fields, filtering imported snapshots through the existing event deduplication keys without reading Session instructions or Run input/results. Late non-null counters remain eligible; zero values, unknown semantics and historical evidence retain their meaning. The estimate dictionary's `estimate_id` column and historical conversion commit in one transaction, so the column's presence marks completion without rescanning exposures for null values on every open. Backfill upgrades start from partial indexes of pending upgrade records and check their Runs by primary key, preserving pruned-event exclusions and tokenizer replay rules.
+
 ## 8. Agent capability projection
 
 Each agent has an independent Provider Home. The service discovers reusable capabilities from the service user's provider configuration, then requires an explicit agent selection:
