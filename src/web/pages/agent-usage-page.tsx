@@ -43,7 +43,6 @@ type UsageMetadata = {
   revision?: string;
   asOf: string;
   stale?: boolean;
-  timezone: string;
   from: string | null;
   to: string | null;
   analysisStatus: AnalysisStatus;
@@ -104,53 +103,18 @@ const PAGE_SIZE = 50;
 const invocationPageSize = 50;
 const sourcePollIntervalMs = 1_000;
 const fastSourcePollAttempts = 60;
-const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
-const validTimezone = (value: string | null): string => {
-  if (!value) return browserTimezone;
-  try {
-    new Intl.DateTimeFormat("en", { timeZone: value });
-    return value;
-  } catch { return browserTimezone; }
-};
 const dimensions: RankingDimension[] = ["all", "user_prompt", "configured_instructions", "system_prompt", "assistant_output", "assistant_thought", "mcp_tool", "builtin_tool", "cli", "skill", "plugin", "hook", "unknown"];
 const contentSorts: SortKey[] = ["observedTotalTokens", "observedArgumentTokens", "observedResultTokens", "calls", "failures", "latencyMsP95"];
 const contextSorts: SortKey[] = ["totalInputTokens", "argumentInputTokens", "definitionInputTokens", "firstResultInputTokens", "repeatedResultInputTokens", "inputBytes", "calls", "failures", "latencyMsP95"];
 
-const zonedDateParts = (instant: Date, timezone: string) => Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
-  timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
-}).formatToParts(instant).filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
-
-const zonedMidnight = (date: string, timezone: string): Date => {
-  const [year, month, day] = date.split("-").map(Number);
-  const nominal = Date.UTC(year!, month! - 1, day!);
-  let instant = nominal;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const parts = zonedDateParts(new Date(instant), timezone);
-    const represented = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
-    instant -= represented - nominal;
-  }
-  return new Date(instant);
-};
-
-const dateKeyInZone = (instant: Date, timezone: string): string => {
-  const parts = zonedDateParts(instant, timezone);
-  return `${parts.year}-${parts.month}-${parts.day}`;
-};
-
-const shiftDateKey = (date: string, days: number): string => {
-  const instant = new Date(`${date}T00:00:00Z`);
-  instant.setUTCDate(instant.getUTCDate() + days);
-  return instant.toISOString().slice(0, 10);
-};
-
-const rangeBounds = (range: RangeKey, timezone: string): { from?: string; to?: string } => {
+const rangeBounds = (range: RangeKey): { from?: string; to?: string } => {
   if (range === "all") return {};
-  const today = dateKeyInZone(new Date(), timezone);
-  const days = range === "30d" ? 30 : 7;
-  return {
-    from: zonedMidnight(shiftDateKey(today, -(days - 1)), timezone).toISOString(),
-    to: zonedMidnight(shiftDateKey(today, 1), timezone).toISOString()
-  };
+  const to = new Date();
+  to.setUTCHours(0, 0, 0, 0);
+  to.setUTCDate(to.getUTCDate() + 1);
+  const from = new Date(to);
+  from.setUTCDate(from.getUTCDate() - (range === "30d" ? 30 : 7));
+  return { from: from.toISOString(), to: to.toISOString() };
 };
 
 const queryString = (values: Record<string, string | undefined>): string => {
@@ -171,8 +135,6 @@ export const AgentUsagePage = () => {
   const agentId = searchParams.get("agentId") ?? "";
   const sessionId = searchParams.get("sessionId") ?? "";
   const range = (["7d", "30d", "all"].includes(searchParams.get("range") ?? "") ? searchParams.get("range") : "7d") as RangeKey;
-  const requestedTimezone = searchParams.get("timezone");
-  const timezone = useMemo(() => validTimezone(requestedTimezone), [requestedTimezone]);
   const requestedRuntimeKind = searchParams.get("runtimeKind") ?? "";
   const runtimeKind = requestedRuntimeKind === "claude-code" ? "claude_code" : requestedRuntimeKind;
   const dimension = (dimensions.includes(searchParams.get("dimension") as RankingDimension) ? searchParams.get("dimension") : "all") as RankingDimension;
@@ -211,7 +173,7 @@ export const AgentUsagePage = () => {
     const next = new URLSearchParams(searchParamsRef.current);
     if (value === "") next.delete(key); else next.set(key, value);
     if (resetOffset) next.delete("offset");
-    if (["agentId", "sessionId", "range", "runtimeKind", "timezone"].includes(key)) {
+    if (["agentId", "sessionId", "range", "runtimeKind"].includes(key)) {
       for (const page of ["sourcePage", "trendPage", "capturePage", "failurePage", "stageOffset"]) next.delete(page);
     }
     if (key === "dimension") next.delete("stageOffset");
@@ -235,15 +197,14 @@ export const AgentUsagePage = () => {
   }, [requestedRuntimeKind, searchParams, writeSearchParams]);
 
   const scopeQuery = useMemo(() => {
-    const bounds = rangeBounds(range, timezone);
+    const bounds = rangeBounds(range);
     return queryString({
       agentId: agentId || undefined,
       sessionId: sessionId || undefined,
-      timezone,
       runtimeKind: runtimeKind || undefined,
       ...bounds
     });
-  }, [agentId, range, runtimeKind, sessionId, timezone]);
+  }, [agentId, range, runtimeKind, sessionId]);
   const summaryQuery = `${scopeQuery}&capturePage=${capturePage}&failurePage=${failurePage}`;
   const trendQuery = `${scopeQuery}&limit=20&offset=${(trendPage - 1) * 20}`;
   const requestQuery = useMemo(() => [scopeQuery, queryString({ dimension, sort, stageOffset: String(stageOffset), offset: String(offset), limit: String(PAGE_SIZE) })]
@@ -419,7 +380,6 @@ export const AgentUsagePage = () => {
     && (ranking.items.length > 0 || (ranking.stages?.length ?? 0) > 0);
   const empty = summary !== null && ranking !== null && !hasModelEvidence && !hasCapabilityEvidence;
   const filteredEmpty = empty && (range !== "all" || agentId !== "" || sessionId !== "" || runtimeKind !== "");
-  const timezoneOptions = [...new Set([browserTimezone, "UTC", timezone])];
   const runtimeOptions = [...new Set(["codex", "claude_code", "hermes", runtimeKind].filter(Boolean))];
 
   return <PageContainer width="wide">
@@ -430,11 +390,10 @@ export const AgentUsagePage = () => {
     {summary === null ? null : <p className="mb-5 text-xs text-muted-foreground">{text("统计截至：", "Statistics as of: ")}{formatDate(summary.asOf)}
       {summary.stale ? text(" · 有新数据，可刷新统计", " · New data available; refresh statistics") : ""}</p>}
 
-    <Card className="mb-5"><CardHeader><CardTitle>{text("分析范围", "Analysis scope")}</CardTitle><CardDescription>{text("日期按所选时区的自然日换算；结束时间为下一日零点，不假设每天固定 24 小时。", "Dates use calendar boundaries in the selected timezone; the end is the next local midnight without assuming a fixed 24-hour day.")}</CardDescription></CardHeader><CardContent><FieldGroup className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-7">
+    <Card className="mb-5"><CardHeader><CardTitle>{text("分析范围", "Analysis scope")}</CardTitle><CardDescription>{text("日期统一按 UTC 自然日统计；结束时间为下一日零点。", "Dates use UTC calendar days; the end is the next midnight.")}</CardDescription></CardHeader><CardContent><FieldGroup className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-6">
       <Field><FieldLabel htmlFor="usage-agent">{text("智能体", "Agent")}</FieldLabel><PagedResourceSelect<Agent> key="usage-agent" endpoint="/agents" id="usage-agent" ariaLabel={text("智能体筛选", "Agent filter")} value={agentId} onValueChange={(value) => updateFilter("agentId", value)} emptyLabel={text("全部智能体", "All agents")} getOption={(agent) => ({ value: String(agent.id), label: agent.name })} /></Field>
       <Field><FieldLabel htmlFor="usage-session">{text("会话", "Session")}</FieldLabel><PagedResourceSelect<SessionListItem> key={`usage-session-${agentId}`} endpoint={agentId ? `/sessions?agentId=${agentId}` : "/sessions"} id="usage-session" ariaLabel={text("会话筛选", "Session filter")} value={sessionId} onValueChange={(value) => updateFilter("sessionId", value)} emptyLabel={text("全部会话", "All sessions")} getOption={(session) => ({ value: String(session.id), label: session.title })} /></Field>
       <Field><FieldLabel htmlFor="usage-range">{text("日期范围", "Date range")}</FieldLabel><NativeSelect id="usage-range" size="sm" value={range} onChange={(event) => updateFilter("range", event.target.value)}><NativeSelectOption value="7d">{text("最近 7 天", "Recent 7 days")}</NativeSelectOption><NativeSelectOption value="30d">{text("最近 30 天", "Recent 30 days")}</NativeSelectOption><NativeSelectOption value="all">{text("全部时间", "All time")}</NativeSelectOption></NativeSelect></Field>
-      <Field><FieldLabel htmlFor="usage-timezone">{text("时区", "Timezone")}</FieldLabel><NativeSelect id="usage-timezone" size="sm" value={timezone} onChange={(event) => updateFilter("timezone", event.target.value)}>{timezoneOptions.map((value) => <NativeSelectOption key={value} value={value}>{value}{value === browserTimezone ? text("（浏览器）", " (browser)") : ""}</NativeSelectOption>)}</NativeSelect></Field>
       <Field><FieldLabel htmlFor="usage-runtime">{text("运行时", "Runtime")}</FieldLabel><NativeSelect id="usage-runtime" size="sm" value={runtimeKind} onChange={(event) => updateFilter("runtimeKind", event.target.value)}><NativeSelectOption value="">{text("全部运行时", "All runtimes")}</NativeSelectOption>{runtimeOptions.map((value) => <NativeSelectOption key={value} value={value}>{value}</NativeSelectOption>)}</NativeSelect></Field>
       <Field><FieldLabel htmlFor="usage-dimension">{text("能力维度", "Capability dimension")}</FieldLabel><NativeSelect id="usage-dimension" size="sm" aria-label={text("能力维度", "Capability dimension")} value={dimension} onChange={(event) => updateFilter("dimension", event.target.value)}>{dimensions.map((value) => <NativeSelectOption key={value} value={value}>{dimensionLabel(value)}</NativeSelectOption>)}</NativeSelect></Field>
       <Field><FieldLabel htmlFor="usage-sort">{text("排序", "Sort")}</FieldLabel><NativeSelect id="usage-sort" size="sm" value={sort} onChange={(event) => updateFilter("sort", event.target.value)}>{sorts.map((value) => <NativeSelectOption key={value} value={value}>{sortLabel(value)}</NativeSelectOption>)}</NativeSelect></Field>
@@ -507,7 +466,7 @@ export const AgentUsagePage = () => {
           <TabsTrigger value="content" onClick={() => changeView("content")}>{text("观测内容", "Observed content")}</TabsTrigger>
         </TabsList>
         <TabsContent value={view}>
-      {ranking === null ? <Skeleton className="h-48" aria-label={text("正在加载排名", "Loading rankings")} /> : empty ? filteredEmpty
+      {ranking === null ? rankingError !== "" ? <EmptyState icon={TriangleAlert} title={text("排名暂时不可用", "Rankings are unavailable")} description={text("请求失败，请使用上方的重试按钮重新加载。", "The request failed. Use Retry above to load the rankings again.")} /> : <Skeleton className="h-48" aria-label={text("正在加载排名", "Loading rankings")} /> : empty ? filteredEmpty
         ? <EmptyState icon={SearchX} title={text("当前筛选没有记录", "No records match these filters")} description={text("已选范围内没有模型用量或能力活动；清除 Agent、会话、运行时与日期筛选可查看全部历史。", "The selected scope has no model usage or capability activity. Clear the Agent, Session, Runtime, and date filters to view all history.")} action={<Button type="button" variant="outline" onClick={clearDataFilters}>{text("清除筛选", "Clear filters")}</Button>} />
         : <EmptyState icon={SearchX} title={text("尚无用量记录", "No usage records yet")} description={text("受管会话会自动发现 Provider 日志，统计上报用量并重建累计输入占用。运行一次会话后即可查看分析。", "Managed sessions automatically discover provider transcripts, collect reported usage and reconstruct cumulative input. Run a session to see the analysis.")} action={<Button type="button" onClick={() => setGuideOpen(true)}>{text("查看接入方法", "View setup guide")}</Button>} />
         : <CapabilityTable stageOffset={stageOffset} onStagePageChange={(value) => updateFilter("stageOffset", String((value - 1) * 20), false)} view={view} ranking={ranking} estimate={estimate} dimensionLabel={dimensionLabel} onOpen={setSelectedCapability} />}

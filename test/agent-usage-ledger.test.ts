@@ -38,7 +38,7 @@ describe("usage ledger", () => {
     expect(identityReads).toBeLessThan(records.length * 50);
   });
 
-  it("reads the ledger once and reuses one calendar formatter for a timeseries query", () => {
+  it("reads the ledger once and uses UTC without constructing locale formatters", () => {
     const { store, binding } = setup();
     for (let index = 0; index < 200; index++) store.observe(binding, {
       ...accountingRequests()[0]!, eventId: `event-${index}`, coverageId: `request-${index}`, invocationId: `request-${index}`
@@ -49,10 +49,10 @@ describe("usage ledger", () => {
       return new DateTimeFormat(locales, options);
     });
     try {
-      const result = store.timeseries({}, "Asia/Singapore", "day");
+      const result = store.timeseries({}, "day");
       expect(result.items).toEqual([{ period: "2026-09-20", usage: expect.objectContaining({ totalTokens: 220_000 }), observedRanges: 200 }]);
       expect(records).toHaveBeenCalledTimes(1);
-      expect(formatter).toHaveBeenCalledTimes(1);
+      expect(formatter).not.toHaveBeenCalled();
     } finally {
       formatter.mockRestore();
     }

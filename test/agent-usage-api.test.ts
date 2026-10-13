@@ -274,25 +274,25 @@ describe("usage query API", () => {
     expect((await app.inject({ method: "GET", url: "/api/usage/context-evidence" })).statusCode).toBe(401);
   });
 
-  it("does not assign cumulative intervals across a requested boundary or local calendar day", async () => {
+  it("does not assign cumulative intervals across a requested boundary or UTC calendar day", async () => {
     const { app, manager, bindings } = await setup();
     const parsed = parseProviderLog("codex_log", providerFixture("codex-token-count.jsonl"));
     const base = parsed.at(-1)!.observation;
     manager.collector.store.observe(bindings.first, { ...base, eventId: "interval", scope: "interval",
-      occurredAt: "2026-09-21T16:01:00Z", intervalStart: "2026-09-21T15:59:00Z" });
-    const series = (await get(app, "/timeseries?timezone=Asia%2FSingapore")).json();
+      occurredAt: "2026-09-22T00:01:00Z", intervalStart: "2026-09-21T23:59:00Z" });
+    const series = (await get(app, "/timeseries")).json();
     expect(series.items).toEqual([]);
-    const partial = (await get(app, "/timeseries?timezone=Asia%2FSingapore&from=2026-09-21T16%3A00%3A00Z")).json();
+    const partial = (await get(app, "/timeseries?from=2026-09-22T00%3A00%3A00Z")).json();
     expect(partial.items).toEqual([]);
     expect(partial.unplacedUsage.totalTokens).toBe(70);
-    const summary = (await get(app, "/summary?timezone=Asia%2FSingapore&from=2026-09-21T16%3A00%3A00Z&to=2026-09-22T16%3A00%3A00Z")).json();
+    const summary = (await get(app, "/summary?from=2026-09-22T00%3A00%3A00Z&to=2026-09-23T00%3A00%3A00Z")).json();
     expect(summary).toMatchObject({ usage: { totalTokens: null }, unplacedUsage: { totalTokens: 70 }, completeness: "partial" });
     manager.collector.store.observe(bindings.first, { ...base, eventId: "parent", scope: "provider_session", intervalStart: undefined,
       coverageId: "parent", occurredAt: null, semantics: "cumulative", metrics: { totalTokens: 190 } });
-    const crossing = "/summary?timezone=Asia%2FSingapore&from=2026-09-21T16%3A00%3A00Z&to=2026-09-22T16%3A00%3A00Z&fresh=1";
+    const crossing = "/summary?from=2026-09-22T00%3A00%3A00Z&to=2026-09-23T00%3A00%3A00Z&fresh=1";
     expect((await get(app, crossing)).json().unplacedUsage.totalTokens).toBe(190);
     expect((await get(app, crossing.replace("summary", "timeseries"))).json().unplacedUsage.totalTokens).toBe(190);
-    expect((await get(app, "/summary?timezone=Asia%2FSingapore&from=2026-09-23T00%3A00%3A00Z")).json().unplacedUsage.totalTokens).toBe(120);
+    expect((await get(app, "/summary?from=2026-09-23T00%3A00%3A00Z")).json().unplacedUsage.totalTokens).toBe(120);
   });
 
   it("requires management authentication and rejects invalid filters", async () => {
@@ -301,7 +301,8 @@ describe("usage query API", () => {
     for (const path of [
       "/summary?unknown=value",
       "/summary?agentId=0",
-      "/summary?timezone=Mars%2FOlympus",
+      "/summary?timezone=UTC",
+      "/summary?timezone=Asia%2FSingapore",
       "/summary?from=2026-03-01T00%3A00%3A00Z&to=2026-03-01T00%3A00%3A00Z",
       "/capabilities?limit=0",
       "/invocations?origin=unknown",
@@ -370,13 +371,12 @@ describe("usage query API", () => {
     observe(manager, bindings.first, { id: "range", at: null, total: 500, scope: "provider_session" });
     observe(manager, bindings.first, { id: "before-dst", at: "2026-03-08T06:59:00Z", total: 100 });
     observe(manager, bindings.first, { id: "after-dst", at: "2026-03-08T07:01:00Z", total: 150 });
-    observe(manager, bindings.first, { id: "at-to", at: "2026-03-09T04:00:00Z", total: 50 });
-    const query = `?sessionId=${bindings.first.sessionId}&from=2026-03-08T05%3A00%3A00Z&to=2026-03-09T04%3A00%3A00Z&timezone=America%2FNew_York`;
+    observe(manager, bindings.first, { id: "at-to", at: "2026-03-09T00:00:00Z", total: 50 });
+    const query = `?sessionId=${bindings.first.sessionId}&from=2026-03-08T00%3A00%3A00Z&to=2026-03-09T00%3A00%3A00Z`;
 
     const summary = await get(app, `/summary${query}`);
     expect(summary.statusCode).toBe(200);
     expect(summary.json()).toMatchObject({
-      timezone: "America/New_York",
       bodyStatus: "not_retained",
       usage: { totalTokens: 250 },
       locatedUsage: { totalTokens: 250 },
@@ -399,13 +399,13 @@ describe("usage query API", () => {
     expect(summary.body).not.toContain("canonical_request_body");
   });
 
-  it("buckets IANA-local days, Monday weeks and months across calendar boundaries", async () => {
+  it("buckets UTC days, Monday weeks and months across calendar boundaries", async () => {
     const { app, manager, bindings } = await setup();
-    observe(manager, bindings.first, { id: "feb-local", at: "2026-03-01T04:30:00Z", total: 10 });
-    observe(manager, bindings.first, { id: "march-local", at: "2026-03-01T05:30:00Z", total: 20 });
+    observe(manager, bindings.first, { id: "feb-local", at: "2026-02-28T23:30:00Z", total: 10 });
+    observe(manager, bindings.first, { id: "march-local", at: "2026-03-01T00:30:00Z", total: 20 });
     observe(manager, bindings.first, { id: "dst-before", at: "2026-03-08T06:59:00Z", total: 30 });
     observe(manager, bindings.first, { id: "dst-after", at: "2026-03-08T07:01:00Z", total: 40 });
-    const base = `?sessionId=${bindings.first.sessionId}&timezone=America%2FNew_York`;
+    const base = `?sessionId=${bindings.first.sessionId}`;
 
     expect((await get(app, `/timeseries${base}&bucket=day`)).json().items.map((item: { period: string; usage: { totalTokens: number } }) =>
       [item.period, item.usage.totalTokens])).toEqual([

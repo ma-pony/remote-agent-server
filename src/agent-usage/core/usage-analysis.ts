@@ -1,3 +1,4 @@
+import { dayKey } from "./daily-time.js";
 import { metricNames, type UsageFilter, type UsageMetrics, type UsageRecord, type UsageSummary, type UsageTimeseries } from "./types.js";
 import { accountingRows, completeUsage, emptyUsage, intervalIntersects, intervalOverlapConflicts, isAccountable,
   isLocated, rangeConflicts, reconcileSources, sumUsage, UsageRangeIndex } from "./usage.js";
@@ -92,16 +93,13 @@ export class UsageAnalysis {
     };
   }
 
-  timeseries(filter: UsageFilter, timezone: string, bucket: "day" | "week" | "month"): UsageTimeseries {
+  timeseries(filter: UsageFilter, bucket: "day" | "week" | "month"): UsageTimeseries {
     const inPeriod = withinPeriod(filter);
-    const formatter = new Intl.DateTimeFormat("en-CA", { timeZone: timezone, year: "numeric", month: "2-digit", day: "2-digit" });
     const periodKey = (timestamp: string): string => {
-      const parts = formatter.formatToParts(new Date(timestamp));
-      const part = (kind: string) => parts.find((item) => item.type === kind)!.value;
-      const day = `${part("year")}-${part("month")}-${part("day")}`;
+      const day = dayKey(timestamp);
       if (bucket === "day") return day;
       if (bucket === "month") return day.slice(0, 7);
-      // Calendar arithmetic follows timezone conversion, including DST boundaries.
+      // Weeks start on Monday in the same UTC calendar as daily projections.
       const date = new Date(`${day}T00:00:00Z`);
       date.setUTCDate(date.getUTCDate() - (date.getUTCDay() + 6) % 7);
       return date.toISOString().slice(0, 10);

@@ -237,11 +237,37 @@ it("opens model-input evidence directly for system prompts without runtime obser
   expect(fetch.mock.calls.some(([url]) => String(url).includes("/usage/content-evidence?"))).toBe(false);
 });
 
-it("无效 URL 时区回退到浏览器时区，不使整页崩溃", async () => {
-  window.history.replaceState({}, "", "/usage?timezone=invalid-timezone");
+it("使用唯一 UTC 日期口径，不展示或传递时区筛选", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date("2026-10-12T20:30:00Z"));
+  try {
+    window.history.replaceState({}, "", "/usage?range=7d&timezone=Asia%2FSingapore");
+    mount();
+    expect(await screen.findByText("3,300")).toBeInTheDocument();
+    expect(screen.queryByLabelText("时区")).not.toBeInTheDocument();
+    const urls = vi.mocked(globalThis.fetch).mock.calls.map(([input]) => new URL(String(input), "http://localhost"))
+      .filter(url => ["/api/usage/summary", "/api/usage/timeseries", "/api/usage/capabilities"].includes(url.pathname));
+    expect(urls).toHaveLength(3);
+    for (const url of urls) {
+      expect(url.searchParams.has("timezone")).toBe(false);
+      expect(url.searchParams.get("from")).toBe("2026-10-06T00:00:00.000Z");
+      expect(url.searchParams.get("to")).toBe("2026-10-13T00:00:00.000Z");
+    }
+  } finally { vi.useRealTimers(); }
+});
+
+it("排名请求失败后退出加载占位并允许重试", async () => {
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input, init) => String(input).includes("/usage/capabilities")
+    ? response({ error: { code: "usage_query_timeout", message: "Usage analysis is temporarily unavailable" } }, 503)
+    : original(input, init));
   mount();
-  expect(await screen.findByText("3,300")).toBeInTheDocument();
-  expect(screen.getByLabelText("时区")).toHaveValue(Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC");
+  expect(await screen.findByText("用量分析加载失败")).toBeInTheDocument();
+  expect(screen.queryByLabelText("正在加载排名")).not.toBeInTheDocument();
+  fetch.mockImplementation(original);
+  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  expect(await screen.findByRole("button", { name: "查看 search 的调用" })).toBeInTheDocument();
+  expect(screen.queryByText("用量分析加载失败")).not.toBeInTheDocument();
 });
 
 it("切换排名排序只刷新排名，保留已经加载的汇总和趋势", async () => {
@@ -721,14 +747,14 @@ it("默认对照一次性内容与累计占用，仍可查看逐侧内容覆盖"
 });
 
 it("切换内容与上下文视图保留范围筛选并使用各自排序", async () => {
-  window.history.replaceState({}, "", "/usage?range=30d&agentId=1&sessionId=2&timezone=UTC&dimension=plugin&view=content");
+  window.history.replaceState({}, "", "/usage?range=30d&agentId=1&sessionId=2&dimension=plugin&view=content");
   mount(); await screen.findByText("362");
   fireEvent.click(screen.getByRole("tab", { name: "模型输入上下文" }));
   expect(await screen.findByRole("columnheader", { name: "重复结果" })).toBeInTheDocument();
   expect(screen.getByText("620")).toBeInTheDocument();
   expect(screen.getByLabelText("排序")).toHaveValue("totalInputTokens");
   const params = new URLSearchParams(window.location.search);
-  expect(Object.fromEntries(params)).toMatchObject({ view: "context", range: "30d", agentId: "1", sessionId: "2", timezone: "UTC", dimension: "plugin" });
+  expect(Object.fromEntries(params)).toMatchObject({ view: "context", range: "30d", agentId: "1", sessionId: "2", dimension: "plugin" });
   expect(vi.mocked(fetch).mock.calls.some(([input]) => {
     const url = new URL(String(input), "http://localhost");
     return url.pathname === "/api/usage/capabilities" && url.searchParams.get("sort") === "totalInputTokens"

@@ -57,7 +57,7 @@ try {
   // Mutable tuples match the internal worker protocol.
   const totals=()=>reader!.read({kind:totalQuery.kind,args:[...totalQuery.args]});
   const observed=()=>reader!.read({kind:observedQuery.kind,args:[...observedQuery.args]});
-  const overview=()=>reader!.read({kind:"overview",args:[filter,"UTC","day"]});
+  const overview=()=>reader!.read({kind:"overview",args:[filter,"day"]});
   const expectedTotal=totals(), expectedObserved=observed(), expectedOverview=overview();
   const detailed={rankingsInputMs:measure(totals),rankingsObservedMs:measure(observed),overviewMs:measure(overview)};
   while (attribution.backfillRankingInputs(5)) { /* Latest-first bounded migration. */ }

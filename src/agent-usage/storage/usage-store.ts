@@ -135,13 +135,13 @@ export class UsageStore {
     return this.analysis(filter).summary(filter);
   }
 
-  timeseries(filter: UsageFilter, timezone: string, bucket: "day" | "week" | "month"): UsageTimeseries {
-    return this.analysis(filter).timeseries(filter, timezone, bucket);
+  timeseries(filter: UsageFilter, bucket: "day" | "week" | "month" = "day"): UsageTimeseries {
+    return this.analysis(filter).timeseries(filter, bucket);
   }
 
-  overview(filter: UsageFilter, timezone: string, bucket: "day" | "week" | "month"): { summary: UsageSummary; timeseries: UsageTimeseries } {
+  overview(filter: UsageFilter, bucket: "day" | "week" | "month" = "day"): { summary: UsageSummary; timeseries: UsageTimeseries } {
     const analysis = this.analysis(filter);
-    return { summary: analysis.summary(filter), timeseries: analysis.timeseries(filter, timezone, bucket) };
+    return { summary: analysis.summary(filter), timeseries: analysis.timeseries(filter, bucket) };
   }
 
   private analysis(filter: UsageFilter): UsageAnalysis {

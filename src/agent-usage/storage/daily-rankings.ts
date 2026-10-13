@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { UsageFilter } from "../core/types.js";
-import { dailyBounds, dayStart, localDay, shiftDay } from "../core/daily-time.js";
+import { dailyBounds, dayStart, dayKey, shiftDay } from "../core/daily-time.js";
 import { runtimeContentTokenSql } from "../runtime-content-evidence.js";
 
 type Sql = { sql: string; params: Array<string | number> };
@@ -21,43 +21,68 @@ const numeric = new Set(["estimate_id", "byte_length", "token_count", "exposure_
 /** Rebuild only changed Session/day partitions, off-thread; readers never consume stale partitions. */
 export class DailyRankingStore {
   constructor(private readonly db: Database.Database) {
-    db.function("usage_local_day", { deterministic: true }, (time: string | null, zone: string) => localDay(time, zone));
-    db.function("usage_day_start", { deterministic: true }, (day: string, zone: string) => day ? dayStart(day, zone) : null);
-    db.function("usage_day_end", { deterministic: true }, (day: string, zone: string) => day ? dayStart(shiftDay(day, 1), zone) : null);
+    db.function("usage_day", { deterministic: true }, dayKey);
+    db.function("usage_day_start", { deterministic: true }, (day: string) => day ? dayStart(day) : null);
+    db.function("usage_day_end", { deterministic: true }, (day: string) => day ? dayStart(shiftDay(day, 1)) : null);
     if (db.readonly) return;
-    db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_ranking_timezones (
-      timezone TEXT PRIMARY KEY, context_cursor INTEGER NOT NULL DEFAULT 0, content_cursor INTEGER NOT NULL DEFAULT 0,
-      context_complete INTEGER NOT NULL DEFAULT 0, content_complete INTEGER NOT NULL DEFAULT 0);
-      CREATE TABLE IF NOT EXISTS agent_usage_ranking_days (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, timezone TEXT NOT NULL, namespace TEXT NOT NULL, agent_id TEXT NOT NULL,
+    db.transaction(() => {
+      db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_ranking_discovery (
+        id INTEGER PRIMARY KEY CHECK(id=1), context_cursor INTEGER NOT NULL DEFAULT 0, content_cursor INTEGER NOT NULL DEFAULT 0,
+        context_complete INTEGER NOT NULL DEFAULT 0, content_complete INTEGER NOT NULL DEFAULT 0);
+        INSERT OR IGNORE INTO agent_usage_ranking_discovery(id) VALUES(1)`);
+      const migrated = this.migrateCalendars();
+      db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_ranking_days (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, namespace TEXT NOT NULL, agent_id TEXT NOT NULL,
         session_id TEXT NOT NULL, day TEXT NOT NULL, from_at TEXT, to_at TEXT, revision INTEGER NOT NULL DEFAULT 1,
-        ready INTEGER NOT NULL DEFAULT 0, UNIQUE(timezone,namespace,agent_id,session_id,day));
-      CREATE INDEX IF NOT EXISTS agent_usage_ranking_days_time ON agent_usage_ranking_days(timezone,day,namespace);
-      CREATE INDEX IF NOT EXISTS agent_usage_ranking_days_session ON agent_usage_ranking_days(namespace,session_id);
-      CREATE INDEX IF NOT EXISTS agent_usage_ranking_days_pending ON agent_usage_ranking_days(id) WHERE ready=0`);
-    for (const [kind, columns] of Object.entries(projections)) {
-      // Cluster each partition by capability/category, so page detail queries read only selected keys.
-      const key = kind === "content" ? "category" : "capability_key";
-      db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_ranking_${kind} (
-        partition_id INTEGER NOT NULL,ordinal INTEGER NOT NULL,
-        ${columns.map(column => `${column} ${numeric.has(column) ? "INTEGER" : "TEXT"}`).join(",")},
-        PRIMARY KEY(partition_id,${key},ordinal)) WITHOUT ROWID`);
-    }
-    this.ensureTimezone("UTC");
-    this.track("agent_usage_contexts", "UPDATE OF revision,occurred_at,runtime_kind,model,coverage,history_complete,ranking_inputs_ready,namespace,agent_id,session_id");
-    this.attachContent();
+        ready INTEGER NOT NULL DEFAULT 0, UNIQUE(namespace,agent_id,session_id,day));
+        CREATE INDEX IF NOT EXISTS agent_usage_ranking_days_time ON agent_usage_ranking_days(namespace,day);
+        CREATE INDEX IF NOT EXISTS agent_usage_ranking_days_session ON agent_usage_ranking_days(namespace,session_id);
+        CREATE INDEX IF NOT EXISTS agent_usage_ranking_days_pending ON agent_usage_ranking_days(id) WHERE ready=0`);
+      for (const [kind, columns] of Object.entries(projections)) {
+        // Cluster each partition by capability/category, so page detail queries read only selected keys.
+        const key = kind === "content" ? "category" : "capability_key";
+        db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_ranking_${kind} (
+          partition_id INTEGER NOT NULL,ordinal INTEGER NOT NULL,
+          ${columns.map(column => `${column} ${numeric.has(column) ? "INTEGER" : "TEXT"}`).join(",")},
+          PRIMARY KEY(partition_id,${key},ordinal)) WITHOUT ROWID`);
+      }
+      this.track("agent_usage_contexts", "UPDATE OF revision,occurred_at,runtime_kind,model,coverage,history_complete,ranking_inputs_ready,namespace,agent_id,session_id");
+      // Replacing legacy triggers must not restart the preserved UTC discovery cursor.
+      if (migrated && this.hasContent()) this.track("agent_usage_conversation_content", "UPDATE");
+      this.attachContent();
+    })();
   }
 
-  ensureTimezone(timezone: string): boolean {
-    // Route validation already checks IANA names; direct callers get the same validation.
-    localDay("2000-01-01T00:00:00Z", timezone);
-    return this.db.prepare("INSERT OR IGNORE INTO agent_usage_ranking_timezones(timezone) VALUES(?)").run(timezone).changes > 0;
+  /** Preserve UTC identities, completed aggregates and cursors in one retryable migration. */
+  private migrateCalendars(): boolean {
+    const columns = this.db.prepare("PRAGMA table_info(agent_usage_ranking_days)").all() as Array<{ name: string }>;
+    if (!columns.some(column => column.name === "timezone")) return false;
+    const sequence = (this.db.prepare("SELECT seq FROM sqlite_sequence WHERE name='agent_usage_ranking_days'").get() as { seq: number } | undefined)?.seq ?? 0;
+    for (const table of ["agent_usage_contexts", "agent_usage_conversation_content"]) {
+      for (const event of ["insert", "update", "delete"]) this.db.exec(`DROP TRIGGER IF EXISTS ${table}_daily_${event}`);
+    }
+    for (const kind of Object.keys(projections)) this.db.exec(`DELETE FROM agent_usage_ranking_${kind}
+      WHERE partition_id IN (SELECT id FROM agent_usage_ranking_days WHERE timezone!='UTC')`);
+    this.db.exec(`CREATE TABLE agent_usage_ranking_days_single (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, namespace TEXT NOT NULL, agent_id TEXT NOT NULL,
+      session_id TEXT NOT NULL, day TEXT NOT NULL, from_at TEXT, to_at TEXT, revision INTEGER NOT NULL DEFAULT 1,
+      ready INTEGER NOT NULL DEFAULT 0, UNIQUE(namespace,agent_id,session_id,day));
+      INSERT INTO agent_usage_ranking_days_single SELECT id,namespace,agent_id,session_id,day,from_at,to_at,revision,ready
+        FROM agent_usage_ranking_days WHERE timezone='UTC';
+      DROP TABLE agent_usage_ranking_days;
+      ALTER TABLE agent_usage_ranking_days_single RENAME TO agent_usage_ranking_days;
+      INSERT OR REPLACE INTO agent_usage_ranking_discovery SELECT 1,context_cursor,content_cursor,context_complete,content_complete
+        FROM agent_usage_ranking_timezones WHERE timezone='UTC';
+      DROP TABLE agent_usage_ranking_timezones;`);
+    if (!this.db.prepare("UPDATE sqlite_sequence SET seq=MAX(seq,?) WHERE name='agent_usage_ranking_days'").run(sequence).changes)
+      this.db.prepare("INSERT INTO sqlite_sequence(name,seq) VALUES('agent_usage_ranking_days',?)").run(sequence);
+    return true;
   }
 
   attachContent(): void {
     if (this.db.readonly || !this.hasContent()) return;
     const installed = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='agent_usage_conversation_content_daily_insert'").get();
-    if (!installed) this.db.prepare("UPDATE agent_usage_ranking_timezones SET content_complete=0").run();
+    if (!installed) this.db.prepare("UPDATE agent_usage_ranking_discovery SET content_complete=0").run();
     this.track("agent_usage_conversation_content", "UPDATE");
   }
 
@@ -66,12 +91,10 @@ export class DailyRankingStore {
   }
 
   private track(table: string, update: string): void {
-    const invalidate = (row: string) => `INSERT INTO agent_usage_ranking_days(timezone,namespace,agent_id,session_id,day,from_at,to_at)
-      SELECT timezone,${row}.namespace,${row}.agent_id,${row}.session_id,usage_local_day(${row}.occurred_at,timezone),
-        usage_day_start(usage_local_day(${row}.occurred_at,timezone),timezone),
-        usage_day_end(usage_local_day(${row}.occurred_at,timezone),timezone)
-      FROM agent_usage_ranking_timezones WHERE 1
-      ON CONFLICT(timezone,namespace,agent_id,session_id,day) DO UPDATE SET revision=revision+1,ready=0;`;
+    const invalidate = (row: string) => `INSERT INTO agent_usage_ranking_days(namespace,agent_id,session_id,day,from_at,to_at)
+      VALUES(${row}.namespace,${row}.agent_id,${row}.session_id,usage_day(${row}.occurred_at),
+        usage_day_start(usage_day(${row}.occurred_at)),usage_day_end(usage_day(${row}.occurred_at)))
+      ON CONFLICT(namespace,agent_id,session_id,day) DO UPDATE SET revision=revision+1,ready=0;`;
     for (const [event, suffix, rows] of [["INSERT", "insert", ["NEW"]], [update, "update", ["OLD", "NEW"]],
       ["DELETE", "delete", ["OLD"]]] as const) {
       this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${table}_daily_${suffix} AFTER ${event} ON ${table}
@@ -82,30 +105,30 @@ export class DailyRankingStore {
   /** Startup discovers metadata in bounded rowid batches, never aggregates historical bodies. */
   discover(limit = 500): boolean {
     return this.db.transaction(() => {
-      const zone = this.db.prepare(`SELECT timezone,context_cursor,content_cursor,context_complete,content_complete FROM agent_usage_ranking_timezones
-        WHERE context_complete=0 OR content_complete=0 ORDER BY timezone LIMIT 1`).get() as
-        { timezone: string; context_cursor: number; content_cursor: number; context_complete: number; content_complete: number } | undefined;
-      if (!zone) return false;
+      const progress = this.db.prepare(`SELECT context_cursor,content_cursor,context_complete,content_complete FROM agent_usage_ranking_discovery
+        WHERE context_complete=0 OR content_complete=0`).get() as
+        { context_cursor: number; content_cursor: number; context_complete: number; content_complete: number } | undefined;
+      if (!progress) return false;
       const insert = this.db.prepare(`INSERT OR IGNORE INTO agent_usage_ranking_days
-        (timezone,namespace,agent_id,session_id,day,from_at,to_at) VALUES(?,?,?,?,?,?,?)`);
+        (namespace,agent_id,session_id,day,from_at,to_at) VALUES(?,?,?,?,?,?)`);
       for (const [kind, table] of [["context", "agent_usage_contexts"], ["content", "agent_usage_conversation_content"]] as const) {
-        if (zone[`${kind}_complete`]) continue;
+        if (progress[`${kind}_complete`]) continue;
         const rows = kind === "content" && !this.hasContent() ? [] : this.db.prepare(`SELECT rowid,namespace,agent_id,session_id,occurred_at
-          FROM ${table} WHERE rowid>? ORDER BY rowid LIMIT ?`).all(zone[`${kind}_cursor`], limit) as DiscoveryRow[];
+          FROM ${table} WHERE rowid>? ORDER BY rowid LIMIT ?`).all(progress[`${kind}_cursor`], limit) as DiscoveryRow[];
         for (const row of rows) {
-          const day = localDay(row.occurred_at, zone.timezone);
-          insert.run(zone.timezone, row.namespace, row.agent_id, row.session_id, day,
-            day ? dayStart(day, zone.timezone) : null, day ? dayStart(shiftDay(day, 1), zone.timezone) : null);
+          const day = dayKey(row.occurred_at);
+          insert.run(row.namespace, row.agent_id, row.session_id, day,
+            day ? dayStart(day) : null, day ? dayStart(shiftDay(day, 1)) : null);
         }
-        this.db.prepare(`UPDATE agent_usage_ranking_timezones SET ${kind}_cursor=?,${kind}_complete=? WHERE timezone=?`)
-          .run(rows.at(-1)?.rowid ?? zone[`${kind}_cursor`], Number(rows.length < limit), zone.timezone);
+        this.db.prepare(`UPDATE agent_usage_ranking_discovery SET ${kind}_cursor=?,${kind}_complete=? WHERE id=1`)
+          .run(rows.at(-1)?.rowid ?? progress[`${kind}_cursor`], Number(rows.length < limit));
       }
-      return Boolean(this.db.prepare("SELECT 1 FROM agent_usage_ranking_timezones WHERE context_complete=0 OR content_complete=0 LIMIT 1").get());
+      return Boolean(this.db.prepare("SELECT 1 FROM agent_usage_ranking_discovery WHERE context_complete=0 OR content_complete=0").get());
     })();
   }
 
   pending(): boolean {
-    return Boolean(this.db.prepare("SELECT 1 FROM agent_usage_ranking_timezones WHERE context_complete=0 OR content_complete=0 LIMIT 1").get()
+    return Boolean(this.db.prepare("SELECT 1 FROM agent_usage_ranking_discovery WHERE context_complete=0 OR content_complete=0").get()
       || this.db.prepare("SELECT 1 FROM agent_usage_ranking_days WHERE ready=0 LIMIT 1").get());
   }
 
@@ -177,16 +200,16 @@ export class DailyRankingStore {
 
   /** Partial-day internal queries retain their original path; management queries normalize to days. */
   private scope(filter: UsageFilter): Sql | undefined {
-    const timezone = filter.timezone ?? "UTC", normalized = dailyBounds(filter.from, filter.to, timezone);
+    const normalized = dailyBounds(filter.from, filter.to);
     if (filter.from !== undefined && normalized.from !== filter.from
       || filter.to !== undefined && normalized.to !== filter.to) return;
-    const zone = this.db.prepare("SELECT context_complete,content_complete FROM agent_usage_ranking_timezones WHERE timezone=?")
-      .get(timezone) as { context_complete: number; content_complete: number } | undefined;
-    if (!zone?.context_complete || !zone.content_complete) return;
-    const clauses = ["j.timezone=?"], params: string[] = [timezone];
+    const progress = this.db.prepare("SELECT context_complete,content_complete FROM agent_usage_ranking_discovery WHERE id=1")
+      .get() as { context_complete: number; content_complete: number };
+    if (!progress.context_complete || !progress.content_complete) return;
+    const clauses = ["1"], params: string[] = [];
     for (const [field, column] of dimensions) if (filter[field] !== undefined) { clauses.push(`j.${column}=?`); params.push(filter[field]); }
-    if (filter.from !== undefined) { clauses.push("j.day>=?"); params.push(localDay(filter.from, timezone)); }
-    if (filter.to !== undefined) { clauses.push("j.day<?"); params.push(localDay(filter.to, timezone)); }
+    if (filter.from !== undefined) { clauses.push("j.day>=?"); params.push(dayKey(filter.from)); }
+    if (filter.to !== undefined) { clauses.push("j.day<?"); params.push(dayKey(filter.to)); }
     if (filter.from !== undefined || filter.to !== undefined) clauses.push("j.day!=''");
     return { sql: clauses.join(" AND "), params };
   }

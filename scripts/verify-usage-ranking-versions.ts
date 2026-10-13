@@ -62,12 +62,8 @@ try {
   }
   const warm=()=>{while(actual.dailyRankings.discover(7)){}let job;while((job=actual.dailyRankings.nextJob()))
     assert.equal(actual.dailyRankings.commit(actual.dailyRankings.project(job)),true)};
-  for(const timezone of ['Asia/Singapore','America/New_York','Asia/Kathmandu']) {
-    actual.dailyRankings.ensureTimezone(timezone);
-    filters.push({namespace:'fixture',timezone});
-  }
-  filters.push({namespace:'fixture',timezone:'Asia/Singapore',from:'2026-10-05T16:00:00.000Z',to:'2026-10-12T16:00:00.000Z'},
-    {namespace:'fixture',timezone:'UTC',from:'2026-10-06T00:00:00.000Z',to:'2026-10-12T00:00:00.000Z',runtimeKind:'claude_code'});
+  filters.push({namespace:'fixture',from:'2026-10-06T00:00:00.000Z',to:'2026-10-13T00:00:00.000Z'},
+    {namespace:'fixture',from:'2026-10-06T00:00:00.000Z',to:'2026-10-12T00:00:00.000Z',runtimeKind:'claude_code'});
   verify('compact');
   warm();verify('daily');
   db.exec('UPDATE agent_usage_contexts SET ranking_inputs_ready=0');verify('detailed');

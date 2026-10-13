@@ -11,9 +11,6 @@ import { UsageQueryWorker, UsageQueryWorkerError } from "./query-worker.js";
 const querySchema = z.object({
   agentId: z.string().regex(/^[1-9]\d*$/).optional(), sessionId: z.string().regex(/^[1-9]\d*$/).optional(),
   from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional(),
-  timezone: z.string().default("UTC").refine((value) => {
-    try { new Intl.DateTimeFormat("en", { timeZone: value }); return true; } catch { return false; }
-  }),
   runtimeKind: z.string().min(1).max(100).optional(), subagents: z.literal("self").default("self"),
   dimension: z.enum(["all", ...capabilityKinds]).default("all"),
   sort: z.enum(["observedTotalTokens", "observedArgumentTokens", "observedResultTokens", "totalInputTokens", "inputBytes", "calls", "definitionInputTokens", "argumentInputTokens", "firstResultInputTokens", "repeatedResultInputTokens", "failures", "latencyMsP95"]).default("observedTotalTokens"),
@@ -72,8 +69,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       const query = parsed.data;
       const maxAgeMs = query.fresh ? 0 : 30_000;
       const filter: UsageFilter = { namespace, agentId: query.agentId, sessionId: query.sessionId,
-        ...dailyBounds(query.from, query.to, query.timezone), timezone: query.timezone, runtimeKind: query.runtimeKind };
-      if (endpoint === "capabilities") collector.prepareDailyRankings(query.timezone);
+        ...dailyBounds(query.from, query.to), runtimeKind: query.runtimeKind };
       const revision = cache.revision();
       const status = cache.get(`status:${JSON.stringify(filter)}`, () => ({
         sourceCounts: collector.sources.sourceStatusCounts(namespace, filter),
@@ -97,13 +93,13 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       const metadata = { collectionFailures, collectionFailureTotal: failurePage.total,
         retryableCollectionFailureTotal: status.retryableCollectionFailureTotal, sourceRecoveryCounts: status.sourceRecoveryCounts,
         captureHealth, captureHealthTotal: capturePage?.total ?? 0, captureHealthCounts,
-        contentBackfill, revision, asOf: new Date().toISOString(), timezone: query.timezone, from: filter.from ?? null, to: filter.to ?? null,
+        contentBackfill, revision, asOf: new Date().toISOString(), from: filter.from ?? null, to: filter.to ?? null,
         subagents: "self", timeBasis: "source_timestamp", bodyStatus: "not_retained",
         analysisStatus: sourceCounts.collecting || contentBackfill.status === "pending" || contentBackfill.status === "running" ? "collecting"
           : capturePartial || contentBackfill.status === "failed" || failurePage.total > 0 || sourceCounts.failed ? "partial" : "ready" };
       if (endpoint === "summary") {
-        const snapshot = await cache.getAsync(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
-          () => reader.readSnapshot("overviewWithContext", [filter, query.timezone, query.bucket]),maxAgeMs,query.fresh);
+        const snapshot = await cache.getAsync(`totals:${JSON.stringify([filter, query.bucket])}`,
+          () => reader.readSnapshot("overviewWithContext", [filter, query.bucket]),maxAgeMs,query.fresh);
         const { summary, contextAnalysis } = snapshot.value;
         const hasCapabilityEvidence = collector.attribution.hasEvidence(filter);
         return { ...metadata, ...summary, revision: snapshot.revision, asOf: snapshot.asOf,
@@ -114,8 +110,8 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
             && contentBackfill.status === "completed" && !hasCapabilityEvidence ? "empty" : metadata.analysisStatus };
       }
       if (endpoint === "timeseries") {
-        const snapshot = await cache.getAsync(`totals:${JSON.stringify([filter, query.timezone, query.bucket])}`,
-          () => reader.readSnapshot("overviewWithContext", [filter, query.timezone, query.bucket]),maxAgeMs,query.fresh);
+        const snapshot = await cache.getAsync(`totals:${JSON.stringify([filter, query.bucket])}`,
+          () => reader.readSnapshot("overviewWithContext", [filter, query.bucket]),maxAgeMs,query.fresh);
         const series = snapshot.value.timeseries;
         return { ...metadata, ...series, revision: snapshot.revision, asOf: snapshot.asOf,
           stale: snapshot.revision !== cache.revision(), total: series.items.length, items: series.items.slice(query.offset, query.offset + query.limit) };

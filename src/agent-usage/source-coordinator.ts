@@ -165,7 +165,9 @@ export class UsageSourceCoordinator {
         for await (const entry of adapter.collect(input, source.checkpoint, boundary, controller.signal, rebuild)) {
           controller.signal.throwIfAborted();
           pending.push(entry);
-          if (!entry.observation || pending.length >= COLLECTION_YIELD_INTERVAL || Date.now() - lastFlush >= 1000) {
+          // A reconstructed request is a durable resume point. Persist it before the
+          // adapter starts parsing/tokenizing another potentially slow transcript record.
+          if (!entry.observation || entry.context || pending.length >= COLLECTION_YIELD_INTERVAL || Date.now() - lastFlush >= 1000) {
             await flush(); await yieldToEventLoop(); controller.signal.throwIfAborted();
           }
         }

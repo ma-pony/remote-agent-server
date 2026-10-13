@@ -40,6 +40,7 @@ export class HostUsageCollector {
   private lastBackfillAt: string | null = null;
   private nextBackfillCheckAt = 0;
   private nextContextTotalsCheckAt = 0;
+  private nextSourceRetryAt = 0;
   private projectionReader?: UsageQueryWorker;
   private lastAccountingJob?: AccountingProjectionJob;
   private compactedEventPayloads = 0;
@@ -273,6 +274,7 @@ export class HostUsageCollector {
   }
 
   private queueRecovery(initial: boolean): void {
+    this.nextSourceRetryAt = performance.now() + 30_000;
     const sessions = this.eligibleSessions(initial);
     const managedIds = new Set(sessions.map(({ id }) => String(id)));
     this.recoveryQueue.push(...sessions.map(({ id }) => () => this.harvestSession(id)));
@@ -300,13 +302,6 @@ export class HostUsageCollector {
 
   private lastDailyRankingJob = 0;
 
-  prepareDailyRankings(timezone: string): void {
-    if (this.attribution.dailyRankings.ensureTimezone(timezone) && !this.recoveryWork) {
-      clearTimeout(this.recoveryTimer);
-      this.scheduleRecovery(0);
-    }
-  }
-
   private async recoveryBatch(): Promise<void> {
     const started = performance.now();
     try {
@@ -333,11 +328,14 @@ export class HostUsageCollector {
       const rankingInputsPending = this.attribution.backfillRankingInputs(5);
       const dailyDiscoveryPending = this.attribution.dailyRankings.discover();
       this.setRecoveryPhase("sources");
+      // Source retries have their own deadline; historical projection work may never become idle.
+      if (this.recoveryQueue.length === 0 && performance.now() >= this.nextSourceRetryAt) this.queueRecovery(false);
       const deadline = performance.now() + 25;
       let admitted = 0;
       while (!this.recoveryStopped && this.recoveryQueue.length > 0 && admitted++ < 100 && performance.now() < deadline) {
         const work = this.recoveryQueue.shift()!;
         await work().catch(() => undefined);
+        if (this.recoveryQueue.length === 0) this.nextSourceRetryAt = performance.now() + 30_000;
       }
       if (this.recoveryStopped) return;
       const projectionJob = this.store.nextAccountingProjection(this.lastAccountingJob);
@@ -365,10 +363,7 @@ export class HostUsageCollector {
       // Yield real idle time, not just an event-loop turn. Large individual records can still
       // exceed the soft work budget; the worker keeps their tokenization off the main thread.
       if (this.recoveryQueue.length > 0 || contentPending || contextTotalsPending || rankingInputsPending || projectionJob || dailyDiscoveryPending || dailyJob) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
-      else {
-        this.queueRecovery(false);
-        this.scheduleRecovery(30_000);
-      }
+      else this.scheduleRecovery(Math.max(50, this.nextSourceRetryAt - performance.now()));
     } finally {
       if (!this.recoveryStopped) this.setRecoveryPhase("idle");
     }

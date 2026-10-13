@@ -32,6 +32,13 @@ const warm = (daily: DailyRankingStore) => {
   while ((job = daily.nextJob())) expect(daily.commit(daily.project(job))).toBe(true);
 };
 
+const sourceRankings = (attribution: AttributionStore, ...args: Parameters<AttributionStore["rankingsPage"]>) => {
+  const inputs = vi.spyOn(attribution.dailyRankings, "inputs").mockReturnValue(undefined);
+  const content = vi.spyOn(attribution.dailyRankings, "content").mockReturnValue(undefined);
+  try { return attribution.rankingsPage(...args); }
+  finally { inputs.mockRestore(); content.mockRestore(); }
+};
+
 it("reads a completed day's input totals without evaluating source token rows", async () => {
   const { db, attribution, binding, daily } = setup();
   for (let index = 0; index < 8; index++) await attribution.upsertContext(binding, context(String(index), "2026-10-10T12:00:00Z"));
@@ -51,16 +58,13 @@ it("reads a completed day's input totals without evaluating source token rows", 
   expect(reads).toBe(0);
 });
 
-it("rounds management ranges to local days and preserves 23/25-hour DST days", () => {
-  expect(dailyBounds("2026-10-10T03:00:00Z", "2026-10-11T04:00:00Z", "Asia/Singapore"))
-    .toEqual({ from: "2026-10-09T16:00:00.000Z", to: "2026-10-11T16:00:00.000Z" });
-  expect(dailyBounds("2026-10-09T16:00:00Z", "2026-10-10T16:00:00Z", "Asia/Singapore"))
-    .toEqual({ from: "2026-10-09T16:00:00.000Z", to: "2026-10-10T16:00:00.000Z" });
-  const duration = (from: string, to: string) => (Date.parse(dayStart(to, "America/New_York")) - Date.parse(dayStart(from, "America/New_York"))) / 3_600_000;
-  expect(duration("2026-03-08", "2026-03-09")).toBe(23);
-  expect(duration("2026-11-01", "2026-11-02")).toBe(25);
-  expect(dayStart("2018-11-04", "America/Sao_Paulo")).toBe("2018-11-04T03:00:00.000Z");
-  expect(dayStart("2011-12-30", "Pacific/Apia")).toBe("2011-12-30T10:00:00.000Z");
+it("rounds all management ranges to UTC days regardless of timestamp offsets", () => {
+  expect(dailyBounds("2026-10-10T03:00:00+08:00", "2026-10-11T04:00:00+08:00"))
+    .toEqual({ from: "2026-10-09T00:00:00.000Z", to: "2026-10-11T00:00:00.000Z" });
+  expect(dailyBounds("2026-10-10T00:00:00Z", "2026-10-11T00:00:00Z"))
+    .toEqual({ from: "2026-10-10T00:00:00.000Z", to: "2026-10-11T00:00:00.000Z" });
+  expect(dayStart("2026-03-08")).toBe("2026-03-08T00:00:00.000Z");
+  expect(dayStart("2026-11-01")).toBe("2026-11-01T00:00:00.000Z");
 });
 
 it("merges clean days with live dirty days, rejects stale commits and rebuilds only affected Sessions", async () => {
@@ -75,7 +79,7 @@ it("merges clean days with live dirty days, rejects stale commits and rebuilds o
     for (const runtimeKind of [undefined, "codex", "claude_code"]) {
       const filter = { namespace: "test", runtimeKind, from: "2026-10-11T00:00:00.000Z" };
       expect(attribution.rankingsPage(filter, "all", options))
-        .toEqual(attribution.rankingsPage({ ...filter, timezone: "Etc/UTC" }, "all", options));
+        .toEqual(sourceRankings(attribution, filter, "all", options));
     }
   };
   check();
@@ -108,7 +112,7 @@ it("keeps null, zero, content-only, legacy estimate and missing-timestamp semant
   const filters = [{ namespace: "test" }, { namespace: "test", from: "2026-10-10T00:00:00.000Z", to: "2026-10-12T00:00:00.000Z" }];
   const check = () => {
     for (const filter of filters) expect(attribution.rankingsPage(filter, "all", options))
-      .toEqual(attribution.rankingsPage({ ...filter, timezone: "Etc/UTC" }, "all", options));
+      .toEqual(sourceRankings(attribution, filter, "all", options));
   };
   warm(daily); check();
   content.compactEstimates(1, ["event"]);
@@ -121,23 +125,21 @@ it("keeps null, zero, content-only, legacy estimate and missing-timestamp semant
   expect(attribution.rankings({ namespace: "test" }, "assistant_output")).toEqual([]);
 });
 
-it("resumes bounded historical discovery after restart and safely registers a new timezone", async () => {
+it("resumes the single bounded historical discovery after restart", async () => {
   const { db, attribution, binding, daily } = setup();
   for (let index = 0; index < 5; index++) await attribution.upsertContext(binding,
     context(String(index), `2026-10-${10 + index}T23:00:00.000Z`));
   // Upgrade an existing database that has never tracked daily partitions.
   for (const suffix of ["insert", "update", "delete"]) db.exec(`DROP TRIGGER agent_usage_contexts_daily_${suffix}`);
-  db.exec("DROP TABLE agent_usage_ranking_days; DROP TABLE agent_usage_ranking_timezones");
+  db.exec("DROP TABLE agent_usage_ranking_days; DROP TABLE agent_usage_ranking_discovery");
   const upgraded = new DailyRankingStore(db);
   expect(upgraded.discover(1)).toBe(true);
-  const cursor = db.prepare("SELECT context_cursor FROM agent_usage_ranking_timezones").get();
+  const cursor = db.prepare("SELECT context_cursor FROM agent_usage_ranking_discovery").get();
   const reopened = new DailyRankingStore(db);
-  expect(db.prepare("SELECT context_cursor FROM agent_usage_ranking_timezones").get()).toEqual(cursor);
+  expect(db.prepare("SELECT context_cursor FROM agent_usage_ranking_discovery").get()).toEqual(cursor);
   warm(reopened);
-  expect(reopened.ensureTimezone("Asia/Kathmandu")).toBe(true);
-  expect(reopened.ensureTimezone("Asia/Kathmandu")).toBe(false);
-  expect(reopened.discover(1)).toBe(true);
-  const filter = { namespace: "test", timezone: "Asia/Kathmandu", from: "2026-10-10T18:15:00.000Z", to: "2026-10-12T18:15:00.000Z" };
+  expect(reopened.discover(1)).toBe(false);
+  const filter = { namespace: "test", from: "2026-10-10T00:00:00.000Z", to: "2026-10-12T00:00:00.000Z" };
   const expected = attribution.rankingsPage(filter, "all", options);
   await attribution.upsertContext(binding, context("new", "2026-10-11T12:00:00.000Z"));
   const live = attribution.rankingsPage(filter, "all", options);
@@ -222,30 +224,23 @@ it("rolls back all projection tables when a partition commit is interrupted", as
   expect(db.prepare("SELECT COUNT(*) AS n FROM agent_usage_ranking_inputs").get()).toEqual({ n: 0 });
 });
 
-it("keeps both occurrences of a repeated midnight in the same daily partition", async () => {
+it("uses the same UTC midnight boundaries for input and content partitions", async () => {
   const { db, store, attribution, binding, daily } = setup();
   new RuntimeConversationCollector(store, attribution, "test");
-  const timezone = "Asia/Amman";
-  daily.ensureTimezone(timezone);
-  // This is the first 00:30 on a day whose 00:00-00:59 occurs twice.
-  await attribution.upsertContext(binding, context("first-midnight", "2021-10-28T21:30:00.000Z"));
+  await attribution.upsertContext(binding, context("first-midnight", "2021-10-28T23:30:00.000Z"));
   const estimate = context("fixture", null).blocks[0]!.measured!.estimate;
   db.prepare(`INSERT INTO agent_usage_conversation_content
     (namespace,agent_id,session_id,run_id,event_key,category,occurred_at,runtime_kind,tokens,bytes,partial,estimate_json,estimate_id)
-    VALUES('test','agent','session',1,'event','assistant_output','2021-10-28T21:30:00.000Z','codex',7,7,0,'',?)`)
+    VALUES('test','agent','session',1,'event','assistant_output','2021-10-28T23:30:00.000Z','codex',7,7,0,'',?)`)
     .run(attribution.tokenEstimateId(estimate));
-  const filters = [{ namespace: "test", timezone }, { namespace: "test", timezone,
-    from: "2021-10-28T21:00:00.000Z", to: "2021-10-29T22:00:00.000Z" }];
+  const filters = [{ namespace: "test" }, { namespace: "test",
+    from: "2021-10-28T00:00:00.000Z", to: "2021-10-29T00:00:00.000Z" }];
   const expected = filters.map(filter => attribution.rankingsPage(filter, "all", options));
   expect(expected[0].total).toBe(2);
   warm(daily);
   for (const [index, filter] of filters.entries()) expect(attribution.rankingsPage(filter, "all", options)).toEqual(expected[index]);
-  expect(dayStart("2021-10-29", timezone)).toBe("2021-10-28T21:00:00.000Z");
-  expect(dailyBounds("2021-10-28T22:30:00.000Z", "2021-10-29T22:00:00.000Z", timezone))
-    .toEqual({ from: "2021-10-28T21:00:00.000Z", to: "2021-10-29T22:00:00.000Z" });
-  expect(dayStart("2026-11-01", "America/Havana")).toBe("2026-11-01T04:00:00.000Z");
-  await attribution.upsertContext(binding, context("second-midnight", "2021-10-28T22:30:00.000Z"));
-  const revised = filters.map(filter => attribution.rankingsPage({ ...filter, timezone: "Etc/UTC" }, "all", options));
+  await attribution.upsertContext(binding, context("second-midnight", "2021-10-29T00:30:00.000Z"));
+  const revised = filters.map(filter => sourceRankings(attribution, filter, "all", options));
   for (const [index, filter] of filters.entries()) expect(attribution.rankingsPage(filter, "all", options)).toEqual(revised[index]);
   warm(daily);
   for (const [index, filter] of filters.entries()) expect(attribution.rankingsPage(filter, "all", options)).toEqual(revised[index]);
@@ -266,7 +261,7 @@ it.each(["dated", "missing-time"])("does not read off-page coverage from dirty %
   const filter = { namespace: "test", ...(time === "dated"
     ? { from: "2026-10-10T00:00:00.000Z", to: "2026-10-11T00:00:00.000Z" } : {}) };
   const pageOptions = { ...options, limit: 1 };
-  const expected = attribution.rankingsPage({ ...filter, timezone: "Etc/UTC" }, "all", pageOptions);
+  const expected = sourceRankings(attribution, filter, "all", pageOptions);
   expect(expected.items[0]).toMatchObject({ capability: { id: "read" }, contextCoverage: { partial: 1 } });
   let reads = 0;
   db.function("required_coverage", (id: string, coverage: string) => {

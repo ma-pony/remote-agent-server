@@ -72,7 +72,6 @@ try {
   })();
   const rollupStarted = performance.now();
   const pagesBefore = Number(db.pragma("page_count", { simple: true }));
-  attribution.dailyRankings.ensureTimezone("Asia/Singapore");
   while (attribution.dailyRankings.discover(2000)) {}
   let projectedDays = 0, dailyJob;
   while ((dailyJob = attribution.dailyRankings.nextJob())) {
@@ -118,10 +117,10 @@ try {
     connection.pragma("query_only=ON"); connection.pragma("cache_size=-8192");
     readers.push({ db: connection, attribution: new Store(new UsageStore(connection)) });
   }
-  const filter = { namespace: "benchmark", timezone: "Asia/Singapore", from: "2026-10-05T16:00:00.000Z", to: "2026-10-12T16:00:00.000Z" };
+  const filter = { namespace: "benchmark", from: "2026-10-06T00:00:00.000Z", to: "2026-10-13T00:00:00.000Z" };
   for (const [name, scope, sort] of [
     ["week-input", filter, "totalInputTokens"],
-    ["day-input", { ...filter, from: "2026-10-11T16:00:00.000Z" }, "totalInputTokens"],
+    ["day-input", { ...filter, from: "2026-10-12T00:00:00.000Z" }, "totalInputTokens"],
     ["week-observed", filter, "observedTotalTokens"]
   ] as const) {
     const read = (version: number) => readers[version]!.attribution.rankingsPage(scope, "all", { sort, limit: 50, offset: 0 });

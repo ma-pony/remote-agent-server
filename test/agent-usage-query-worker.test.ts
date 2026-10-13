@@ -55,8 +55,8 @@ it("redacts SQL errors while allowing another supported query to continue", asyn
   db.exec("DROP TABLE agent_usage_invocation_payloads");
   await expect(worker.read("rankings", [{ namespace: host.namespace }, "all", options]))
     .rejects.toMatchObject({ code: "usage_query_failed", message: "usage_query_failed" });
-  const expected = host.store.overview({ namespace: host.namespace }, "UTC", "day");
-  expect(await worker.read("overview", [{ namespace: host.namespace }, "UTC", "day"]))
+  const expected = host.store.overview({ namespace: host.namespace }, "day");
+  expect(await worker.read("overview", [{ namespace: host.namespace }, "day"]))
     .toEqual({ ...expected, summary: { ...expected.summary, asOf: expect.any(String) } });
 });
 
@@ -84,10 +84,10 @@ it("waits for a timed-out worker to exit before replacing it or completing shutd
   const post = vi.spyOn(Worker.prototype,"postMessage").mockImplementation(() => undefined);
   const worker = new UsageQueryWorker(host,100);
   try {
-    const first = worker.read("overview",[{namespace:host.namespace},"UTC","day"]).catch(error => error.code);
+    const first = worker.read("overview",[{namespace:host.namespace},"day"]).catch(error => error.code);
     await vi.advanceTimersByTimeAsync(100);
     expect(await first).toBe("usage_query_timeout");
-    const second = worker.read("overview",[{namespace:host.namespace},"UTC","day"]).catch(error => error.code);
+    const second = worker.read("overview",[{namespace:host.namespace},"day"]).catch(error => error.code);
     let closed = false;
     const closing = worker.close().then(() => { closed = true; });
     await Promise.resolve();

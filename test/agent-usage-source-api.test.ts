@@ -16,10 +16,11 @@ import { ProviderExtensionProjector } from "../src/runtime/provider-extension-pr
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 const headers = { authorization: "Bearer test-token" };
-const setup = async (usageTokenizers = [fixtureTokenizerConfig()]) => {
+const setup = async (usageTokenizers = [fixtureTokenizerConfig()], fileBacked = false) => {
   const root = await mkdtemp(join(tmpdir(), "usage-api-"));
-  const { db, seed } = createTestDatabase(); const session = seed.session();
-  const config = loadConfig({ USAGE_TOKENIZERS: JSON.stringify(usageTokenizers), API_TOKEN: "test-token", DATA_DIR: root, DATABASE_PATH: ":memory:",
+  const databasePath = fileBacked ? join(root, "usage.sqlite") : ":memory:";
+  const { db, seed } = createTestDatabase(databasePath); const session = seed.session();
+  const config = loadConfig({ USAGE_TOKENIZERS: JSON.stringify(usageTokenizers), API_TOKEN: "test-token", DATA_DIR: root, DATABASE_PATH: databasePath,
     PROJECT_ENVIRONMENTS_ROOT: join(root, "environments"), SESSIONS_ROOT: join(root, "sessions"),
     SESSION_RETENTION_HOURS: "0", USAGE_IMPORT_ROOTS: JSON.stringify({ fixtures: root }) });
   await copyFile("test/fixtures/agent-usage/provider-logs/codex-token-count.jsonl", join(root, "codex.jsonl"));
@@ -35,6 +36,71 @@ const setup = async (usageTokenizers = [fixtureTokenizerConfig()]) => {
 const register = (app: FastifyInstance, payload: unknown) => app.inject({ method: "POST", url: "/api/usage/sources", headers, payload });
 
 describe("usage source management API", () => {
+  it("loads usage and model context through query Workers after a transcript timeout and resumed collection", async () => {
+    const { app, root, manager, registration, session } = await setup([fixtureTokenizerConfig()], true);
+    await manager.collector.stopRecovery();
+    const records = [
+      { type: "session_meta", payload: { id: "codex-session-1" } },
+      { type: "turn_context", payload: { model: "gpt-4.1", turn_id: "turn" } },
+      ...["hello world", "blocked-record"].flatMap((text, index) => [
+        { type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } },
+        { type: "event_msg", payload: { type: "token_count", info: {
+          total_token_usage: { input_tokens: (index + 1) * 100, output_tokens: (index + 1) * 10, total_tokens: (index + 1) * 110 },
+          last_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 }
+        } } }
+      ])
+    ];
+    await writeFile(join(root, "codex.jsonl"), records.map((record, index) => JSON.stringify({ ...record,
+      timestamp: new Date(Date.parse("2026-09-21T01:00:00Z") + index * 1000).toISOString() })).join("\n") + "\n");
+    const registered = await register(app, registration);
+    expect(registered.statusCode).toBe(201);
+    const sourceId = registered.json().id as string;
+    const source = () => manager.collector.sources.listSources(manager.collector.namespace, { id: sourceId })[0]!;
+    const collect = () => app.inject({ method: "POST", url: `/api/usage/sources/${sourceId}/collect`, headers });
+    const query = `sessionId=${session.id}&from=2026-09-21T00:00:00Z&to=2026-09-22T00:00:00Z&fresh=1`;
+    const get = async (endpoint: string, extra = "") => {
+      const response = await app.inject({ url: `/api/usage/${endpoint}?${query}${extra}`, headers });
+      expect(response.statusCode).toBe(200);
+      return response.json();
+    };
+    let started!: () => void;
+    const blocked = new Promise<void>(resolve => { started = resolve; });
+    const measure = manager.collector.attribution.measureContent.bind(manager.collector.attribution);
+    const delayed = vi.spyOn(manager.collector.attribution, "measureContent").mockImplementation(async (text, part, model, signal) => {
+      if (text === "blocked-record") {
+        started();
+        await new Promise<never>((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }));
+      }
+      return measure(text, part, model, signal);
+    });
+    try {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      expect((await collect()).statusCode).toBe(202);
+      await blocked;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(source()).toMatchObject({ status: "failed", errorCode: "usage_collection_timeout", checkpoint: expect.any(String) });
+      vi.useRealTimers();
+      delayed.mockRestore();
+      const firstTokens = (await measure("hello world", "result", "gpt-4.1"))!.tokens!;
+      const totalInputTokens = firstTokens * 2 + (await measure("blocked-record", "result", "gpt-4.1"))!.tokens!;
+      expect(await get("summary")).toMatchObject({ usage: { totalTokens: 110 }, contextAnalysis: { requests: 1, reconstructedRequests: 1 } });
+      const partial = await get("capabilities", "&dimension=user_prompt&sort=totalInputTokens");
+      expect(partial.items).toHaveLength(1);
+      expect(partial.items[0].totalInputTokens).toBe(firstTokens);
+
+      expect((await collect()).statusCode).toBe(202);
+      await vi.waitFor(() => expect(source().status).toBe("completed"));
+      expect(await get("summary")).toMatchObject({ usage: { totalTokens: 220 },
+        contextAnalysis: { requests: 2, reconstructedRequests: 2, reportedInputTokens: 200, estimatedInputTokens: totalInputTokens } });
+      expect((await get("timeseries")).items).toEqual([expect.objectContaining({ usage: expect.objectContaining({ totalTokens: 220 }) })]);
+      for (const sort of ["totalInputTokens", "observedTotalTokens"]) {
+        const ranking = await get("capabilities", `&dimension=user_prompt&sort=${sort}`);
+        expect(ranking.items).toHaveLength(1);
+        expect(ranking.items[0].totalInputTokens).toBe(totalInputTokens);
+      }
+    } finally { delayed.mockRestore(); vi.useRealTimers(); }
+  });
+
   it("does not register a managed source after cleanup discovery times out", async () => {
     const { db, root, manager, session } = await setup();
     await manager.collector.stopRecovery();

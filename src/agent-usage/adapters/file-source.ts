@@ -106,7 +106,9 @@ export class FileUsageSource implements UsageSourceAdapter {
           yield { ...entries[index]!, checkpoint: lastCheckpoint };
         }
         cursor = end; line++; skip = 0; unterminated = !record.terminated;
-        if (!entries.length && line % 100 === 0) {
+        // A request can emit counters after its context. Flush those counters and the
+        // completed parser state before tokenizing the next record.
+        if ((!entries.length && line % 100 === 0) || (entries.some(entry => entry.context) && !entries.at(-1)?.context)) {
           lastCheckpoint = JSON.stringify({ ...boundary, version, offset: cursor, line, state: after, index: 0, unterminated } satisfies Checkpoint);
           yield { checkpoint: lastCheckpoint };
         }

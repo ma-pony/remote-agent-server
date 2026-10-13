@@ -47,7 +47,7 @@ it("preserves accounting across projection, date filters, cumulative parents and
   for (const observation of accountingRequests()) store.observe(binding, observation);
   const filters = [{ namespace: "test" }, { namespace: "test", runtimeKind: "codex" },
     { namespace: "test", from: "2026-09-20T00:00:00Z", to: "2026-09-21T00:00:00Z" }];
-  const expected = filters.map(filter => store.overview(filter, "Asia/Singapore", "day"));
+  const expected = filters.map(filter => store.overview(filter, "day"));
   let job = store.nextAccountingProjection();
   while (job) { store.commitAccountingProjection(store.projectEpoch(job)); job = store.nextAccountingProjection(); }
   const prepare = db.prepare.bind(db);
@@ -55,7 +55,7 @@ it("preserves accounting across projection, date filters, cumulative parents and
     if (sql.includes("FROM agent_usage_ledger")) throw new Error("Overview reloaded the ledger");
     return prepare(sql);
   });
-  for (const [index, filter] of filters.entries()) expect(store.overview(filter, "Asia/Singapore", "day"))
+  for (const [index, filter] of filters.entries()) expect(store.overview(filter, "day"))
     .toEqual({ ...expected[index], summary: { ...expected[index]!.summary, asOf: expect.any(String) } });
 });
 

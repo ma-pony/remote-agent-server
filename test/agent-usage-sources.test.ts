@@ -3,9 +3,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UsageStore } from "../src/agent-usage/storage/usage-store.js";
 import { UsageSourceCoordinator, type UsageSourceAdapter } from "../src/agent-usage/source-coordinator.js";
 import { accountingRequests } from "./fixtures/agent-usage/accounting.js";
+import { AttributionStore } from "../src/agent-usage/storage/attribution-store.js";
+import type { ModelContextInput } from "../src/agent-usage/core/context-types.js";
 
 const databases: Database.Database[] = [];
-afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); for (const db of databases.splice(0)) db.close(); });
 const setup = (adapter: UsageSourceAdapter) => {
   const db = new Database(":memory:"); databases.push(db);
   const store = new UsageStore(db);
@@ -27,6 +29,44 @@ const adapter = (): UsageSourceAdapter => ({
 });
 
 describe("usage source coordinator", () => {
+  it("preserves a completed context before the next transcript record times out and resumes without duplication", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let blocked = true;
+    const context = (index: number): ModelContextInput => ({ invocationId: `request-${index + 1}`, providerEpochId: "epoch-1", sourceId: "fixture",
+      revision: 1, occurredAt: accountingRequests()[index]!.occurredAt, runtimeKind: "codex", model: null, coverage: "partial", historyComplete: true,
+      blocks: [{ position: 0, kind: "user_message", content: { identity: `message-${index}`, modality: "text", text: "" },
+        capabilities: [{ capability: { kind: "user_prompt", id: "user_prompt", name: "User prompt" }, evidence: "inferred" }],
+        measured: { tokens: 5, byteLength: 20, partial: false, estimate: { measurement: "estimated", method: "text_heuristic",
+          model: null, modelProvider: null, tokenizer: null, tokenizerVersion: null, encoding: null, tokenizerId: null, tokenizerRevision: null, reason: "model_missing" } } }] });
+    const slow = adapter();
+    slow.collect = async function* (_input, checkpoint, _boundary, signal) {
+      for (let index = Number(checkpoint ?? 0); index < 2; index++) {
+        if (index === 1 && blocked) {
+          await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+          signal.throwIfAborted();
+        }
+        yield { sourceSessionKey: "capture-1", observation: accountingRequests()[index]!, context: context(index), checkpoint: String(index + 1) };
+      }
+    };
+    const { store, config } = setup(slow), attribution = new AttributionStore(store);
+    const coordinator = new UsageSourceCoordinator(store, { fixture: slow }, 30_000, attribution);
+    const source = coordinator.registerSource(config);
+    try {
+      const collecting = coordinator.collect(source.id).catch(error => error.code);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await collecting).toBe("usage_collection_timeout");
+      expect(coordinator.listSources("test")[0]).toMatchObject({ checkpoint: "1", status: "failed" });
+      expect(store.summary().usage.totalTokens).toBe(1100);
+      expect(attribution.contextSummary({}).requests).toBe(1);
+      blocked = false;
+      await coordinator.collect(source.id);
+      expect(coordinator.listSources("test")[0]).toMatchObject({ checkpoint: "2", status: "completed" });
+      expect(store.summary().usage.totalTokens).toBe(2650);
+      expect(attribution.contextSummary({}).requests).toBe(2);
+      expect(attribution.rankings({}, "user_prompt")[0]?.totalInputTokens).toBe(10);
+    } finally { await coordinator.close(); await attribution.close(); }
+  });
+
   it("clears replay state only after all mappings are revoked and keeps revocation identities", async () => {
     const { db,coordinator,config } = setup(adapter());
     const source = coordinator.registerSource(config);

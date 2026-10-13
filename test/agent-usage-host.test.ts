@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { HostUsageCollector } from "../src/agent-usage/host-collector.js";
 import { createTestDatabase } from "./helpers.js";
 import { accountingRequests } from "./fixtures/agent-usage/accounting.js";
+import { UsageError } from "../src/agent-usage/core/errors.js";
 
 const databases: Array<ReturnType<typeof createTestDatabase>["db"]> = [];
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); for (const db of databases.splice(0)) db.close(); });
@@ -14,6 +15,32 @@ const setup = () => {
 };
 
 describe("host usage integration", () => {
+  it.each(["managed", "registered"])("retries a timed-out %s source while historical backfill stays pending", async kind => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+    const { db, session } = setup();
+    if (kind === "managed") db.prepare("UPDATE sessions SET provider_session_id='native' WHERE id=?").run(session.id);
+    const freeze = vi.fn().mockRejectedValueOnce(new UsageError("usage_collection_timeout")).mockResolvedValue("1");
+    const host = new HostUsageCollector(db, { fixture: {
+      describe: () => ({ usage: "model_request", context: "none", identity: "explicit", version: "1" }), freeze,
+      async *collect() { yield { sourceSessionKey: "fixture", observation: accountingRequests()[0]!, checkpoint: "1" }; }
+    } });
+    const source = host.sources.registerSource({ namespace: host.namespace, sourceKey: "fixture", kind: "fixture", inputRef: {},
+      mappings: [{ sourceSessionKey: "fixture", agentId: host.binding(session.id).agentId, sessionId: String(session.id), providerEpochId: host.epoch(session.id) }] });
+    if (kind === "registered") db.prepare("UPDATE agent_usage_sources SET status='failed' WHERE id=?").run(source.id);
+    vi.spyOn(host.contentBackfill, "step").mockResolvedValue(true);
+    host.startRecovery();
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(host.sources.listSources(host.namespace, { id: source.id })[0]).toMatchObject({ status: "failed", errorCode: "usage_collection_timeout" });
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(freeze).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(51);
+      expect(freeze).toHaveBeenCalledTimes(2);
+      expect(host.sources.listSources(host.namespace, { id: source.id })[0]).toMatchObject({ status: "completed", checkpoint: "1" });
+      expect(host.store.summary({ namespace: host.namespace }).usage.totalTokens).toBe(1100);
+    } finally { await host.stopRecovery(); }
+  });
+
   it("leaves idle time between background batches proportional to their work", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const { host } = setup();
@@ -406,22 +433,6 @@ describe("host usage integration", () => {
     expect(() => host.binding(session.id)).toThrow("usage_subject_deleted");
     expect(host.store.summary({ namespace: host.namespace }).usage.totalTokens).toBeNull();
   });
-});
-
-it("registers requested timezones without starting concurrent recovery batches", async () => {
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-  const { host } = setup();
-  let finish!: () => void;
-  const gate = new Promise<void>(resolve => { finish = resolve; });
-  const step = vi.spyOn(host.contentBackfill, "step").mockImplementation(async () => { await gate; return false; });
-  host.startRecovery();
-  try {
-    await vi.advanceTimersByTimeAsync(0);
-    host.prepareDailyRankings("Asia/Singapore");
-    host.prepareDailyRankings("America/New_York");
-    await vi.advanceTimersByTimeAsync(100);
-    expect(step).toHaveBeenCalledTimes(1);
-  } finally { finish(); await host.stopRecovery(); }
 });
 
 it("deletes persisted daily aggregates with the Session and rejects in-flight projection results", async () => {

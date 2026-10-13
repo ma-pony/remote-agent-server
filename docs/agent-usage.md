@@ -30,6 +30,8 @@
 
 重建状态不保存消息正文；每条新消息计量后合并为能力／类型／词表／首次状态分组，每个边界保存分组快照，而不是复制完整历史。来源游标与投影同事务提交，升级到 transcript/2 时按文件重新分析一次，之后断点续做；文件中没有的新信息不会凭空补齐。新 Run 的 MCP 定义配置可用于重算；同一 Session 配置未改变时复用已有快照。旧 Run 缺少的定义不使用当前配置冒充历史。
 
+单次来源采集仍限时 30 秒。完成请求上下文后立即提交计数与续采位置；同一行随后产生的上报计数也在读取下一行前提交。后续解析或分词超时只中止未完成工作，已提交数据可立即查询。后台来源队列完成一轮后冷却 30 秒，再在后续恢复批次安排可重试来源，不依赖历史事件或统计投影全部回填完成；已清理会话的缺口不自动重试。
+
 这些数值用于优化能力占用。日志没有完整呈现服务端实际上下文，因此重建统一标注为“会话重建估算”，不是精确账单；不按总输入比例给工具强行分摊差额。
 
 ## 如何读报表
@@ -48,15 +50,15 @@
 
 来源列表使用 `page`／`pageSize`（默认 20，最大 100）；排名和日期趋势使用 `limit`／`offset`；调用、内容观测与模型输入证据列表使用游标；详情暴露使用 `limit`／`offset` 和 `exposureTotal`。`capturePage`／`failurePage` 控制每页 20 条的采集健康／失败记录，完整数量及状态计数独立返回；`stageOffset` 控制阶段证据页。分页不会把当前页小计当成整体用量。
 
-汇总、排名、趋势和来源各自加载展示；汇总慢或失败时，其他已加载区域仍可使用。排名先只计算所选排序指标并分页，再获取当页能力的完整指标。相同主体、日期、时区和分桶的汇总与趋势共享一次账本读取。查询结果缓存最多 32 项，序列化大小合计最多 4 MiB，单项超过 512 KiB 不缓存；只保留无正文的统计投影，不保留原始会话或整份账本。相关计数变化后按下文的快照期限与 `fresh=1` 规则刷新。
+汇总、排名、趋势和来源各自加载展示；汇总慢或失败时，其他已加载区域仍可使用。排名先只计算所选排序指标并分页，再获取当页能力的完整指标。相同主体、日期和分桶的汇总与趋势共享一次账本读取。查询结果缓存最多 32 项，序列化大小合计最多 4 MiB，单项超过 512 KiB 不缓存；只保留无正文的统计投影，不保留原始会话或整份账本。相关计数变化后按下文的快照期限与 `fresh=1` 规则刷新。
 
-能力排名进一步按所选时区的自然日和 Session 增量预聚合输入计数、去重 coverage 及对话内容计数。已完成的日期直接读取可索引的汇总列；排序先读取所需指标并分页，再读取当页能力的完整指标与估算来源。迟到数据、修订或删除仅使受影响分区失效，后台重建期间实时读取这些分区，避免使用旧聚合。跨天调用去重及 P50/P95 继续按原始调用计算，不相加每日去重数或百分位数。管理查询的 `from` 向所在自然日开始取整，非日界线的 `to` 向下一日开始取整，已对齐的 `to` 保持排他上界；以请求的 IANA `timezone` 为准，响应返回实际范围。
+能力排名按固定 UTC 自然日和 Session 维护唯一一份增量汇总，包含输入计数、去重 coverage 及对话内容计数。已完成的日期直接读取可索引的汇总列；排序先读取所需指标并分页，再读取当页能力的完整指标与估算来源。迟到数据、修订或删除仅使受影响分区失效，后台重建期间实时读取这些分区，避免使用旧聚合。跨天调用去重及 P50/P95 继续按原始调用计算，不相加每日去重数或百分位数。管理查询的 `from` 向 UTC 日初取整，非日界线的 `to` 向下一日开始取整，已对齐的 `to` 保持排他上界；响应返回实际范围。管理页面不再提供时区筛选，API 不再接受或返回 `timezone`。
 
 `GET /api/usage/status` 使用相同的管理鉴权及主体、日期、Runtime 筛选，返回 `revision`、`sourceCounts`、失败／采集计数和 `contentBackfill`，不执行模型总量或排名查询。`revision` 是不透明的统计变更标记，不能解释为新增 Token 数；普通运行 events 和采集 checkpoint 不改变它。另返回不受筛选影响的 `recovery`、`eventRetention`：`accountingProjectionPending`、`rankingInputProjectionPending`、`dailyRankingProjectionPending` 表示对应统计投影的回填尚未完成；`eventPayloadCompactionPending`、`exposureIdentityCompactionPending` 表示旧副本清理尚未到达升级时的主键上界。`compactedEventPayloads`、`compactedExposureIdentities`、`reclaimedEstimateProfiles`、`compactedRevokedSources` 是本进程已处理数，重启后清零，不表示数据库剩余总量。原事件清理的 `checkedRuns`、`retiredEvents`、跳过原因与耗时仍按进程记录。后台恢复时页面轮询轻量状态，采集完成后刷新统计，隐藏页面暂停轮询。
 
 - `usage` 是当前筛选范围内可计量的已知部分；同时看 `completeness`、缺失请求数与来源状态。它不证明未观察到的调用为零。
 - `sourceCounts` 包含保留的历史来源状态，`sourceRecoveryCounts` 只统计仍有 active 映射的来源。`collectionFailureTotal` 包含清理后的缺口，`retryableCollectionFailureTotal` 只统计未清理会话的失败；这些数量覆盖全部分页。失败条目的 `retryable` 标识能否自动补采，页面不会将已清理的缺口显示为等待重试，也不会仅因这些缺口继续轮询。
-- 缓存读取／写入属于输入子集，不重复相加。Codex 连续累计记录的可信差额可形成时间区间；当 last_token_usage 与累计增量一致时，首请求和跨日请求可按该报告的完成时间归位；其他初始基线、跨日区间或倒退计数不强行分摊。日期筛选要求完整区间落入范围，按所选时区分桶时也不能跨桶。未定位部分单列，不使用导入日期。
+- 缓存读取／写入属于输入子集，不重复相加。Codex 连续累计记录的可信差额可形成时间区间；当 last_token_usage 与累计增量一致时，首请求和跨日请求可按该报告的完成时间归位；其他初始基线、跨日区间或倒退计数不强行分摊。日期筛选要求完整区间落入范围，按 UTC 日／周／月分桶时也不能跨桶。未定位部分单列，不使用导入日期。
 - `calls` 只计实际执行，按工具开始时间筛选；若只保留完成事件，使用其结束时间筛选，开始时间和耗时仍未知。`observedArgumentTokens`、`observedResultTokens`、`observedTotalTokens` 为观测到的输入、返回及合计文本估算，默认按合计排序；内容维度分别归入输入或返回，工具维度分别对应参数或结果。`observedArgumentCalls`／`observedResultCalls` 只表示有数值的工具调用数，不保证全部模态都已计量。`payloadEstimates` 保留估算来源，详情中的 `partial` 标明媒体缺口或历史采样。`contextOnlyCalls` 按关联模型请求时间筛选，不加入实际调用数；Skill／插件标签、仅定义等暴露通过模型请求输入证据查看，不为其虚构调用记录。
 - 首次／重复根据 Session 和 Provider epoch 的完整已知历史分类；选择另一日期不会把重复输入重新算作首次。采集前历史不完整时，首次状态保留未知。
 - 不同 Server 的同名 Tool 分开。模型输入证据与包装进程的执行 ID 无法关联时分别展示，不能只凭内容或时间认定为同一次调用。
@@ -209,7 +211,7 @@ Provider 文件也可显式登记 `codex_log` 或 `claude_log`。使用授权导
 
 ## 查询和维护
 
-共同筛选为 `agentId/sessionId/from/to/timezone/runtimeKind`。日期采用 `[from,to)`，时区为 IANA；时间趋势支持 day/week/month。首版只支持已映射主体的 `subagents=self`，不自动扫描或推断 Provider 内部子 Agent 树。
+共同筛选为 `agentId/sessionId/from/to/runtimeKind`。日期统一按 UTC 自然日统计，采用 `[from,to)`；不接受 `timezone` 参数。时间趋势支持 day/week/month，周从周一开始。首版只支持已映射主体的 `subagents=self`，不自动扫描或推断 Provider 内部子 Agent 树。
 
 能力维度为 `mcp_tool/builtin_tool/cli/skill/plugin/hook/unknown`，另含细分提示词与对话维度。排名支持 `limit`（1–200）、`offset` 以及调用数、定义输入、参数输入、结果首次／重复输入、累计输入贡献、失败数、P95 耗时排序。调用列表使用 `cursor`；`origin=counted` 与 `execution` 只看实际执行，`context` 只看输入证据。不同 origin 不相加。
 
