@@ -25,9 +25,15 @@ it("ranks prompts, conversations and tools together without inventing tool calls
   await content("user_prompt", 999, "other", "other");
   attribution.observeInvocation(binding, { invocationId: "tool", providerEpochId: "epoch", executionId: "run", capability: { kind: "cli", id: "build", name: "Build" }, startedAt: "2026-09-22T01:00:00.000Z", endedAt: null, status: "running", sourceId: "runtime", revision: 1, rawResultBytes: null, argumentEstimate: { ...await measureToolContent("args", "arguments")!, tokens: 20 } });
   const filter = { namespace: "test", sessionId: "session", agentId: "agent", runtimeKind: undefined };
-  const prepare = vi.spyOn(db, "prepare");
+  db.function("required_profile", (category: string, estimate: string) => {
+    if (!["assistant_output", "user_prompt"].includes(category)) throw new Error("Loaded off-page content profile");
+    return estimate;
+  });
+  const prepare = db.prepare.bind(db);
+  const selective = vi.spyOn(db, "prepare").mockImplementation(sql => prepare(sql.replaceAll(
+    "c.estimate_json AS legacy_estimate_json", "required_profile(c.category,c.estimate_json) AS legacy_estimate_json")));
   const page = attribution.rankingsPage(filter, "all", { sort: "observedTotalTokens", limit: 2, offset: 0 });
-  expect(prepare.mock.calls.filter(([sql]) => sql.includes("FROM agent_usage_conversation_content"))).toHaveLength(1);
+  selective.mockRestore();
   expect(page).toMatchObject({ total: 5, items: [
     { capability: { kind: "assistant_output", id: "assistant_output" }, observedResultTokens: 90, observedArgumentTokens: null, calls: 0, contentObservations: 2, observedResultCalls: 0, totalInputTokens: null },
     { capability: { kind: "user_prompt", id: "user_prompt" }, observedArgumentTokens: 60, calls: 0, contentObservations: 1, observedArgumentCalls: 0 }

@@ -4,6 +4,7 @@ import type { HostUsageCollector } from "./host-collector.js";
 import { capabilityKinds, type AttributionRankRow } from "./core/context-types.js";
 import type { UsageFilter } from "./core/types.js";
 import { getRuntimeContentEvidence, listRuntimeContentEvidence } from "./runtime-content-evidence.js";
+import { dailyBounds } from "./core/daily-time.js";
 import { UsageQueryCache } from "./query-cache.js";
 import { UsageQueryWorker, UsageQueryWorkerError } from "./query-worker.js";
 
@@ -71,8 +72,8 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       const query = parsed.data;
       const maxAgeMs = query.fresh ? 0 : 30_000;
       const filter: UsageFilter = { namespace, agentId: query.agentId, sessionId: query.sessionId,
-        from: query.from === undefined ? undefined : new Date(query.from).toISOString(),
-        to: query.to === undefined ? undefined : new Date(query.to).toISOString(), runtimeKind: query.runtimeKind };
+        ...dailyBounds(query.from, query.to, query.timezone), timezone: query.timezone, runtimeKind: query.runtimeKind };
+      if (endpoint === "capabilities") collector.prepareDailyRankings(query.timezone);
       const revision = cache.revision();
       const status = cache.get(`status:${JSON.stringify(filter)}`, () => ({
         sourceCounts: collector.sources.sourceStatusCounts(namespace, filter),
@@ -96,7 +97,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       const metadata = { collectionFailures, collectionFailureTotal: failurePage.total,
         retryableCollectionFailureTotal: status.retryableCollectionFailureTotal, sourceRecoveryCounts: status.sourceRecoveryCounts,
         captureHealth, captureHealthTotal: capturePage?.total ?? 0, captureHealthCounts,
-        contentBackfill, revision, asOf: new Date().toISOString(), timezone: query.timezone, from: query.from ?? null, to: query.to ?? null,
+        contentBackfill, revision, asOf: new Date().toISOString(), timezone: query.timezone, from: filter.from ?? null, to: filter.to ?? null,
         subagents: "self", timeBasis: "source_timestamp", bodyStatus: "not_retained",
         analysisStatus: sourceCounts.collecting || contentBackfill.status === "pending" || contentBackfill.status === "running" ? "collecting"
           : capturePartial || contentBackfill.status === "failed" || failurePage.total > 0 || sourceCounts.failed ? "partial" : "ready" };

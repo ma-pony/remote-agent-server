@@ -9,6 +9,7 @@ export type UsageQueries = {
   sessionSummaries: { args: Parameters<UsageStore["summariesBySession"]>; result: ReturnType<UsageStore["summariesBySession"]> };
   rankings: { args: Parameters<AttributionStore["rankingsPage"]>; result: ReturnType<AttributionStore["rankingsPage"]> };
   contextSummary: { args: Parameters<AttributionStore["contextSummary"]>; result: ReturnType<AttributionStore["contextSummary"]> };
+  dailyRankingProjection: { args: Parameters<AttributionStore["dailyRankings"]["project"]>; result: ReturnType<AttributionStore["dailyRankings"]["project"]> };
   accountingProjection: { args: Parameters<UsageStore["projectEpoch"]>; result: ReturnType<UsageStore["projectEpoch"]> };
 };
 export type UsageQuerySnapshot<T> = { value: T; revision: string; asOf: string };
@@ -19,6 +20,7 @@ export const executeUsageQuery = (store: UsageStore, attribution: AttributionSto
   if (query.kind === "overviewWithContext") return { ...store.overview(...query.args), contextAnalysis: attribution.contextSummary(query.args[0]) };
   if (query.kind === "sessionSummaries") return store.summariesBySession(...query.args);
   if (query.kind === "contextSummary") return attribution.contextSummary(...query.args);
+  if (query.kind === "dailyRankingProjection") return attribution.dailyRankings.project(...query.args);
   if (query.kind === "accountingProjection") return store.projectEpoch(...query.args);
   return attribution.rankingsPage(...query.args);
 };

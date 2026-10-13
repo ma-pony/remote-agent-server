@@ -259,6 +259,7 @@ export class HostUsageCollector {
       lastBackfillMs: this.lastBackfillMs, lastBackfillAt: this.lastBackfillAt,
       accountingProjectionPending: this.store.nextAccountingProjection() !== undefined,
       rankingInputProjectionPending: this.attribution.rankingInputProjectionPending(),
+      dailyRankingProjectionPending: this.attribution.dailyRankings.pending(),
       eventPayloadCompactionPending: this.store.eventPayloadCompactionPending(),
       exposureIdentityCompactionPending: this.attribution.exposureIdentityCompactionPending(),
       compactedEventPayloads: this.compactedEventPayloads, reclaimedEstimateProfiles: this.reclaimedEstimateProfiles,
@@ -297,6 +298,15 @@ export class HostUsageCollector {
     this.recoveryTimer.unref();
   }
 
+  private lastDailyRankingJob = 0;
+
+  prepareDailyRankings(timezone: string): void {
+    if (this.attribution.dailyRankings.ensureTimezone(timezone) && !this.recoveryWork) {
+      clearTimeout(this.recoveryTimer);
+      this.scheduleRecovery(0);
+    }
+  }
+
   private async recoveryBatch(): Promise<void> {
     const started = performance.now();
     try {
@@ -321,6 +331,7 @@ export class HostUsageCollector {
       }
       if (this.recoveryStopped) return;
       const rankingInputsPending = this.attribution.backfillRankingInputs(5);
+      const dailyDiscoveryPending = this.attribution.dailyRankings.discover();
       this.setRecoveryPhase("sources");
       const deadline = performance.now() + 25;
       let admitted = 0;
@@ -341,9 +352,19 @@ export class HostUsageCollector {
         if (this.recoveryStopped) return;
         this.store.commitAccountingProjection(batch);
       }
+      if (this.recoveryStopped) return;
+      const dailyJob = this.attribution.dailyRankings.nextJob(this.lastDailyRankingJob);
+      if (dailyJob) {
+        this.lastDailyRankingJob = dailyJob.id;
+        this.projectionReader ??= new UsageQueryWorker(this);
+        this.setRecoveryPhase("backfill");
+        const batch = await this.projectionReader.read("dailyRankingProjection", [dailyJob]);
+        if (this.recoveryStopped) return;
+        this.attribution.dailyRankings.commit(batch);
+      }
       // Yield real idle time, not just an event-loop turn. Large individual records can still
       // exceed the soft work budget; the worker keeps their tokenization off the main thread.
-      if (this.recoveryQueue.length > 0 || contentPending || contextTotalsPending || rankingInputsPending || projectionJob) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
+      if (this.recoveryQueue.length > 0 || contentPending || contextTotalsPending || rankingInputsPending || projectionJob || dailyDiscoveryPending || dailyJob) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
       else {
         this.queueRecovery(false);
         this.scheduleRecovery(30_000);
@@ -457,6 +478,7 @@ export class HostUsageCollector {
       this.conversationContent.deleteSession(String(sessionId));
       this.db.prepare("DELETE FROM agent_usage_context_profiles WHERE namespace=? AND session_id=?").run(this.namespace, String(sessionId));
       this.sources.revokeSubject(this.namespace, String(sessionId));
+      this.attribution.dailyRankings.deleteSession(this.namespace, String(sessionId));
     })();
     this.observer?.revokeSession(sessionId);
   }

@@ -14,8 +14,14 @@ type ContentRow = { namespace: string; agent_id: string; session_id: string; run
   bytes: number; partial: number; estimate_json: string; capability_key: string };
 export type RuntimeContentEvidenceOptions = { capabilityKind?: CapabilityKind; capabilityId?: string; capabilityServerId?: string; limit: number; cursor?: { t: string; id: string } };
 
+/** Guard token reads at the source, before daily UNION branches are materialized. */
+export const runtimeContentTokenSql = (alias: string, part?: "arguments" | "result"): string => part === undefined
+  ? `${alias}.tokens`
+  : `CASE WHEN ${alias}.category ${part === "arguments" ? "IN" : "NOT IN"}
+      ('configured_instructions','user_prompt') THEN ${alias}.tokens END`;
+
 /** Shared aggregate/list scope. Standalone attribution stores need no runtime-content table. */
-export const runtimeContentScope = (db: Database.Database, filter: UsageFilter, options: { capabilityKind?: CapabilityKind; capabilityId?: string; capabilityServerId?: string; keys?: string[]; deferEstimateJoin?: boolean } = {}): { sql: string; params: string[] } => {
+export const runtimeContentScope = (db: Database.Database, filter: UsageFilter, options: { capabilityKind?: CapabilityKind; capabilityId?: string; capabilityServerId?: string; keys?: string[]; deferEstimateJoin?: boolean; tokenPart?: "arguments" | "result" } = {}): { sql: string; params: string[] } => {
   const selected = categories.filter(category => {
     const capability = contentCapability(category)!;
     return (options.capabilityKind === undefined || options.capabilityKind === capability.kind)
@@ -34,7 +40,7 @@ export const runtimeContentScope = (db: Database.Database, filter: UsageFilter, 
   }
   if (filter.from !== undefined) { clauses.push("c.occurred_at>=?"); params.push(new Date(filter.from).toISOString()); }
   if (filter.to !== undefined) { clauses.push("c.occurred_at<?"); params.push(new Date(filter.to).toISOString()); }
-  return { sql: `SELECT c.namespace,c.agent_id,c.session_id,c.run_id,c.event_key,c.category,c.occurred_at,c.runtime_kind,c.tokens,c.bytes,c.partial,
+  return { sql: `SELECT c.namespace,c.agent_id,c.session_id,c.run_id,c.event_key,c.category,c.occurred_at,c.runtime_kind,${runtimeContentTokenSql("c", options.tokenPart)} AS tokens,c.bytes,c.partial,
     c.estimate_id,c.estimate_json AS legacy_estimate_json,${options.deferEstimateJoin ? "c.estimate_json" : "COALESCE(t.estimate_json,c.estimate_json)"} AS estimate_json,
     CASE c.category ${selected.map(() => "WHEN ? THEN ?").join(" ")} END AS capability_key
     FROM agent_usage_conversation_content c ${options.deferEstimateJoin ? "" : "LEFT JOIN agent_usage_token_estimates t ON t.id=c.estimate_id"}

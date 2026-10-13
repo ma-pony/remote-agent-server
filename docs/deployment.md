@@ -534,4 +534,8 @@ Session 存储到期清理仍先停止 Runtime，再尝试采集尾部。采集�
 
 通过管理鉴权读取 `/api/usage/status` 的 `recovery.accountingProjectionPending`、`rankingInputProjectionPending`、`eventPayloadCompactionPending` 与 `exposureIdentityCompactionPending`，以及各 `compacted*`／`reclaimedEstimateProfiles` 计数。pending 标记检查已登记工作，计数只表示本进程已处理数。旧 event payload 和重复哈希按升级时的主键上界分批压缩，未来新写入不再复制；无引用估算及 fully revoked 来源的重放状态持续回收。去重和撤销身份、计量结果与历史证据保留。
 
+每日排名增量预聚合升级仅新增元数据与汇总表，不在启动时扫描或重写全部历史输入。历史发现和分区聚合由后台分批执行，重启续做；后台 Worker 每轮重建一个 Session／自然日分区。默认准备 UTC，首次请求其他时区时登记该时区，首次回填完成前仍可能走较慢的原查询。可查看 `/api/usage/status` 的 `recovery.dailyRankingProjectionPending`；此标记只反映汇总准备情况，不表示已有统计缺失。每增加一个使用过的时区会增加一套按日汇总和相应失效维护成本，容量规划应覆盖汇总表与 WAL。更新或删除发生时，未重建日期实时查询源计数，投影未完成不会阻止清理。升级不自动执行 `ANALYZE`、全库 `VACUUM` 或改变查询期限。
+
+管理统计 API 的 `from`／`to` 现在按 `timezone` 的自然日规范化；开始向日初取整，未对齐的结束向下一日取整，日初结束仍为排他上界。服务返回规范化后的范围，调用方应使用响应范围解释统计。备份仍覆盖原 SQLite 数据库，无新增外部服务或依赖。
+
 统计 API 默认允许最多 30 秒旧快照，保留实际 `asOf`／`revision` 并报告 `stale`。人工核对可对 summary、timeseries 或 capabilities 传 `fresh=1`。本版本只释放可复用页与行内空间，不承诺数据库文件立即缩小，也不自动在线 VACUUM；物理瘦身仍应安排单独的维护窗口。

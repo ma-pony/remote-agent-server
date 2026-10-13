@@ -48,9 +48,11 @@
 
 来源列表使用 `page`／`pageSize`（默认 20，最大 100）；排名和日期趋势使用 `limit`／`offset`；调用、内容观测与模型输入证据列表使用游标；详情暴露使用 `limit`／`offset` 和 `exposureTotal`。`capturePage`／`failurePage` 控制每页 20 条的采集健康／失败记录，完整数量及状态计数独立返回；`stageOffset` 控制阶段证据页。分页不会把当前页小计当成整体用量。
 
-汇总、排名、趋势和来源各自加载展示；汇总慢或失败时，其他已加载区域仍可使用。排名先只计算所选排序指标并分页，再获取当页能力的完整指标。相同主体、日期、时区和分桶的汇总与趋势共享一次账本读取。查询结果缓存最多 32 项，序列化大小合计最多 4 MiB，单项超过 512 KiB 不缓存；只保留无正文的统计投影，不保留原始会话或整份账本。本连接写入或其他连接提交后，下次查询立即失效重算。
+汇总、排名、趋势和来源各自加载展示；汇总慢或失败时，其他已加载区域仍可使用。排名先只计算所选排序指标并分页，再获取当页能力的完整指标。相同主体、日期、时区和分桶的汇总与趋势共享一次账本读取。查询结果缓存最多 32 项，序列化大小合计最多 4 MiB，单项超过 512 KiB 不缓存；只保留无正文的统计投影，不保留原始会话或整份账本。相关计数变化后按下文的快照期限与 `fresh=1` 规则刷新。
 
-`GET /api/usage/status` 使用相同的管理鉴权及主体、日期、Runtime 筛选，返回 `revision`、`sourceCounts`、失败／采集计数和 `contentBackfill`，不执行模型总量或排名查询。`revision` 是不透明的统计变更标记，不能解释为新增 Token 数；普通运行 events 和采集 checkpoint 不改变它。另返回不受筛选影响的 `recovery`、`eventRetention`：`accountingProjectionPending`、`rankingInputProjectionPending` 表示统计回填尚未完成；`eventPayloadCompactionPending`、`exposureIdentityCompactionPending` 表示旧副本清理尚未到达升级时的主键上界。`compactedEventPayloads`、`compactedExposureIdentities`、`reclaimedEstimateProfiles`、`compactedRevokedSources` 是本进程已处理数，重启后清零，不表示数据库剩余总量。原事件清理的 `checkedRuns`、`retiredEvents`、跳过原因与耗时仍按进程记录。后台恢复时页面轮询轻量状态，采集完成后刷新统计，隐藏页面暂停轮询。
+能力排名进一步按所选时区的自然日和 Session 增量预聚合输入计数、去重 coverage 及对话内容计数。已完成的日期直接读取可索引的汇总列；排序先读取所需指标并分页，再读取当页能力的完整指标与估算来源。迟到数据、修订或删除仅使受影响分区失效，后台重建期间实时读取这些分区，避免使用旧聚合。跨天调用去重及 P50/P95 继续按原始调用计算，不相加每日去重数或百分位数。管理查询的 `from` 向所在自然日开始取整，非日界线的 `to` 向下一日开始取整，已对齐的 `to` 保持排他上界；以请求的 IANA `timezone` 为准，响应返回实际范围。
+
+`GET /api/usage/status` 使用相同的管理鉴权及主体、日期、Runtime 筛选，返回 `revision`、`sourceCounts`、失败／采集计数和 `contentBackfill`，不执行模型总量或排名查询。`revision` 是不透明的统计变更标记，不能解释为新增 Token 数；普通运行 events 和采集 checkpoint 不改变它。另返回不受筛选影响的 `recovery`、`eventRetention`：`accountingProjectionPending`、`rankingInputProjectionPending`、`dailyRankingProjectionPending` 表示对应统计投影的回填尚未完成；`eventPayloadCompactionPending`、`exposureIdentityCompactionPending` 表示旧副本清理尚未到达升级时的主键上界。`compactedEventPayloads`、`compactedExposureIdentities`、`reclaimedEstimateProfiles`、`compactedRevokedSources` 是本进程已处理数，重启后清零，不表示数据库剩余总量。原事件清理的 `checkedRuns`、`retiredEvents`、跳过原因与耗时仍按进程记录。后台恢复时页面轮询轻量状态，采集完成后刷新统计，隐藏页面暂停轮询。
 
 - `usage` 是当前筛选范围内可计量的已知部分；同时看 `completeness`、缺失请求数与来源状态。它不证明未观察到的调用为零。
 - `sourceCounts` 包含保留的历史来源状态，`sourceRecoveryCounts` 只统计仍有 active 映射的来源。`collectionFailureTotal` 包含清理后的缺口，`retryableCollectionFailureTotal` 只统计未清理会话的失败；这些数量覆盖全部分页。失败条目的 `retryable` 标识能否自动补采，页面不会将已清理的缺口显示为等待重试，也不会仅因这些缺口继续轮询。
@@ -90,7 +92,7 @@ Claude 等未配置兼容本地词表的模型继续显示已报告 usage，工�
 
 清理及 Run 的过期游标在同一事务提交，重启续做，事件序号不会复用。管理事件列表与 SSE 请求的 `afterSeq` 落在已清理范围时返回 `410 run_events_expired`；Run 响应提供 `eventsPrunedAt`／`eventsPrunedThroughSeq`，页面展示过期提示和最终回复。原始正文过期后，不再安排该 Run 的内容补算或词表历史重算，未完成任务停止重试，保留原失败原因或记录 `usage_runtime_events_expired`；迟到的计量结果不再提交，已有计数、来源标记和未知值保留，不补零；不影响新 Run 使用新词表。新对话计量直接引用共享估算元数据，旧记录随清理批次尽力去重，去重失败不阻止原文清理，不启动全库重写。统计和原始事件仍在同一个 SQLite 文件，释放页面用于后续复用，不自动 VACUUM，也不承诺文件立即缩小。
 
-文件数据库的汇总／趋势和能力排名分别使用只读查询 Worker；另一个按需 Worker 进行 epoch 对账回填。每个 Worker 一次一个任务、最多排队 16 个、页缓存 8 MiB，空闲 60 秒释放。Worker 请求从入队起最多等待 30 秒：队列过期移除任务，执行过期返回 `503 usage_query_timeout` 并请求终止 Worker；队列满返回 `503 usage_query_busy`。原生 SQLite 调用可能延迟线程退出及读快照释放，确认退出前不启动替代线程，后续排队任务仍遵守自己的期限。关闭服务也会等待已请求终止的线程退出。汇总、趋势和请求输入对照共享一次一致快照。正在执行的相同查询跨普通数据修订继续合并，完成结果保留真实 `asOf` 和 `revision`；相关数据变化后最多复用 30 秒，`stale=true` 表示期间已有变更。`fresh=1` 跳过已完成缓存，但仍共享相同在途请求；页面“刷新统计”和采集完成后的刷新使用该选项。Session 删除立即使旧快照失效。Worker 隔离主线程阻塞，不意味着首次回填前的大范围查询已达到秒级。
+文件数据库的汇总／趋势和能力排名分别使用只读查询 Worker；另一个按需 Worker 进行 epoch 对账和每日排名回填。每个 Worker 一次一个任务、最多排队 16 个、页缓存 8 MiB，空闲 60 秒释放。Worker 请求从入队起最多等待 30 秒：队列过期移除任务，执行过期返回 `503 usage_query_timeout` 并请求终止 Worker；队列满返回 `503 usage_query_busy`。原生 SQLite 调用可能延迟线程退出及读快照释放，确认退出前不启动替代线程，后续排队任务仍遵守自己的期限。关闭服务也会等待已请求终止的线程退出。汇总、趋势和请求输入对照共享一次一致快照。正在执行的相同查询跨普通数据修订继续合并，完成结果保留真实 `asOf` 和 `revision`；相关数据变化后最多复用 30 秒，`stale=true` 表示期间已有变更。`fresh=1` 跳过已完成缓存，但仍共享相同在途请求；页面“刷新统计”和采集完成后的刷新使用该选项。Session 删除立即使旧快照失效。Worker 隔离主线程阻塞，不意味着首次回填前的大范围查询已达到秒级。
 
 词表按需获取，无需重启才能从等待状态恢复。Runtime 的等待记录使用原 Run、事件身份持久化重试进度；获取成功后自动补算，替换原记录的计数和计量来源，不新增调用、不改变 Provider 上报用量。运行中的 Run 可以提交后台补算，模型执行不等待下载。重试有 60 秒间隔，不反复扫描失败任务；页面超过一分钟后改为每 30 秒检查轻量状态，数据变化后再刷新统计，等待不再显示成加载失败。
 

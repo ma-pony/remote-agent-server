@@ -407,3 +407,34 @@ describe("host usage integration", () => {
     expect(host.store.summary({ namespace: host.namespace }).usage.totalTokens).toBeNull();
   });
 });
+
+it("registers requested timezones without starting concurrent recovery batches", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const { host } = setup();
+  let finish!: () => void;
+  const gate = new Promise<void>(resolve => { finish = resolve; });
+  const step = vi.spyOn(host.contentBackfill, "step").mockImplementation(async () => { await gate; return false; });
+  host.startRecovery();
+  try {
+    await vi.advanceTimersByTimeAsync(0);
+    host.prepareDailyRankings("Asia/Singapore");
+    host.prepareDailyRankings("America/New_York");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(step).toHaveBeenCalledTimes(1);
+  } finally { finish(); await host.stopRecovery(); }
+});
+
+it("deletes persisted daily aggregates with the Session and rejects in-flight projection results", async () => {
+  const { host, db, session, runId } = setup(), daily = host.attribution.dailyRankings;
+  await host.conversationContent.recordRun(runId);
+  while (daily.discover()) { /* Complete metadata discovery. */ }
+  let job;
+  while ((job = daily.nextJob())) expect(daily.commit(daily.project(job))).toBe(true);
+  expect(db.prepare("SELECT COUNT(*) AS n FROM agent_usage_ranking_content").get()).toEqual({ n: 1 });
+  db.prepare("UPDATE agent_usage_conversation_content SET tokens=tokens+1").run();
+  const stale = daily.project(daily.nextJob()!);
+  host.deleteSession(session.id);
+  for (const suffix of ["days", "inputs", "coverage", "latest", "content"])
+    expect(db.prepare(`SELECT COUNT(*) AS n FROM agent_usage_ranking_${suffix}`).get()).toEqual({ n: 0 });
+  expect(daily.commit(stale)).toBe(false);
+});

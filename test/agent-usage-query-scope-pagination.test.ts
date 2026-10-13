@@ -75,6 +75,11 @@ it("keeps mixed capability, content and provider totals scoped while independent
     const scope = new URLSearchParams({ agentId: String(seed.agent.id), sessionId: String(selected.id),
       runtimeKind: "codex", from: "2026-09-20T08:00:00+08:00", to: "2026-09-22T08:00:00+08:00" });
     const summary = await get(`/summary?${scope}`);
+    const withinDay = new URLSearchParams(scope);
+    withinDay.set("from", "2026-09-20T12:00:00.000Z"); withinDay.set("to", "2026-09-21T12:00:00.000Z");
+    const rounded = await get(`/summary?${withinDay}`);
+    expect(rounded).toMatchObject({ from: "2026-09-20T00:00:00.000Z", to: "2026-09-22T00:00:00.000Z", usage: summary.usage });
+    expect((await get(`/capabilities?${withinDay}`)).items).toEqual((await get(`/capabilities?${scope}`)).items);
     expect(summary).toMatchObject({ usage: { totalTokens: 96 }, sourceCounts: { idle: 3 }, hasCapabilityEvidence: true });
     const prompts = await get(`/capabilities?${scope}&dimension=system_prompt`);
     expect(prompts).toMatchObject({ total: 1, items: [{ capability: { kind: "system_prompt" }, exposureCount: 6, calls: 0 }] });

@@ -30,6 +30,7 @@ export class RuntimeConversationCollector {
     trackUsageQueryChanges(store.db,"agent_usage_conversation_content");
     store.db.exec(`CREATE INDEX IF NOT EXISTS agent_usage_conversation_estimate
       ON agent_usage_conversation_content(estimate_id) WHERE estimate_id IS NOT NULL`);
+    attribution.dailyRankings.attachContent();
   }
 
   async recordRun(runId: number, signal?: AbortSignal): Promise<void> {

@@ -104,3 +104,19 @@ it("waits for a timed-out worker to exit before replacing it or completing shutd
     vi.useRealTimers();
   }
 });
+
+it("projects daily content off-thread and discards a result superseded before commit", async () => {
+  const { db, host, worker } = await setup(), daily = host.attribution.dailyRankings;
+  while (daily.discover(50)) { /* Bounded startup discovery. */ }
+  const job = daily.nextJob()!, schema = db.pragma("schema_version", { simple: true });
+  vi.spyOn(daily, "project").mockImplementation(() => { throw new Error("Main-thread projection"); });
+  const stale = await worker.read("dailyRankingProjection", [job]);
+  expect(stale).toBeDefined();
+  db.prepare("UPDATE agent_usage_conversation_content SET tokens=4").run();
+  expect(daily.commit(stale)).toBe(false);
+  expect(daily.commit(await worker.read("dailyRankingProjection", [daily.nextJob()!]))).toBe(true);
+  expect(db.pragma("schema_version", { simple: true })).toBe(schema);
+  expect((await worker.read("rankings", [{ namespace: host.namespace }, "all", options])).items[0])
+    .toMatchObject({ observedTotalTokens: 800, contentObservations: 200 });
+  expect(daily.nextJob()).toBeUndefined();
+});

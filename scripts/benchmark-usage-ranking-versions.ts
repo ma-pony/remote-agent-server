@@ -70,6 +70,46 @@ try {
       }
     }
   })();
+  const rollupStarted = performance.now();
+  const pagesBefore = Number(db.pragma("page_count", { simple: true }));
+  attribution.dailyRankings.ensureTimezone("Asia/Singapore");
+  while (attribution.dailyRankings.discover(2000)) {}
+  let projectedDays = 0, dailyJob;
+  while ((dailyJob = attribution.dailyRankings.nextJob())) {
+    assert.equal(attribution.dailyRankings.commit(attribution.dailyRankings.project(dailyJob)), true);
+    projectedDays++;
+  }
+  console.log(JSON.stringify({ phase: "daily-projection", projectedDays, ms: Math.round(performance.now() - rollupStarted),
+    storedBytes: (Number(db.pragma("page_count", { simple: true })) - pagesBefore) * Number(db.pragma("page_size", { simple: true })) }));
+  const partial = db.prepare("SELECT context_id FROM agent_usage_contexts ORDER BY rowid LIMIT 1").get() as { context_id: string };
+  const incrementalStarted = performance.now();
+  db.prepare("UPDATE agent_usage_contexts SET coverage='partial' WHERE context_id=?").run(partial.context_id);
+  let rebuilt = 0;
+  while ((dailyJob = attribution.dailyRankings.nextJob())) {
+    assert.equal(attribution.dailyRankings.commit(attribution.dailyRankings.project(dailyJob)), true); rebuilt++;
+  }
+  console.log(JSON.stringify({ phase: "incremental-rebuild", rebuilt, totalPartitions: projectedDays,
+    ms: Math.round(performance.now() - incrementalStarted) }));
+  // Compare invalidation overhead inside rolled-back synthetic transactions. No fixture counts change.
+  const writeSamples: number[][] = [[], []], rollback = new Error("rollback benchmark");
+  const contextIds = (db.prepare("SELECT context_id FROM agent_usage_contexts ORDER BY rowid LIMIT 500").all() as Array<{ context_id: string }>);
+  const contentIds = (db.prepare("SELECT rowid FROM agent_usage_conversation_content ORDER BY rowid LIMIT 500").all() as Array<{ rowid: number }>);
+  for (let round = 0; round < 5; round++) for (const tracked of round % 2 ? [1, 0] : [0, 1]) {
+    try { db.transaction(() => {
+      if (!tracked) for (const table of ["agent_usage_contexts", "agent_usage_conversation_content"])
+        db.exec(`DROP TRIGGER ${table}_daily_update`);
+      const changeContext = db.prepare("UPDATE agent_usage_contexts SET coverage='opaque' WHERE context_id=?");
+      const changeContent = db.prepare("UPDATE agent_usage_conversation_content SET tokens=tokens+1 WHERE rowid=?");
+      const started = performance.now();
+      for (const row of contextIds) changeContext.run(row.context_id);
+      for (const row of contentIds) changeContent.run(row.rowid);
+      writeSamples[tracked]!.push(Number((performance.now() - started).toFixed(2)));
+      throw rollback;
+    })(); } catch (error) { if (error !== rollback) throw error; }
+  }
+  console.log(JSON.stringify({ phase: "invalidation-writes", rows: contextIds.length + contentIds.length,
+    baselineMs: [...writeSamples[0]!].sort((a,b)=>a-b)[2], trackedMs: [...writeSamples[1]!].sort((a,b)=>a-b)[2],
+    samples: writeSamples, measurement: "Synthetic transaction body; excludes commit/fsync" }));
   db.pragma("wal_checkpoint(TRUNCATE)");
   console.log(JSON.stringify({ phase: "fixture", node: process.version, contexts, compactInputRows: contexts * 180,
     invocations: contexts * 20, contentFragments: contexts * 20, setupMs: Math.round(performance.now() - started) }));
@@ -78,7 +118,7 @@ try {
     connection.pragma("query_only=ON"); connection.pragma("cache_size=-8192");
     readers.push({ db: connection, attribution: new Store(new UsageStore(connection)) });
   }
-  const filter = { namespace: "benchmark", from: "2026-10-05T16:00:00.000Z", to: "2026-10-12T16:00:00.000Z" };
+  const filter = { namespace: "benchmark", timezone: "Asia/Singapore", from: "2026-10-05T16:00:00.000Z", to: "2026-10-12T16:00:00.000Z" };
   for (const [name, scope, sort] of [
     ["week-input", filter, "totalInputTokens"],
     ["day-input", { ...filter, from: "2026-10-11T16:00:00.000Z" }, "totalInputTokens"],

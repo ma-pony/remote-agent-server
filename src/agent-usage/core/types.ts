@@ -24,7 +24,7 @@ export type UsageObservation = {
   correctionReason?: string;
 };
 export type UsageBinding = { namespace: string; agentId: string; sessionId: string; generation: number };
-export type UsageFilter = { namespace?: string; agentId?: string; sessionId?: string; from?: string; to?: string; runtimeKind?: string };
+export type UsageFilter = { namespace?: string; agentId?: string; sessionId?: string; from?: string; to?: string; runtimeKind?: string; timezone?: string };
 export type UsageRecord = UsageObservation & UsageBinding & { metrics: UsageMetrics; issues?: string[] };
 export type UsageSummary = {
   usage: UsageMetrics;

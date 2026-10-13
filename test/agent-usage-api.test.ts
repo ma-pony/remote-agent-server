@@ -282,17 +282,17 @@ describe("usage query API", () => {
       occurredAt: "2026-09-21T16:01:00Z", intervalStart: "2026-09-21T15:59:00Z" });
     const series = (await get(app, "/timeseries?timezone=Asia%2FSingapore")).json();
     expect(series.items).toEqual([]);
-    const partial = (await get(app, "/timeseries?from=2026-09-21T16%3A00%3A00Z")).json();
+    const partial = (await get(app, "/timeseries?timezone=Asia%2FSingapore&from=2026-09-21T16%3A00%3A00Z")).json();
     expect(partial.items).toEqual([]);
     expect(partial.unplacedUsage.totalTokens).toBe(70);
-    const summary = (await get(app, "/summary?from=2026-09-21T16%3A00%3A00Z&to=2026-09-22T16%3A00%3A00Z")).json();
+    const summary = (await get(app, "/summary?timezone=Asia%2FSingapore&from=2026-09-21T16%3A00%3A00Z&to=2026-09-22T16%3A00%3A00Z")).json();
     expect(summary).toMatchObject({ usage: { totalTokens: null }, unplacedUsage: { totalTokens: 70 }, completeness: "partial" });
     manager.collector.store.observe(bindings.first, { ...base, eventId: "parent", scope: "provider_session", intervalStart: undefined,
       coverageId: "parent", occurredAt: null, semantics: "cumulative", metrics: { totalTokens: 190 } });
-    const crossing = "/summary?from=2026-09-21T16%3A00%3A00Z&to=2026-09-22T16%3A00%3A00Z&fresh=1";
+    const crossing = "/summary?timezone=Asia%2FSingapore&from=2026-09-21T16%3A00%3A00Z&to=2026-09-22T16%3A00%3A00Z&fresh=1";
     expect((await get(app, crossing)).json().unplacedUsage.totalTokens).toBe(190);
     expect((await get(app, crossing.replace("summary", "timeseries"))).json().unplacedUsage.totalTokens).toBe(190);
-    expect((await get(app, "/summary?from=2026-09-23T00%3A00%3A00Z")).json().unplacedUsage.totalTokens).toBe(120);
+    expect((await get(app, "/summary?timezone=Asia%2FSingapore&from=2026-09-23T00%3A00%3A00Z")).json().unplacedUsage.totalTokens).toBe(120);
   });
 
   it("requires management authentication and rejects invalid filters", async () => {
@@ -528,7 +528,8 @@ describe("usage query API", () => {
     const boundedRanking = await get(app,
       `/capabilities?sessionId=${bindings.first.sessionId}&dimension=mcp_tool&sort=calls&${bounded}`);
     expect(boundedRanking.json().items.find((item: { capability: Capability }) =>
-      item.capability.serverId === serverOne.serverId)).toMatchObject({ calls: 1, exposureCount: 1 });
+      item.capability.serverId === serverOne.serverId)).toMatchObject({ calls: 3, exposureCount: 1 });
+    expect(boundedRanking.json()).toMatchObject({ from: "2026-09-21T00:00:00.000Z", to: "2026-09-22T00:00:00.000Z" });
 
     const firstPage = await get(app, `/invocations?sessionId=${bindings.first.sessionId}&limit=2`);
     expect(firstPage.json().origin).toBe("counted");

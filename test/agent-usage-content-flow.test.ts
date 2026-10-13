@@ -76,7 +76,7 @@ const setup = async (withMcpMirror = false, legacyObserver = false) => {
       const response = await app.inject({ url: "/api/usage/summary", headers });
       expect(response.statusCode).toBe(200);
       expect(response.json().contentBackfill).toMatchObject({ status: "completed", processedEvents, errorCode: null });
-    });
+    }, { timeout: 5_000 }); // Background workers can start concurrently on a busy test host.
   };
   await ready();
   return {

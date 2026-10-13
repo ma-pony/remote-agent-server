@@ -60,10 +60,22 @@ try {
       }
     console.log(JSON.stringify({stage,comparisons,equal:true}));
   }
+  const warm=()=>{while(actual.dailyRankings.discover(7)){}let job;while((job=actual.dailyRankings.nextJob()))
+    assert.equal(actual.dailyRankings.commit(actual.dailyRankings.project(job)),true)};
+  for(const timezone of ['Asia/Singapore','America/New_York','Asia/Kathmandu']) {
+    actual.dailyRankings.ensureTimezone(timezone);
+    filters.push({namespace:'fixture',timezone});
+  }
+  filters.push({namespace:'fixture',timezone:'Asia/Singapore',from:'2026-10-05T16:00:00.000Z',to:'2026-10-12T16:00:00.000Z'},
+    {namespace:'fixture',timezone:'UTC',from:'2026-10-06T00:00:00.000Z',to:'2026-10-12T00:00:00.000Z',runtimeKind:'claude_code'});
   verify('compact');
+  warm();verify('daily');
   db.exec('UPDATE agent_usage_contexts SET ranking_inputs_ready=0');verify('detailed');
   while(actual.backfillRankingInputs(5)){}
   await actual.upsertContext(bindings[0],{...context(0,2),occurredAt:'2026-10-04T00:00:00Z',blocks:context(0,2).blocks.slice(5)});
   await actual.upsertContext(bindings[1],{...context(1,2),historyComplete:false});
-  store.deleteSession('fixture','third');verify('revised-late-and-deleted');
+  actual.deleteSession('fixture','third');store.deleteSession('fixture','third');
+  db.prepare('DELETE FROM agent_usage_conversation_content WHERE namespace=? AND session_id=?').run('fixture','third');
+  verify('daily-dirty-late-revised-deleted');
+  warm();verify('daily-rebuilt');
 } finally {await actual.close();await before.close();db.close()}
