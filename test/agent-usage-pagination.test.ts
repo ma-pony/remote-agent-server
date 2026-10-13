@@ -46,6 +46,89 @@ it("sorts and pages mixed capability rankings in SQL without materializing invoc
   expect(largest).toBeLessThanOrEqual(2);
 });
 
+it.each(["compact", "detailed"])("looks up dated context calls by invocation before visiting contexts (%s)", async (path) => {
+  const { db, attribution, binding } = setup();
+  for (let index = 0; index < 64; index++) {
+    attribution.observeInvocation(binding, call(index, { origin: "context", startedAt: null }));
+    await attribution.upsertContext(binding, {
+      invocationId: `model-${index}`, providerEpochId: "epoch", sourceId: "snapshot", revision: 1,
+      occurredAt: "2026-09-21T10:00:00Z", runtimeKind: "codex", model: "gpt-test", coverage: "full", historyComplete: true,
+      blocks: [0, 1].map(position => ({ position, kind: "result", toolInvocationId: `call-${index}`,
+        content: { identity: `result-${index}-${position}`, modality: "text", text: "visible result" },
+        capabilities: [{ capability: call(index).capability, evidence: "direct" }] }))
+    });
+  }
+  if (path === "detailed") db.exec("UPDATE agent_usage_contexts SET ranking_inputs_ready=0");
+  type PlanRow = { id: number; parent: number; detail: string };
+  const prepare = db.prepare.bind(db), plans: PlanRow[][] = [];
+  vi.spyOn(db, "prepare").mockImplementation(sql => {
+    const statement = prepare(sql);
+    if (sql.includes("e.tool_invocation_id=i.invocation_id")) {
+      const all = statement.all.bind(statement);
+      statement.all = (...params: unknown[]) => {
+        plans.push(prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...params) as PlanRow[]);
+        return all(...params);
+      };
+    }
+    return statement;
+  });
+  const filter = { namespace: "test", from: "2026-09-21T00:00:00Z", to: "2026-09-22T00:00:00Z" };
+  expect(attribution.rankingsPage(filter, "all", { sort: "totalInputTokens", limit: 50, offset: 0 }))
+    .toMatchObject({ total: 1, items: [{ calls: 0, contextOnlyCalls: 64, exposureCount: 128, totalInputTokens: 256 }] });
+  expect(attribution.invocations(filter, "context", { limit: 10 })).toHaveLength(10);
+  // Inspect the actual ranking and list statements, without a machine-dependent timing threshold.
+  const lookups = plans.flatMap(plan => plan.filter(row => row.detail.startsWith("CORRELATED SCALAR SUBQUERY"))
+    .map(subquery => plan.filter(row => row.parent === subquery.id).map(row => row.detail)));
+  expect(lookups.length).toBeGreaterThanOrEqual(3);
+  for (const lookup of lookups) {
+    expect(lookup[0]).toMatch(/^SEARCH e .*\(tool_invocation_id=\?/);
+    expect(lookup[1]).toMatch(/^SEARCH c .*\(context_id=\?\)/);
+  }
+});
+
+it.each(["compact", "detailed"])("preserves dated context-call membership, boundaries and deduplication (%s)", async (path) => {
+  const { db, usage, attribution, binding } = setup();
+  for (let index = 0; index < 9; index++) attribution.observeInvocation(binding, call(index, {
+    origin: "context", startedAt: index === 0 ? null : "2026-09-01T00:00:00Z"
+  }));
+  attribution.observeInvocation(binding, call(9, {
+    startedAt: "2026-09-21T10:00:00Z", endedAt: "2026-09-21T10:00:01Z"
+  }));
+  const save = (subject: typeof binding, id: string, occurredAt: string | null, calls: number[],
+    providerEpochId = "epoch", capability = call(0).capability) => attribution.upsertContext(subject, {
+    invocationId: id, providerEpochId, sourceId: "snapshot", revision: 1, occurredAt,
+    runtimeKind: "codex", model: "gpt-test", coverage: "full", historyComplete: true,
+    blocks: calls.map((index, position) => ({ position, kind: "result", toolInvocationId: `call-${index}`,
+      content: { identity: `result-${index}`, modality: "text", text: "visible result" },
+      capabilities: [{ capability, evidence: "direct" }] }))
+  });
+  await save(binding, "before", "2026-09-20T23:59:59.999Z", [2]);
+  await save(binding, "from", "2026-09-21T00:00:00Z", [0, 0]);
+  await save(binding, "inside", "2026-09-21T12:00:00Z", [0, 1]);
+  await save(binding, "to", "2026-09-22T00:00:00Z", [3]);
+  await save(binding, "undated", null, [4]);
+  await save(usage.bindSession("test", "other-agent", "other-session"), "other-session", "2026-09-21T12:00:00Z", [5]);
+  await save(usage.bindSession("other", "agent", "session"), "other-namespace", "2026-09-21T12:00:00Z", [6]);
+  await save(binding, "other-epoch", "2026-09-21T12:00:00Z", [7], "other-epoch");
+  await save(binding, "other-capability", "2026-09-21T12:00:00Z", [8], "epoch", { kind: "cli", id: "build", name: "Build" });
+  if (path === "detailed") db.exec("UPDATE agent_usage_contexts SET ranking_inputs_ready=0");
+  const scope = { namespace: "test", agentId: "agent", sessionId: "session", runtimeKind: "codex" };
+  const filter = { ...scope, from: "2026-09-21T00:00:00Z", to: "2026-09-22T00:00:00Z" };
+  const ids = (range: { from?: string; to?: string }) => attribution.invocations({ ...scope, ...range }, "context")
+    .map(row => row.invocationId).sort();
+  expect(ids(filter)).toEqual(["call-0", "call-1"]);
+  expect(ids({ from: filter.from })).toEqual(["call-0", "call-1", "call-3"]);
+  expect(ids({ to: filter.to })).toEqual(["call-0", "call-1", "call-2"]);
+  expect(ids({})).toHaveLength(9);
+  const ranked = attribution.rankingsPage(filter, "all", { sort: "totalInputTokens", limit: 1, offset: 0 });
+  expect(ranked).toMatchObject({ total: 2, items: [{ capability: { id: "tool" }, calls: 1, contextOnlyCalls: 2,
+    totalInputTokens: 10, exposureCount: 5, contextCoverage: { full: 3, partial: 0, opaque: 0, none: 0 },
+    rawResultBytes: 9, rawResultBytesP95: 9, latencyMsP95: 1000 }] });
+  expect(attribution.rankingsPage(filter, "all", { sort: "totalInputTokens", limit: 1, offset: 1 }))
+    .toMatchObject({ total: 2, items: [{ capability: { id: "build" }, calls: 0, contextOnlyCalls: 0, totalInputTokens: 2 }] });
+  expect(attribution.rankingsPage(filter, "mcp_tool", { sort: "calls", limit: 1, offset: 0 }).items).toEqual(ranked.items);
+});
+
 
 it("paginates invocation and context detail exposures while keeping accurate totals", async () => {
   const { attribution, binding } = setup();

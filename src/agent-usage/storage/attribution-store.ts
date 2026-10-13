@@ -678,31 +678,59 @@ export class AttributionStore {
     if (keys) { clauses.push(`e.capability_key IN (${keys.map(() => "?").join(",")})`); params.push(...keys); }
     const from = `FROM agent_usage_contexts c JOIN ${inputTable} e ON e.context_id=c.context_id
       WHERE ${clauses.join(" AND ")}`;
-    const sum = (predicate: string) => `CASE WHEN SUM(CASE WHEN ${predicate} THEN 1 ELSE 0 END)=0 THEN 0
-      ELSE SUM(CASE WHEN ${predicate} THEN e.token_count END) END`;
+    type EstimateGroup = { estimate_json: string; model: string | null; exposureCount: number;
+      knownExposureCount: number; totalInputTokens: number | null };
     type Aggregate = Pick<AttributionRankRow, "inputBytes" | "definitionInputTokens" | "argumentInputTokens"
       | "firstResultInputTokens" | "repeatedResultInputTokens" | "unknownFirstResultInputTokens" | "totalInputTokens"
       | "exposureCount" | "missingExposureCount"> & { capability_key: string; capability_json: string;
-        direct: number; matched: number; inferred: number; full: number; partial: number; opaque: number; none: number;
-        result_tokens: number | null; result_count: number; result_known: number };
-    const aggregates = this.store.db.prepare(`SELECT e.capability_key, e.capability_json,
-      SUM(e.byte_length) AS inputBytes, SUM(e.token_count) AS totalInputTokens,
-      SUM(${count}) AS exposureCount, SUM(${count}-${known}) AS missingExposureCount,
-      ${sum("e.block_kind='definition'")} AS definitionInputTokens,
-      ${sum("e.block_kind='arguments'")} AS argumentInputTokens,
-      ${sum("e.block_kind='result'")} AS result_tokens,
-      SUM((e.block_kind='result')*${count}) AS result_count,
-      SUM((e.block_kind='result')*${known}) AS result_known,
-      SUM((e.evidence='direct')*${count}) AS direct, SUM((e.evidence='matched')*${count}) AS matched, SUM((e.evidence='inferred')*${count}) AS inferred,
-      COUNT(DISTINCT CASE WHEN c.coverage='full' THEN c.context_id END) AS full,
-      COUNT(DISTINCT CASE WHEN c.coverage='partial' THEN c.context_id END) AS partial,
-      COUNT(DISTINCT CASE WHEN c.coverage='opaque' THEN c.context_id END) AS opaque,
-      COUNT(DISTINCT CASE WHEN c.coverage='none' THEN c.context_id END) AS none
-      ${from} GROUP BY e.capability_key`).all(...params) as Aggregate[];
-    // First-use identities are indexed separately: repeated history needs no per-row index lookup.
-    const firstGroups = this.store.db.prepare(compact ? `SELECT e.capability_key,${firstClassification}='first' AS history_complete,
-      SUM(e.exposure_count) AS count,SUM(e.known_count) AS known,SUM(e.token_count) AS tokens ${from}
-      AND ${firstClassification} IN ('first','unknown') GROUP BY e.capability_key,${firstClassification}` : `SELECT capability_key, history_complete,
+        direct: number; matched: number; inferred: number; estimates: string;
+        result_tokens: number | null; result_count: number; result_known: number;
+        first_count: number; first_known: number; first_tokens: number | null;
+        unknown_count: number; unknown_known: number; unknown_tokens: number | null };
+    const classified = (value: string) => compact ? `${firstClassification}='${value}'` : "0";
+    // Read numeric inputs once for totals, estimate profiles and compact first-use counts.
+    // Join profile metadata only after reducing the input rows to capability/profile groups.
+    const aggregates = this.store.db.prepare(`WITH input_groups AS MATERIALIZED (
+      SELECT e.capability_key,e.capability_json,e.estimate_id,c.model,
+        SUM(e.byte_length) AS inputBytes,SUM(e.token_count) AS totalInputTokens,
+        SUM(${count}) AS exposureCount,SUM(${known}) AS knownExposureCount,
+        SUM(e.block_kind='definition') AS definitions,SUM(CASE WHEN e.block_kind='definition' THEN e.token_count END) AS definition_tokens,
+        SUM(e.block_kind='arguments') AS arguments,SUM(CASE WHEN e.block_kind='arguments' THEN e.token_count END) AS argument_tokens,
+        SUM((e.block_kind='result')*${count}) AS result_count,SUM((e.block_kind='result')*${known}) AS result_known,
+        SUM(CASE WHEN e.block_kind='result' THEN e.token_count END) AS result_tokens,
+        SUM((e.evidence='direct')*${count}) AS direct,SUM((e.evidence='matched')*${count}) AS matched,SUM((e.evidence='inferred')*${count}) AS inferred,
+        SUM((${classified("first")})*${count}) AS first_count,SUM((${classified("first")})*${known}) AS first_known,
+        SUM(CASE WHEN ${classified("first")} THEN e.token_count END) AS first_tokens,
+        SUM((${classified("unknown")})*${count}) AS unknown_count,SUM((${classified("unknown")})*${known}) AS unknown_known,
+        SUM(CASE WHEN ${classified("unknown")} THEN e.token_count END) AS unknown_tokens
+      ${from} GROUP BY e.capability_key,e.estimate_id)
+      SELECT g.capability_key,g.capability_json,SUM(g.inputBytes) AS inputBytes,SUM(g.totalInputTokens) AS totalInputTokens,
+        SUM(g.exposureCount) AS exposureCount,SUM(g.exposureCount-g.knownExposureCount) AS missingExposureCount,
+        CASE WHEN SUM(g.definitions)=0 THEN 0 ELSE SUM(g.definition_tokens) END AS definitionInputTokens,
+        CASE WHEN SUM(g.arguments)=0 THEN 0 ELSE SUM(g.argument_tokens) END AS argumentInputTokens,
+        CASE WHEN SUM(g.result_count)=0 THEN 0 ELSE SUM(g.result_tokens) END AS result_tokens,
+        SUM(g.result_count) AS result_count,SUM(g.result_known) AS result_known,
+        SUM(g.direct) AS direct,SUM(g.matched) AS matched,SUM(g.inferred) AS inferred,
+        SUM(g.first_count) AS first_count,SUM(g.first_known) AS first_known,SUM(g.first_tokens) AS first_tokens,
+        SUM(g.unknown_count) AS unknown_count,SUM(g.unknown_known) AS unknown_known,SUM(g.unknown_tokens) AS unknown_tokens,
+        json_group_array(json_object('estimate_json',t.estimate_json,'model',g.model,'exposureCount',g.exposureCount,
+          'knownExposureCount',g.knownExposureCount,'totalInputTokens',g.totalInputTokens) ORDER BY g.estimate_id)
+          FILTER (WHERE t.id IS NOT NULL) AS estimates
+      FROM input_groups g LEFT JOIN agent_usage_token_estimates t ON t.id=g.estimate_id
+      GROUP BY g.capability_key`).all(...params) as Aggregate[];
+    // Coverage counts contexts once across all blocks and profiles. This scan needs only
+    // the input primary key, avoiding four distinct sets in the wider numeric aggregation.
+    const coverage = new Map((this.store.db.prepare(`SELECT capability_key,
+      SUM(coverage='full') AS full,SUM(coverage='partial') AS partial,SUM(coverage='opaque') AS opaque,SUM(coverage='none') AS none
+      FROM (SELECT DISTINCT e.capability_key,c.context_id,c.coverage ${from}) GROUP BY capability_key`)
+      .all(...params) as Array<AttributionRankRow["contextCoverage"] & { capability_key: string }>)
+      .map(({ capability_key, ...counts }) => [capability_key, counts]));
+    type FirstGroup = { capability_key: string; history_complete: number; count: number; known: number; tokens: number | null };
+    // Detailed first-use identities remain indexed separately; do not look up repeated history per row.
+    const firstGroups: FirstGroup[] = compact ? aggregates.flatMap(row => [
+      { capability_key: row.capability_key,history_complete: 1,count: row.first_count,known: row.first_known,tokens: row.first_tokens },
+      { capability_key: row.capability_key,history_complete: 0,count: row.unknown_count,known: row.unknown_known,tokens: row.unknown_tokens }
+    ].filter(group => group.count > 0)) : this.store.db.prepare(`SELECT capability_key, history_complete,
       SUM(count) AS count, SUM(known) AS known, SUM(tokens) AS tokens FROM (
       SELECT e.capability_key, c.history_complete,
       COUNT(*) AS count, COUNT(e.token_count) AS known, SUM(e.token_count) AS tokens
@@ -714,8 +742,7 @@ export class AttributionStore {
         COUNT(*), COUNT(e.token_count), SUM(e.token_count) ${from}
         AND e.result_first_use IN ('first','unknown') GROUP BY e.capability_key, e.result_first_use
       ) GROUP BY capability_key, history_complete`)
-      .all(...(compact ? params : [filter.runtimeKind === undefined ? "" : JSON.stringify(filter.runtimeKind), ...params, ...params])) as Array<{
-        capability_key: string; history_complete: number; count: number; known: number; tokens: number | null }>;
+      .all(filter.runtimeKind === undefined ? "" : JSON.stringify(filter.runtimeKind), ...params, ...params) as FirstGroup[];
     const firstByKey = new Map<string, typeof firstGroups>();
     for (const item of firstGroups) {
       const group = firstByKey.get(item.capability_key) ?? []; group.push(item); firstByKey.set(item.capability_key, group);
@@ -734,8 +761,9 @@ export class AttributionStore {
       latencyMsP50: null, latencyMsP95: null, latencySampleCount: 0
     });
     for (const aggregate of aggregates) {
-      const { capability_key, capability_json, direct, matched, inferred, full, partial, opaque, none,
-        result_tokens, result_count, result_known, ...values } = aggregate;
+      const { capability_key, capability_json, direct, matched, inferred, estimates,
+        result_tokens, result_count, result_known, first_count, first_known, first_tokens,
+        unknown_count, unknown_known, unknown_tokens, ...values } = aggregate;
       const first = firstByKey.get(capability_key) ?? [];
       const firstKnown = first.reduce((sum, row) => sum + row.known, 0);
       const repeatCount = result_count - first.reduce((sum, row) => sum + row.count, 0);
@@ -753,19 +781,11 @@ export class AttributionStore {
         repeatedResultInputTokens: repeatTokens,
         estimateCompleteness: values.missingExposureCount === values.exposureCount ? "none"
           : values.missingExposureCount > 0 ? "partial" : "complete",
-        attributionEvidence: { direct, matched, inferred }, contextCoverage: { full, partial, opaque, none } });
-    }
-    const estimates = this.store.db.prepare(`SELECT e.capability_key, t.estimate_json, c.model,
-      SUM(${count}) AS exposureCount, SUM(${known}) AS knownExposureCount, SUM(e.token_count) AS totalInputTokens
-      FROM agent_usage_contexts c JOIN ${inputTable} e ON e.context_id=c.context_id
-      JOIN agent_usage_token_estimates t ON t.id=e.estimate_id
-      WHERE ${clauses.join(" AND ")} GROUP BY e.capability_key, e.estimate_id`)
-      .all(...params) as Array<{ capability_key: string; estimate_json: string | null; model: string | null;
-        exposureCount: number; knownExposureCount: number; totalInputTokens: number | null }>;
-    for (const item of estimates) {
-      const row = groups.get(item.capability_key)!;
-      row.tokenEstimates.push({ ...estimateFrom({ ...item, token_count: item.totalInputTokens }),
-        exposureCount: item.exposureCount, knownExposureCount: item.knownExposureCount, totalInputTokens: item.totalInputTokens });
+        attributionEvidence: { direct, matched, inferred }, contextCoverage: coverage.get(capability_key)! });
+      const row = groups.get(capability_key)!;
+      for (const item of JSON.parse(estimates) as EstimateGroup[]) row.tokenEstimates.push({
+        ...estimateFrom({ ...item, token_count: item.totalInputTokens }), exposureCount: item.exposureCount,
+        knownExposureCount: item.knownExposureCount, totalInputTokens: item.totalInputTokens });
     }
     const scopeFor = (origin: InvocationOrigin) => {
       const scope = this.invocationWhere(filter, origin, dimension === "all" ? {} : { capabilityKind: dimension });
@@ -984,7 +1004,9 @@ export class AttributionStore {
       const context = this.contextWhere({ from: filter.from, to: filter.to });
       const scope = this.contextWhere(filter);
       const table = this.rankingInputs.ready(scope.clauses,scope.params) ? "agent_usage_context_calls" : "agent_usage_exposures";
-      clauses.push(`EXISTS (SELECT 1 FROM ${table} e JOIN agent_usage_contexts c ON c.context_id=e.context_id
+      // Start from the invocation index, then look up each referenced context by primary key.
+      // Reordering this join can rescan a long Session's entire date range for every call.
+      clauses.push(`EXISTS (SELECT 1 FROM ${table} e CROSS JOIN agent_usage_contexts c ON c.context_id=e.context_id
         WHERE e.tool_invocation_id=i.invocation_id AND e.capability_key=i.capability_key
           AND c.namespace=i.namespace AND c.session_id=i.session_id AND c.provider_epoch_id=i.provider_epoch_id
           AND ${context.clauses.join(" AND ")})`);

@@ -3,7 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { UsageStore } from "../src/agent-usage/storage/usage-store.js";
 import { AttributionStore } from "../src/agent-usage/storage/attribution-store.js";
 import { accountingRequests } from "./fixtures/agent-usage/accounting.js";
-import type { ModelContextInput } from "../src/agent-usage/core/context-types.js";
+import type { ContextBlock, ModelContextInput } from "../src/agent-usage/core/context-types.js";
 import { usageQueryVersion } from "../src/agent-usage/storage/query-version.js";
 
 const databases: Database.Database[] = [];
@@ -142,6 +142,43 @@ it("keeps compact and detailed ranking results equal after late arrivals, revisi
   db.exec("UPDATE agent_usage_contexts SET ranking_inputs_ready=0");
   for (const [index,filter] of filters.entries()) for (const [sortIndex,sort] of sorts.entries())
     expect(attribution.rankingsPage(filter,"all",{sort,limit:20,offset:0})).toEqual(compact[index]![sortIndex]);
+});
+
+it("preserves nulls and distinct context coverage across estimate profiles and first-use groups", async () => {
+  const { db, attribution, binding } = setup();
+  const block = (position: number, kind: ContextBlock["kind"], tokens: number | null,
+    profile: string, resultFirstUse?: ContextBlock["resultFirstUse"]): ContextBlock => {
+    const template = context("unused", "2026-10-10T00:00:00Z").blocks[0]!;
+    return { ...template, position, kind, resultFirstUse,
+      measured: { ...template.measured!, tokens, estimate: { ...template.measured!.estimate, tokenizerId: profile } } };
+  };
+  const blocks = [block(0, "definition", null, "unknown"), block(1, "arguments", null, "unknown"),
+    block(2, "result", null, "unknown", "first"), block(3, "result", 3, "known", "repeat"),
+    block(4, "result", null, "unknown", "unknown"), block(5, "other", 0, "zero")];
+  for (const [index, coverage] of (["full", "partial", "opaque", "none"] as const).entries()) {
+    await attribution.upsertContext(binding, { ...context(`coverage-${index}`, `2026-10-1${index}T00:00:00Z`), coverage, blocks });
+  }
+  const filter = { namespace: "test", from: "2026-10-10T00:00:00Z", to: "2026-10-14T00:00:00Z" };
+  const compact = attribution.rankingsPage(filter, "all", { sort: "totalInputTokens", limit: 10, offset: 0 });
+  expect(compact.items).toHaveLength(1);
+  expect(compact.items[0]).toMatchObject({
+    definitionInputTokens: null, argumentInputTokens: null, firstResultInputTokens: null,
+    unknownFirstResultInputTokens: null, repeatedResultInputTokens: 12, totalInputTokens: 12,
+    inputBytes: 168, exposureCount: 24, missingExposureCount: 16,
+    contextCoverage: { full: 1, partial: 1, opaque: 1, none: 1 },
+    tokenEstimates: [
+      { tokenizerId: "unknown", exposureCount: 16, knownExposureCount: 0, totalInputTokens: null },
+      { tokenizerId: "known", exposureCount: 4, knownExposureCount: 4, totalInputTokens: 12 },
+      { tokenizerId: "zero", exposureCount: 4, knownExposureCount: 4, totalInputTokens: 0 }
+    ]
+  });
+  db.exec("UPDATE agent_usage_contexts SET ranking_inputs_ready=0");
+  expect(attribution.rankingsPage(filter, "all", { sort: "totalInputTokens", limit: 10, offset: 0 })).toEqual(compact);
+  // A window with only unknown results must stay unknown, while absent arguments remain zero.
+  await attribution.upsertContext(binding, { ...context("only-unknown", "2026-10-14T00:00:00Z"), blocks: [blocks[2]!] });
+  expect(attribution.rankings({ namespace: "test", from: "2026-10-14T00:00:00Z" }, "all")[0])
+    .toMatchObject({ totalInputTokens: null, definitionInputTokens: 0, argumentInputTokens: 0,
+      firstResultInputTokens: null, repeatedResultInputTokens: 0, unknownFirstResultInputTokens: 0 });
 });
 
 it("compacts redundant identity hashes without changing evidence or invalidating rankings", async () => {
