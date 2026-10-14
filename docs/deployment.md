@@ -4,7 +4,11 @@ Remote Agent Server 是面向业务系统的自托管 ACP Agent 执行网关。�
 
 服务支持两种原生写时复制 Workspace：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。运行时会根据操作系统自动选择，不提供普通目录复制回退。它以 acpx 的 `approve-all` 模式运行 Claude Code、Codex 或 Hermes。`approve-all` 只减少 Provider 的交互确认，**不是安全沙箱**；Workspace 中的代码、网络和该用户能访问的文件都应视为 Agent 可操作范围。
 
-Codex 默认 `agent` 模式允许普通命令联网，继续采用 `workspace-write` 文件沙箱和原有临时目录规则。平台的 ACP adapter 每轮显式下发网络策略，主机 `config.toml` 的 `sandbox_workspace_write.network_access` 不会覆盖该预设；`approve-all` 仍会自动批准越界提权。升级时按本指南完成 `pnpm install --frozen-lockfile`、构建和服务重启后生效，运行中的进程不会热更新依赖。已有业务 Session 可以恢复，无需清空 Workspace 或会话历史。
+Codex ACP adapter 固定为 `2.2.2`，锁文件中的配套 Codex CLI 为 `0.160.1`；默认运行使用项目依赖中的 CLI，更新全局 `codex` 不会替换它。默认 `agent` 模式允许普通命令联网，继续采用 `workspace-write` 文件沙箱和原有临时目录规则。adapter 每轮显式下发网络策略，主机 `config.toml` 的 `sandbox_workspace_write.network_access` 不会覆盖该预设。保留上游默认 `auto_review` 审批；acpx 的 `approve-all` 只处理转交客户端的权限请求，不绕过 Codex 自动审批。
+
+Codex 会话启动或恢复后，必须等待已选 MCP 全部连接就绪才能开始模型请求；启动失败、被禁用、需要认证或超过 30 秒仍未就绪都会阻断执行。修复 MCP 配置或认证后重新打开 Provider 会话会重新检查。
+
+升级时按本指南完成 `pnpm install --frozen-lockfile`、构建和服务重启后生效，运行中的进程不会热更新依赖。已有业务 Session 可以恢复，无需清空 Workspace 或会话历史。生产验收还需检查真实 Provider 的会话恢复、MCP 工具调用及自动审批结果。
 
 ## macOS：APFS 原生部署
 

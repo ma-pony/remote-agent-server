@@ -1,4 +1,22 @@
-# acpx patch maintenance
+# Dependency patch maintenance
+
+## Codex ACP 2.2.2
+
+`@agentclientprotocol__codex-acp@2.2.2.patch` replaces the 1.1.14 patch. The adapter is pinned exactly; the lockfile resolves its bundled Codex CLI to 0.160.1.
+
+Upstream now owns the shared `McpSessionStartup` task, its abort controller and session-close cleanup, the generic thread-aware status request, and paginated status collection. The old patches to `CodexAcpClient.listMcpServers` and separate new/load/resume startup-promise setup are removed.
+
+The remaining local policy is:
+
+- Enable networking in default `agent` mode, retaining workspace sandbox roots and temporary-directory rules. Other mode presets and upstream's default `auto_review` reviewer are unchanged.
+- Use upstream's paginated query to require every selected MCP server's thread-local `runtimeStatus` to be `connected`, including same-name entries supplied by Codex config. Cached `serverInfo`, global events, and early startup notifications are insufficient. A transient `cancelled` state may recover; `failed`, `disabled`, and `authenticationRequired` fail immediately.
+- Share a startup result with prompts and background reporting, retain failures until the Provider Session closes, and end the readiness wait within 30 seconds even when a status request does not respond. Cancellation stops the waiting prompt; close aborts startup and clears timers. An outstanding status RPC is released when its Runtime closes the ACP/app-server processes. A replacement app-server invalidates the old result, so automatic recovery checks the new connections again.
+
+Upstream's optional `_meta.mcpStartupAwaitTimeoutMs` is not equivalent: acpx 0.16.0 does not send it, `session/load` does not read it, and elapsed waits or MCP failure results do not reject the subsequent prompt. Keep the local prompt gate until the released upstream adapter provides the same required-server behavior across creation, loading, resumption, and process recovery.
+
+`pnpm exec vitest run test/codex-acp-patch.test.ts` runs the published adapter and acpx against a local fake app-server without Provider credentials or model calls. It covers default/explicit mode policies, thread isolation, pagination, config conflicts, transient events, cached metadata, failure retention, the real 30-second deadline (including a hung RPC), load/resume, process recovery, cancellation, and close/shutdown cleanup with responsive and hung status requests. Before removing either policy, run these behavior tests against the unpatched candidate release; source-string matches alone are not sufficient.
+
+## acpx 0.16.0
 
 `acpx@0.16.0.patch` supplements the process cleanup shipped in [acpx 0.16.0](https://github.com/openclaw/acpx/releases/tag/v0.16.0). It replaces the larger 0.13.2 patch.
 

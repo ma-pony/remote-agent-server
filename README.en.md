@@ -218,7 +218,9 @@ Authenticate and configure models only for the providers you intend to use, unde
 
 At startup, the server reads the login-shell PATH and merges it with the current Node directory and process PATH. Each agent has its own Provider Home. The server prepares baseline configuration, authentication, and model information from the service user's Provider Home while excluding session history, logs, and temporary runtime data, including Codex's `app-server-daemon` and `app-server-control` directories. System plugins, hooks, and global MCP from Codex and Claude Code are optional configuration sources; agents never inherit them implicitly.
 
-Codex defaults to `agent` mode: ordinary commands run in the `workspace-write` sandbox with network access enabled, without requesting escalation for networking. The platform's ACP adapter explicitly sends this network policy on every turn; `sandbox_workspace_write.network_access` in the host's `config.toml` does not override it. The existing `approve-all` policy still approves permission requests automatically; see the [security boundary](#security-boundary).
+The Codex ACP adapter is pinned to `2.2.2`, with Codex CLI `0.160.1` in the lockfile. Default `agent` mode allows ordinary commands to access the network inside the `workspace-write` sandbox. Every turn explicitly sends this network policy; `sandbox_workspace_write.network_access` in the host's `config.toml` does not override it. Upstream's default `auto_review` approval mode is retained. acpx's `approve-all` only approves permission requests forwarded to the client and does not bypass Codex automatic review; see the [security boundary](#security-boundary).
+
+When creating or restoring a Codex session, all selected MCP servers must be connected before model work starts. Failed, disabled, authentication-required, or unready connections after 30 seconds block execution. Cancelling a Run or closing its session while waiting prevents a late model request.
 
 ### 2. Create a project environment
 

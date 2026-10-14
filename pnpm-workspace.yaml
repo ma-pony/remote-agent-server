@@ -10,5 +10,5 @@ overrides:
   "js-yaml@>=4.0.0 <4.3.2": 4.3.2
 
 patchedDependencies:
-  "@agentclientprotocol/codex-acp@1.1.14": patches/@agentclientprotocol__codex-acp@1.1.14.patch
+  "@agentclientprotocol/codex-acp@2.2.2": patches/@agentclientprotocol__codex-acp@2.2.2.patch
   acpx@0.16.0: patches/acpx@0.16.0.patch

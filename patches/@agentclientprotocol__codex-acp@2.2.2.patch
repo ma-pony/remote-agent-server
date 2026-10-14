@@ -1,0 +1,123 @@
+diff --git a/dist/index.js b/dist/index.js
+index 3e927271d2e805d1b111dfa6082686c17b2f62ae..fb7df43f85c96bead3573071af906902cffc8900 100755
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -33454,16 +33454,76 @@ var McpSessionStartup = class {
+     void this.doPublish(sessionId);
+   }
+   createPendingSession(sessionId, mcpServers, afterVersion, skippedServers) {
+-    const requestedServers = new Set(getRequestedMcpServerNames(mcpServers).filter((server) => !skippedServers.includes(server)));
++    const requestedServers = new Set(getRequestedMcpServerNames(mcpServers));
+     const abort = new AbortController();
+-    const startup = this.runWithProcessCheck(() => this.codexAcpClient().awaitMcpServerStartup(
+-      Array.from(requestedServers),
+-      afterVersion,
+-      { threadId: sessionId, signal: abort.signal }
+-    ));
++    const client = this.codexAcpClient();
++    const startup = this.waitForReadiness(sessionId, requestedServers, abort.signal, client);
+     void startup.catch(() => {
+     });
+-    return { requestedServers, skippedServers, startup, abort };
++    return { requestedServers, skippedServers, startup, abort, client };
++  }
++  async waitForReadiness(sessionId, requestedServers, signal, client) {
++    signal.throwIfAborted();
++    let ready = [];
++    let finished = false;
++    let pollTimer;
++    let deadlineTimer;
++    let onAbort;
++    const stopped = new Promise((_, reject) => {
++      onAbort = () => reject(signal.reason);
++      signal.addEventListener("abort", onAbort, { once: true });
++    });
++    const deadline = new Promise((resolve) => {
++      deadlineTimer = setTimeout(() => resolve({
++        ready,
++        failed: [...requestedServers].filter((name) => !ready.includes(name)).map((server) => ({
++          server, error: "MCP startup timed out"
++        })),
++        cancelled: []
++      }), 3e4);
++    });
++    const poll = async () => {
++      while (!finished) {
++        const servers = new Map((await this.runWithProcessCheck(
++          () => listMcpServerStatus(client, sessionId)
++        )).map((server) => [server.name, server]));
++        if (finished) return;
++        ready = [...requestedServers].filter((name) => servers.get(name)?.runtimeStatus === "connected");
++        const failed = [...requestedServers].filter((name) =>
++          ["failed", "disabled", "authenticationRequired"].includes(servers.get(name)?.runtimeStatus)
++        ).map((server) => ({ server, error: `MCP connection ${servers.get(server).runtimeStatus}` }));
++        if (failed.length > 0 || ready.length === requestedServers.size) {
++          return { ready, failed, cancelled: [] };
++        }
++        // A cancelled startup notification can precede a usable thread connection.
++        await new Promise((resolve) => { pollTimer = setTimeout(resolve, 250); });
++      }
++    };
++    try {
++      return await Promise.race([poll(), deadline, stopped]);
++    } finally {
++      finished = true;
++      clearTimeout(pollTimer);
++      clearTimeout(deadlineTimer);
++      signal.removeEventListener("abort", onAbort);
++    }
++  }
++  async waitBeforePrompt(sessionId, mcpServers) {
++    let pendingStartup = this.pendingSessions.get(sessionId);
++    // A restarted app-server has new MCP connections, even when the session id is unchanged.
++    if (pendingStartup && pendingStartup.client !== this.codexAcpClient()) {
++      this.close(sessionId);
++      this.begin(sessionId, mcpServers, 0, { publish: true });
++      pendingStartup = this.pendingSessions.get(sessionId);
++    }
++    if (!pendingStartup) return;
++    const result = await pendingStartup.startup;
++    if (result.failed.length > 0) {
++      throw RequestError.internalError(
++        { mcpServers: result.failed.map((failure3) => failure3.server) },
++        `MCP servers failed to start: ${result.failed.map((failure3) => `${failure3.server} (${failure3.error})`).join(", ")}`
++      );
++    }
+   }
+   async doPublish(sessionId) {
+     const pendingStartup = this.pendingSessions.get(sessionId);
+@@ -33480,9 +33540,8 @@ var McpSessionStartup = class {
+       if (!pendingStartup.abort.signal.aborted) {
+         logger.error(`Failed to publish MCP startup status for session ${sessionId}`, err);
+       }
+-    } finally {
+-      this.forget(sessionId, pendingStartup);
+     }
++    // Keep the settled startup result for later prompts; close() owns its lifetime.
+   }
+   async publish(sessionId, mcpStartup, pendingStartup) {
+     const { requestedServers, skippedServers, abort: { signal } } = pendingStartup;
+@@ -34300,7 +34359,7 @@ var AgentMode = class _AgentMode {
+     {
+       type: "workspaceWrite",
+       writableRoots: [],
+-      networkAccess: false,
++      networkAccess: true,
+       excludeTmpdirEnvVar: false,
+       excludeSlashTmp: false
+     },
+@@ -44855,7 +44914,13 @@ Check ${configPath} and project .codex directories, especially their config.toml
+           return cancelledPromptResponse();
+         }
+       }
+-      if (activePrompt.clientCancelled) {
++      const mcpReady = await Promise.race([
++        this.mcpSessionStartup.waitBeforePrompt(params.sessionId, sessionState.mcpServers ?? []).then(() => true),
++        activePrompt.closeSignal.then(() => false),
++        activePrompt.cancelSignal.then(() => false),
++        activePrompt.clientCancelSignal.then(() => false)
++      ]);
++      if (!mcpReady || activePrompt.signal.aborted || activePrompt.clientCancelled) {
+         return cancelledPromptResponse();
+       }
+       if (this.recovery !== null) {

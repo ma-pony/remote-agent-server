@@ -262,6 +262,8 @@ Codex 也在 `.tmp` 中保存 rollout 压缩锁。启用压缩的 Session 使用
 
 配置变化从下一次 Run 生效。已有 Session 会刷新 Runtime 连接；Provider 支持恢复时继续原有 Provider Session。
 
+Codex ACP `2.2.2` 复用上游的 MCP 启动任务、会话关闭清理和线程级分页查询，仅保留平台的就绪阻断策略。新建、加载和恢复 Provider Session 时，对已选 MCP（包括 Codex 配置提供的同名项）查询当前线程的 `runtimeStatus`，全部为 `connected` 才允许 prompt 启动模型请求；缓存的 `serverInfo` 或提前到达的启动通知不代表连接就绪。明确的 `failed`、`disabled`、`authenticationRequired` 立即失败；暂态 `cancelled` 等未就绪状态继续等待。即使状态查询无响应，启动等待也在 30 秒内结束并阻断 prompt；底层未决 RPC 随 Runtime 关闭 ACP/app-server 进程释放。结果在 Provider Session 关闭前保留，后续 prompt 不能绕过失败；重新打开或 app-server 自动重启恢复后重新检查。取消中的 prompt 不启动模型请求，关闭会话会中止等待并清理定时器。未选择 MCP 时不等待。
+
 Git 来源的稳定身份来自配置的 URL、ref 和子目录；Skill 身份还包含插件标识和包内路径。刷新操作在进程内串行，使用有截止时间、可取消并回收进程树的 Git 命令。发布前验证路径、文件类型和内容大小，来源索引原子替换，失败保留上一可用版本。来源仓库与 marketplace 引用的插件仓库分别记录实际 commit，外部插件未指定 ref 时跟随自身 HEAD。
 
 Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace 条目的 Skills 声明，并包含默认 `skills/`；当条目指向 marketplace 根目录且明确选择子路径时，仅导入所选路径。`strict: false` 与插件自身 Skills 声明冲突时提示并保留该插件的上一可用版本。Codex 插件按显式声明选择目录，没有声明时才使用默认目录。普通仓库递归发现 Skills；不支持的源类型会显示提示。
@@ -365,7 +367,7 @@ HTTP 中已知 Provider 工具名通过显式适配映射到与 Runtime 事件�
 
 Agent 运行在服务操作系统用户权限下，可以执行命令、修改 Workspace、调用 MCP 和访问该用户能够访问的网络与文件。`approve-all` 是 Provider 交互策略，不是安全沙箱。生产部署必须使用专用无特权用户、可信仓库和 MCP，并把服务放在可信网络或 TLS 反向代理后。
 
-打包的 Codex ACP adapter 将默认 `agent` 模式设为 `workspaceWrite`、`networkAccess: true`，保留原有可写目录和临时目录规则。新建、加载或恢复 Provider Session 都采用同一预设，后续普通 Run 每轮显式发送该策略，不依赖模型申请联网提权，也不依赖主机 `sandbox_workspace_write.network_access` 默认值。`read-only` 和 `agent-full-access` 预设保持各自原有策略。默认命令的文件沙箱不构成不可提权的隔离保证，因为 `approve-all` 仍会批准越界权限请求。
+打包的 Codex ACP adapter 将默认 `agent` 模式设为 `workspaceWrite`、`networkAccess: true`，保留原有可写目录和临时目录规则。新建、加载或恢复 Provider Session 都采用同一预设，后续普通 Run 每轮显式发送该策略，不依赖模型申请联网提权，也不依赖主机 `sandbox_workspace_write.network_access` 默认值。`read-only`、`workspace-write` 和 `agent-full-access` 预设保持上游策略。`2.2.2` 默认模式使用上游 `auto_review` 审批，acpx 的 `approve-all` 只处理转交客户端的请求，不绕过自动审批；默认文件沙箱仍不构成不可提权的隔离保证。
 
 ## 11. 部署边界
 
