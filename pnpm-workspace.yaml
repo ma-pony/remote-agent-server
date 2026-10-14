@@ -3,10 +3,10 @@ onlyBuiltDependencies:
   - esbuild
 
 overrides:
-  "fast-uri@>=3.0.0 <4.0.0": 3.1.6
-  "fast-uri@>=4.0.0 <5.0.0": 4.1.4
+  "fast-uri@>=3.0.0 <4.0.0": 3.1.8
+  "fast-uri@>=4.0.0 <5.0.0": 4.2.2
   "qs@>=2.2.5 <6.16.0": 6.16.0
-  "hono@>=4.0.0 <4.13.5": 4.13.5
+  "hono@>=4.0.0 <4.13.13": 4.13.13
   "js-yaml@>=4.0.0 <4.3.2": 4.3.2
 
 patchedDependencies:
