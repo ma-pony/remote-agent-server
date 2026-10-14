@@ -7,6 +7,14 @@ import { getRuntimeContentEvidence, listRuntimeContentEvidence } from "./runtime
 import { dailyBounds } from "./core/daily-time.js";
 import { UsageQueryCache } from "./query-cache.js";
 import { UsageQueryWorker, UsageQueryWorkerError } from "./query-worker.js";
+import type { DashboardFilter } from "./dashboard-types.js";
+
+const dashboardQuerySchema = z.object({
+  agentId: z.string().regex(/^[1-9]\d*$/).optional(),
+  from: z.string().datetime({ offset: true }), to: z.string().datetime({ offset: true }),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  offset: z.coerce.number().int().min(0).max(100000).default(0)
+}).strict();
 
 const querySchema = z.object({
   agentId: z.string().regex(/^[1-9]\d*$/).optional(), sessionId: z.string().regex(/^[1-9]\d*$/).optional(),
@@ -43,6 +51,22 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
   const reader = new UsageQueryWorker(collector);
   const rankingReader = new UsageQueryWorker(collector);
   app.addHook("preClose", async () => { await Promise.all([reader.close(), rankingReader.close()]); });
+  for (const endpoint of ["dashboard", "session-trend"] as const) {
+    app.get(`/usage/${endpoint}`, { errorHandler: queryError }, async (request, reply) => {
+      const parsed = dashboardQuerySchema.safeParse(request.query);
+      if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid dashboard query" } });
+      const query = parsed.data, bounds = dailyBounds(query.from, query.to);
+      const duration = Date.parse(bounds.to!) - Date.parse(bounds.from!);
+      if (Date.parse(query.from) >= Date.parse(query.to) || duration <= 0 || duration > 366 * 86_400_000) {
+        return reply.code(400).send({ error: { code: "invalid_request", message: "Dashboard range must be between 1 and 366 UTC days" } });
+      }
+      const filter: DashboardFilter = { namespace, agentId: query.agentId, from: bounds.from!, to: bounds.to! };
+      // Session creation and Run transitions do not revise the usage ledger. Read fresh host metadata on each request.
+      const snapshot = endpoint === "dashboard" ? await reader.readSnapshot("dashboard", [filter])
+        : await reader.readSnapshot("sessionTrend", [filter, query]);
+      return { ...snapshot.value, asOf: snapshot.asOf, from: filter.from, to: filter.to, timeZone: "UTC" };
+    });
+  }
   const providerEpoch = (sessionId: string, agentId: string | undefined): string | null => {
     const session = collector.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: number } | undefined;
     if (session === undefined || (agentId !== undefined && String(session.agent_id) !== agentId)) return null;

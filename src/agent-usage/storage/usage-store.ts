@@ -144,6 +144,26 @@ export class UsageStore {
     return { summary: analysis.summary(filter), timeseries: analysis.timeseries(filter, bucket) };
   }
 
+  /** Daily averages count only Sessions with a known total, after reconciliation across all their epochs. */
+  overviewWithSessionCounts(filter: UsageFilter & { namespace: string }) {
+    let analyses: Map<string, UsageAnalysis>;
+    if (this.projections.hasProjection()) analyses = this.projections.analysesBySession(filter);
+    else {
+      const grouped = new Map<string, UsageRecord[]>();
+      for (const record of this.records(filter)) {
+        const rows = grouped.get(record.sessionId) ?? [];
+        rows.push(record); grouped.set(record.sessionId, rows);
+      }
+      analyses = new Map([...grouped].map(([sessionId, records]) => [sessionId, new UsageAnalysis(records)]));
+    }
+    const reportedSessions: Record<string, number> = {};
+    for (const analysis of analyses.values()) for (const day of analysis.timeseries(filter, "day").items) {
+      if (day.usage.totalTokens !== null) reportedSessions[day.period] = (reportedSessions[day.period] ?? 0) + 1;
+    }
+    const analysis = UsageAnalysis.combine([...analyses.values()].map(item => item.project()));
+    return { summary: analysis.summary(filter), timeseries: analysis.timeseries(filter, "day"), reportedSessions };
+  }
+
   private analysis(filter: UsageFilter): UsageAnalysis {
     return this.projections.hasProjection() ? this.projections.read(filter) : new UsageAnalysis(this.records(filter));
   }

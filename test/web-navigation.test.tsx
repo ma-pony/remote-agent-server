@@ -45,6 +45,14 @@ it("使用侧栏链接在四个资源列表间导航", async () => {
   expect(await screen.findByRole("heading", { name: "接入端点" })).toBeInTheDocument();
 });
 
+it("从侧栏打开用量看板", async () => {
+  render(<App />);
+  const navigation = await screen.findByRole("navigation", { name: "主导航" });
+  fireEvent.click(within(navigation).getByRole("link", { name: "用量看板" }));
+  expect(await screen.findByRole("heading", { name: "用量看板" })).toBeInTheDocument();
+  expect(window.location.pathname).toBe("/dashboard");
+});
+
 it("移动端从侧栏导航后自动关闭抽屉", async () => {
   Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 });
   Object.defineProperty(window, "matchMedia", {

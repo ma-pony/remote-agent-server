@@ -121,12 +121,17 @@ export class AccountingProjectionStore {
     return UsageAnalysis.combine(this.facts(filter).map(row => row.projection));
   }
 
-  summariesBySession(namespace: string, sessionIds: string[]) {
+  analysesBySession(filter: UsageFilter, sessionIds?: string[]): Map<string, UsageAnalysis> {
     const grouped = new Map<string,UsageAnalysisProjection[]>();
-    for (const row of this.facts({ namespace },sessionIds)) {
+    for (const row of this.facts(filter,sessionIds)) {
       const group = grouped.get(row.sessionId) ?? []; group.push(row.projection); grouped.set(row.sessionId,group);
     }
-    return sessionIds.map(sessionId => ({sessionId,summary:UsageAnalysis.combine(grouped.get(sessionId) ?? []).summary()}));
+    return new Map([...grouped].map(([sessionId, projections]) => [sessionId, UsageAnalysis.combine(projections)]));
+  }
+
+  summariesBySession(namespace: string, sessionIds: string[]) {
+    const grouped = this.analysesBySession({ namespace }, sessionIds);
+    return sessionIds.map(sessionId => ({sessionId,summary:(grouped.get(sessionId) ?? new UsageAnalysis([])).summary()}));
   }
 
   compactEventPayloads(limit: number): number {

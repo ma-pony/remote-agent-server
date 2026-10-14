@@ -2,8 +2,12 @@ import Database from "better-sqlite3";
 import { UsageStore } from "./storage/usage-store.js";
 import { AttributionStore } from "./storage/attribution-store.js";
 import { usageQueryVersion } from "./storage/query-version.js";
+import { readUsageDashboard, readUsageSessionTrend } from "./dashboard.js";
+import type { DashboardFilter, DashboardPage } from "./dashboard-types.js";
 
 export type UsageQueries = {
+  dashboard: { args: [DashboardFilter]; result: ReturnType<typeof readUsageDashboard> };
+  sessionTrend: { args: [DashboardFilter, DashboardPage]; result: ReturnType<typeof readUsageSessionTrend> };
   overview: { args: Parameters<UsageStore["overview"]>; result: ReturnType<UsageStore["overview"]> };
   overviewWithContext: { args: Parameters<UsageStore["overview"]>; result: ReturnType<UsageStore["overview"]> & { contextAnalysis: ReturnType<AttributionStore["contextSummary"]> } };
   sessionSummaries: { args: Parameters<UsageStore["summariesBySession"]>; result: ReturnType<UsageStore["summariesBySession"]> };
@@ -16,6 +20,8 @@ export type UsageQuerySnapshot<T> = { value: T; revision: string; asOf: string }
 export type UsageQuery = { [K in keyof UsageQueries]: { kind: K; args: UsageQueries[K]["args"] } }[keyof UsageQueries];
 
 export const executeUsageQuery = (store: UsageStore, attribution: AttributionStore, query: UsageQuery) => {
+  if (query.kind === "dashboard") return readUsageDashboard(store, ...query.args);
+  if (query.kind === "sessionTrend") return readUsageSessionTrend(store, ...query.args);
   if (query.kind === "overview") return store.overview(...query.args);
   if (query.kind === "overviewWithContext") return { ...store.overview(...query.args), contextAnalysis: attribution.contextSummary(query.args[0]) };
   if (query.kind === "sessionSummaries") return store.summariesBySession(...query.args);

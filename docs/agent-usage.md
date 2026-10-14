@@ -211,6 +211,15 @@ Provider 文件也可显式登记 `codex_log` 或 `claude_log`。使用授权导
 
 ## 查询和维护
 
+管理台 `/dashboard` 提供四类趋势：每日 token、每日每会话平均 token、每日会话数量及逐会话累计 token。支持 Agent 与最近 7／30／90／365 天筛选、明细切换和手动刷新。
+
+- `GET /api/usage/dashboard?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z`：可选 `agentId`，返回 `summary`、每日分配之外的 `unplacedUsage`、区间 `counts` 和完整 `daily` 日期序列。每日项包含 `day/usage/newSessions/activeSessions/runs/reportedSessions/averageTokensPerSession`。
+- `GET /api/usage/session-trend?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z&limit=50&offset=0`：按创建日期筛选 Session，按创建时间及 ID 升序返回。`items` 含 `sessionId/title/agentId/agentName/createdAt/summary`，其中 `summary` 为会话完整历史用量；`total` 不受当前页限制。可选 `agentId`，`limit` 为 1–100，默认 50；`offset` 为 0–100000，默认 0。
+
+两个接口沿用管理鉴权，要求 `from/to`，按下述 UTC 日界线规则取整后限制为 1–366 天，返回实际 `from/to`、`timeZone: "UTC"` 和 `asOf`；不支持 `sessionId/runtimeKind/timezone/fresh`。每次读取新快照，文件数据库使用已有只读查询 Worker。每日及逐会话查询独立返回各自统计时间。
+
+每日平均值 = 当天已知总 token ÷ 当天总 token 非空的去重 Session 数；一个 Session 的多个请求、Run 或 epoch 只进入分母一次，已知零参与，未上报不参与，无上报时平均值为 null。它是已知部分的平均值，不能代表缺失数据；无时间和跨日用量不分摊。新建数按 Session 创建日统计，活跃数按当天有 Run 开始的 Session 去重；未开始的排队执行不计入，开始后失败或取消的执行仍计入。区间活跃总数独立去重，不累加每日去重数。日期缺口保留会话计数 0 和未上报 token null。逐会话累计量可能含日期范围外用量，不能与每日图求和核对。
+
 共同筛选为 `agentId/sessionId/from/to/runtimeKind`。日期统一按 UTC 自然日统计，采用 `[from,to)`；不接受 `timezone` 参数。时间趋势支持 day/week/month，周从周一开始。首版只支持已映射主体的 `subagents=self`，不自动扫描或推断 Provider 内部子 Agent 树。
 
 能力维度为 `mcp_tool/builtin_tool/cli/skill/plugin/hook/unknown`，另含细分提示词与对话维度。排名支持 `limit`（1–200）、`offset` 以及调用数、定义输入、参数输入、结果首次／重复输入、累计输入贡献、失败数、P95 耗时排序。调用列表使用 `cursor`；`origin=counted` 与 `execution` 只看实际执行，`context` 只看输入证据。不同 origin 不相加。

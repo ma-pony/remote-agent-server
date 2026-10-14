@@ -1,4 +1,4 @@
-import { BarChart3, Bot, Boxes, Cable, Languages, LogOut, MessagesSquare, SlidersHorizontal } from "lucide-react";
+import { BarChart3, Bot, Boxes, Cable, Languages, LayoutDashboard, LogOut, MessagesSquare, SlidersHorizontal } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router";
 
 import { Button } from "@/components/ui/button";
@@ -22,6 +22,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { useI18n } from "@/i18n";
 
 const navigation = [
+  { label: ["用量看板", "Usage dashboard"], path: "/dashboard", icon: LayoutDashboard },
   { label: ["智能体", "Agents"], path: "/agents", icon: Bot },
   { label: ["项目环境", "Project environments"], path: "/project-environments", icon: Boxes },
   { label: ["会话", "Sessions"], path: "/sessions", icon: MessagesSquare },

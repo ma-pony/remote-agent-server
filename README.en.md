@@ -349,6 +349,14 @@ Cleanup rechecks expiry when claiming a Session. A failed cleanup or deletion ke
 
 These limits control the current Remote Agent Server process. The project is designed for single-process deployment and does not provide distributed concurrency quotas across multiple service instances.
 
+### Usage dashboard
+
+The sidebar's **Usage dashboard** (`/dashboard`) shows daily tokens, daily average tokens per session, daily session counts, and lifetime tokens per session. Filter by all or one Agent and the last 7/30/90/365 days, including today. Each chart has a data view, supports arrow-key inspection, and can be refreshed manually.
+
+All dates use UTC. Daily tokens reuse the reconciled ledger. The daily average is known total tokens divided by distinct Sessions with a reported total that day: multiple Runs/epochs count as one Session, known zero participates, and unreported Sessions are not treated as zero. Undated and cross-day ranges are not distributed into daily charts. New sessions are counted by creation date; active sessions started a Run that day, excluding queued work. The period's active-session total is independently deduplicated.
+
+The session chart filters by creation date and orders by creation time and ID, with 50 Sessions per page. Each point represents that Session's **full lifetime usage**, possibly outside the selected dates; its sum is not comparable to the daily chart. Data views include Agent, completeness and a Session link. Missing counts remain “Not reported”; conflicts and usage that cannot be assigned to a day are disclosed separately.
+
 ### Usage analysis
 
 Capability rankings default to **All capabilities**, combining MCP tools, built-ins, CLIs, Skills, plugins, hooks and unknown tools with five distinct content dimensions: user prompts, configured instructions, model-request system prompts, assistant output and observed reasoning. Each dimension supports filtering, ranking and evidence inspection. Configured instructions are counted once per Run and replies by persisted text fragment; content observations are displayed separately from tool executions. Cumulative input is reconstructed from native conversation logs by default, with optional direct request capture; it must not be added to one-time observed content.
