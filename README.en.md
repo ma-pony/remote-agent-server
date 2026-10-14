@@ -162,6 +162,8 @@ Open `http://127.0.0.1:3000` and copy the value of `API_TOKEN` from `.env` into 
 
 Follow the first-use path: **project environment → Agent → session**. When no environment is ready, the console links directly to creating or inspecting one. Start with one Provider; add Skills, MCP, and integrations after the first task works.
 
+The console supports Chinese, English, and keyboard navigation. The sidebar stays available during page transitions. Agent, session, environment, and endpoint lists, plus system settings, offer in-place retries after loading fails. Invalid tokens return to the login screen with an explanation; unknown URLs provide a route back. Failed credential or code copying prompts manual copying. On phones, the session composer scrolls with the page so the history remains readable.
+
 ### Manual configuration and direct startup
 
 You can also manage configuration manually. For a new installation without an existing `.env`:

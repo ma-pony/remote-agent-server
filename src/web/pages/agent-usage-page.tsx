@@ -383,14 +383,14 @@ export const AgentUsagePage = () => {
   const runtimeOptions = [...new Set(["codex", "claude_code", "hermes", runtimeKind].filter(Boolean))];
 
   return <PageContainer width="wide">
-    <PageHeader eyebrow={text("可核验用量台账", "VERIFIABLE USAGE LEDGER")} title={text("用量分析", "Usage analysis")}
-      description={text("核对模型上报用量，统一分析提示词、对话与工具内容及模型输入上下文。", "Reconcile model-reported usage and analyze prompts, conversation, tool content and model-input context together.")}
+    <PageHeader title={text("用量分析", "Usage analysis")}
+      description={text("核对模型上报的 token，查看提示词、工具和上下文的用量估算。", "Reconcile model-reported tokens and inspect usage estimates for prompts, tools, and context.")}
       action={<Button type="button" variant="outline" disabled={summary === null || rankingRequestRef.current !== null}
         onClick={() => setReload(value => value + 1)}><RefreshCw data-icon="inline-start" />{text("刷新统计", "Refresh statistics")}</Button>} />
     {summary === null ? null : <p className="mb-5 text-xs text-muted-foreground">{text("统计截至：", "Statistics as of: ")}{formatDate(summary.asOf)}
       {summary.stale ? text(" · 有新数据，可刷新统计", " · New data available; refresh statistics") : ""}</p>}
 
-    <Card className="mb-5"><CardHeader><CardTitle>{text("分析范围", "Analysis scope")}</CardTitle><CardDescription>{text("日期统一按 UTC 自然日统计；结束时间为下一日零点。", "Dates use UTC calendar days; the end is the next midnight.")}</CardDescription></CardHeader><CardContent><FieldGroup className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-6">
+    <Card className="mb-5"><CardHeader><CardTitle>{text("分析范围", "Analysis scope")}</CardTitle><CardDescription>{text("按 UTC 自然日筛选。下方会分别展示模型上报量和内容估算。", "Filter by UTC calendar day. Reported usage and content estimates are shown separately below.")}</CardDescription></CardHeader><CardContent><FieldGroup className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-6">
       <Field><FieldLabel htmlFor="usage-agent">{text("智能体", "Agent")}</FieldLabel><PagedResourceSelect<Agent> key="usage-agent" endpoint="/agents" id="usage-agent" ariaLabel={text("智能体筛选", "Agent filter")} value={agentId} onValueChange={(value) => updateFilter("agentId", value)} emptyLabel={text("全部智能体", "All agents")} getOption={(agent) => ({ value: String(agent.id), label: agent.name })} /></Field>
       <Field><FieldLabel htmlFor="usage-session">{text("会话", "Session")}</FieldLabel><PagedResourceSelect<SessionListItem> key={`usage-session-${agentId}`} endpoint={agentId ? `/sessions?agentId=${agentId}` : "/sessions"} id="usage-session" ariaLabel={text("会话筛选", "Session filter")} value={sessionId} onValueChange={(value) => updateFilter("sessionId", value)} emptyLabel={text("全部会话", "All sessions")} getOption={(session) => ({ value: String(session.id), label: session.title })} /></Field>
       <Field><FieldLabel htmlFor="usage-range">{text("日期范围", "Date range")}</FieldLabel><NativeSelect id="usage-range" size="sm" value={range} onChange={(event) => updateFilter("range", event.target.value)}><NativeSelectOption value="7d">{text("最近 7 天", "Recent 7 days")}</NativeSelectOption><NativeSelectOption value="30d">{text("最近 30 天", "Recent 30 days")}</NativeSelectOption><NativeSelectOption value="all">{text("全部时间", "All time")}</NativeSelectOption></NativeSelect></Field>
@@ -437,7 +437,7 @@ export const AgentUsagePage = () => {
         </AlertDescription>
       </Alert> : null}
 
-      <section aria-labelledby="reported-usage-title"><div className="mb-3 flex flex-wrap items-end justify-between gap-3"><div><h2 id="reported-usage-title" className="font-heading text-lg font-medium">{text("模型上报用量", "Model-reported usage")}</h2><p className="mt-1 text-sm text-muted-foreground">{text("来自模型请求、轮次或 Provider 范围总量的去重台账；与下方估算值不是同一口径。", "A reconciled ledger reported by model requests, turns, or provider ranges; it is separate from the estimates below.")}</p></div><Badge variant={summary.analysisStatus === "collecting" ? "secondary" : summary.completeness === "complete" ? "default" : "outline"}>{summary.analysisStatus === "collecting" ? text("采集中", "Collecting") : summary.completeness === "complete" ? text("完整", "Complete") : text("部分", "Partial")}</Badge></div>
+      <section aria-labelledby="reported-usage-title"><div className="mb-3 flex flex-wrap items-end justify-between gap-3"><div><h2 id="reported-usage-title" className="font-heading text-lg font-medium">{text("模型上报用量", "Model-reported usage")}</h2><p className="mt-1 text-sm text-muted-foreground">{text("来自模型请求、轮次或 Provider 范围总量的去重台账；与下方估算值不是同一口径。", "A reconciled ledger reported by model requests, turns, or provider ranges; it is separate from the estimates below.")}</p></div><Badge variant={summary.analysisStatus === "collecting" ? "secondary" : summary.completeness === "complete" ? "default" : "outline"}>{summary.analysisStatus === "collecting" ? text("采集中", "Collecting") : summary.completeness === "complete" ? text("完整", "Complete") : summary.completeness === "conflict" ? text("来源冲突", "Conflicting sources") : summary.completeness === "none" ? text("未上报", "Not reported") : text("部分", "Partial")}</Badge></div>
         <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <MetricCard label={text("总 Token", "Total tokens")} value={formatNumber(summary.usage.totalTokens, text("未上报", "Not reported"))} />
           <MetricCard label={text("输入 Token", "Input tokens")} value={formatNumber(summary.usage.inputTotalTokens, text("未上报", "Not reported"))} />
@@ -485,7 +485,7 @@ export const AgentUsagePage = () => {
   </PageContainer>;
 };
 
-const MetricCard = ({ label, value, description }: { label: string; value: string; description?: string }) => <Card><CardHeader><CardDescription>{label}</CardDescription><CardTitle className="font-mono text-2xl tabular-nums">{value}</CardTitle>{description === undefined ? null : <CardDescription>{description}</CardDescription>}</CardHeader></Card>;
+const MetricCard = ({ label, value, description }: { label: string; value: string; description?: string }) => <Card><CardHeader><CardDescription>{label}</CardDescription><CardTitle className="text-2xl tabular-nums [overflow-wrap:anywhere]">{value}</CardTitle>{description === undefined ? null : <CardDescription>{description}</CardDescription>}</CardHeader></Card>;
 
 const CapabilityTable = ({ stageOffset, onStagePageChange, view, ranking, estimate, dimensionLabel, onOpen }: {
   stageOffset: number;

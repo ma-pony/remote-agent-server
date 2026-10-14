@@ -1,11 +1,13 @@
-import { Component, lazy, Suspense, type ErrorInfo, type FormEvent, type ReactNode, useEffect, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useParams } from "react-router";
+import { Component, lazy, type ErrorInfo, type FormEvent, type ReactNode, useEffect, useState } from "react";
+import { BrowserRouter, Link, Navigate, Route, Routes, useParams } from "react-router";
+import { FileQuestion } from "lucide-react";
 
 import { AppShellLayout } from "./components/app-shell.js";
 import { Button } from "./components/ui/button.js";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "./components/ui/card.js";
 import { Input } from "./components/ui/input.js";
-import { Field, FieldGroup, FieldLabel } from "./components/ui/field.js";
+import { Field, FieldDescription, FieldGroup, FieldLabel } from "./components/ui/field.js";
+import { EmptyState, PageContainer } from "./components/page-header.js";
 import { I18nProvider, useI18n } from "./i18n.js";
 import { API_TOKEN_INVALID_EVENT, verifyApiToken } from "./api.js";
 const agentPages = () => import("./pages/agent-pages.js");
@@ -68,38 +70,53 @@ class AppErrorBoundary extends Component<AppErrorBoundaryProps, AppErrorBoundary
 
   render(): ReactNode {
     if (!this.state.failed) return this.props.children;
-    return <main className="grid min-h-svh place-items-center p-6">
-      <section className="w-full max-w-lg rounded-xl border bg-card p-8 text-card-foreground shadow-lg" role="alert">
-        <p className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground">REMOTE AGENT SERVER</p>
-        <h1 className="mt-4 text-2xl font-semibold">页面加载失败</h1>
-        <p className="mt-3 text-sm leading-6 text-muted-foreground">前端资源可能刚刚更新，请重新加载页面。<br />The web application failed to load. Please reload the page.</p>
-        <Button className="mt-6" type="button" onClick={() => window.location.reload()}>重新加载</Button>
-      </section>
-    </main>;
+    return <ApplicationError />;
   }
 }
 
-export const App = () => <AppErrorBoundary><I18nProvider><Application /></I18nProvider></AppErrorBoundary>;
+const ApplicationError = () => {
+  const { text } = useI18n();
+  return <main className="grid min-h-svh place-items-center p-6">
+    <Card className="w-full max-w-lg" role="alert">
+      <CardHeader><h1 className="text-2xl font-semibold">{text("页面加载失败", "Page could not load")}</h1>
+        <CardDescription>{text("请重新加载页面。如果仍然失败，请检查网络连接或联系服务管理员。", "Reload the page. If it still fails, check your connection or contact the server administrator.")}</CardDescription>
+      </CardHeader>
+      <CardContent><Button onClick={() => window.location.reload()}>{text("重新加载", "Reload page")}</Button></CardContent>
+    </Card>
+  </main>;
+};
+
+const NotFoundPage = () => {
+  const { text } = useI18n();
+  return <PageContainer><EmptyState headingLevel={1} icon={FileQuestion} title={text("找不到这个页面", "Page not found")}
+    description={text("请检查网址，或从侧栏选择要打开的页面。", "Check the URL or choose a page from the sidebar.")}
+    action={<Button asChild><Link to="/agents">{text("返回智能体", "Back to agents")}</Link></Button>} /></PageContainer>;
+};
+
+export const App = () => <I18nProvider><AppErrorBoundary><Application /></AppErrorBoundary></I18nProvider>;
 
 const Application = () => {
   const [token, setToken] = useState(() => sessionStorage.getItem("apiToken"));
+  const [expired, setExpired] = useState(false);
 
   useEffect(() => {
-    const disconnect = () => setToken(null);
+    const disconnect = () => { setExpired(true); setToken(null); };
     window.addEventListener(API_TOKEN_INVALID_EVENT, disconnect);
     return () => window.removeEventListener(API_TOKEN_INVALID_EVENT, disconnect);
   }, []);
 
   if (token === null) {
-    return <TokenGate onSave={(value) => {
+    return <TokenGate expired={expired} onSave={(value) => {
       sessionStorage.setItem("apiToken", value);
+      setExpired(false);
       setToken(value);
     }} />;
   }
 
-  return <BrowserRouter><Suspense fallback={<main className="grid min-h-64 place-items-center text-sm text-muted-foreground" role="status">加载页面…</main>}><Routes>
+  return <BrowserRouter><Routes>
     <Route element={<AppShellLayout onDisconnect={() => {
       sessionStorage.removeItem("apiToken");
+      setExpired(false);
       setToken(null);
     }} />}>
       <Route path="/agents" element={<AgentListPage />} />
@@ -141,9 +158,10 @@ const Application = () => {
         <Route path="settings" element={<IntegrationEndpointSettingsPage />} />
       </Route>
       <Route path="/integration-tasks/:id" element={<IntegrationTaskDetailPage />} />
-      <Route path="*" element={<Navigate to="/agents" replace />} />
+      <Route path="/" element={<Navigate to="/agents" replace />} />
+      <Route path="*" element={<NotFoundPage />} />
     </Route>
-  </Routes></Suspense></BrowserRouter>;
+  </Routes></BrowserRouter>;
 };
 
 const SessionRoute = () => {
@@ -151,11 +169,12 @@ const SessionRoute = () => {
   return <SessionPage sessionId={id} />;
 };
 
-const TokenGate = ({ onSave }: { onSave(token: string): void }) => {
+const TokenGate = ({ onSave, expired }: { onSave(token: string): void; expired: boolean }) => {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<"invalid" | "network" | null>(null);
   const { locale, setLocale, text } = useI18n();
+  useEffect(() => { document.title = text("连接服务 · Remote Agent Server", "Connect · Remote Agent Server"); }, [text]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -167,10 +186,10 @@ const TokenGate = ({ onSave }: { onSave(token: string): void }) => {
       if (await verifyApiToken(token)) {
         onSave(token);
       } else {
-        setError(text("API 令牌无效", "Invalid API token"));
+        setError("invalid");
       }
     } catch {
-      setError(text("无法连接服务器", "Unable to connect to the server"));
+      setError("network");
     } finally {
       setBusy(false);
     }
@@ -181,19 +200,26 @@ const TokenGate = ({ onSave }: { onSave(token: string): void }) => {
       <Card className="grid w-full max-w-4xl gap-0 overflow-hidden border-sidebar-border bg-card py-0 shadow-2xl md:grid-cols-[minmax(0,0.9fr)_minmax(24rem,1.1fr)]">
         <div className="hidden min-h-[30rem] flex-col justify-between bg-sidebar-accent p-10 text-sidebar-foreground md:flex">
           <div><span className="grid size-11 place-items-center rounded-xl bg-sidebar-primary font-mono text-sm font-black text-sidebar-primary-foreground">RA</span><p className="mt-6 font-mono text-xs font-bold tracking-[0.16em]">REMOTE AGENT SERVER</p></div>
-          <div><p className="text-2xl font-semibold tracking-tight">{text("一个入口，管理所有远程智能体。", "One console for every remote agent.")}</p><p className="mt-3 text-sm leading-6 text-sidebar-foreground/70">{text("连接后管理智能体、项目环境、会话和外部接入。", "Connect to manage agents, project environments, sessions, and integrations.")}</p></div>
+          <div><p className="text-2xl font-semibold tracking-tight">{text("配置智能体，跟踪每次执行。", "Configure agents. Track every run.")}</p><p className="mt-3 text-sm leading-6 text-sidebar-foreground/70">{text("管理项目环境和会话，查看 token 用量，为外部系统配置接入端点。", "Manage environments and sessions, inspect token usage, and connect external systems.")}</p></div>
         </div>
         <div className="flex min-h-[30rem] flex-col justify-center p-6 sm:p-10">
           <CardHeader className="p-0">
             <div className="flex items-center justify-between gap-4"><p className="font-mono text-xs font-bold tracking-[0.16em] text-muted-foreground md:hidden">REMOTE AGENT SERVER</p><Button type="button" size="sm" variant="ghost" className="ml-auto" aria-label={text("切换为 English", "Switch to 简体中文")} onClick={() => setLocale(locale === "zh-CN" ? "en" : "zh-CN")}>{locale === "zh-CN" ? "English" : "简体中文"}</Button></div>
             <CardTitle id="token-title" role="heading" aria-level={1} className="mt-5 text-2xl sm:text-3xl">{text("连接智能体服务", "Connect to Remote Agent")}</CardTitle>
-            <CardDescription className="mt-2 leading-6">{text("运行 pnpm run init 后，服务器 .env 中的 API_TOKEN 就是这里需要的令牌。凭证仅保留在当前浏览器会话中。", "After running pnpm run init, use the API_TOKEN from the server .env file here. It is kept only for this browser session.")}</CardDescription>
+            <CardDescription className="mt-2 leading-6">{text("使用服务管理员提供的 API 令牌进入管理台。", "Enter the API token provided by your server administrator.")}</CardDescription>
           </CardHeader>
           <CardContent className="p-0 pt-7"><form className="flex flex-col gap-4" onSubmit={submit} aria-labelledby="token-title"><FieldGroup>
-            <Field><FieldLabel htmlFor="api-token">{text("API 令牌", "API token")}</FieldLabel><Input id="api-token" name="api-token" type="password" autoComplete="off" value={value} aria-invalid={error === null ? undefined : true} aria-describedby={error === null ? undefined : "api-token-error"} onChange={(event) => setValue(event.target.value)} /></Field>
-            {error && <p id="api-token-error" className="text-sm text-destructive" role="alert">{error}</p>}
+            {expired ? <p className="text-sm text-muted-foreground" role="status">{text("当前令牌已失效，请重新输入有效令牌。", "Your token is no longer valid. Enter a valid token to reconnect.")}</p> : null}
+            <Field><FieldLabel htmlFor="api-token">{text("API 令牌", "API token")}</FieldLabel><Input id="api-token" name="api-token" type="password" autoComplete="off" disabled={busy} value={value} aria-invalid={error === "invalid" || undefined} aria-describedby={`api-token-help${error ? " api-token-error" : ""}`} onChange={(event) => { setValue(event.target.value); setError(null); }} />
+              <FieldDescription id="api-token-help">{text("令牌仅保留在当前浏览器会话中。", "The token is kept only for this browser session.")}</FieldDescription>
+            </Field>
+            {error && <p id="api-token-error" className="text-sm text-destructive" role="alert">{error === "invalid" ? text("API 令牌无效。请检查是否复制完整，或向管理员获取有效令牌。", "Invalid API token. Check that you copied it in full, or request a valid token from your administrator.") : text("无法连接服务器。请检查网络和服务地址，然后重试。", "Unable to connect to the server. Check your network and server address, then try again.")}</p>}
             <Button className="w-full" type="submit" disabled={busy || value.trim() === ""}>{busy ? text("正在验证…", "Verifying…") : text("进入管理台", "Open console")}</Button>
-          </FieldGroup></form></CardContent>
+          </FieldGroup></form>
+            <details className="mt-6 text-sm text-muted-foreground"><summary className="cursor-pointer rounded-sm text-foreground">{text("在哪里找到令牌？", "Where do I find the token?")}</summary>
+              <p className="mt-2 leading-6">{text("自行部署时，运行 pnpm run init 后，在服务器的 .env 文件中查看 API_TOKEN。", "For a self-hosted server, run pnpm run init and find API_TOKEN in the server's .env file.")}</p>
+            </details>
+          </CardContent>
         </div>
       </Card>
     </main>

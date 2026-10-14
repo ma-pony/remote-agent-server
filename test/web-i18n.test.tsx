@@ -54,7 +54,7 @@ it("错误 API 令牌不能进入管理台或写入浏览器会话", async () =>
   fireEvent.change(screen.getByLabelText("API 令牌"), { target: { value: "wrong-token" } });
   fireEvent.click(screen.getByRole("button", { name: "进入管理台" }));
 
-  expect(await screen.findByText("API 令牌无效")).toBeInTheDocument();
+  expect(await screen.findByText(/API 令牌无效。请检查/)).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "连接智能体服务" })).toBeInTheDocument();
   expect(sessionStorage.getItem("apiToken")).toBeNull();
   expect(fetchMock).toHaveBeenCalledWith("/api/auth/verify", expect.objectContaining({
@@ -90,6 +90,7 @@ it("启动时清除浏览器中已经失效的 API 令牌", async () => {
 
   expect(await screen.findByRole("heading", { name: "连接智能体服务" })).toBeInTheDocument();
   await waitFor(() => expect(sessionStorage.getItem("apiToken")).toBeNull());
+  expect(screen.getByRole("status")).toHaveTextContent("当前令牌已失效");
 });
 
 it("控制台导航和页面随语言切换，并在中文模式下使用完整中文名称", async () => {

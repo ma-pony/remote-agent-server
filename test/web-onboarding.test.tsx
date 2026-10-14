@@ -47,7 +47,7 @@ afterEach(() => {
 it("first-use Agent list directs users to create an environment before an Agent", async () => {
   render(<App />);
 
-  expect(await screen.findByText(/项目环境 → 智能体 → 会话/)).toBeInTheDocument();
+  expect(await screen.findByText(/先创建项目环境并添加 Git 项目/)).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "新建智能体" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: "新建项目环境" })).toHaveAttribute("href", "/project-environments/new");
 });

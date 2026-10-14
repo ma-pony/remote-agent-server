@@ -13,7 +13,10 @@ type I18nValue = {
 
 const I18nContext = createContext<I18nValue | null>(null);
 
-const storedLocale = (): Locale => localStorage.getItem(STORAGE_KEY) === "en" ? "en" : "zh-CN";
+const storedLocale = (): Locale => {
+  try { return localStorage.getItem(STORAGE_KEY) === "en" ? "en" : "zh-CN"; }
+  catch { return "zh-CN"; }
+};
 
 export const I18nProvider = ({ children }: { children: ReactNode }) => {
   const [locale, setLocale] = useState<Locale>(storedLocale);
@@ -23,7 +26,8 @@ export const I18nProvider = ({ children }: { children: ReactNode }) => {
   }).format(new Date(value)), [locale]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, locale);
+    try { localStorage.setItem(STORAGE_KEY, locale); }
+    catch { /* Keep the in-memory preference when browser storage is unavailable. */ }
     document.documentElement.lang = locale;
   }, [locale]);
 

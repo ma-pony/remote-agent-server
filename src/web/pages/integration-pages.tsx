@@ -1,7 +1,9 @@
+import { CopyButton } from "@/components/copy-button";
+import { ResourceLoadError } from "@/components/resource-feedback";
 import { AttachmentPicker, MessageAttachments, useAttachmentDraft } from "@/components/message-attachments";
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ArrowLeft, BookOpenText, Cable, Check, Clipboard, KeyRound, Pencil, Play, Plus,
+  ArrowLeft, BookOpenText, Cable, Check, KeyRound, Pencil, Play, Plus,
   RefreshCw, RotateCcw, Search, Settings2, Trash2, Webhook, XCircle
 } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams, useSearchParams } from "react-router";
@@ -48,32 +50,19 @@ const ErrorAlert = ({ message }: { message: string }) => { const { text } = useI
 
 const OneTimeSecret = ({ title, value, onDismiss }: { title: string; value: string; onDismiss(): void }) => {
   const { text } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    await navigator.clipboard?.writeText(value);
-    setCopied(true);
-  };
   return <Alert className="border-primary/40 bg-primary/5"><KeyRound /><AlertTitle>{title}</AlertTitle>
     <AlertDescription className="mt-3 flex flex-col gap-3">
       <code className="break-all rounded-md border bg-background p-3 text-xs text-foreground">{value}</code>
-      <div className="flex flex-wrap gap-2"><Button type="button" size="sm" onClick={() => void copy()}>{copied ? <Check /> : <Clipboard />}{copied ? text("已复制", "Copied") : text("复制", "Copy")}</Button><Button type="button" size="sm" variant="ghost" onClick={onDismiss}>{text("我已保存", "I've saved it")}</Button></div>
+      <div className="flex flex-wrap gap-2"><CopyButton value={value} label={title} /><Button type="button" size="sm" variant="ghost" onClick={onDismiss}>{text("我已保存", "I've saved it")}</Button></div>
     </AlertDescription>
   </Alert>;
 };
 
 const CopyableCode = ({ title, value }: { title: string; value: string }) => {
-  const { text } = useI18n();
-  const [copied, setCopied] = useState(false);
-  const copy = async () => {
-    await navigator.clipboard?.writeText(value);
-    setCopied(true);
-  };
   return <div className="overflow-hidden rounded-lg border bg-sidebar text-sidebar-foreground">
     <div className="flex items-center justify-between border-b border-white/10 px-4 py-2">
       <span className="text-xs font-medium text-white/70">{title}</span>
-      <Button type="button" size="sm" variant="ghost" className="text-white hover:bg-white/10 hover:text-white" onClick={() => void copy()}>
-        {copied ? <Check /> : <Clipboard />}{copied ? text("已复制", "Copied") : text("复制", "Copy")}
-      </Button>
+      <CopyButton value={value} label={title} className="border-sidebar-border bg-sidebar-accent text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground" />
     </div>
     <pre className="overflow-x-auto p-4 text-xs leading-6"><code>{value}</code></pre>
   </div>;
@@ -86,8 +75,9 @@ export const IntegrationEndpointListPage = () => {
   const [page, setPage] = useState(1);
   const [paging, setPaging] = useState<Page<IntegrationEndpointSummary> | null>(null);
   const [error, setError] = useState("");
+  const [refresh, setRefresh] = useState(0);
   useEffect(() => {
-    const controller = new AbortController(); setEndpoints(null); setError("");
+    const controller = new AbortController(); setEndpoints(null); setPaging(null); setError("");
     void api<Page<IntegrationEndpointSummary>>(`/integration-endpoints?page=${page}&pageSize=20`, { signal: controller.signal })
       .then(async (result) => {
         const agentItems = await Promise.all([...new Set(result.items.map(({ agentId }) => agentId))]
@@ -95,14 +85,14 @@ export const IntegrationEndpointListPage = () => {
         if (!controller.signal.aborted) { setEndpoints(result.items); setPaging(result); setAgents(agentItems); }
       }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [page]);
+  }, [page, refresh]);
   const agentNames = useMemo(() => new Map(agents.map((item) => [item.id, item.name])), [agents]);
   return <PageContainer width="wide">
-    <PageHeader title={text("接入端点", "Integration endpoints")} description={text("为外部系统提供稳定的智能体调用入口，调用方无需了解内部执行器、智能体会话和单次执行。", "Provide stable agent entry points to external systems without exposing providers, sessions, or runs.")} action={<Button asChild><Link to="/integration-endpoints/new"><Plus />{text("新建接入端点", "New endpoint")}</Link></Button>} />
-    <ErrorAlert message={error} />
-    {endpoints === null ? <div className="resource-grid">{[0, 1].map((item) => <Skeleton key={item} className="h-52" />)}</div>
+    <PageHeader title={text("接入端点", "Integration endpoints")} description={text("让外部系统提交任务、接续对话，并通过 Webhook 接收执行结果。", "Let external systems submit tasks, continue conversations, and receive results through webhooks.")} action={<Button asChild><Link to="/integration-endpoints/new"><Plus />{text("新建接入端点", "New endpoint")}</Link></Button>} />
+
+    {error ? <ResourceLoadError title={text("接入端点加载失败", "Could not load endpoints")} message={error} onRetry={() => setRefresh(value => value + 1)} /> : endpoints === null ? <div role="status" aria-label={text("加载中…", "Loading…")} className="resource-grid">{[0, 1].map((item) => <Skeleton key={item} className="h-52" />)}</div>
       : endpoints.length === 0 ? <EmptyState icon={Cable} title={text("还没有接入端点", "No integration endpoints yet")} description={text("创建一个稳定入口，让外部系统安全提交任务并接收事件。", "Create a stable entry point for external systems to submit tasks and receive events.")} action={<Button asChild><Link to="/integration-endpoints/new"><Plus />{text("新建接入端点", "New endpoint")}</Link></Button>} />
-        : <div className="resource-grid">{endpoints.map((endpoint) => <Card key={endpoint.id} className="h-full overflow-hidden transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40"><CardHeader className="border-b bg-muted/20"><div className="flex items-start justify-between gap-4"><div><CardTitle><Link className="hover:underline" to={`/integration-endpoints/${endpoint.id}`}>{endpoint.name}</Link></CardTitle><CardDescription className="mt-2 font-mono">/{endpoint.slug}</CardDescription></div><Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div></CardHeader><CardContent className="grid gap-4 p-5 sm:grid-cols-3"><div><p className="text-xs text-muted-foreground">{text("智能体", "Agent")}</p><p className="mt-1 truncate text-sm font-medium">{agentNames.get(endpoint.agentId) ?? endpoint.agentId}</p></div><div><p className="text-xs text-muted-foreground">{text("接续中的业务对话", "Active conversations")}</p><p className="mt-1 font-mono text-xl tabular-nums">{endpoint.activeConversationCount}</p></div><div><p className="text-xs text-muted-foreground">{text("排队 / 运行", "Queued / running")}</p><p className="mt-1 font-mono text-xl tabular-nums">{endpoint.queuedTaskCount} / {endpoint.runningTaskCount}</p></div><div className="sm:col-span-3"><p className="text-xs text-muted-foreground">{text("最近任务", "Latest task")}</p>{endpoint.latestTask === null ? <p className="mt-1 text-sm">{text("尚无调用", "No calls yet")}</p> : <div className="mt-1 flex items-center justify-between gap-3"><Link className="truncate text-sm font-medium hover:underline" to={`/integration-tasks/${endpoint.latestTask.id}`}>{endpoint.latestTask.requestId}</Link><StatusBadge status={endpoint.latestTask.status} /></div>}</div></CardContent></Card>)}</div>}
+        : <div className="resource-grid">{endpoints.map((endpoint) => <Card key={endpoint.id} className="h-full overflow-hidden transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40"><CardHeader className="border-b bg-muted/20"><div className="flex items-start justify-between gap-4"><div className="min-w-0 [overflow-wrap:anywhere]"><CardTitle><Link className="hover:underline" to={`/integration-endpoints/${endpoint.id}`}>{endpoint.name}</Link></CardTitle><CardDescription className="mt-2 font-mono">/{endpoint.slug}</CardDescription></div><Badge variant={endpoint.enabled ? "default" : "secondary"}>{endpoint.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div></CardHeader><CardContent className="grid gap-4 p-5 sm:grid-cols-3"><div><p className="text-xs text-muted-foreground">{text("智能体", "Agent")}</p><p className="mt-1 truncate text-sm font-medium">{agentNames.get(endpoint.agentId) ?? endpoint.agentId}</p></div><div><p className="text-xs text-muted-foreground">{text("接续中的业务对话", "Active conversations")}</p><p className="mt-1 font-mono text-xl tabular-nums">{endpoint.activeConversationCount}</p></div><div><p className="text-xs text-muted-foreground">{text("排队 / 运行", "Queued / running")}</p><p className="mt-1 font-mono text-xl tabular-nums">{endpoint.queuedTaskCount} / {endpoint.runningTaskCount}</p></div><div className="sm:col-span-3"><p className="text-xs text-muted-foreground">{text("最近任务", "Latest task")}</p>{endpoint.latestTask === null ? <p className="mt-1 text-sm">{text("尚无调用", "No calls yet")}</p> : <div className="mt-1 flex items-center justify-between gap-3"><Link className="truncate text-sm font-medium hover:underline" to={`/integration-tasks/${endpoint.latestTask.id}`}>{endpoint.latestTask.requestId}</Link><StatusBadge status={endpoint.latestTask.status} /></div>}</div></CardContent></Card>)}</div>}
     {paging && <ListPagination pageSize={paging.pageSize} page={paging.page} totalPages={paging.totalPages} total={paging.total} onPageChange={setPage} />}
   </PageContainer>;
 };

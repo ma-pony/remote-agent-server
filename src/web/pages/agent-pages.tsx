@@ -27,6 +27,7 @@ import {
   type ProjectEnvironment, type Provider
 } from "@/api";
 import { useI18n } from "@/i18n";
+import { ResourceLoadError } from "@/components/resource-feedback";
 import { ListPagination } from "@/components/list-pagination";
 import { PagedResourceSelect } from "@/components/paged-resource-select";
 import { SkillRevisionDialog, SkillSourcesDialog } from "@/components/skill-dialogs";
@@ -161,23 +162,26 @@ export const AgentListPage = () => {
   const [hasReadyEnvironment, setHasReadyEnvironment] = useState(false);
   const [query, setQuery] = useState("");
   const [error, setError] = useState("");
+  const [environmentError, setEnvironmentError] = useState("");
+  const [refresh, setRefresh] = useState(0);
 
   useEffect(() => {
     const controller = new AbortController();
     setAgentPage(null); setError("");
     void api<Page<Agent & {projectEnvironmentName: string | null}>>(`/agents?page=${page}&pageSize=20&query=${encodeURIComponent(query)}`, {signal: controller.signal})
-      .then(setAgentPage).catch(reason => {if (!controller.signal.aborted) setError(errorMessage(reason));});
+      .then(result => { if (!controller.signal.aborted) setAgentPage(result); }).catch(reason => {if (!controller.signal.aborted) setError(errorMessage(reason));});
     return () => controller.abort();
-  }, [page, query]);
+  }, [page, query, refresh]);
   useEffect(() => {
     const controller = new AbortController();
+    setEnvironmentError("");
     void Promise.all([
       api<Page<ProjectEnvironment>>("/project-environments?page=1&pageSize=20", {signal: controller.signal}),
       api<Page<ProjectEnvironment>>("/project-environments?ready=true&page=1&pageSize=1", {signal: controller.signal})
-    ]).then(([projects, ready]) => {setEnvironments(projects.items); setHasReadyEnvironment(ready.total > 0);})
-      .catch(reason => {if (!controller.signal.aborted) setError(errorMessage(reason));});
+    ]).then(([projects, ready]) => { if (!controller.signal.aborted) { setEnvironments(projects.items); setHasReadyEnvironment(ready.total > 0); } })
+      .catch(reason => {if (!controller.signal.aborted) setEnvironmentError(errorMessage(reason));});
     return () => controller.abort();
-  }, []);
+  }, [refresh]);
 
 
   const visible = agents ?? [];
@@ -189,33 +193,35 @@ export const AgentListPage = () => {
     : <Button asChild><Link to="/project-environments">{text("查看项目环境", "View environments")}</Link></Button>;
   const createAgentAction = <Button asChild><Link to="/agents/new"><Plus />{text("新建智能体", "New agent")}</Link></Button>;
   const primaryAction = noAgents && !hasReadyEnvironment ? environmentAction : createAgentAction;
-  const firstUseDescription = environments === null
-    ? text("正在检查项目环境。完成顺序是：项目环境 → 智能体 → 会话。", "Checking project environments. The setup order is: environment → agent → session.")
+  const firstUseDescription = environmentError
+    ? text("无法确认项目环境是否可用。请重新加载环境信息后继续。", "Could not check project readiness. Reload the environment information to continue.")
+    : environments === null
+    ? text("正在检查项目环境…", "Checking project environments…")
     : hasReadyEnvironment
-      ? text("完成顺序是：项目环境 → 智能体 → 会话。已有可用环境，现在创建智能体。", "The setup order is: environment → agent → session. A ready environment is available, so create an agent now.")
+      ? text("项目环境已就绪。创建智能体并选择执行器，然后新建会话开始任务。", "An environment is ready. Create an agent, choose its provider, then start a session.")
       : environments.length === 0
-        ? text("完成顺序是：项目环境 → 智能体 → 会话。先创建项目环境并添加 Git 项目，准备完成后再创建智能体。", "The setup order is: environment → agent → session. Create an environment and add a Git project before creating an agent.")
+        ? text("先创建项目环境并添加 Git 项目。环境就绪后，再创建智能体和会话。", "Create an environment and add a Git project first. Once it is ready, create an agent and a session.")
         : hasPreparingEnvironment
-          ? text("完成顺序是：项目环境 → 智能体 → 会话。项目环境正在准备，完成后即可创建智能体。", "The setup order is: environment → agent → session. An environment is preparing; create an agent after it is ready.")
+          ? text("项目环境正在准备，完成后即可创建智能体。", "An environment is preparing; create an agent after it is ready.")
           : hasFailedEnvironment
-            ? text("完成顺序是：项目环境 → 智能体 → 会话。项目环境准备失败，请先检查并重新准备。", "The setup order is: environment → agent → session. Environment preparation failed; inspect it and prepare it again first.")
-            : text("完成顺序是：项目环境 → 智能体 → 会话。现有项目环境尚未准备完成，请先处理它。", "The setup order is: environment → agent → session. An existing environment is not ready yet; prepare it first.");
+            ? text("项目环境准备失败，请先检查并重新准备。", "Environment preparation failed; inspect it and prepare it again first.")
+            : text("现有项目环境尚未准备完成，请先处理它。", "An existing environment is not ready yet; prepare it first.");
 
   return <PageContainer width="wide">
-    <PageHeader eyebrow={text("执行配置", "EXECUTION PROFILES")} title={text("智能体", "Agents")} description={text("选择一个智能体查看运行状态、管理技能或修改配置。", "Select an agent to inspect its status, manage skills, or update configuration.")}
+    <PageHeader title={text("智能体", "Agents")} description={text("选择一个智能体查看运行状态、管理技能或修改配置。", "Select an agent to inspect its status, manage skills, or update configuration.")}
       action={agents === null || noAgents ? undefined : createAgentAction} />
-    <ErrorAlert message={error} />
-    <div className="mb-5 flex max-w-md items-center gap-2 rounded-xl border bg-card px-3 shadow-sm">
+    {environmentError ? <div className="mb-5"><ResourceLoadError title={text("项目环境信息加载失败", "Could not load environment information")} message={environmentError} onRetry={() => setRefresh(value => value + 1)} /></div> : null}
+    <div className="mb-5 flex max-w-md items-center gap-2 rounded-lg border bg-card px-3 focus-within:ring-2 focus-within:ring-ring">
       <Search className="size-4 text-muted-foreground" aria-hidden="true" />
       <Input type="search" name="agent-search" aria-label={text("搜索智能体", "Search agents")} className="border-0 bg-transparent shadow-none focus-visible:ring-0" placeholder={text("按名称搜索", "Search by name")} value={query} onChange={(event) => { setPage(1); setQuery(event.target.value); }} />
       {agents === null ? null : <span className="shrink-0 font-mono text-xs tabular-nums text-muted-foreground" aria-live="polite">{agentPage?.total}</span>}
     </div>
-    {agents === null ? <div className="resource-grid">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-44" />)}</div>
+    {error ? <ResourceLoadError title={text("智能体加载失败", "Could not load agents")} message={error} onRetry={() => setRefresh(value => value + 1)} /> : agents === null ? <div role="status" aria-label={text("正在加载智能体", "Loading agents")} className="resource-grid">{[0, 1, 2].map((item) => <Skeleton key={item} className="h-44" />)}</div>
       : visible.length === 0 ? <EmptyState icon={Bot} title={noAgents ? text("还没有智能体", "No agents yet") : text("没有匹配结果", "No matching results")} description={noAgents ? firstUseDescription : text("调整搜索词，或清除搜索查看全部智能体。", "Change the search term or clear it to see every agent.")} action={noAgents ? primaryAction : <Button variant="outline" onClick={() => setQuery("")}>{text("清除搜索", "Clear search")}</Button>} />
       : <div className="resource-grid">{visible.map((agent) => <Card key={agent.id} className="h-full transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40">
         <CardHeader>
           <div className="flex items-start justify-between gap-4">
-            <div><CardTitle><Link className="hover:underline" to={`/agents/${agent.id}`}>{agent.name}</Link></CardTitle><CardDescription className="mt-2">{providerNames[agent.provider]}</CardDescription></div>
+            <div className="min-w-0 [overflow-wrap:anywhere]"><CardTitle><Link className="hover:underline" to={`/agents/${agent.id}`}>{agent.name}</Link></CardTitle><CardDescription className="mt-2">{providerNames[agent.provider]}</CardDescription></div>
             <Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge>
           </div>
         </CardHeader>

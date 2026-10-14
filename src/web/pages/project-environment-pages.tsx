@@ -1,3 +1,4 @@
+import { ResourceLoadError } from "@/components/resource-feedback";
 import { ListPagination } from "@/components/list-pagination";
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { ArrowLeft, Boxes, CheckCircle2, GitBranch, Loader2, Pencil, Plus, RefreshCw, Trash2, XCircle } from "lucide-react";
@@ -36,18 +37,19 @@ export const ProjectEnvironmentListPage = () => {
   const [page, setPage] = useState(1);
   const [result, setResult] = useState<Page<EnvironmentSummary> | null>(null);
   const [error, setError] = useState("");
+  const [refresh, setRefresh] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
-    setItems(null);
-    void api<Page<EnvironmentSummary>>(`/project-environments?page=${page}&pageSize=20`, { signal: controller.signal }).then((result) => { setResult(result); setItems(result.items); }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+    setItems(null); setResult(null); setError("");
+    void api<Page<EnvironmentSummary>>(`/project-environments?page=${page}&pageSize=20`, { signal: controller.signal }).then((result) => { if (!controller.signal.aborted) { setResult(result); setItems(result.items); } }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
     return () => controller.abort();
-  }, [page]);
+  }, [page, refresh]);
   return <PageContainer width="wide">
-    <PageHeader eyebrow={text("托管工作区", "MANAGED WORKSPACES")} title={text("项目环境", "Project environments")} description={text("一个环境可以包含多个 Git 项目，会话从可用版本创建独立工作区。", "An environment can contain multiple Git projects. Sessions receive isolated workspaces from a ready revision.")} action={<Button asChild><Link to="/project-environments/new"><Plus />{text("新建项目环境", "New environment")}</Link></Button>} />
-    <ErrorAlert message={error} />
-    {items === null ? <div className="resource-grid">{[0, 1].map((item) => <Skeleton key={item} className="h-48" />)}</div>
+    <PageHeader title={text("项目环境", "Project environments")} description={text("一个环境可以包含多个 Git 项目，会话从可用版本创建独立工作区。", "An environment can contain multiple Git projects. Sessions receive isolated workspaces from a ready revision.")} action={<Button asChild><Link to="/project-environments/new"><Plus />{text("新建项目环境", "New environment")}</Link></Button>} />
+
+    {error ? <ResourceLoadError title={text("项目环境加载失败", "Could not load environments")} message={error} onRetry={() => setRefresh(value => value + 1)} /> : items === null ? <div role="status" aria-label={text("加载中…", "Loading…")} className="resource-grid">{[0, 1].map((item) => <Skeleton key={item} className="h-48" />)}</div>
       : items.length === 0 ? <EmptyState icon={Boxes} title={text("还没有项目环境", "No project environments yet")} description={text("创建环境并添加 Git 项目，系统会准备可复用的基础工作区。", "Create an environment and add Git projects to prepare a reusable base workspace.")} action={<Button asChild><Link to="/project-environments/new"><Plus />{text("新建项目环境", "New environment")}</Link></Button>} />
-      : <div className="resource-grid">{items.map((environment) => { const status = revisionStatus(environment, text); return <Card key={environment.id} className="h-full transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40"><CardHeader><div className="flex items-start justify-between gap-4"><div><CardTitle><Link className="hover:underline" to={`/project-environments/${environment.id}`}>{environment.name}</Link></CardTitle><CardDescription className="mt-2">{text(`${environment.repositoryCount} 个项目`, `${environment.repositoryCount} projects`)}</CardDescription></div><Badge variant={status.variant}>{status.label}</Badge></div></CardHeader><CardContent className="flex flex-col gap-2 text-sm text-muted-foreground"><p><span className="font-medium text-foreground">{text("当前版本：", "Current revision: ")}</span>{environment.currentRevisionId ?? "—"}</p><p><span className="font-medium text-foreground">{text("最近同步：", "Last sync: ")}</span>{environment.lastCheckedAt === null ? text("尚未同步", "Never") : formatDate(environment.lastCheckedAt)}</p><p><span className="font-medium text-foreground">{text("下次同步：", "Next sync: ")}</span>{environment.sync.nextScheduledAt === null ? text("尚未安排", "Not scheduled") : formatDate(environment.sync.nextScheduledAt)}</p></CardContent></Card>; })}</div>}
+      : <div className="resource-grid">{items.map((environment) => { const status = revisionStatus(environment, text); return <Card key={environment.id} className="h-full transition-[border-color,box-shadow] duration-150 hover:border-primary/30 hover:shadow-sm focus-within:border-primary/40"><CardHeader><div className="flex items-start justify-between gap-4"><div className="min-w-0 [overflow-wrap:anywhere]"><CardTitle><Link className="hover:underline" to={`/project-environments/${environment.id}`}>{environment.name}</Link></CardTitle><CardDescription className="mt-2">{text(`${environment.repositoryCount} 个项目`, `${environment.repositoryCount} projects`)}</CardDescription></div><Badge variant={status.variant}>{status.label}</Badge></div></CardHeader><CardContent className="flex flex-col gap-2 text-sm text-muted-foreground"><p><span className="font-medium text-foreground">{text("当前版本：", "Current revision: ")}</span>{environment.currentRevisionId ?? "—"}</p><p><span className="font-medium text-foreground">{text("最近同步：", "Last sync: ")}</span>{environment.lastCheckedAt === null ? text("尚未同步", "Never") : formatDate(environment.lastCheckedAt)}</p><p><span className="font-medium text-foreground">{text("下次同步：", "Next sync: ")}</span>{environment.sync.nextScheduledAt === null ? text("尚未安排", "Not scheduled") : formatDate(environment.sync.nextScheduledAt)}</p></CardContent></Card>; })}</div>}
     {result === null ? null : <ListPagination {...result} onPageChange={setPage} disabled={items === null} />}
   </PageContainer>;
 };

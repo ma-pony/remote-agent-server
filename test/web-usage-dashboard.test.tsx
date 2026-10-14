@@ -56,7 +56,7 @@ it("renders all four trends and exposes exact averages, reporting counts and Ses
   expect(cohort.getByRole("link", { name: "Review session" })).toHaveAttribute("href", "/sessions/10");
   expect(cohort.getByText("Second agent")).toBeInTheDocument();
   expect(cohort.getAllByText("未上报").length).toBeGreaterThan(0);
-  expect(screen.getByText(/完整历史的累计用量/)).toBeInTheDocument();
+  expect(screen.getByText(/完整历史累计.*范围外用量/)).toBeInTheDocument();
 });
 
 it("keeps Agent and UTC date filters in both queries and resets Session pagination", async () => {
@@ -127,7 +127,7 @@ it("loads Session usage independently of daily failures and allows retry and ref
   expect(await screen.findByText("每日统计加载失败")).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "每次会话 token 总量" })).toBeInTheDocument();
   fail = false;
-  fireEvent.click(screen.getByRole("button", { name: "重试" }));
+  fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
   expect(await screen.findByRole("heading", { name: "每日 token 用量" })).toBeInTheDocument();
   fetch.mockClear();
   fireEvent.click(screen.getByRole("button", { name: "刷新统计" }));
