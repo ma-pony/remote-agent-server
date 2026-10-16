@@ -91,8 +91,8 @@ it.each(["queued", "running", "maintenance", "recent", "unfinished"])(
   }
 );
 
-it.each(["pending", "running", "failed", "error", "missing", "cursor behind", "uncounted message", "uncounted tool", "unsupported content"])(
-  "retires expired bodies despite %s accounting and never retries deleted evidence", async state => {
+it.each(["pending", "running", "failed", "error", "missing", "cursor behind", "uncounted message", "uncounted tool"])(
+  "preserves expired bodies while %s accounting is incomplete", async state => {
   const { db, id, events, collector } = await setup();
   const latestSeq = events.latestSeq(id);
   if (["pending", "running", "failed"].includes(state)) db.prepare("UPDATE agent_usage_runtime_backfills SET status=?").run(state);
@@ -101,7 +101,29 @@ it.each(["pending", "running", "failed", "error", "missing", "cursor behind", "u
   if (state === "cursor behind") db.prepare("UPDATE agent_usage_runtime_backfills SET last_seq=1").run();
   if (state === "uncounted message") db.prepare("UPDATE agent_usage_conversation_content SET tokens=NULL").run();
   if (state === "uncounted tool") db.prepare("UPDATE agent_usage_invocation_payloads SET token_count=NULL").run();
-  if (state === "unsupported content") {
+  const before = collector.attribution.rankings({}, "all");
+  const progress = db.prepare("SELECT * FROM agent_usage_runtime_backfills").all();
+  expect(collector.eventRetention.step(now)).toBe("scanned");
+  expect(collector.eventRetention.status().skippedByReason).toEqual({
+    [state.startsWith("uncounted") ? "counting_incomplete" : "backfill_incomplete"]: 1
+  });
+  expect(events.list(id, 0)).toHaveLength(3);
+  expect(db.prepare("SELECT events_pruned_at,events_pruned_through_seq FROM runs WHERE id=?").get(id))
+    .toEqual({ events_pruned_at: null, events_pruned_through_seq: 0 });
+  expect(events.latestSeq(id)).toBe(latestSeq);
+  expect(collector.attribution.rankings({}, "all")).toEqual(before);
+  expect(db.prepare("SELECT * FROM agent_usage_runtime_backfills").all()).toEqual(progress);
+  const restarted = new HostUsageCollector(db);
+  expect(restarted.eventRetention.step(now)).toBe("scanned");
+  expect(events.list(id, 0)).toHaveLength(3);
+});
+
+it.each(["known zero", "unsupported content"])("retires completed %s measurements without replacing unknown counts", async state => {
+  const { db, id, events, collector } = await setup();
+  if (state === "known zero") {
+    db.prepare("UPDATE agent_usage_conversation_content SET tokens=0").run();
+    db.prepare("UPDATE agent_usage_invocation_payloads SET token_count=0").run();
+  } else {
     const estimate = await collector.attribution.measureContent([{ type: "image", data: "fixture", mimeType: "image/png" }], "result");
     db.prepare("UPDATE agent_usage_invocation_payloads SET token_count=NULL,partial=1,estimate_id=? WHERE part='result'")
       .run(collector.attribution.tokenEstimateId(estimate!.estimate));
@@ -109,27 +131,27 @@ it.each(["pending", "running", "failed", "error", "missing", "cursor behind", "u
   const before = collector.attribution.rankings({}, "all");
   expect(collector.eventRetention.step(now)).toBe("retired");
   expect(events.list(id, 0)).toMatchObject([{ type: "status" }]);
-  expect(events.latestSeq(id)).toBe(latestSeq);
   expect(collector.attribution.rankings({}, "all")).toEqual(before);
-  const restarted = new HostUsageCollector(db);
-  restarted.contentBackfill.schedule(id);
-  expect(await restarted.contentBackfill.step()).toBe(false);
-  expect(restarted.contentBackfill.status().status).not.toBe("pending");
-  expect(db.prepare("SELECT COUNT(*) AS n FROM agent_usage_runtime_backfills WHERE status IN ('pending','running')").get()).toEqual({ n: 0 });
 });
 
-it("discards in-flight backfill work when retirement removes its evidence", async () => {
-  const { db, id, collector } = await setup();
+it("waits for in-flight backfill to commit before retiring its evidence", async () => {
+  const { db, id, events, collector } = await setup();
   db.prepare("UPDATE agent_usage_runtime_backfills SET last_seq=0,status='pending'").run();
+  const prepare = collector.runtimeCapabilities.prepareTool.bind(collector.runtimeCapabilities);
   const commit = vi.fn();
-  vi.spyOn(collector.runtimeCapabilities, "prepareTool").mockImplementation(async () => {
-    expect(collector.eventRetention.step(now)).toBe("retired");
-    return { commit, pending: true };
+  vi.spyOn(collector.runtimeCapabilities, "prepareTool").mockImplementationOnce(async (...args) => {
+    expect(collector.eventRetention.step(now)).toBe("scanned");
+    expect(events.list(id, 0)).toHaveLength(3);
+    const prepared = await prepare(...args);
+    return { pending: prepared?.pending, commit: () => { prepared?.commit(); commit(); } };
   });
-  expect(await collector.contentBackfill.step()).toBe(false);
-  expect(commit).not.toHaveBeenCalled();
+  while (await collector.contentBackfill.step()) { /* finish the resumed replay */ }
+  expect(commit).toHaveBeenCalledTimes(1);
   expect(db.prepare("SELECT status,error_code FROM agent_usage_runtime_backfills WHERE run_id=?").get(id))
-    .toEqual({ status: "failed", error_code: "usage_runtime_events_expired" });
+    .toEqual({ status: "completed", error_code: null });
+  expect(collector.eventRetention.step(now)).toBe("idle");
+  expect(collector.eventRetention.step(now + 5 * 60_000)).toBe("retired");
+  expect(events.list(id, 0)).toMatchObject([{ type: "status" }]);
 });
 
 it("keeps cleanup independent of estimate compaction failures", async () => {

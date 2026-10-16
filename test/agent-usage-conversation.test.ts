@@ -32,7 +32,7 @@ it("upgrades retained historical fallback content without adding calls and resum
   const { db, seed } = createTestDatabase(); databases.push(db);
   const session = seed.session(); seed.run(session.id, "succeeded");
   const { id } = db.prepare("SELECT id FROM runs WHERE session_id=?").get(session.id) as { id: number };
-  db.prepare("UPDATE runs SET input='hello world',resolved_model='fixture-model' WHERE id=?").run(id);
+  db.prepare("UPDATE runs SET input='hello world',resolved_model='fixture-model',finished_at='2026-09-01T00:00:00.000Z' WHERE id=?").run(id);
   db.prepare("UPDATE sessions SET instructions_snapshot='hello' WHERE id=?").run(session.id);
   db.prepare("INSERT INTO events(run_id,seq,type,content_json,created_at) VALUES(?,1,'tool',?,?)")
     .run(id, JSON.stringify({ toolCallId: "read", kind: "read", status: "in_progress", rawOutput: "hello" }), "2026-09-22T01:00:00Z");
@@ -51,6 +51,9 @@ it("upgrades retained historical fallback content without adding calls and resum
   expect(await upgraded.contentBackfill.step()).toBe(true);
   expect(upgraded.contentBackfill.status()).toMatchObject({ status: "pending", errorCode: "usage_tokenizer_pending", processedEvents: 0 });
   expect(upgraded.attribution.rankings({}, "user_prompt")[0].observedTotalTokens).toBeNull();
+  const retentionTime = Date.parse("2026-09-23T00:00:00.000Z");
+  expect(upgraded.eventRetention.step(retentionTime)).toBe("scanned");
+  expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id=?").get(id)).toEqual({ n: 3 });
   expect(await upgraded.contentBackfill.step()).toBe(false); // Cooldown is not a busy loop.
   db.prepare("UPDATE agent_usage_runtime_backfills SET retry_after=0").run();
   const resumed = new HostUsageCollector(db, {}, undefined, fixtureTokenizers());
@@ -59,6 +62,8 @@ it("upgrades retained historical fallback content without adding calls and resum
   expect(resumed.attribution.rankings({}, "user_prompt")[0]).toMatchObject({ observedTotalTokens: 2, contentObservations: 1 });
   expect(resumed.attribution.rankings({}, "configured_instructions")[0]).toMatchObject({ observedTotalTokens: 1, contentObservations: 1 });
   expect(resumed.attribution.rankings({}, "builtin_tool")[0]).toMatchObject({ calls: 1, observedResultTokens: 2 });
+  expect(resumed.eventRetention.step(retentionTime)).toBe("retired");
+  expect(db.prepare("SELECT COUNT(*) AS n FROM events WHERE run_id=?").get(id)).toEqual({ n: 0 });
   expect(await new HostUsageCollector(db, {}, undefined, fixtureTokenizers()).contentBackfill.step()).toBe(false);
 });
 it("backfills prompts and output once, keeps scope and never stores their bodies in usage tables", async () => {

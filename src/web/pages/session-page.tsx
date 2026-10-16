@@ -72,6 +72,10 @@ const mergeEvent = (views: RunView[], runId: number, item: RunEvent, applyStatus
 });
 
 export const SessionPage = ({ sessionId }: { sessionId: string }) => {
+  return <SessionContent key={sessionId} sessionId={sessionId} />;
+};
+
+const SessionContent = ({ sessionId }: { sessionId: string }) => {
   const { text } = useI18n();
   const navigate = useNavigate();
   const [session, setSession] = useState<SessionDetail | null>(null);

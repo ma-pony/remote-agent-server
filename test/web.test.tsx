@@ -533,6 +533,55 @@ describe("最小管理界面", () => {
     expect(screen.getByRole("heading", { name: "新 Session" })).toBeInTheDocument();
   });
 
+  it.each(["success", "failure"] as const)("切换 Session 后隔离旧发送请求的 %s 响应和草稿状态", async outcome => {
+    sessionStorage.setItem("apiToken", "secret-token");
+    const oldResponse = deferred<Response>();
+    const newResponse = deferred<Response>();
+    const oldSession = { ...session, id: "session-old", title: "旧 Session", runs: [] };
+    const newSession = { ...session, id: "session-new", title: "新 Session", runs: [] };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      const path = new URL(url, "http://localhost").pathname;
+      if (url.startsWith("/api/usage/summary?")) return jsonResponse(emptyLedgerSummary);
+      if (path === `/api/agents/${agent.id}`) return jsonResponse(agent);
+      if (path === "/api/sessions/session-old/runs" && init?.method === "POST") return oldResponse.promise;
+      if (path === "/api/sessions/session-new/runs" && init?.method === "POST") return newResponse.promise;
+      if (path === "/api/sessions/session-old") return jsonResponse(oldSession);
+      if (path === "/api/sessions/session-new") return jsonResponse(newSession);
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const page = (id: string) => <I18nProvider><MemoryRouter><SessionPage sessionId={id} /></MemoryRouter></I18nProvider>;
+    const rendered = render(page(oldSession.id));
+    await screen.findByRole("heading", { name: oldSession.title });
+    fireEvent.change(screen.getByLabelText("发送给智能体"), { target: { value: "旧会话的任务" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) =>
+      requestUrl(input) === "/api/sessions/session-old/runs" && init?.method === "POST")).toBe(true));
+
+    rendered.rerender(page(newSession.id));
+    await screen.findByRole("heading", { name: newSession.title });
+    expect(screen.getByLabelText("发送给智能体")).toBeEnabled();
+    expect(screen.getByLabelText("发送给智能体")).toHaveValue("");
+    fireEvent.change(screen.getByLabelText("发送给智能体"), { target: { value: "新会话的任务" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([input, init]) =>
+      requestUrl(input) === "/api/sessions/session-new/runs" && init?.method === "POST")).toBe(true));
+    const oldRun = { id: "run-old", sessionId: oldSession.id, status: "queued", input: "旧会话的任务",
+      result: null, error: null, createdAt: now, startedAt: null, finishedAt: null };
+    await act(async () => oldResponse.resolve(outcome === "success" ? jsonResponse(oldRun)
+      : jsonResponse({ error: { code: "send_failed", message: "旧会话发送失败" } }, 503)));
+    expect(screen.queryByText("旧会话的任务")).not.toBeInTheDocument();
+    expect(screen.queryByText("旧会话发送失败")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("发送给智能体")).toHaveValue("新会话的任务");
+    expect(screen.getByRole("button", { name: "发送中…" })).toBeDisabled();
+    await act(async () => newResponse.resolve(jsonResponse({ ...oldRun, id: "run-new", sessionId: newSession.id,
+      input: "新会话的任务", status: "succeeded", result: "新会话任务完成", finishedAt: now })));
+    expect(screen.getByText("新会话任务完成")).toBeInTheDocument();
+    expect(screen.getByLabelText("发送给智能体")).toBeEnabled();
+    expect(screen.getByLabelText("发送给智能体")).toHaveValue("");
+  });
+
   it("Session 详情保留多轮历史，合并增量并显示工具、错误、终态、取消和继续输入", async () => {
     sessionStorage.setItem("apiToken", "secret-token");
     window.history.replaceState({}, "", `/sessions/${session.id}`);

@@ -119,7 +119,7 @@ export class RuntimeContentBackfill {
     signal?.throwIfAborted();
     // Commit projections and their cursor together. No tokenization or other await holds the lock.
     const committed = this.db.transaction(() => {
-      // Retention can run while tokenization awaits. Never revive a retired job or commit its late projections.
+      // Older versions may have retired incomplete jobs. Never revive their missing evidence.
       if (!this.db.prepare("SELECT 1 FROM runs WHERE id=? AND events_pruned_through_seq=0").get(job.run_id)) return false;
       let sequence = job.last_seq, processed = 0;
       try { prompt?.commit(); } catch { errorCode ??= "usage_runtime_prompt_failed"; }

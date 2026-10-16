@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import * as attachmentPreparation from "../src/attachments/prepare-attachments.js";
 import { AgentManager } from "../src/agents/agent-manager.js";
 import { HostUsageCollector } from "../src/agent-usage/host-collector.js";
 import { ModelTokenizers } from "../src/agent-usage/core/tokenizers.js";
@@ -299,6 +300,41 @@ describe("RunExecutor", () => {
       preparation.resolve();
       await execution;
       vi.useRealTimers();
+    }
+  });
+
+  it.each(["runtime initialization", "attachment preparation"] as const)("releases the Runtime Session when cancelled during %s", async stage => {
+    const entered = deferred<void>();
+    const ensured = deferred<RuntimeSession>();
+    const attachments = deferred<Awaited<ReturnType<typeof attachmentPreparation.prepareAttachments>>>();
+    const runtime = createFakeRuntime();
+    if (stage === "runtime initialization") runtime.ensureSession = vi.fn(() => {
+      entered.resolve();
+      return ensured.promise;
+    });
+    const prepare = stage === "attachment preparation" ? vi.spyOn(attachmentPreparation, "prepareAttachments").mockImplementation(() => {
+      entered.resolve();
+      return attachments.promise;
+    }) : undefined;
+    runtime.releaseSession = vi.fn(async () => undefined);
+    runtime.startTurn = vi.fn(runtime.startTurn);
+    const h = setup(runtime);
+    const execution = h.executor.execute(h.run.id);
+    try {
+      await entered.promise;
+      await h.executor.cancel(h.run.id);
+      ensured.resolve({ providerSessionId: "cancelled-provider-session" });
+      attachments.resolve({ text: h.run.input });
+      expect(await execution).toMatchObject({ status: "cancelled" });
+      expect(runtime.startTurn).not.toHaveBeenCalled();
+      expect(runtime.releaseSession).toHaveBeenCalledExactlyOnceWith(TEST_SESSION_ID);
+      expect(h.sessionManager.get(TEST_SESSION_ID)).toMatchObject({ status: "idle", workspacePath: h.workspacePath });
+    } finally {
+      ensured.resolve({ providerSessionId: "cancelled-provider-session" });
+      attachments.resolve({ text: h.run.input });
+      await execution;
+      prepare?.mockRestore();
+      h.db.close();
     }
   });
 

@@ -1,10 +1,10 @@
 import type Database from "better-sqlite3";
 import type { RuntimeConversationCollector } from "./runtime-conversation.js";
 
-type SkipReason = "run_not_expired" | "session_busy" | "no_raw_events";
+type SkipReason = "run_not_expired" | "session_busy" | "no_raw_events" | "backfill_incomplete" | "counting_incomplete";
 type RetentionAction = "idle" | "scanned" | "retired" | "failed";
 
-/** Retires expired replay bodies independently of usage collection and counting. */
+/** Retires expired replay bodies only after their content counts and backfill are committed. */
 export class RuntimeEventRetention {
   // Recheck a Run while it has more raw events; otherwise advance one Run per step.
   private nextRunId = 0;
@@ -48,11 +48,24 @@ export class RuntimeEventRetention {
             WHEN s.status!='idle' OR s.pending_operation IS NOT NULL OR EXISTS (
               SELECT 1 FROM runs active WHERE active.session_id=s.id AND active.status IN ('queued','running'))
               THEN 'session_busy'
-            WHEN EXISTS (SELECT 1 FROM events e WHERE e.run_id=r.id AND e.seq>r.events_pruned_through_seq
-              AND e.type IN ('message','tool')) THEN 'ready'
-            ELSE 'no_raw_events'
+            WHEN NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id=r.id AND e.seq>r.events_pruned_through_seq
+              AND e.type IN ('message','tool')) THEN 'no_raw_events'
+            WHEN NOT EXISTS (SELECT 1 FROM agent_usage_runtime_backfills j
+              WHERE j.namespace=? AND j.run_id=r.id AND j.status='completed' AND j.error_code IS NULL
+                AND NOT EXISTS (SELECT 1 FROM events e WHERE e.run_id=r.id AND e.seq>j.last_seq
+                  AND e.type IN ('message','tool'))) THEN 'backfill_incomplete'
+            WHEN EXISTS (SELECT 1 FROM agent_usage_conversation_content c
+              WHERE c.namespace=? AND c.run_id=r.id AND c.tokens IS NULL)
+              OR EXISTS (SELECT 1 FROM agent_usage_invocations i
+                JOIN agent_usage_invocation_payloads p ON p.public_id=i.public_id
+                LEFT JOIN agent_usage_token_estimates t ON t.id=p.estimate_id
+                WHERE i.namespace=? AND i.session_id=CAST(s.id AS TEXT) AND i.execution_id=CAST(r.id AS TEXT)
+                  AND p.token_count IS NULL AND (p.partial!=1
+                    OR json_extract(t.estimate_json,'$.reason') IS NOT 'unsupported_content'))
+              THEN 'counting_incomplete'
+            ELSE 'ready'
           END AS reason FROM runs r JOIN sessions s ON s.id=r.session_id WHERE r.id=?`)
-          .get(new Date(now - this.retentionMs).toISOString(), run.id) as {
+          .get(new Date(now - this.retentionMs).toISOString(), this.namespace, this.namespace, this.namespace, run.id) as {
             id: number; events_pruned_through_seq: number; reason: SkipReason | "ready"
           };
         if (job.reason !== "ready") return { retired: 0, reason: job.reason };
@@ -73,11 +86,6 @@ export class RuntimeEventRetention {
         this.db.prepare(`UPDATE runs SET events_pruned_at=COALESCE(events_pruned_at,?),
           events_pruned_through_seq=MAX(events_pruned_through_seq,?) WHERE id=?`)
           .run(new Date(now).toISOString(), batch.at(-1)!.seq, job.id);
-        // Preserve completed counts and failure reasons; missing raw evidence cannot be retried.
-        this.db.prepare(`UPDATE agent_usage_runtime_backfills SET status='failed',
-          error_code=COALESCE(error_code,'usage_runtime_events_expired'),retry_after=0
-          WHERE namespace=? AND run_id=? AND (status IN ('pending','running') OR last_seq<?)`)
-          .run(this.namespace, job.id, batch.at(-1)!.seq);
         return { retired: batch.length, reason: "ready" as const };
       })();
       this.checkedRuns++;

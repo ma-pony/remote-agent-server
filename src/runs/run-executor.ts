@@ -266,10 +266,14 @@ export class RunExecutor {
       }
 
       if (this.cancellationIntents.has(run.id)) {
+        await this.releaseSessionBestEffort(session.id);
         return this.finishRun(run.id, { status: "cancelled" }, usage);
       }
       const prompt = await withinRunTimeout(prepareAttachments(this.runRepository.attachments, run.id, session.workspacePath, run.input, runAbortController.signal));
-      if (this.cancellationIntents.has(run.id)) return this.finishRun(run.id, { status: "cancelled" }, usage);
+      if (this.cancellationIntents.has(run.id)) {
+        await this.releaseSessionBestEffort(session.id);
+        return this.finishRun(run.id, { status: "cancelled" }, usage);
+      }
       const turn = this.runtime.startTurn({ sessionId: session.id, requestId: run.id, ...prompt });
       liveTurn = turn;
       let output = "";
