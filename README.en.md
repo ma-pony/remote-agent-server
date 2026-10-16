@@ -4,15 +4,15 @@
 
 **Connect Claude Code, Codex, and Hermes to your ticketing systems, operations platforms, and internal business applications.**
 
-Deploy on your own machine. Dispatch tasks from your business applications through an HTTP API, or call familiar command-line agents directly from the web console. Remote Agent Server manages queues, workspaces, sessions, and execution records. Your application receives progress and results through polling, SSE, or signed webhooks.
+Remote Agent Server is a self-hosted service for agent tasks. Submit tasks from your applications through an HTTP API or run them directly from the web console. The service manages queues, workspaces, sessions, and execution records. Your application receives progress and results through polling, SSE, or signed webhooks.
 
-Prepare repositories and dependencies once, then give each session an independent copy-on-write workspace. Continue the conversation in the same session; submitted tasks keep running when the caller disconnects.
+Prepare project repositories and dependencies, then create an independent copy-on-write workspace for each session. Continue the conversation in the same session; submitted tasks keep running when the caller disconnects.
 
-Beyond task execution, **choose which MCP tools each agent sees** to keep its tool list focused. **Install and update Skills from Git repositories**, preview file changes, and apply or roll back versions per agent to maintain team conventions and business procedures.
+**Choose which MCP tools each agent can see and call.** **Install and update Skills from Git repositories**, preview file changes, and apply or roll back versions per agent to maintain team conventions and business procedures.
 
 The service communicates with agents through [acpx](https://github.com/openclaw/acpx) and the [Agent Client Protocol (ACP)](https://github.com/agentclientprotocol), connects external tools through MCP, and provides provider extensions and model policies. A single Fastify process uses SQLite WAL, with no separate database server or message broker to deploy.
 
-[Demo](#business-integration-demo) · [Install and start](#install-and-start) · [Run your first task](#complete-one-agent-run) · [HTTP / webhook integration](#integrating-another-system) · [Features](#features) · [Execution model](#execution-model) · [Configuration](#configuration) · [Deployment guide](docs/deployment.md)
+[Demo](#business-integration-demo) · [Install and start](#install-and-start) · [Run your first task](#complete-one-agent-run) · [HTTP / webhook integration](#integrating-another-system) · [Features](#features) · [Execution model](#execution-model) · [Configuration](#configuration) · [Deployment guide (Chinese)](docs/deployment.md) · [Documentation](docs/README.en.md)
 
 ## Business integration demo
 
@@ -54,20 +54,23 @@ Providers still own reasoning, tool use, and native sessions; callers own busine
 
 ## Features
 
-- **Asynchronous Task API:** submit work over HTTP, prevent duplicate execution with idempotency keys, query or cancel tasks, and continue multi-turn conversations.
-- **Reliable event delivery:** consume incremental event history, resumable SSE, or signed Webhooks without tying task execution to a live connection.
-- **Agent management:** configure providers, instructions, project environments, Skills, and MCP in one place.
-- **MCP tool selection:** expose all tools or only selected tools from each agent's MCP servers. Supports HTTP, stdio, and imports from provider system configuration.
+- **Asynchronous Task API:** submit, query, or cancel tasks over HTTP and continue multi-turn conversations. Each endpoint deduplicates by `requestId`; submitting the same request again returns the existing Task.
+- **Events and results:** consume incremental event history, resumable SSE, or signed webhooks. Submitted tasks keep running when the caller disconnects.
+- **Duplicate agent configurations:** manage providers, instructions, project environments, Skills, and MCP centrally, then use **Duplicate** to create an independent agent for another purpose.
+- **Session-specific parameters:** supply project, environment, or credential values for different Sessions of the same agent and reference them in MCP configuration. Secret values are encrypted at rest.
+- **MCP tool selection:** choose all or selected tools for each agent's MCP servers to control what the model can see and call. Supports HTTP, stdio, and imports from provider system configuration.
 - **Install and update Skills from Git:** install from Git repositories or marketplaces, preview file changes, and apply or roll back versions per agent. Host discovery and ZIP uploads remain available.
-- **Reusable project environments:** prepare one or more Git repositories and their dependencies before sessions start.
+- **Reusable project environments:** prepare Git repositories and dependencies before creating session workspaces. Failed builds preserve the last usable version; existing Sessions keep their original version.
 - **Isolated workspaces:** use APFS clones on macOS or Btrfs snapshots on Linux to create copy-on-write session environments.
-- **Multi-turn conversations:** execute multiple runs in one session and resume the ACP session where supported.
-- **Recorded executions:** persist user messages, agent output, tool activity, statuses, errors, and results in SQLite.
-- **Provider extensions:** discover system plugins and hooks from Codex and Claude Code, select them per agent, and project them into that agent's Provider Home at runtime.
-- **Model policies:** discover models advertised by Agent Core over ACP, follow the Core default, pin one model, or select a model for each new run with UTC weekdays and 24-hour windows.
+- **Multi-turn conversations and context reset:** continue multiple Runs in one Session, resuming the native provider conversation where supported, or rebuild the provider session while preserving the workspace, history, and usage.
+- **Execution records and usage:** retain session and run statuses, errors, final replies, and token statistics in SQLite. Raw message fragments and tool-event bodies follow the retention policy.
+- **Usage trends:** filter by Agent and date to inspect daily tokens, daily average tokens per session, session counts, and lifetime usage per session, with charts and data views.
+- **Tool and content analysis:** compare input usage and evidence for MCP, CLIs, Skills, plugins, and prompts. Reconstruct context from Codex and Claude Code logs by default, keeping estimates separate from reported model usage.
+- **Provider extensions:** select Codex and Claude Code plugins and hooks per agent. Native plugin Skills follow the plugin's installed version.
+- **Model and scheduled concurrency policies:** discover models advertised by Core over ACP, follow its default, pin a model, or select a model and optional concurrency cap for new Runs using UTC weekdays and time windows.
 - **Runtime, storage, and concurrency control:** adjust run timeout, large idle-session storage retention, and three service concurrency limits from the console, with an optional run limit per agent.
 - **Headed browser support:** run agents in a real desktop session without requiring containers.
-- **GitHub / GitLab event ingress:** native webhook verification, filters, filter previews, and receipt history, using the same execution flow as the Task API.
+- **GitHub / GitLab event ingress:** use PR/MR review mapping presets, webhook verification, filters, previews, and receipt history through the same execution flow as the Task API.
 - **Image and file tasks:** upload, drop, or paste attachments in the console, or submit mixed and attachment-only messages through the API. Interpretation depends on the provider, model, and tools.
 - **Setup and diagnostics:** `pnpm run init` generates configuration, `pnpm run doctor` verifies native workspace operations, and the console guides first use.
 
@@ -266,11 +269,26 @@ The agent page also provides:
 
 - **Skills:** install from Git repositories, preview updates, and roll back versions, or discover host Skills and upload ZIP archives. Select enabled Skills and versions independently for each agent.
 - **Provider extensions:** review plugins and hooks discovered in the current provider's system configuration and enable the ones this agent needs.
+- **Session parameters:** declare values supplied when a Session is created, mark required or secret values, and reference them in MCP configuration.
 - **MCP:** add HTTP or stdio servers, check connectivity, and select exposed tools. Use fixed, session, or runtime values, or import a system-global MCP from Codex or Claude Code.
 - **Run concurrency policy:** inherit the system run limit by default, or set an Agent-specific cap. The smaller limit is effective.
 - **Model policy:** model choices come from the current Agent Core; arbitrary model IDs cannot be entered. Follow the Core default, pin one model, or switch by UTC weekday and 24-hour window. The latter two modes are unavailable when the Core does not advertise models.
 
 The model policy is resolved when a run leaves the queue and actually starts, so queue delay cannot select a model too early. A switch reuses the same Session and provider conversation and updates only the ACP `model` option. It never interrupts an active run; the next run receives the new model. Fixed and scheduled policies record the resolved model on every run for auditability.
+
+### Reuse configurations and session parameters
+
+Choose **Duplicate** in the agent list or detail page and enter a name. The new agent copies the provider, instructions, project-environment binding, Skills, provider extensions, MCP, session-parameter definitions, and model/concurrency policies. It starts without the source agent's Sessions, Runs, usage, endpoints, or runtime memory. Its configuration can then be changed independently.
+
+Use session parameters when one agent serves different projects or environments:
+
+1. In **Agents → Session parameters**, declare a key and display name, such as `project_id`, and mark it required or secret where needed.
+2. Bind the variable value in that agent's MCP configuration to this session parameter.
+3. Supply it when creating a Session in the console or through the Task API's `parameters`. Secret parameters are encrypted and are not returned in plaintext by management APIs.
+
+### Rebuild a provider session
+
+For an invalid context or a fresh provider conversation, open **Session → Settings → Rebuild provider session**. This preserves the workspace, browser data, conversation history, Runs, attachments, and token statistics. The next Run creates a new provider session and injects MCP again. The Session must be idle and its storage must still be available.
 
 ### Model policy quick reference
 
@@ -304,17 +322,15 @@ Refreshing a source only discovers versions. Enabled agents retain their selecti
 
 Each Run uses its Session's projection, preserving the contents of active Runs. The Run management API records the projected digest as `skillsRevision`; pre-upgrade Runs have `null`. Source and version endpoints use the existing management API Token. See [capability projection](docs/design.en.md#8-agent-capability-projection).
 
-The [2026-09-14 acceptance report](docs/superpowers/validation/2026-09-14-skill-source-updates.md) verifies real Git source imports and Codex `gpt-5.5` reads, updates, rollbacks, and session continuity. The GitLab smoke covers repository transport. Real Claude Code and Hermes execution remains unverified because upstream model permissions and channel availability blocked those runs.
-
-Known runtime limitation: some Providers return upstream model errors as ordinary output while reporting completion. Acceptance must inspect the actual reply and expected artifacts, not only Run status. This error-status propagation issue remains unresolved; see [deployment troubleshooting](docs/deployment.md#provider-验收与已知限制).
+After applying or rolling back a Skill, check its contents and expected artifacts with the actual provider. `skillsRevision` identifies the projection. See the [deployment checks](docs/deployment.md#provider-验收与排查).
 
 ### Provider extensions
 
-Provider extensions follow a discover, select, and runtime projection flow. After a plugin or hook is added to the service user's Codex or Claude Code configuration, it appears on the agent's **Provider extensions** page and remains disabled by default. Enabled items are projected only to that agent. Hermes does not currently support this extension-management flow.
+After installing plugins or hooks in the service user's Codex or Claude Code configuration, select them on the agent's **Extensions** tab. They are disabled by default. Hermes does not currently support this extension-management flow.
 
-Plugin-provided Skills are marked **Follows plugin updates** on the Skills page. Their plugin controls enablement and version. After an installed host plugin is upgraded, its Skills follow that version on the next Run without separate Skill installation or revision application. Skill identity uses the provider, plugin identifier, and package-relative path, excluding the cache-version directory. A legacy copy is taken over on the next Run only when its recorded plugin identifier matches an available native Skill enabled for that Agent. Takeovers persist so disabling the plugin cannot reactivate the old copy. Copies without recorded ownership, with unavailable or unselected plugins, and copies used by Hermes remain independently available as **Legacy independent copy** entries. Once the required native Skill is available, an operator can disable an unassociated copy. Copy files, revision history, and existing plugin selections are preserved. Git-imported Skills, ZIP uploads, and other independent Skills retain explicit revision selection.
+Plugin-provided Skills are marked **Follows plugin updates**. Their plugin controls enablement and version. After a host plugin upgrade, these Skills follow the installed version on subsequent Runs without separate installation or revision application. Git imports, ZIP uploads, and other independent Skills retain explicit revision selection.
 
-Codex plugins are published as local marketplace snapshots per agent. Sessions with the same selection and content revision share a plugin cache. By default, Sessions of an agent also share the built-in marketplace sync directory; a Session with Codex rollout compression explicitly enabled keeps its own `.tmp` so its compression lock remains independent. Selection changes take effect on the next run; package-file changes take effect after the discovery cache refreshes (within 30 seconds by default). Existing sessions discard old plugin caches and temporary clones when their runtime home is next prepared; idle session homes still follow the existing retention policy. Both Codex and Claude Code refresh subsequent Runs when plugin file trees change; Claude Code retains Session-local plugin directories.
+Selection changes take effect on the next Run; package-file changes take effect after discovery refreshes, within 30 seconds by default. Codex Sessions of the same agent and content revision share a plugin cache; Claude Code uses Session-local directories. See the [upgrade guide](docs/deployment.md#skills-git-来源与版本升级) for legacy copies and backups.
 
 ### MCP: select tools per agent
 
@@ -361,37 +377,19 @@ The session chart filters by creation date and opens the latest 50 Sessions, ord
 
 ### Usage analysis
 
-Request input summaries no longer duplicate capability display JSON; metadata is read from the original exposure position. Background batches compact historical copies while preserving token counts, rankings and evidence. This does not immediately shrink the SQLite file. See the [deployment guide](docs/deployment.md#请求输入展示元数据去重) for progress and rollback requirements.
+Open **Usage analysis** from the sidebar, an Agent, or a Session. Filter by Agent, Session, date, and Runtime to find tools, Skills, and content with high usage.
 
-Capability rankings default to **All capabilities**, combining MCP tools, built-ins, CLIs, Skills, plugins, hooks and unknown tools with five distinct content dimensions: user prompts, configured instructions, model-request system prompts, assistant output and observed reasoning. Each dimension supports filtering, ranking and evidence inspection. Configured instructions are counted once per Run and replies by persisted text fragment; content observations are displayed separately from tool executions. Cumulative input is reconstructed from native conversation logs by default, with optional direct request capture; it must not be added to one-time observed content.
+- **Model usage:** inspect provider-reported input, output, and totals alongside missing, conflicting, or undated usage.
+- **Model input context** (default): reconstruct each request's visible input from Codex and Claude Code logs. Separate definitions, arguments, and first/repeated results to identify context that accumulates across turns.
+- **Observed content and capability rankings:** compare MCP, built-ins, CLIs, Skills, plugins, hooks, prompts, replies, and observed reasoning, with call counts, content estimates, and linked evidence.
 
-Skills projected by native plugins selected through Provider extensions participate in the same ownership mapping. In Claude logs, instructions injected by a `Skill` call belong to that Skill/plugin and count again in subsequent requests rather than appearing as user prompts.
+Default analysis works with existing OAuth and API-key authentication. Optionally enable HTTP model-request capture for direct request evidence, or import context snapshots. Known models automatically fetch and cache pinned official vocabularies; manual configuration and offline deployment are supported.
 
-Dynamic console resource lists, selectors and histories use pagination or explicit incremental loading. Selections and edited values survive page changes, and task/session events load incrementally by sequence. Switching Sessions resets the draft and operation state; late responses from the previous Session cannot change the current one. Summary cards continue to cover the entire selected scope independently of the visible list page.
+Reported usage and content estimates are shown separately. Hidden content, media, and protocol overhead create differences. Estimates are not exact billing data and must not be added to model totals or overlapping Skill/plugin views. A visible Skill has not necessarily been used.
 
-The sidebar, Agent and Session pages open one usage analysis view with Agent, Session, date and Runtime filters. Default rankings reconstruct visible input from Codex and Claude Code conversation logs, including visible reasoning text and separating definitions, arguments, and first/repeated results. Content reused in subsequent requests counts again, and recorded compaction replaces the old context. Results are labeled transcript estimates and compared with reported input totals. Request framing and internal tool definitions absent from native logs remain in the difference. OAuth and API-key authentication keep their existing routes. Explicit HTTP capture is optional. The Observed content tab shows one-time argument and result estimates. Known models lazily fetch and cache pinned official vocabularies on first measurement; manual profiles take precedence. Failed downloads retry in the background and leave known-model measurements pending; only unmapped models use a labeled multilingual text fallback; cache subsets and overlapping capability dimensions are not added twice.
+The console shows the statistics timestamp and supports manual refresh. Background collection backfills retained evidence and resumes after restarts; missing values remain unknown. By default, raw message/tool bodies can expire once a Run has been finished for at least 7 days, its Session is idle, and content counting and vocabulary backfill are complete. Final replies and statistics remain. Configure this separately from workspace retention with `USAGE_EVENT_RETENTION_DAYS`.
 
-Managed Codex/Claude Code logs supplement Runtime evidence, including startup and shutdown harvesting; the MCP observer records executions. Configure `USAGE_CAPTURE_UPSTREAMS` to automatically capture supported API-key model requests and inspect concrete tool definitions, first/repeated result inputs and Skill/plugin attribution. Generic **Context Snapshot** imports remain available. Reported usage, actual executions and context evidence are counted separately without an external telemetry platform. Reset completes collection before purging; storage cleanup attempts collection but continues after failure or timeout, preserving existing statistics and gaps; explicit Session deletion clears its statistics and rejects late replay.
-
-HTTP capture finalization waits only for the current Session. Each observation has 30 seconds from transport completion, including its wait behind other observations in that Session; collection preparation, including source discovery before cleanup, also has a 30-second deadline. Expiration preserves known usage and gaps while allowing cleanup to continue. Late work cannot overwrite gaps or register sources again. The console distinguishes retryable failures from gaps in cleaned sessions; retained gaps alone no longer trigger recovery polling.
-
-Each log collection attempt has a 30-second deadline. Completed request contexts, reported counters and checkpoints persist before reading the next record, so a later timeout preserves that progress. Recoverable sources re-enter the queue after a 30-second cooldown following the collection round, even while historical backfill remains pending. Retries resume committed checkpoints without double counting.
-
-Parser upgrades do not automatically replay unchanged historical Codex logs. To correct an old estimate for a completed Session, send `{"rebuild":true}` to `POST /api/usage/sources/:id/collect` for that source. Rebuilding updates its context estimate without adding reported model usage again. See the [usage analysis guide](docs/agent-usage.md) for the procedure and status checks.
-
-Startup incrementally backfills retained Run tool events in the background, exposing progress and gaps while preserving original event dates and restart deduplication. Counts and cursors commit in batches with idle time between cycles; interrupted recovery resumes from committed progress. Individual large records may still exceed the soft time budget. CLI recognition accepts structured inputs and literal single shell commands, including common env, rtk and shell wrappers; pipelines, compound commands and dynamic expansion remain attributed to the shell. Explicit reads and script execution under projected Skill paths provide Skill/plugin ownership; catalog visibility alone is not usage.
-
-Summary, rankings, trends and sources render independently. Capability queries read compact counts grouped by request, capability, content kind and tokenizer provenance, preserving date filters, lifetime first/repeat attribution and complete page metrics. Background batches fill older contexts; unfinished scopes retain the detailed query. Summary and trend reuse durable reconciled facts per Session/epoch and re-reconcile only changed epochs, preserving cumulative ranges and unplaced usage. Matching summary, trend and input-comparison requests share a consistent snapshot. Ordinary Runtime events and collection checkpoints do not change the analysis revision. After relevant writes, completed snapshots can be reused for up to 30 seconds with their actual `asOf`, `revision` and `stale` fields. The console displays the statistics timestamp; Refresh statistics and API `fresh=1` bypass completed snapshots. Managed JSONL logs parse only new records; individual lines remain bounded and incomplete trailing lines stay pending for retry.
-
-Source listings and collection polling follow the selected Agent and Session. Lists default to 20 entries per page and do not read the server-only recovery checkpoint. Switching capabilities or closing the evidence sheet cancels stale detail requests; reopening starts from the first page.
-
-File-backed summary/trend and capability queries use separate read-only Workers with bounded queues and a shared projection cache to keep heavy aggregation off the management request loop. New conversation counts reference shared tokenizer metadata. After a Run has been finished for 7 days, background batches retire its raw message/tool bodies only while the Session is idle and content counting and vocabulary backfill are complete. Missing counts, failures, pending vocabularies and lagging backfill cursors preserve the bodies. Known zero counts qualify; media explicitly unsupported by counting remain unknown without blocking retirement. Cleanup runs independently, checking one Run per step without waiting for other Runs or statistical projections. `/api/usage/status` exposes process-local retirement progress and skip reasons. Final replies, counts, rankings and associations remain available; the console labels expired history. `USAGE_EVENT_RETENTION_DAYS=0` disables this cleanup independently of Workspace retention. Expired bodies cannot be used for further backfill or vocabulary replay; bodies already deleted by older versions cannot be recovered automatically. Unknown counts are not replaced with zero. Freed SQLite pages are reusable; the file does not shrink immediately.
-
-Capability rankings maintain a single set of incremental aggregates by Session and UTC calendar day, covering input counts, deduplicated coverage and conversation content. Completed days use indexed summary columns. Sorting reads the required metric before pagination; full metrics and estimate profiles are loaded only for the selected capabilities. Late data, revisions and deletion invalidate affected partitions, which remain queryable from current source counts while rebuilding. Cross-day invocation deduplication and P50/P95 still use the original invocation algorithms; daily distinct counts and percentiles are not added together. Management queries floor `from` to the start of its UTC day and ceil a non-aligned `to` to the next day; an aligned `to` remains exclusive. Responses return the actual range. The management page has no timezone selector, and the API no longer accepts or returns `timezone`.
-
-Independent background compaction removes unused usage-event payloads, duplicate identity hashes, unreferenced estimate profiles and replay state from fully revoked sources. Deduplication keys, revocation identities, statistics and evidence remain available. Durable cursors resume cleanup without waiting for long accounting backfills. Query Workers have a 30-second deadline including their queue wait; expiration returns `503 usage_query_timeout` and requests termination. Subsequent work waits for confirmed thread exit, which a native SQLite call can delay.
-
-Agent detail, Session detail and the Session list now display cumulative figures from the `/api/usage/*` ledger; the list fetches totals for its current page in one request. Legacy Session cumulative fields and `/api/agents/:id/usage` are retired, while per-Run usage remains available. See the [usage analysis guide](docs/agent-usage.md) for collection boundaries, missing-data semantics and the snapshot contract.
+See the [usage guide](docs/agent-usage.md) for collection, metrics, historical rebuilds, APIs, and retention, and the [deployment guide](docs/deployment.md#用量数据保留与维护) for upgrades, backups, and database maintenance.
 
 ## Integrating another system
 

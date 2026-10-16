@@ -196,8 +196,9 @@ it("已清理存储的 Session 仍可查看统计但不能继续发送", async (
 
   expect(await screen.findByText("存储已清理")).toBeInTheDocument();
   fireEvent.click(screen.getByRole("link", { name: session.title }));
-  expect(await screen.findByText("该会话已过期，工作区和执行器上下文已清理；历史与 Token 统计仍保留。"))
-    .toBeInTheDocument();
+  const storageNotice = await screen.findByText(/工作区和执行器上下文已清理，此会话无法继续运行。/);
+  expect(storageNotice).toHaveTextContent("最终回复和 Token 统计仍可查看");
+  expect(storageNotice).toHaveTextContent("原始事件按保留策略清理");
   expect(screen.getByLabelText("发送给智能体")).toBeDisabled();
 });
 

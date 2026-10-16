@@ -1,6 +1,15 @@
 # Remote Agent Server 部署与验收
 
-Remote Agent Server 是面向业务系统的自托管 ACP Agent 执行网关。生产部署需要同时保证四条链路可用：外部 HTTP 接入、Provider/ACP 执行、项目环境与 Session Workspace、Event/Webhook 返回。本指南覆盖 macOS 和 Linux 的单机、单进程部署，并使用真实 Provider 和 Integration Task 完成验收。产品边界与执行链路见[产品与架构](design.md)。
+本指南介绍 Remote Agent Server 在 macOS 和 Linux 上的单机、单进程部署，以及首次任务、外部接入和升级验收。服务通过 ACP 调用 Provider，使用 SQLite 保存状态。产品边界与执行链路见[产品与架构](design.md)。
+
+| 当前任务 | 从这里开始 |
+| --- | --- |
+| 首次部署到 macOS | [APFS 原生部署](#macosapfs-原生部署) |
+| 首次部署到 Linux | [Btrfs 原生部署](#linuxbtrfs-原生部署) |
+| 服务启动后验证可用性 | [完成首次任务](#6-完成首次任务与可选-provider-验收)，再验证[外部系统接入](#7-外部系统接入) |
+| 更新已有安装 | [升级与存储恢复](#8-升级备份与恢复) |
+
+生产验收需要分别确认 HTTP 接入、Provider 执行、项目环境与会话工作区、事件与 Webhook 返回。健康接口通过只代表服务可响应，还需用真实 Provider 和 Integration Task 验证执行与结果。[返回文档导航](README.md)。
 
 服务支持两种原生写时复制 Workspace：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。运行时会根据操作系统自动选择，不提供普通目录复制回退。它以 acpx 的 `approve-all` 模式运行 Claude Code、Codex 或 Hermes。`approve-all` 只减少 Provider 的交互确认，**不是安全沙箱**；Workspace 中的代码、网络和该用户能访问的文件都应视为 Agent 可操作范围。
 
@@ -306,9 +315,7 @@ curl --fail-with-body \
 
 ### 用量采集与导入目录
 
-用量账本和归因表保存在现有 SQLite 中，无需部署外部遥测服务。升级前按既有流程备份 SQLite 和 `secret.key`；首次启动创建新的 `agent_usage_*` 表并幂等保留旧 Session／Run 计数为未验证证据，不把它们补成精确账单。现有 `usage` API 保持语义。服务管理的 MCP 增加本地观察包装，Unix socket 位于私有临时目录，正常关闭会清理；没有需要对外开放的观察端口。
-
-已有归因数据升级时，首次启动会回填首次结果索引、证据排序键和估算元数据字典，需要读取历史数据并写入 SQLite/WAL；按数据库规模预留启动时间和磁盘空间。原始事件清理复用对话空计数的稀疏索引和调用执行定位索引，检查目标 Run 的计量缺口。迁移幂等，完成后不逐次重建；不会截断历史或自动执行全库 VACUUM。迁移释放的数据库页供后续写入复用，文件体积不保证立即缩小。
+用量账本和归因表保存在现有 SQLite 中，无需部署外部遥测服务。管理统计使用 `/api/usage/*`；单次 Run 的 `usage` 是该次执行的观测，不作为跨运行累计值。服务管理的 MCP 使用本地观察包装，Unix socket 位于私有临时目录，正常关闭会清理，无需开放观察端口。备份与迁移见[升级指南](#8-升级备份与恢复)。
 
 托管的 Codex／Claude Code Session 日志在启动恢复、Run 收尾、维护前和 Runtime 关闭后尝试采集；未登记来源的日志也参加恢复，失败状态持久保留。不扫描服务用户的任意个人日志，也不启用 Claude Code 原生遥测。外部来源默认关闭。需要显式文件导入时，在 `.env` 增加绝对路径映射，例如：
 
@@ -468,86 +475,106 @@ pnpm smoke:integrations
 
 每个 HTTP 请求和响应 Body 读取都有 Abort deadline。失败时命令非零退出并打印已经取得的 Endpoint、Task、Session、Run 和 Delivery ID，不打印 Token 或 signing secret。脚本默认不删除记录，便于在管理界面审计；确认无用后由管理员手动停用 Endpoint。可用 `SMOKE_TASK_TIMEOUT_MS`、`SMOKE_REQUEST_TIMEOUT_MS` 和 `SMOKE_POLL_INTERVAL_MS` 调整等待时间。
 
-## 8. 升级、Skills 与 Session 存储恢复
+## 8. 升级、备份与恢复
 
-Webhook 投递历史查询的升级会在启动迁移时自动创建 `webhook_deliveries_subscription_recent` 索引，无需手动执行 SQL。首次创建需要读取现有投递记录；完成迁移并启动后，检查健康接口及管理台“事件回调”的投递记录，确认历史数据、筛选和最近投递摘要正常。
+### 升级步骤
+
+1. 记录当前代码版本和服务配置，在维护窗口正常停止服务。
+2. 备份下表中的持久数据。使用停止后的完整数据副本或 SQLite 一致性备份；不要在服务写入时只复制主库，也不要单独删除 WAL。
+3. 切换到目标版本，使用 Node.js 22，执行 `pnpm install --frozen-lockfile`、`pnpm build` 和 `pnpm run doctor`。
+4. 启动服务。数据库迁移自动执行，后端与管理页面应使用同一版本；大库首次建立索引需要额外时间和磁盘空间。
+5. 检查健康接口、管理台和历史记录，再完成一条实际 Provider 任务及需要的外部接入流程。健康检查通过只说明服务可访问。
+
+| 备份对象 | 内容与恢复要求 |
+| --- | --- |
+| `.env` 与服务启动配置 | 存储路径、认证配置和服务用户；按敏感文件保管。 |
+| `DATA_DIR` | SQLite 数据库及仍存在的 WAL、`secret.key`、Agent 配置、Skills 来源与版本、托管 Provider 数据和词表缓存。数据库与密钥必须配套恢复，丢失密钥无法解密已有敏感值。 |
+| `PROJECT_ENVIRONMENTS_ROOT` | 已发布环境版本及其引用，使用对应文件系统的备份方式。 |
+| `SESSIONS_ROOT` | Session 工作区、浏览器数据与 Session 运行目录；需要继续原会话时一并保留。 |
+| 服务用户的 Provider 配置 | 按所用 CLI 的方式安全备份登录状态和宿主配置；Git／SSH 凭据同样由宿主管理。 |
+
+回退时先停止新服务，恢复升级前匹配的代码、配置和一致数据备份，再启动检查。UTC 统计表结构及输入展示元数据清理与旧版本不兼容，不能只回退代码。备份文件应限制访问，避免将凭据或运行数据提交到仓库。
 
 ### Skills Git 来源与版本升级
 
-原生插件的 Skills 在升级后自动跟随当前已安装插件，从下一次 Run 生效。请在 Agent 的“执行器扩展”中检查插件选择，技能页的“随插件更新”项无需单独启用或选择版本。发现缓存默认最多 30 秒。升级前的独立插件 Skill 副本与版本历史继续保留。记录了明确插件归属、且已有已启用原生技能承接的副本，在下一次 Run 接管；旧 Session 托管入口届时清理，接管标记保存在 Agent 的 `skills/.plugin-managed/` 下，备份与恢复时应随整个 `agents/` 保留。未确认接管的副本（包括 Hermes）仍可独立使用和停用，技能页标记为“旧插件独立副本”；确认原生技能可用后可手动停用未关联的旧副本。Codex 与 Claude Code 同版本内容变更也会刷新下一次 Run，并续用原有 Provider Session。服务不会因旧副本已启用而自动启用整个插件。只通过 Git 来源导入的 Skills 仍需显式应用更新。
+Skills 来源复用服务用户的 Git／SSH 凭证。为该用户配置无交互 Git 访问、SSH 主机信任和只读仓库权限；URL 中不要嵌入 Token 或密码。支持 HTTPS、SSH 和 `git@host:group/repository.git`，不接受本机目录或 `file://` 来源。来源刷新不运行安装命令，Git Hook 被禁用。
 
-Skills 来源复用服务用户的 Git/SSH 凭证。先为该用户配置无交互 Git 访问、SSH 主机信任和只读仓库权限；URL 中不要嵌入 Token 或密码。管理台支持 HTTPS、SSH 和 `git@host:group/repository.git`，不接受本机目录或 `file://` 来源。来源刷新不运行安装命令，Git Hook 被禁用。Git 地址、可选 ref 和路径保存在管理数据中，凭证仍由宿主 Git 管理。
+刷新来源只发现版本，独立 Skills 仍需在 Agent 中明确应用或回退。备份整个 `DATA_DIR`，包括 `skill-sources/`、`skill-revisions/`、`skill-library/` 和 `agents/`；版本历史暂不自动回收，需预留完整包副本的空间。历史 Run 没有记录过的 `skillsRevision` 保持 `null`。
 
-备份和恢复时，除了 SQLite 与 `secret.key`，还应保留 `DATA_DIR/skill-sources/`、`skill-revisions/`、`skill-library/` 和 `agents/` 中的配置及安装内容。版本历史暂不自动回收，需为完整包副本预留磁盘空间。升级会自动添加可空的 `runs.skills_revision`，不会补写旧 Run 的版本。
+原生插件 Skills 在“扩展”页随所属插件启停，技能页标为“随插件更新”。宿主插件更新在后续 Run 生效，发现缓存默认最多 30 秒。升级前的独立插件 Skill 副本和版本历史保留：只有归属明确且已有启用的原生技能承接时，才在下一次 Run 交由插件接管；接管标记随 `agents/` 备份。其他副本（包括 Hermes）仍标为“旧插件独立副本”，可独立使用或停用。服务不会因旧副本启用而自动启用整个插件。
 
-Hermes 的 Provider Home 改为每个 Session 独立。首次继续旧会话时，服务读取旧 Agent Home 的配置及 `state.db` 并迁移对应会话；已有投影目录不会跳过初始化。升级前应正常停止旧服务并备份 Hermes Home。旧会话状态缺失或结构不兼容时会明确报恢复失败，保留业务 Session、Workspace 和 Run 历史；应核验备份或明确重置 Provider 上下文后重试。
+旧版 Hermes 的 Agent Home 会在继续相应会话时迁移到 Session 独立 Home。升级前保留原 Home；状态缺失或不兼容会明确报恢复失败，并保留业务 Session、Workspace 和 Run 历史。核验备份后再恢复，或明确重建执行器会话后重试。
 
-### Provider 验收与已知限制
+### Provider 验收与排查
 
-Git 来源刷新成功只证明目录已发布；应用 Skill 后还需使用实际 Provider 验证读取结果、资源更新和回退。`skillsRevision` 可用于核对投影版本，但不能代替业务输出检查。[2026-09-14 测试记录](superpowers/validation/2026-09-14-skill-source-updates.md)包含已通过的 Codex 三轮验证与其他 Provider 的阻塞证据。
+来源刷新、Skill 投影和模型执行分别验证。应用或回退 Skill 后，用实际 Provider 检查读取结果和预期产物；`skillsRevision` 用于核对版本，Run 状态不能代替业务结果验收。
 
-- 模型提示需要更新版本 Codex 时，核对 ACP 适配器实际调用的 CLI 版本。适配器可能使用自带 CLI，仅更新宿主命令不一定生效；选择兼容模型，或单独升级适配器后重新验收。
-- `Authentication required` 或 HTTP 403 `MODEL_ACCESS_DENIED` 时，检查服务进程实际加载的认证环境以及该账号的模型权限。
-- HTTP 503、模型无可用通道时，先恢复上游模型服务，再重试验收；刷新 Skill 无法解决通道故障。
+| 问题 | 优先检查 |
+| --- | --- |
+| CLI 不存在、版本或模型不兼容 | 服务进程的 PATH、ACP 适配器实际调用的 CLI 与模型目录；更新宿主 CLI 不一定改变适配器使用的版本。 |
+| 认证失败或模型无权限 | 服务用户实际加载的登录状态、环境变量和账号模型权限。 |
+| 上游不可用或无模型通道 | Provider 的网络和模型服务；恢复后再重试任务。 |
+| Skill 已应用但结果不符合预期 | Run 的 `skillsRevision`、实际读取内容、最终回复及产物。 |
 
-当前部分 Provider 会把这些模型错误作为普通回复返回，同时报告 `completed`，上层 Run 因而可能显示成功。这一错误状态传递问题尚未修复；上线验收必须检查回复或实际产物，不得只依赖状态字段。
+真实检查命令见[首次任务验收](#6-完成首次任务与可选-provider-验收)。历史验证记录只反映当时版本与环境。
 
 ### Session 存储清理与恢复
 
-Session 存储清理成功时，也会删除通过 Task 关联的全部 Webhook 投递记录并停止后续重试；Task、Conversation、事件和 Token 统计仍保留。投递删除和清理完成标记在同一事务内提交，清理失败后按原流程恢复。此行为适用于升级后完成的清理；升级前已清理 Session 的历史投递不会在启动迁移中批量删除。
+Session 存储清理删除 Workspace、浏览器数据、Provider 原生会话、附件内容，以及该 Session 下全部 Task 的 Webhook 投递记录；删除后的投递停止重试。Session／Run 元数据、Task／Conversation 关联、最终回复和 Token 统计保留。原始消息／工具正文按下方独立的事件保留策略处理。重建执行器会话保留工作区、附件和投递记录；永久删除 Session 则移除其历史与统计。
 
-升级时按正常流程停止旧进程、备份数据库和 `secret.key`，再启动新版本。启动迁移会为现有 Session 增加可空的 `pending_operation` 字段；不会改写历史活动时间。服务在调度 Run 前，先重试创建中断的目录删除，并完成持久化标记中的清理、删除或重置。
+服务在启动时先恢复创建中断的目录清理和已登记的清理、删除或重置，再调度 Run。存储清理前会尝试采集尾部用量；采集失败或超时会保留已有统计和缺口，并继续清理。
 
-如果出现 `session_maintenance_recovery_failed sessionId=<id> operation=<operation>`，对应 Session 会保持占用，以免使用已被部分删除的目录。排除磁盘或权限问题后，自动存储清理会在下一轮重试；手动删除和重置可以重试原管理 API，或在下次服务启动时恢复。关闭自动清理只停止新的清理任务，不取消已经开始的清理。
+出现 `session_maintenance_recovery_failed sessionId=<id> operation=<operation>` 时，Session 会保持占用，防止复用部分删除的目录。修复磁盘或权限后，自动清理会在后续轮次重试；手动删除和重置可重试原管理 API，也可在下次启动时恢复。关闭自动清理不取消已开始的维护。
 
-创建失败且目录无法删除时，服务会保留 `workspace_path` 为 `pending:` 的记录，供下次启动重试。不要手动把这些记录改成空闲。修复前已丢失数据库记录的孤立目录，以及已被错误刷新的活动时间，无法由本次迁移自动还原，需要依据备份或历史记录单独核验。
+创建失败且目录无法删除时，可能保留 `workspace_path` 为 `pending:` 的记录供启动恢复。不要手工改为空闲；已失去记录的孤立目录需依据备份核验。
 
 ### 图片与普通文件附件
 
-消息提交端点接受最多 20 MiB 的解码附件，base64 会扩大请求体。反向代理需要允许至少 30 MiB 的请求体，覆盖 `/api/sessions/`、`/api/integration-endpoints/` 和 `/integration/v1/endpoints/` 下的消息提交；Nginx 可在对应 `server` 或 `location` 中设置 `client_max_body_size 30m;`。应用仅对 Run、外部 Task 和管理测试 Task 的提交路由放宽到约 28 MiB，其余路由（包括原生 GitHub/GitLab Webhook）维持原限制。
+消息端点接受最多 20 MiB 的解码附件，base64 会扩大请求体。反向代理应允许至少 30 MiB 请求体，覆盖 `/api/sessions/`、`/api/integration-endpoints/` 和 `/integration/v1/endpoints/` 的消息提交；Nginx 可设置 `client_max_body_size 30m;`。应用仅对 Run、外部 Task 和管理测试 Task 提交放宽到约 28 MiB，其余路由维持原限制。
 
-升级自动创建 `message_attachments` 表，无需回填旧消息或引入新依赖。原始附件存储在 SQLite BLOB 中，执行时另在 Session 工作区保留副本，备份与容量规划应覆盖数据库、WAL 及工作区。Session 保留策略清除 BLOB 内容和工作区副本，但 SQLite 文件大小不保证立即缩小；释放的页可供后续写入复用。重置上下文不删除附件，过期清理和 Session 删除沿用既有可恢复维护流程。
-
-文字与参数的 JSON 内容（不含 `attachments`）仍限制为 1 MiB，附件不会扩大纯文本的持久化上限。
+附件内容存储在 SQLite BLOB 中，执行时还会在 Session 工作区保留副本；容量与备份应同时覆盖数据库和工作区。存储到期后清除内容，保留名称、类型、大小等元数据。重建执行器会话保留附件，永久删除 Session 删除附件记录。文字与参数的 JSON 内容（不含 `attachments`）仍限制为 1 MiB。
 
 ## 本地模型分词配置
 
-已知模型在首次计量时自动获取固定版本官方 JSON 词表，缓存到 `DATA_DIR/tokenizers`；启动时不预下载。当前自动模型列表、手动覆盖与离线部署见[用量分析指南](agent-usage.md#配置多模型词表)。首次获取需要服务进程能访问 Hugging Face 的公开 HTTPS 资产及重定向下载端点，并能写入缓存目录；不发送计数正文，不下载模型权重。固定 SHA-256 校验通过后原子发布缓存，后续可离线复用。官方源失败后自动尝试 HF-Mirror 国内镜像，仍校验相同 SHA-256；全部失败时保留等待计量状态，60 秒后自动重试，不给已知词表模型保存字符兜底值。可备份缓存以避免迁移主机后重新下载。
+已知模型首次计量时自动获取固定版本官方 JSON 词表，校验 SHA-256 后缓存到 `DATA_DIR/tokenizers`，后续可离线复用。服务需要能访问 Hugging Face 的公开 HTTPS 资产与重定向端点；失败后尝试 HF-Mirror，同样校验摘要。不发送计数正文、不下载模型权重。全部失败时保留等待状态并在 60 秒后重试，不给已知模型写入字符兜底值。
 
-`USAGE_TOKENIZERS` 手动配置优先，使用本地绝对路径和 SHA-256；手动资产在启动时校验，损坏或绑定冲突使启动失败。默认 `[]` 启用内置自动映射，未知模型仍有兜底估算。大文本计数通过 Worker 执行，计数不因原有 256 KiB／1 MiB 估算阈值而截断；采集传输上限仍独立生效。首次词表获取会延迟上下文计量完成，Runtime 模型执行不等待下载；大文本计数会增加采集延迟和进程内存，部署容量应包括 Worker 内存。
+`USAGE_TOKENIZERS` 支持本地绝对路径与 SHA-256，优先于自动映射；手动资产在启动时校验，损坏或绑定冲突会使启动失败。默认 `[]` 使用内置映射，未知模型显示通用文本估算。自动模型列表、离线准备和配置示例见[词表指南](agent-usage.md#配置多模型词表)。
 
-词表就绪后自动补算 Runtime 等待记录；启动时为新获得词表且仍保留原始事件的模型安排旧 Runtime 兜底记录的后台重算，进度可跨重启恢复。回填先计量再按批事务提交计数与游标，批次之间主动休息；停止恢复会取消未提交计量，普通重启不重置已提交进度。此调度是软时间预算，单条大记录和 SQLite 提交仍可能产生峰值。仅能使用仍保留的 Run 输入、指令快照和工具/消息事件；HTTP 历史上下文没有原文时不可恢复。已有数据库和 WAL 不会因减少后续写入而立即缩小，不执行全库压缩或额外重算。当前没有手动指定范围或暂停重算的管理入口，参见[历史重算说明](agent-usage.md#历史兜底估算与重算)。
+下载与大文本计量在后台进行，不阻塞模型执行，但会增加采集延迟和 Worker 内存占用。词表就绪后自动补算仍有原文的 Runtime 记录，并按持久游标续做；已经删除的正文无法重新分词。历史重算与手动来源重建见[用量指南](agent-usage.md#历史兜底估算与重算)。
 
-`USAGE_EVENT_RETENTION_DAYS=7` 默认启用原始 message/tool 事件保留策略，`0` 关闭，独立于 `SESSION_RETENTION_HOURS` 和管理台 Workspace 保留设置。升级后后台会逐批处理已结束超过保留期的 Run；Session 必须空闲且无维护／活动 Run，且该 Run 的内容计量和词表补算已完成。等待、失败、空计数、缺失回填记录或落后的回填游标会推迟清理，保留原文和已有进度；已知零和明确不支持计数的媒体不阻止清理，未知计数不补零。清理仍独立调度、按自身游标推进，不等待其他 Run 或统计汇总回填。最终回复、输入、状态／错误、统计与关联继续保留；旧词表元数据随清理批次尽力去重，去重失败不阻塞清理。清理后的事件 API 返回明确的 410 过期错误，之后无法用这些正文重新分词，旧估算保持原来源。需要长期重算能力时请在升级启动前延长或关闭该保留期，并按既有流程备份。导入目录、公共 Task 事件和 Provider Home 不由此规则删除。
+## 用量数据保留与维护
 
-Session 存储到期清理仍先停止 Runtime，再尝试采集尾部。采集失败、超时、旧计数导入或发现失败只记录脱敏告警 `usage_cleanup_collection_failed` 和缺口，继续删除 Workspace／Provider Home；收尾后保留已有统计、原失败原因，并停止旧来源自动重试。存储删除或数据库收尾失败仍通过既有维护 claim 恢复。
+### 原始事件保留
 
-已有大量用量记录的线上库首次升级到带执行定位索引的版本时，启动会一次性扫描调用表建立索引，需预留时间和磁盘空间。历史内容计量未完成时会自动保留原文；如需在计量完成后仍保留重新分词能力，可延长保留期或设置 `USAGE_EVENT_RETENTION_DAYS=0`。单次索引构建完成后不会在每次启动重建。先前已清理的原始正文不会因升级而自动恢复，不要清空数据库或手动删除 WAL。
+`USAGE_EVENT_RETENTION_DAYS=7` 默认启用原始 message／tool 正文清理，设为 `0` 关闭。它独立于 `SESSION_RETENTION_HOURS` 和工作区保留设置。Run 结束超过保留期、Session 空闲且该 Run 内容计量与词表补算完成后，后台分批清理正文。计数失败、缺失或补算落后会推迟清理；已知零和明确不支持计数的媒体不阻止清理，未知值不补零。
 
-升级到请求输入汇总优化后无需清库。服务首次启动只增加上下文汇总列和待补齐索引，随后独立于来源采集和事件补算，每批补齐最多 20 个旧请求；补齐期间旧记录仍按原始曝光记录计算，统计值不应变化。该过程会产生持续但有界的 SQLite 写入，完成后全局输入对照不再反复聚合曝光表。来源列表默认每页 20 条，查询不读取内部 checkpoint；能力排名仍可能因大范围历史聚合而较慢。
+最终回复、输入、状态／错误、Token 统计和关联继续保留；过期正文接口返回 410。正文清理后不能用于历史回补或重新分词，升级前已删除的内容不会自动恢复。需要长期重算时，在升级启动前延长或关闭保留期。导入目录、公共 Task 事件及 Provider Home 不由这项规则删除。
 
-重新启用原始事件清理后，可通过管理鉴权读取 `/api/usage/status` 的全局 `recovery` 和 `eventRetention`。统计恢复可看 `recovery.phase`、`lastBackfillMs`；独立运行的原事件清理看 `eventRetention.checkedRuns`、`retiredEvents`、`skippedByReason`、`lastStepMs` 和 `lastErrorAt`；这些是进程内诊断值，重启即清零，且不表示数据库剩余数量。跳过原因 `backfill_incomplete` 表示补算缺失、未完成、失败或游标落后；`counting_incomplete` 表示仍有未计数内容。应排查对应缺口，不要为释放空间手动标记完成。扫到最后一个 Run 后等待 5 分钟，再检查到期、恢复空闲或完成补算的 Run。清理不会自动缩小数据库文件，不要为追求文件缩小在线执行 VACUUM。
+### 升级与后台准备
 
-统计查询通过两个只读 Worker 访问原 SQLite，未迁移到新数据库，无需改变备份路径；汇总／趋势和能力排名各允许一个执行查询与最多 16 个排队查询，过载返回 503，空闲 60 秒释放。每个 Worker 的 SQLite 页缓存预算为 8 MiB，两个同时运行时合计最多 16 MiB，此外仍有运行时、结果与查询临时内存。长读事务暂时保留 WAL 快照，Worker 不消除统计本身的 CPU／I/O 成本。清理释放的数据库页用于复用，不会自动执行 `VACUUM` 或强制截断 WAL；不要把逻辑清理完成等同于磁盘文件已缩小。
+用量账本、统计投影和清理游标都在现有 SQLite 中，无需外部数据库或遥测服务。迁移自动建立所需表和索引，后台按批准备历史统计并回收重复 payload、展示 JSON、身份哈希和无引用估算。保留去重身份、计数及证据关联；重启从已提交进度继续。首次升级大库需预留索引、统计表和 WAL 空间。
 
-未配置 `USAGE_TOKENIZERS` 时仍可使用工具 token 排名：内置已知模型自动获取词表，其余模型使用带明确标记的通用文本兜底。手动配置可增加未内置模型；新获得词表的模型会触发有保留原文的 Runtime 旧记录补算。
+未准备完成的统计范围使用现有明细计算，较大查询可能返回 `503 usage_query_timeout`。缩小日期范围，或等待后台准备后刷新。查询使用有界队列的只读 Worker；它们仍消耗 CPU、I/O 和内存，长读事务也可能延长 WAL 保留。
 
-## 用量查询投影与无用副本回收升级
+管理鉴权下读取 `/api/usage/status`，可检查：
 
-本版本增加统计修订号、epoch 计量投影、能力输入计数及清理游标，并增加匹配实际调用时间筛选的索引。按既有备份和升级流程操作，预留新表、索引和 WAL 所需空间；不清空现有账本。启动后后台最新优先分批准备能力输入，在独立只读 Worker 中核对 epoch。未准备完成的范围继续使用原明细／账本路径，较大查询可能返回 `503 usage_query_timeout`；等待准备完成或缩小范围后再刷新。
+| 字段 | 用途 |
+| --- | --- |
+| `recovery` 中的各项 `*ProjectionPending` | 账本、输入与每日排名的统计准备进度。待准备不等于原统计丢失。 |
+| `recovery` 中的各项 `*CompactionPending` | 旧副本清理是否到达已登记范围。 |
+| `eventRetention.skippedByReason` | 原始事件清理为何推迟，例如 `counting_incomplete` 或 `backfill_incomplete`。 |
+| 各 `compacted*`、`retiredEvents` 与耗时 | 当前进程处理量和诊断信息；重启会清零，不代表数据库剩余数量。 |
 
-通过管理鉴权读取 `/api/usage/status` 的 `recovery.accountingProjectionPending`、`rankingInputProjectionPending`、`eventPayloadCompactionPending` 与 `exposureIdentityCompactionPending`，以及各 `compacted*`／`reclaimedEstimateProfiles` 计数。pending 标记检查已登记工作，计数只表示本进程已处理数。旧 event payload 和重复哈希按升级时的主键上界分批压缩，未来新写入不再复制；无引用估算及 fully revoked 来源的重放状态持续回收。去重和撤销身份、计量结果与历史证据保留。
+不要为释放空间手动标记补算完成。完整字段及查询期限见[用量指南](agent-usage.md#如何读报表)。
 
-每日排名增量预聚合使用独立元数据与汇总表，不在启动时扫描或重写全部历史输入。历史发现和分区聚合由后台分批执行，重启续做；后台 Worker 每轮重建一个 Session／自然日分区。只准备 UTC 这一份统计，首次回填完成前仍可能走较慢的原查询。可查看 `/api/usage/status` 的 `recovery.dailyRankingProjectionPending`；此标记只反映汇总准备情况，不表示已有统计缺失。容量规划应覆盖这份汇总表与迁移期间的 WAL。更新或删除发生时，未重建日期实时查询源计数，投影未完成不会阻止清理。升级不自动执行 `ANALYZE`、全库 `VACUUM` 或改变查询期限。
-
-管理统计统一使用固定 UTC 自然日，不随服务器或浏览器的时区配置改变。API 的 `from`／`to` 按 UTC 日界线规范化；开始向日初取整，未对齐的结束向下一日取整，日初结束仍为排他上界。服务返回规范化后的范围，调用方应使用响应范围解释统计，并移除请求中的 `timezone` 参数。
-
-升级前按既有流程备份 SQLite 数据库，并一起发布后端和管理页面。首次启动会在同一事务中迁移每日排名表：保留已有 UTC 汇总、分区 ID 和发现游标，删除其他时区的重复汇总；失败则完整回滚，下次启动重试。迁移不重新采集原文，也不清空已完成的 UTC 回填进度。旧版本依赖旧表结构，需要回退时应恢复升级前备份。备份仍覆盖原 SQLite 数据库，无新增外部服务或依赖。
-
-统计 API 默认允许最多 30 秒旧快照，保留实际 `asOf`／`revision` 并报告 `stale`。人工核对可对 summary、timeseries 或 capabilities 传 `fresh=1`。本版本只释放可复用页与行内空间，不承诺数据库文件立即缩小，也不自动在线 VACUUM；物理瘦身仍应安排单独的维护窗口。
+管理统计统一按 UTC 自然日。API 的 `from` 向日初取整，非日界线的 `to` 向下一日取整，日初结束仍为排他上界；使用响应中的实际范围，不再传 `timezone`。统计 API 默认允许最多 30 秒旧快照，保留实际 `asOf`／`revision` 和 `stale`；人工核对可对 summary、timeseries 或 capabilities 传 `fresh=1`。
 
 ### 请求输入展示元数据去重
 
-请求输入汇总不再逐行复制能力展示 JSON；排名选定代表曝光位置后读取原元数据，每日汇总继续保留必要的最新展示记录。升级启动只登记旧行主键上界，后台每批最多清空 250 条历史副本，游标持久化并可跨重启继续，不重算 token 或删除曝光证据。通过 `/api/usage/status` 的 `recovery.rankingInputMetadataCompactionPending` 和 `compactedRankingInputMetadata` 查看进度；计数为本进程已处理行数，重启后清零。
+请求输入汇总不再逐行复制能力展示 JSON，查询从保留的曝光记录读取元数据。历史副本按批清理，不重算 Token 或删除证据；`recovery.rankingInputMetadataCompactionPending` 与 `compactedRankingInputMetadata` 显示进度。
 
-升级前按既有流程备份 SQLite。旧版本仍从请求汇总读取展示 JSON，清理后不能只回退代码；回退需要恢复升级前的一致备份，或先用保留的曝光明细重建请求输入汇总。清理会产生有界 WAL 写入，释放的页内空间可复用，但不会自动缩小主库或截断 WAL。物理压缩应另行安排备份、磁盘空间和维护窗口，不在活动服务中直接执行全库 VACUUM。
+旧代码依赖这些副本，清理后不能只回退代码；恢复升级前的一致备份，或先从保留的曝光明细重建汇总。UTC 每日排名表结构也应随匹配版本一起恢复。
+
+### 数据库空间
+
+逻辑清理释放的 SQLite 页可供后续写入复用，主库与 WAL 不保证立即缩小。服务不会自动执行全库 `VACUUM`、强制截断 WAL 或清空账本。需要物理压缩时，另行安排备份、足够磁盘空间和维护窗口；不要在活动服务中直接执行全库压缩。

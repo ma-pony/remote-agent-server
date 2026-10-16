@@ -291,7 +291,7 @@ Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace �
 
 版本检查和应用是不同操作；来源删除、刷新失败、版本不变均不会改动运行中的投影。独立 Skill 版本流程不提供自动更新、仓库写回、包管理器安装或版本垃圾回收；原生插件 Skills 按上述插件生命周期自动跟随。
 
-`skillsRevision` 证明该 Run 使用的投影内容，不证明模型成功读取或执行了 Skill。已观察到部分上游模型错误作为普通输出返回且 Runtime 报告 `completed`；当前服务未修复这一状态传递问题。业务验收须核对实际回复或产物。[实测记录](superpowers/validation/2026-09-14-skill-source-updates.md)分别列出通过项与 Provider 环境阻塞。
+`skillsRevision` 标识该 Run 使用的投影内容，不证明模型成功读取或执行了 Skill。业务验收须核对实际回复或产物，步骤见[部署指南](deployment.md#provider-验收与排查)。
 
 ## 9. 可靠性与并发
 
@@ -399,7 +399,7 @@ Remote Agent Server 当前专注于单机 Agent 执行网关。以下能力留�
 - 业务 Workflow、工单状态机和审批规则；
 - 多主机调度和跨实例分布式配额；
 - 不受信任租户的强安全沙箱；
-- Agent 推理框架、模型路由和自研工具循环；
+- Agent 推理框架、跨 Core 的模型路由、模型网关和自研工具循环；
 - Git 托管平台的业务规则和部署编排。
 
 保持这些边界可以让外部系统通过稳定 API 使用现有 Coding Agent，同时保留各自的业务模型。

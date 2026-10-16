@@ -293,7 +293,7 @@ Complete packages are copied into Session-owned directories before execution. Ma
 
 Checking and applying are separate operations. Source deletion, failed refreshes, and unchanged content do not alter active projections. Independent Skill revisions do not include automatic updates, repository write-back, package-manager installation, or revision garbage collection; native plugin Skills follow their plugin lifecycle as described above.
 
-`skillsRevision` identifies the contents projected for a Run; it does not prove the model read or executed a Skill successfully. Some observed upstream model errors arrive as ordinary output while the Runtime reports `completed`. This error-status propagation issue remains unresolved, so business acceptance must verify the actual reply or artifact. The [acceptance report](superpowers/validation/2026-09-14-skill-source-updates.md) distinguishes passing checks from Provider environment blockers.
+`skillsRevision` identifies the contents projected for a Run; it does not prove the model read or executed a Skill successfully. Business acceptance must verify the actual reply or artifact. See the [deployment guide](deployment.md#provider-验收与排查).
 
 ## 9. Reliability and concurrency
 
@@ -403,7 +403,7 @@ Remote Agent Server focuses on the single-machine execution gateway. The calling
 - business workflows, ticket state machines, and approval rules;
 - multi-host scheduling and distributed quotas;
 - strong isolation for untrusted tenants;
-- agent reasoning frameworks, model routing, and custom tool loops;
+- agent reasoning frameworks, model routing across Cores, model gateways, and custom tool loops;
 - Git-host business rules and deployment orchestration.
 
 This boundary gives external systems a stable API for existing coding agents while preserving their own business model.

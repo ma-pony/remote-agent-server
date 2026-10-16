@@ -130,7 +130,11 @@ export const AgentMcpPage = () => {
     setBusy(`check-${server.id}`); setError(""); setNotice("");
     try {
       const result = await probe(server);
-      setNotice(result.status === "passed" ? text(`${result.toolCount ?? 0} 个工具可用`, `${result.toolCount ?? 0} tools available`) : result.message);
+      if (result.status === "passed") {
+        setNotice(text(`${server.name}：${result.toolCount ?? 0} 个工具可用`, `${server.name}: ${result.toolCount ?? 0} tools available`));
+      } else {
+        setError(text(`${server.name}：${result.message}`, `${server.name}: ${result.message}`));
+      }
       await load();
     } catch (reason) { setError(errorMessage(reason)); } finally { setBusy(""); }
   };
@@ -231,7 +235,7 @@ export const AgentMcpPage = () => {
         </>}
       </DialogContent>
     </Dialog>
-    {notice === "" ? null : <Alert><CheckCircle2 /><AlertTitle>{text("连接正常", "Connection healthy")}</AlertTitle><AlertDescription>{notice}</AlertDescription></Alert>}
+    {notice === "" ? null : <Alert><CheckCircle2 /><AlertTitle>{text("连接检查通过", "Connection check passed")}</AlertTitle><AlertDescription>{notice}</AlertDescription></Alert>}
     <Card>
       <CardHeader>
         <CardTitle className="flex min-w-0 flex-wrap items-center gap-2">

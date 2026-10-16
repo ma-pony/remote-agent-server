@@ -90,7 +90,33 @@ it("Agent MCP 独立页面展示服务器和连接检查", async () => {
   expect(await screen.findByText("已停用")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "设为核心" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "检查连接" }));
-  expect(await screen.findByText("4 个工具可用")).toBeInTheDocument();
+  expect(await screen.findByText("example_mcp：4 个工具可用")).toBeInTheDocument();
+  expect(screen.getByText("连接检查通过")).toBeInTheDocument();
+});
+
+it("MCP 连接检查失败时显示错误，不显示检查通过", async () => {
+  const message = "连接超时，请检查服务地址后重试。";
+  let checked = false;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (url.startsWith("/api/sessions?")) return response(sessionPage([session]));
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([{ ...server, lastCheckStatus: checked ? "failed" : null }]);
+    if (url === `/api/agents/${agent.id}/mcp-servers/${server.id}/check?page=1&pageSize=20` && init?.method === "POST") {
+      checked = true;
+      return response({ status: "failed", message });
+    }
+    if (url.includes("/mcp-catalog?") || url.includes("/system-mcp-catalog?")) return response([]);
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: "检查连接" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(message);
+  expect(screen.getByRole("alert")).toHaveTextContent("操作失败");
+  expect(screen.getByRole("alert")).toHaveTextContent(server.name);
+  expect(await screen.findByText("最近检查失败")).toBeInTheDocument();
+  expect(screen.queryByText("连接正常")).not.toBeInTheDocument();
+  expect(screen.queryByText("连接检查通过")).not.toBeInTheDocument();
 });
 
 it("MCP 列表可选择只删除当前配置或整个共享组", async () => {
