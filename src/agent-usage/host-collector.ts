@@ -47,6 +47,7 @@ export class HostUsageCollector {
   private reclaimedEstimateProfiles = 0;
   private compactedRevokedSources = 0;
   private compactedExposureIdentities = 0;
+  private compactedRankingInputMetadata = 0;
   readonly store: UsageStore;
   readonly sources: UsageSourceCoordinator;
   readonly attribution: AttributionStore;
@@ -263,8 +264,10 @@ export class HostUsageCollector {
       dailyRankingProjectionPending: this.attribution.dailyRankings.pending(),
       eventPayloadCompactionPending: this.store.eventPayloadCompactionPending(),
       exposureIdentityCompactionPending: this.attribution.exposureIdentityCompactionPending(),
+      rankingInputMetadataCompactionPending: this.attribution.rankingInputMetadataCompactionPending(),
       compactedEventPayloads: this.compactedEventPayloads, reclaimedEstimateProfiles: this.reclaimedEstimateProfiles,
-      compactedRevokedSources: this.compactedRevokedSources, compactedExposureIdentities: this.compactedExposureIdentities };
+      compactedRevokedSources: this.compactedRevokedSources, compactedExposureIdentities: this.compactedExposureIdentities,
+      compactedRankingInputMetadata: this.compactedRankingInputMetadata };
   }
 
   private setRecoveryPhase(phase: typeof this.recoveryPhase): void {
@@ -380,9 +383,11 @@ export class HostUsageCollector {
         const retentionPending = this.eventRetention.step() !== "idle";
         this.compactedEventPayloads += this.store.compactEventPayloads(100);
         this.compactedExposureIdentities += this.attribution.compactExposureIdentities(250);
+        this.compactedRankingInputMetadata += this.attribution.compactRankingInputMetadata(250);
         this.reclaimedEstimateProfiles += this.attribution.cleanupUnusedEstimates(100);
         this.compactedRevokedSources += this.sources.compactRevokedSources(100);
-        const pending = retentionPending || this.store.eventPayloadCompactionPending() || this.attribution.exposureIdentityCompactionPending();
+        const pending = retentionPending || this.store.eventPayloadCompactionPending() || this.attribution.exposureIdentityCompactionPending()
+          || this.attribution.rankingInputMetadataCompactionPending();
         this.scheduleCompaction(pending ? Math.max(50,Math.min(1_000,(performance.now()-started)*3)) : 30_000);
       } catch {
         this.lastRecoveryErrorAt = new Date().toISOString();

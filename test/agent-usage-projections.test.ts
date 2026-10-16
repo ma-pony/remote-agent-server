@@ -27,7 +27,7 @@ const context = (id: string, occurredAt: string): ModelContextInput => ({
   }))
 });
 
-it("serves rankings from compact inputs without reading exposures after projection", async () => {
+it("serves numeric rankings from compact inputs and only looks up display metadata in exposures", async () => {
   const { db, attribution, binding } = setup();
   await attribution.upsertContext(binding, context("first", "2026-10-10T00:00:00Z"));
   await attribution.upsertContext(binding, context("second", "2026-10-11T00:00:00Z"));
@@ -36,10 +36,74 @@ it("serves rankings from compact inputs without reading exposures after projecti
   while (attribution.backfillRankingInputs(5)) { /* Complete the bounded migration. */ }
   const prepare = db.prepare.bind(db);
   vi.spyOn(db, "prepare").mockImplementation(sql => {
-    if (sql.includes("agent_usage_exposures")) throw new Error("Ranking scanned detailed exposures");
+    if (sql.includes("agent_usage_exposures") && sql.includes("SUM(e.token_count)")) throw new Error("Ranking scanned detailed exposures");
     return prepare(sql);
   });
   expect(attribution.rankingsPage(filter, "all", { sort: "totalInputTokens", limit: 20, offset: 0 })).toEqual(expected);
+});
+
+it("stores numeric request inputs without duplicating display metadata and preserves fresh and cached rankings", async () => {
+  const { db, attribution, binding } = setup();
+  await attribution.upsertContext(binding, context("first", "2026-10-10T00:00:00Z"));
+  const newer = context("second", "2026-10-11T00:00:00Z");
+  newer.blocks[0]!.capabilities[0]!.capability.name = "Older profile name";
+  newer.blocks.at(-1)!.capabilities[0]!.capability.name = "Read updated";
+  await attribution.upsertContext(binding, newer);
+  const filter = { namespace: "test", from: "2026-10-10T00:00:00Z" };
+  const options = { sort: "totalInputTokens" as const, limit: 20, offset: 0 };
+  db.exec("UPDATE agent_usage_contexts SET ranking_inputs_ready=0");
+  const expected = attribution.rankingsPage(filter, "all", options);
+  expect(expected.items[0]!.capability.name).toBe("Read updated");
+  while (attribution.backfillRankingInputs(5)) { /* Complete numeric inputs. */ }
+  expect(db.prepare("SELECT SUM(octet_length(capability_json)) AS bytes FROM agent_usage_context_inputs").get()).toEqual({ bytes: 0 });
+  expect(attribution.rankingsPage(filter, "all", options)).toEqual(expected);
+  const daily = attribution.dailyRankings;
+  while (daily.discover(5)) { /* Discover the fixture days. */ }
+  let metadataReads = 0;
+  db.function("metadata_read", (value: string) => { metadataReads++; return value; });
+  const prepare = db.prepare.bind(db);
+  const instrument = vi.spyOn(db, "prepare").mockImplementation(sql => prepare(sql.replace(
+    "SELECT metadata.capability_json FROM agent_usage_exposures metadata",
+    "SELECT metadata_read(metadata.capability_json) FROM agent_usage_exposures metadata")));
+  expect(attribution.rankingsPage(filter, "all", options)).toEqual(expected);
+  expect(metadataReads).toBe(1);
+  instrument.mockRestore();
+  let job;
+  while ((job = daily.nextJob())) expect(daily.commit(daily.project(job))).toBe(true);
+  expect(attribution.rankingsPage(filter, "all", options)).toEqual(expected);
+});
+
+it("reclaims historical request metadata in resumable bounded batches without changing evidence or revisions", async () => {
+  const { db, attribution, binding } = setup();
+  const sample = context("first", "2026-10-10T00:00:00Z");
+  for (const [index, block] of sample.blocks.entries()) block.capabilities[0]!.capability.id = `read-${index}`;
+  await attribution.upsertContext(binding, sample);
+  db.exec(`UPDATE agent_usage_context_inputs SET capability_json=(SELECT capability_json FROM agent_usage_exposures e
+    WHERE e.context_id=agent_usage_context_inputs.context_id AND e.position=agent_usage_context_inputs.position
+      AND e.capability_key=agent_usage_context_inputs.capability_key);
+    DELETE FROM agent_usage_storage_limits WHERE name='ranking-input-metadata'`);
+  const reopened = new AttributionStore(new UsageStore(db));
+  const filter = { namespace: "test" }, options = { sort: "totalInputTokens" as const, limit: 30, offset: 0 };
+  const before = reopened.rankingsPage(filter, "all", options);
+  const evidence = reopened.contextEvidence(filter, { limit: 1 })[0]!;
+  const details = reopened.contextEvidenceDetail("test", evidence.id, { limit: 50, offset: 0 });
+  const revision = usageQueryVersion(db).revision;
+  db.exec(`CREATE TRIGGER fail_metadata_cursor BEFORE INSERT ON agent_usage_storage_cursors
+    WHEN NEW.name='ranking-input-metadata' BEGIN SELECT RAISE(ABORT,'cursor failed'); END`);
+  expect(() => reopened.compactRankingInputMetadata(3)).toThrow("cursor failed");
+  expect(db.prepare("SELECT COUNT(*) AS n FROM agent_usage_context_inputs WHERE capability_json!=''").get()).toEqual({ n: 20 });
+  db.exec("DROP TRIGGER fail_metadata_cursor");
+  expect(reopened.compactRankingInputMetadata(3)).toBe(3);
+  expect(db.prepare("SELECT COUNT(*) AS n FROM agent_usage_context_inputs WHERE capability_json!=''").get()).toEqual({ n: 17 });
+  const restarted = new AttributionStore(new UsageStore(db));
+  let count = 3;
+  while (restarted.rankingInputMetadataCompactionPending()) count += restarted.compactRankingInputMetadata(3);
+  expect(count).toBe(20);
+  expect(restarted.compactRankingInputMetadata(3)).toBe(0);
+  expect(db.prepare("SELECT COUNT(*) AS n FROM agent_usage_context_inputs WHERE capability_json!=''").get()).toEqual({ n: 0 });
+  expect(restarted.rankingsPage(filter, "all", options)).toEqual(before);
+  expect(restarted.contextEvidenceDetail("test", evidence.id, { limit: 50, offset: 0 })).toEqual(details);
+  expect(usageQueryVersion(db).revision).toBe(revision);
 });
 
 it("preserves accounting across projection, date filters, cumulative parents and Runtime filters", () => {

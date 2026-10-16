@@ -2,6 +2,7 @@ import type Database from "better-sqlite3";
 import type { UsageFilter } from "../core/types.js";
 import { dailyBounds, dayStart, dayKey, shiftDay } from "../core/daily-time.js";
 import { runtimeContentTokenSql } from "../runtime-content-evidence.js";
+import { rankingCapabilityMetadata } from "./ranking-inputs.js";
 
 type Sql = { sql: string; params: Array<string | number> };
 export type DailyRankingJob = { id: number };
@@ -154,10 +155,10 @@ export class DailyRankingStore {
       const coverage = this.db.prepare(`SELECT capability_key,runtime_kind,SUM(coverage='full') AS full,SUM(coverage='partial') AS partial,
         SUM(coverage='opaque') AS opaque,SUM(coverage='none') AS none FROM (
           SELECT DISTINCT e.capability_key,c.context_id,c.runtime_kind,c.coverage ${contexts}) GROUP BY capability_key,runtime_kind`).all(job.id);
-      const latest = this.db.prepare(`SELECT capability_key,runtime_kind,capability_json,occurred_at,context_id,position FROM (
-        SELECT e.capability_key,c.runtime_kind,e.capability_json,c.occurred_at,c.context_id,e.position,
+      const latest = this.db.prepare(`SELECT capability_key,runtime_kind,${rankingCapabilityMetadata("ranked")} AS capability_json,occurred_at,context_id,position FROM (
+        SELECT e.capability_key,c.runtime_kind,c.occurred_at,c.context_id,e.position,
         ROW_NUMBER() OVER(PARTITION BY e.capability_key,c.runtime_kind
-          ORDER BY c.occurred_at IS NOT NULL,c.occurred_at DESC,c.context_id DESC,e.position DESC) AS ordinal ${contexts}) WHERE ordinal=1`).all(job.id);
+          ORDER BY c.occurred_at IS NOT NULL,c.occurred_at DESC,c.context_id DESC,e.position DESC) AS ordinal ${contexts}) ranked WHERE ordinal=1`).all(job.id);
       const content = this.hasContent() ? this.db.prepare(`SELECT c.category,c.runtime_kind,c.estimate_id,c.estimate_json AS legacy_estimate_json,
         SUM(c.tokens) AS tokens,COUNT(*) AS observations FROM agent_usage_ranking_days j
         CROSS JOIN agent_usage_conversation_content c ON ${this.member("c", "j", !current.day)} WHERE j.id=?
@@ -260,7 +261,7 @@ export class DailyRankingStore {
   latest(filter: UsageFilter): Sql {
     const scope = this.scope(filter)!;
     const raw = this.raw(scope, filter, "agent_usage_contexts",
-      "e.capability_key,c.runtime_kind,e.capability_json,c.occurred_at,c.context_id,e.position");
+      `e.capability_key,c.runtime_kind,${rankingCapabilityMetadata("e")} AS capability_json,c.occurred_at,c.context_id,e.position`);
     const cached = this.cached(scope, filter, "latest");
     return { sql: `${raw.sql} UNION ALL ${cached.sql}`, params: [...raw.params, ...cached.params] };
   }

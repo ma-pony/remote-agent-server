@@ -4,6 +4,10 @@ import { ResultFirstUseIndex } from "./result-first-use.js";
 export const rankingExposureColumns = ["context_id","position","block_kind","tool_invocation_id","capability_key",
   "capability_json","evidence","content_key","modality","byte_length","token_count","estimate_id","result_first_use"] as const;
 
+/** Fetch display metadata only after selecting a representative numeric input. */
+export const rankingCapabilityMetadata = (alias: string): string => `(SELECT metadata.capability_json FROM agent_usage_exposures metadata
+  WHERE metadata.context_id=${alias}.context_id AND metadata.position=${alias}.position AND metadata.capability_key=${alias}.capability_key)`;
+
 /** Compact numeric inputs retain the existing ranking dimensions and null semantics. */
 export class RankingInputStore {
   constructor(private readonly db: Database.Database) {
@@ -24,7 +28,8 @@ export class RankingInputStore {
       CREATE INDEX IF NOT EXISTS agent_usage_context_calls_context ON agent_usage_context_calls(context_id);
       CREATE INDEX IF NOT EXISTS agent_usage_ranking_pending ON agent_usage_contexts(occurred_at DESC,context_id)
         WHERE ranking_inputs_ready=0;
-      INSERT OR IGNORE INTO agent_usage_storage_limits SELECT 'exposure-identities',COALESCE(MAX(rowid),0) FROM agent_usage_exposures`);
+      INSERT OR IGNORE INTO agent_usage_storage_limits SELECT 'exposure-identities',COALESCE(MAX(rowid),0) FROM agent_usage_exposures;
+      INSERT OR IGNORE INTO agent_usage_storage_limits SELECT 'ranking-input-metadata',COALESCE(MAX(rowid),0) FROM agent_usage_context_inputs`);
     for (const event of ["INSERT","UPDATE","DELETE"]) {
       const row = event === "DELETE" ? "OLD" : "NEW";
       const operation = event === "UPDATE" ? `UPDATE OF ${rankingExposureColumns.join(",")}` : event;
@@ -54,10 +59,7 @@ export class RankingInputStore {
     this.db.prepare(`INSERT INTO agent_usage_context_inputs
       SELECT e.context_id,e.capability_key,e.block_kind,e.evidence,e.estimate_id,
         COALESCE(${classification},''),COALESCE(${runtimeClassification},''),
-        SUM(e.byte_length),SUM(e.token_count),COUNT(*),COUNT(e.token_count),MAX(e.position),
-        (SELECT latest.capability_json FROM agent_usage_exposures latest
-          WHERE latest.context_id=e.context_id AND latest.capability_key=e.capability_key
-          ORDER BY latest.position DESC LIMIT 1)
+        SUM(e.byte_length),SUM(e.token_count),COUNT(*),COUNT(e.token_count),MAX(e.position),''
       FROM agent_usage_contexts c JOIN agent_usage_exposures e ON e.context_id=c.context_id
       ${ResultFirstUseIndex.join.replace("f.runtime_scope=?","f.runtime_scope=''")}
       ${ResultFirstUseIndex.join.replace(/\bf\b/g,"fr").replace("fr.runtime_scope=?","fr.runtime_scope=json_quote(c.runtime_kind)")}
@@ -71,5 +73,28 @@ export class RankingInputStore {
       ORDER BY occurred_at DESC,context_id LIMIT ?`).all(limit+1) as Array<{ context_id: string }>;
     this.db.transaction(() => { for (const row of rows.slice(0,limit)) this.refresh(row.context_id); })();
     return rows.length>limit;
+  }
+
+  compactMetadata(limit: number): number {
+    return this.db.transaction(() => {
+      const cursor = this.db.prepare("SELECT last_rowid FROM agent_usage_storage_cursors WHERE name='ranking-input-metadata'").get() as { last_rowid: number } | undefined;
+      const target = (this.db.prepare("SELECT last_legacy_rowid FROM agent_usage_storage_limits WHERE name='ranking-input-metadata'").get() as { last_legacy_rowid: number }).last_legacy_rowid;
+      const rows = this.db.prepare(`SELECT rowid,capability_json!='' AS redundant FROM agent_usage_context_inputs
+        WHERE rowid>? AND rowid<=? ORDER BY rowid LIMIT ?`).all(cursor?.last_rowid ?? 0,target,limit) as Array<{ rowid: number; redundant: number }>;
+      const lastRowid = rows.at(-1)?.rowid ?? target;
+      if (lastRowid === (cursor?.last_rowid ?? 0)) return 0;
+      const redundant = rows.filter(row => row.redundant).map(row => row.rowid);
+      this.db.prepare("UPDATE agent_usage_context_inputs SET capability_json='' WHERE rowid IN (SELECT value FROM json_each(?))")
+        .run(JSON.stringify(redundant));
+      this.db.prepare(`INSERT INTO agent_usage_storage_cursors VALUES('ranking-input-metadata',?)
+        ON CONFLICT(name) DO UPDATE SET last_rowid=excluded.last_rowid`).run(lastRowid);
+      return redundant.length;
+    })();
+  }
+
+  metadataCompactionPending(): boolean {
+    const cursor = this.db.prepare("SELECT last_rowid FROM agent_usage_storage_cursors WHERE name='ranking-input-metadata'").get() as { last_rowid: number } | undefined;
+    const target = this.db.prepare("SELECT last_legacy_rowid FROM agent_usage_storage_limits WHERE name='ranking-input-metadata'").get() as { last_legacy_rowid: number };
+    return (cursor?.last_rowid ?? 0)<target.last_legacy_rowid;
   }
 }

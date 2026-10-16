@@ -361,6 +361,8 @@ The session chart filters by creation date and opens the latest 50 Sessions, ord
 
 ### Usage analysis
 
+Request input summaries no longer duplicate capability display JSON; metadata is read from the original exposure position. Background batches compact historical copies while preserving token counts, rankings and evidence. This does not immediately shrink the SQLite file. See the [deployment guide](docs/deployment.md#请求输入展示元数据去重) for progress and rollback requirements.
+
 Capability rankings default to **All capabilities**, combining MCP tools, built-ins, CLIs, Skills, plugins, hooks and unknown tools with five distinct content dimensions: user prompts, configured instructions, model-request system prompts, assistant output and observed reasoning. Each dimension supports filtering, ranking and evidence inspection. Configured instructions are counted once per Run and replies by persisted text fragment; content observations are displayed separately from tool executions. Cumulative input is reconstructed from native conversation logs by default, with optional direct request capture; it must not be added to one-time observed content.
 
 Skills projected by native plugins selected through Provider extensions participate in the same ownership mapping. In Claude logs, instructions injected by a `Skill` call belong to that Skill/plugin and count again in subsequent requests rather than appearing as user prompts.

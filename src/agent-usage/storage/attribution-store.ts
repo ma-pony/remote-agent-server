@@ -38,7 +38,7 @@ import type { UsageBinding } from "../core/types.js";
 import type { UsageStore } from "./usage-store.js";
 import { ResultFirstUseIndex } from "./result-first-use.js";
 import { DailyRankingStore } from "./daily-rankings.js";
-import { RankingInputStore, rankingExposureColumns } from "./ranking-inputs.js";
+import { RankingInputStore, rankingCapabilityMetadata, rankingExposureColumns } from "./ranking-inputs.js";
 import { trackUsageQueryChanges } from "./query-version.js";
 
 const LEGACY_ESTIMATE: TokenEstimate = {
@@ -382,6 +382,8 @@ export class AttributionStore {
 
   backfillRankingInputs(limit: number): boolean { return this.rankingInputs.backfill(limit); }
   rankingInputProjectionPending(): boolean { return !this.rankingInputs.ready([],[]); }
+  compactRankingInputMetadata(limit: number): number { return this.rankingInputs.compactMetadata(limit); }
+  rankingInputMetadataCompactionPending(): boolean { return this.rankingInputs.metadataCompactionPending(); }
 
   /** The public hash falls back to content_key; distinct historical hashes remain intact. */
   compactExposureIdentities(limit: number): number {
@@ -799,10 +801,11 @@ export class AttributionStore {
       const repeatTokens = repeatCount === 0 ? 0 : result_known === firstKnown ? null
         : (result_tokens ?? 0) - first.reduce((sum, row) => sum + (row.tokens ?? 0), 0);
       // Only one representative row per capability, preserving the latest display metadata.
-      const latest = (dailyLatest ? latestByKey.get(capability_key) : this.store.db.prepare(`SELECT e.capability_json FROM agent_usage_contexts c
+      const latest = (dailyLatest ? latestByKey.get(capability_key) : this.store.db.prepare(`SELECT ${compact ? rankingCapabilityMetadata("selected") : "selected.capability_json"} AS capability_json FROM (
+        SELECT c.context_id,e.capability_key,e.position${compact ? "" : ",e.capability_json"} FROM agent_usage_contexts c
         CROSS JOIN ${inputTable} e INDEXED BY sqlite_autoindex_${inputTable}_1 ON e.context_id=c.context_id
         WHERE ${clauses.join(" AND ")} AND e.capability_key=?
-        ORDER BY c.occurred_at IS NULL DESC, c.occurred_at DESC, c.context_id DESC, e.position DESC LIMIT 1`)
+        ORDER BY c.occurred_at IS NULL DESC, c.occurred_at DESC, c.context_id DESC, e.position DESC LIMIT 1) selected`)
         .get(...params, capability_key)) as { capability_json: string };
       groups.set(capability_key, { ...empty(capabilityFrom(latest?.capability_json ?? capability_json)), ...values,
         firstResultInputTokens: first.find((row) => row.history_complete === 1)?.tokens ?? (first.some((row) => row.history_complete === 1) ? null : 0),
