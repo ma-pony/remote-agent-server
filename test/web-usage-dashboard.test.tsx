@@ -59,6 +59,33 @@ it("renders all four trends and exposes exact averages, reporting counts and Ses
   expect(screen.getByText(/完整历史累计.*范围外用量/)).toBeInTheDocument();
 });
 
+it("opens recent Sessions in chronological chart order and can recover from an unreported historical page", async () => {
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  const historical = { ...sessions.items[1]!, title: "Historical missing" };
+  const zero = { ...sessions.items[0]!, sessionId: 20, title: "Recent zero", createdAt: "2026-10-12T00:00:00.000Z", summary: { ...summary, usage: metrics(0) } };
+  const recent = { ...sessions.items[0]!, sessionId: 21, title: "Newest reported", createdAt: "2026-10-13T00:00:00.000Z" };
+  fetch.mockImplementation((input, init) => {
+    const url = new URL(String(input), "http://localhost");
+    if (url.pathname !== "/api/usage/session-trend") return original(input, init);
+    return Promise.resolve(response({ ...metadata, total: 75, items:
+      url.searchParams.get("order") === "desc" && url.searchParams.get("offset") === "0" ? [recent, zero] : [historical] }));
+  });
+  mount();
+  const region = await screen.findByRole("region", { name: "每次会话 token 总量" });
+  expect(within(region).getByText(/Newest reported/)).toBeInTheDocument();
+  expect(within(region).getByText(/本页 2 个会话.*2 个有总量上报.*0 个总量未上报/)).toBeInTheDocument();
+  const data = showData("每次会话 token 总量");
+  expect(data.getAllByRole("row").slice(1).map(row => within(row).getByRole("link").textContent))
+    .toEqual(["Recent zero", "Newest reported"]);
+  fireEvent.click(data.getByRole("button", { name: "下一页" }));
+  expect(await screen.findByText(/本页 1 个会话.*0 个有总量上报.*1 个总量未上报/)).toBeInTheDocument();
+  const historicalPage = within(screen.getByRole("region", { name: "每次会话 token 总量" }));
+  expect(historicalPage.getByText("暂无上报用量")).toBeInTheDocument();
+  fireEvent.click(historicalPage.getByRole("button", { name: "查看最近会话" }));
+  expect(await screen.findByText(/Newest reported/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "上一页" })).toBeDisabled();
+});
+
 it("keeps Agent and UTC date filters in both queries and resets Session pagination", async () => {
   window.history.replaceState({}, "", "/dashboard?range=7&page=2");
   mount();

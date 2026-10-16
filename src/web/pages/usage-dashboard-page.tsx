@@ -90,7 +90,7 @@ export const UsageDashboardPage = () => {
   if (agentId) query.set("agentId", agentId);
   const scope = query.toString();
   const dashboard = useDashboardData<DashboardSnapshot<UsageDashboard>>(`/usage/dashboard?${scope}`, refresh);
-  const sessions = useDashboardData<DashboardSnapshot<UsageSessionTrend>>(`/usage/session-trend?${scope}&limit=${pageSize}&offset=${(page - 1) * pageSize}`, refresh);
+  const sessions = useDashboardData<DashboardSnapshot<UsageSessionTrend>>(`/usage/session-trend?${scope}&order=desc&limit=${pageSize}&offset=${(page - 1) * pageSize}`, refresh);
   const reload = () => setRefresh(value => value + 1);
   const loading = (!dashboard.data && !dashboard.error) || (!sessions.data && !sessions.error);
   const changeFilter = (key: string, value: string) => setSearchParams(previous => {
@@ -103,6 +103,8 @@ export const UsageDashboardPage = () => {
     : new Intl.NumberFormat(locale, { maximumFractionDigits: 2 }).format(value);
   const tokenSeries = [text("总 token", "Total tokens"), text("输入", "Input"), text("输出", "Output")];
   const tokenValues = (usage: UsageSummary["usage"]) => [usage.totalTokens, usage.inputTotalTokens, usage.outputTotalTokens];
+  const sessionItems = sessions.data?.items.slice().reverse() ?? [];
+  const reportedSessionCount = sessionItems.filter(item => item.summary.usage.totalTokens !== null).length;
   const data = dashboard.data;
   const endDay = new Date(Date.parse(bounds.to) - 1).toISOString().slice(0, 10);
   const analysisLink = `/usage?${new URLSearchParams({ ...(agentId ? { agentId } : {}), range: "all" })}`;
@@ -177,18 +179,20 @@ export const UsageDashboardPage = () => {
       {sessions.error ? <ResourceLoadError title={text("会话用量加载失败", "Failed to load session usage")} message={sessions.error} onRetry={reload} /> : sessions.data ? <>
         {sessions.data.items.length === 0 ? <EmptyState icon={SearchX} title={text("没有匹配的会话", "No matching sessions")}
           description={text("会话图按创建日期筛选。可以调整智能体、日期范围或返回第一页。", "The session chart filters by creation date. Change the Agent or date range, or return to the first page.")}
-          action={page > 1 ? <Button variant="outline" onClick={() => changeFilter("page", "1")}>{text("返回第一页", "First page")}</Button> : range < 365 ? <Button variant="outline" onClick={() => changeFilter("range", "365")}>{text("查看最近 365 天", "View last 365 days")}</Button> : agentId ? <Button variant="outline" onClick={() => changeFilter("agentId", "")}>{text("查看全部智能体", "View all agents")}</Button> : undefined} /> :
+          action={page > 1 ? <Button variant="outline" onClick={() => changeFilter("page", "1")}>{text("查看最近会话", "View latest sessions")}</Button> : range < 365 ? <Button variant="outline" onClick={() => changeFilter("range", "365")}>{text("查看最近 365 天", "View last 365 days")}</Button> : agentId ? <Button variant="outline" onClick={() => changeFilter("agentId", "")}>{text("查看全部智能体", "View all agents")}</Button> : undefined} /> :
           <TrendPanel key={`sessions:${scope}:${page}:${refresh}`} title={text("每次会话 token 总量", "Total tokens per session")}
-            description={text("按创建时间从早到晚排列，每页 50 个会话。仅筛选所选日期内创建的会话；数值为完整历史累计，可能包含范围外用量。", "50 sessions per page, ordered by creation time. Only sessions created in the selected period are included; totals cover their full history, including usage outside the period.")}
+            description={text("默认查看最近 50 个会话，页内按创建时间从早到晚排列；下一页查看更早会话。仅筛选所选日期内创建的会话；数值为完整历史累计，可能包含范围外用量。", "Shows the latest 50 sessions first, ordered chronologically within each page. Next page shows earlier sessions. Only sessions created in the selected period are included; totals cover their full history, including usage outside the period.")}
             series={tokenSeries}
-            points={sessions.data.items.map(item => ({ label: `${item.createdAt.slice(5, 10)} #${item.sessionId}`, detail: `${item.createdAt.slice(0, 10)} · ${item.title} · ${item.agentName} · ${qualityLabel(item.summary.completeness, text)}`, values: tokenValues(item.summary.usage) }))}
+            points={sessionItems.map(item => ({ label: `${item.createdAt.slice(5, 10)} #${item.sessionId}`, detail: `${item.createdAt.slice(0, 10)} · ${item.title} · ${item.agentName} · ${qualityLabel(item.summary.completeness, text)}`, values: tokenValues(item.summary.usage) }))}
             columns={[text("会话", "Session"), text("智能体", "Agent"), text("创建时间（UTC）", "Created (UTC)"), ...tokenSeries, text("数据状态", "Data quality")]}
-            rows={sessions.data.items.map(item => ({ key: String(item.sessionId), cells: [
+            rows={sessionItems.map(item => ({ key: String(item.sessionId), cells: [
               <Button variant="link" asChild><Link to={`/sessions/${item.sessionId}`}>{item.title || `#${item.sessionId}`}</Link></Button>,
               item.agentName, item.createdAt.replace("T", " ").slice(0, 19), ...tokenValues(item.summary.usage).map(number),
               <Badge variant={item.summary.completeness === "conflict" ? "destructive" : "outline"}>{qualityLabel(item.summary.completeness, text)}</Badge>
             ] }))}
             footer={<><ListPagination page={page} pageSize={pageSize} total={sessions.data.total} totalPages={Math.ceil(sessions.data.total / pageSize)} onPageChange={value => changeFilter("page", String(value))} />
+              <p className="text-xs text-muted-foreground">{text(`本页 ${sessionItems.length} 个会话 · ${reportedSessionCount} 个有总量上报 · ${sessionItems.length - reportedSessionCount} 个总量未上报`, `This page: ${sessionItems.length} sessions · ${reportedSessionCount} with reported totals · ${sessionItems.length - reportedSessionCount} without reported totals`)}</p>
+              {page > 1 ? <Button variant="outline" size="sm" className="self-start" onClick={() => changeFilter("page", "1")}>{text("查看最近会话", "View latest sessions")}</Button> : null}
               <p className="text-xs text-muted-foreground">{text(`共 ${sessions.data.total} 个会话 · 会话统计截至：`, `${sessions.data.total} sessions · Session statistics as of: `)}{formatDate(sessions.data.asOf)}</p></>} />}
       </> : <Skeleton className="h-80" aria-label={text("正在加载会话用量", "Loading session usage")} />}
       </div>

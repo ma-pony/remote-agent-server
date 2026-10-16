@@ -15,6 +15,9 @@ const dashboardQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).max(100000).default(0)
 }).strict();
+const sessionTrendQuerySchema = dashboardQuerySchema.extend({
+  order: z.enum(["asc", "desc"]).default("asc")
+});
 
 const querySchema = z.object({
   agentId: z.string().regex(/^[1-9]\d*$/).optional(), sessionId: z.string().regex(/^[1-9]\d*$/).optional(),
@@ -53,7 +56,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
   app.addHook("preClose", async () => { await Promise.all([reader.close(), rankingReader.close()]); });
   for (const endpoint of ["dashboard", "session-trend"] as const) {
     app.get(`/usage/${endpoint}`, { errorHandler: queryError }, async (request, reply) => {
-      const parsed = dashboardQuerySchema.safeParse(request.query);
+      const parsed = (endpoint === "session-trend" ? sessionTrendQuerySchema : dashboardQuerySchema).safeParse(request.query);
       if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid dashboard query" } });
       const query = parsed.data, bounds = dailyBounds(query.from, query.to);
       const duration = Date.parse(bounds.to!) - Date.parse(bounds.from!);

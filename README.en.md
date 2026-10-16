@@ -357,7 +357,7 @@ The sidebar's **Usage dashboard** (`/dashboard`) shows daily tokens, daily avera
 
 All dates use UTC. Daily tokens reuse the reconciled ledger. The daily average is known total tokens divided by distinct Sessions with a reported total that day: multiple Runs/epochs count as one Session, known zero participates, and unreported Sessions are not treated as zero. Undated and cross-day ranges are not distributed into daily charts. New sessions are counted by creation date; active sessions started a Run that day, excluding queued work. The period's active-session total is independently deduplicated.
 
-The session chart filters by creation date and orders by creation time and ID, with 50 Sessions per page. Each point represents that Session's **full lifetime usage**, possibly outside the selected dates; its sum is not comparable to the daily chart. Data views include Agent, completeness and a Session link. Missing counts remain “Not reported”; conflicts and usage that cannot be assigned to a day are disclosed separately.
+The session chart filters by creation date and opens the latest 50 Sessions, ordered by creation time and ID within each page. The next page shows earlier Sessions, with a shortcut back to the latest page. Each point represents that Session's **full lifetime usage**, possibly outside the selected dates; its sum is not comparable to the daily chart. Data views include Agent, completeness and a Session link, with counts of reported and unreported totals for the current page. Missing counts remain “Not reported”; conflicts and usage that cannot be assigned to a day are disclosed separately.
 
 ### Usage analysis
 

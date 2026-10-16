@@ -214,7 +214,7 @@ Provider 文件也可显式登记 `codex_log` 或 `claude_log`。使用授权导
 管理台 `/dashboard` 提供四类趋势：每日 token、每日每会话平均 token、每日会话数量及逐会话累计 token。支持 Agent 与最近 7／30／90／365 天筛选、明细切换和手动刷新。
 
 - `GET /api/usage/dashboard?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z`：可选 `agentId`，返回 `summary`、每日分配之外的 `unplacedUsage`、区间 `counts` 和完整 `daily` 日期序列。每日项包含 `day/usage/newSessions/activeSessions/runs/reportedSessions/averageTokensPerSession`。
-- `GET /api/usage/session-trend?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z&limit=50&offset=0`：按创建日期筛选 Session，按创建时间及 ID 升序返回。`items` 含 `sessionId/title/agentId/agentName/createdAt/summary`，其中 `summary` 为会话完整历史用量；`total` 不受当前页限制。可选 `agentId`，`limit` 为 1–100，默认 50；`offset` 为 0–100000，默认 0。
+- `GET /api/usage/session-trend?from=2026-10-01T00:00:00Z&to=2026-10-15T00:00:00Z&limit=50&offset=0`：按创建日期筛选 Session，默认按创建时间及 ID 升序返回；可选 `order=desc` 从最近会话开始分页。`items` 含 `sessionId/title/agentId/agentName/createdAt/summary`，其中 `summary` 为会话完整历史用量；`total` 不受当前页限制。可选 `agentId`，`limit` 为 1–100，默认 50；`offset` 为 0–100000，默认 0。管理台使用 `order=desc` 获取最近一页，再按时间升序绘图；页脚说明有总量上报和未上报的会话数量，历史缺失值继续保留为空。
 
 两个接口沿用管理鉴权，要求 `from/to`，按下述 UTC 日界线规则取整后限制为 1–366 天，返回实际 `from/to`、`timeZone: "UTC"` 和 `asOf`；不支持 `sessionId/runtimeKind/timezone/fresh`。每次读取新快照，文件数据库使用已有只读查询 Worker。每日及逐会话查询独立返回各自统计时间。
 

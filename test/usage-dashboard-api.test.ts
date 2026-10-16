@@ -103,6 +103,31 @@ it("paginates a creation-date cohort chronologically while retaining each Sessio
   expect(response.body).not.toMatch(/private prompt|workspacePath|providerSessionId/);
 });
 
+it.each([false, true])("can page recent Sessions before unreported historical Sessions with file-backed=%s", async fileBacked => {
+  const { session, observe, get, seed, otherAgent } = await setup(fileBacked);
+  const first = session("2026-10-10T00:00:00.000Z"), second = session("2026-10-10T00:00:00.000Z");
+  const zero = session("2026-10-11T00:00:00.000Z"), recent = session("2026-10-11T00:00:00.000Z");
+  session("2026-10-12T00:00:00.000Z", otherAgent);
+  observe(zero, "zero", "2026-10-11T01:00:00Z", 0);
+  observe(recent, "recent", "2026-10-11T01:00:00Z", 100);
+  observe(recent, "later", "2026-10-14T01:00:00Z", 200);
+  const scope = `${range}&agentId=${seed.agent.id}&limit=2`;
+  const latest = await get("session-trend", `${scope}&order=desc`);
+  expect(latest.statusCode).toBe(200);
+  expect(latest.json()).toMatchObject({ total: 4, items: [
+    { sessionId: recent, summary: { usage: { totalTokens: 300 } } },
+    { sessionId: zero, summary: { usage: { totalTokens: 0 } } }
+  ] });
+  expect((await get("session-trend", `${scope}&order=desc&offset=2`)).json()).toMatchObject({ total: 4, items: [
+    { sessionId: second, summary: { usage: { totalTokens: null } } },
+    { sessionId: first, summary: { usage: { totalTokens: null } } }
+  ] });
+  expect((await get("session-trend", scope)).json().items.map((item: { sessionId: number }) => item.sessionId))
+    .toEqual([first, second]);
+  expect((await get("session-trend", `${scope}&order=invalid`)).statusCode).toBe(400);
+  expect((await get("dashboard", `${scope}&order=desc`)).statusCode).toBe(400);
+});
+
 it("returns fresh Session and Run metadata even when the ledger revision has not changed", async () => {
   const { session, run, get, db } = await setup();
   const before = (await get()).json();

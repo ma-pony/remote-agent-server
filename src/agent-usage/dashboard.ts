@@ -35,14 +35,15 @@ export const readUsageDashboard = (store: UsageStore, filter: DashboardFilter): 
       runs: activity.reduce((sum, row) => sum + row.runs, 0) } };
 };
 
-/** A creation-date cohort in chronological order. Each Session retains its full lifetime ledger total. */
+/** A creation-date cohort with bounded pagination. Each Session retains its full lifetime ledger total. */
 export const readUsageSessionTrend = (store: UsageStore, filter: DashboardFilter, page: DashboardPage): UsageSessionTrend => {
   const scope = filter.agentId === undefined ? "1" : "s.agent_id=?";
   const params = [...(filter.agentId === undefined ? [] : [filter.agentId]), filter.from, filter.to];
   const where = `${scope} AND s.created_at>=? AND s.created_at<?`;
   const { total } = store.db.prepare(`SELECT COUNT(*) AS total FROM sessions s WHERE ${where}`).get(...params) as { total: number };
+  const order = page.order === "desc" ? "DESC" : "ASC";
   const rows = store.db.prepare(`SELECT s.id AS sessionId, s.title, s.agent_id AS agentId, a.name AS agentName, s.created_at AS createdAt
-    FROM sessions s JOIN agents a ON a.id=s.agent_id WHERE ${where} ORDER BY s.created_at, s.id LIMIT ? OFFSET ?`)
+    FROM sessions s JOIN agents a ON a.id=s.agent_id WHERE ${where} ORDER BY s.created_at ${order}, s.id ${order} LIMIT ? OFFSET ?`)
     .all(...params, page.limit, page.offset) as Array<Omit<UsageSessionTrend["items"][number], "summary">>;
   const summaries = store.summariesBySession(filter.namespace, rows.map(row => String(row.sessionId)));
   return { total, items: rows.map((row, index) => ({ ...row, summary: summaries[index]!.summary })) };
