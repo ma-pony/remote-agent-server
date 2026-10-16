@@ -10,9 +10,9 @@ type Option = { value: string; label: string };
 
 /** Browses a bounded page while retaining the selected option independently of that page. */
 export function PagedResourceSelect<T>({ endpoint, value, onValueChange, getOption, selectedLabel, emptyLabel,
-  id, name, ariaLabel, disabled = false, autoSelectFirst = false, onLoaded }: {
+  id, name, ariaLabel, itemLabel, disabled = false, autoSelectFirst = false, onLoaded }: {
   endpoint: string; value: string; onValueChange(value: string): void; getOption(item: T): Option;
-  selectedLabel?: string; emptyLabel?: string; id?: string; name?: string; ariaLabel?: string;
+  selectedLabel?: string; emptyLabel?: string; id?: string; name?: string; ariaLabel?: string; itemLabel?: string;
   disabled?: boolean; autoSelectFirst?: boolean; onLoaded?(page: Page<T>): void;
 }) {
   const { text } = useI18n();
@@ -59,6 +59,6 @@ export function PagedResourceSelect<T>({ endpoint, value, onValueChange, getOpti
     {loading ? <p className="mt-1 text-xs text-muted-foreground" role="status">{text("加载中…", "Loading…")}</p> : null}
     {error ? <div className="mt-1 text-xs text-destructive" role="alert">{error}<Button type="button" size="sm" variant="ghost" onClick={() => setRetry((value) => value + 1)}>{text("重试", "Retry")}</Button></div> : null}
     {!loading && !error && result?.total === 0 ? <p className="mt-1 text-xs text-muted-foreground">{text("没有匹配资源", "No matching resources")}</p> : null}
-    {result ? <ListPagination {...result} disabled={disabled || loading} onPageChange={setPage} /> : null}
+    {result ? <ListPagination {...result} itemLabel={itemLabel} disabled={disabled || loading} onPageChange={setPage} /> : null}
   </div>;
 }

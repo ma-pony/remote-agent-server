@@ -21,6 +21,7 @@ it("fetches one page at a time and keeps a selection across pages and search", a
   };
   render(<Test />);
   await screen.findByRole("option", { name: "Agent 1" });
+  expect(screen.getByText("第 1–20 项，共 40 项 · 第 1 / 2 页")).toBeVisible();
   expect(requests).toHaveLength(1);
   expect(requests[0]!.searchParams.get("pageSize")).toBe("20");
   expect(requests[0]!.searchParams.get("enabled")).toBe("true");

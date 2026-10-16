@@ -321,7 +321,7 @@ Codex plugins are published as local marketplace snapshots per agent. Sessions w
 One MCP server can provide many business tools. Give each agent a tool list suited to its role—for example, expose only ticket lookup and log-reading tools to a ticket investigation agent.
 
 1. Open **Agents → target agent → MCP** and add an HTTP or stdio server, or import an existing provider-global configuration.
-2. Open the server's **Tool scope** to inspect tool names and descriptions. If the configuration references session parameters, first select a session for the check.
+2. Open the server's **Tool scope** to inspect tool names and descriptions. If the configuration references session parameters, first select a session in the separate connection-check selector. Its pagination counts sessions; the MCP heading shows the server total.
 3. Choose **Selected tools only**, select the required tools, and save. The configuration takes effect on the next run.
 
 | Mode | Tools exposed to the agent |

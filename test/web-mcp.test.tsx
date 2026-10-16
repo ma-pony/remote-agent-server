@@ -147,18 +147,19 @@ it("使用指定 Session 检查引用动态参数的 MCP", async () => {
   await waitFor(() => expect(checkBody).toEqual({ sessionId: session.id }));
 });
 
-it("MCP 检查选择器按需分页加载有效 Session", async () => {
+it("MCP 数量与检查会话分页分别标识，翻页只更新会话选项", async () => {
   const olderSession = { ...session, id: 101, title: "第二页租户" };
+  const servers = Array.from({ length: 4 }, (_, index) => ({ ...server, id: index + 1, name: `mcp-${index + 1}` }));
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url === `/api/agents/${agent.id}`) return response(agent);
     if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=1&pageSize=20`) {
-      return response(sessionPage([session], { total: 101, totalPages: 2 }));
+      return response(sessionPage([session], { total: 234, totalPages: 12 }));
     }
     if (url === `/api/sessions?agentId=${agent.id}&storage=active&page=2&pageSize=20`) {
-      return response(sessionPage([olderSession], { page: 2, total: 101, totalPages: 2 }));
+      return response(sessionPage([olderSession], { page: 2, total: 234, totalPages: 12 }));
     }
-    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response([server]);
+    if (url === `/api/agents/${agent.id}/mcp-servers?page=1&pageSize=20`) return response(servers);
     if (url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
     if (url === `/api/agents/${agent.id}/session-parameters?page=1&pageSize=20`) return response([]);
     if (url === `/api/agents/${agent.id}/system-mcp-catalog?page=1&pageSize=20` || url === `/api/agents/${agent.id}/mcp-catalog?page=1&pageSize=20`) return response([]);
@@ -169,13 +170,21 @@ it("MCP 检查选择器按需分页加载有效 Session", async () => {
   render(<App />);
 
   await screen.findByRole("option", { name: session.title });
+  const checkSessions = screen.getByRole("group", { name: "连接检查会话" });
+  expect(within(checkSessions).getByText("第 1–20 个会话，共 234 个会话 · 第 1 / 12 页")).toBeVisible();
+  expect(screen.getByText("共 4 个 MCP")).toBeVisible();
+  expect(within(checkSessions).queryByText("共 4 个 MCP")).not.toBeInTheDocument();
   expect(screen.queryByRole("option", { name: olderSession.title })).not.toBeInTheDocument();
-  fireEvent.click(within(screen.getByLabelText("检查使用的会话").parentElement!.parentElement!).getByRole("button", { name: "下一页" }));
+  fireEvent.click(within(checkSessions).getByRole("button", { name: "下一页" }));
   expect(await screen.findByRole("option", { name: olderSession.title })).toBeInTheDocument();
+  expect(within(checkSessions).getByText("第 21–40 个会话，共 234 个会话 · 第 2 / 12 页")).toBeVisible();
+  expect(screen.getByText("共 4 个 MCP")).toBeVisible();
+  for (const item of servers) expect(screen.getByText(item.name)).toBeVisible();
   expect(fetchMock).toHaveBeenCalledWith(
     `/api/sessions?agentId=${agent.id}&storage=active&page=2&pageSize=20`,
     expect.objectContaining({ signal: expect.any(AbortSignal) })
   );
+  expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("/mcp-servers?"))).toHaveLength(1);
 });
 
 it("点击工具数量后实时检查并展示全部工具", async () => {
