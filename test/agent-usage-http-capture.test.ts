@@ -21,6 +21,11 @@ it("validates complete API-key-only routing before startup", () => {
   for (const value of [{ codex: { baseUrl: "http://evil.test", protocol: "responses", apiKeyEnv: "CAPTURE_KEY" } }, { codex: { baseUrl: "https://api.test?secret=x", protocol: "responses", apiKeyEnv: "CAPTURE_KEY" } }, { codex: { baseUrl: "https://api.test", protocol: "chat_completions", apiKeyEnv: "CAPTURE_KEY" } }, { hermes: { baseUrl: "https://api.test", protocol: "chat_completions", apiKeyEnv: "CAPTURE_KEY" } }]) expect(() => loadConfig({ ...env, USAGE_CAPTURE_UPSTREAMS: JSON.stringify(value) })).toThrow();
   expect(() => loadConfig({ ...env, CAPTURE_KEY: undefined })).toThrow();
 });
+it("rejects unsupported DeepSeek Harness automatic HTTP capture explicitly", () => {
+  expect(() => loadConfig({ API_TOKEN: "management", CAPTURE_KEY: "fixture", USAGE_CAPTURE_UPSTREAMS: JSON.stringify({
+    deepseek_harness: { baseUrl: "https://api.example.test/v1", protocol: "chat_completions", apiKeyEnv: "CAPTURE_KEY" }
+  }) })).toThrow("DeepSeek Harness ACP capture configuration is not supported");
+});
 it("revokes only its own route while another route is still processing usage", async () => {
   const baseUrl = await upstream((_req, res) => res.end("{}"));
   const relay = new UsageHttpRelay(); relays.push(relay);

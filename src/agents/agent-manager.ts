@@ -475,7 +475,7 @@ export class AgentManager {
   private initializeAgentDirectory(id: number): void {
     const agentDir = this.agentDirectory(id);
     mkdirSync(join(agentDir, "skills"), { recursive: true });
-    for (const providerHome of ["claude", "codex", "hermes"]) {
+    for (const providerHome of ["claude", "codex", "hermes", "deepseek-harness"]) {
       mkdirSync(join(agentDir, "provider-home", providerHome), { recursive: true });
     }
     writeFileSync(join(agentDir, "MEMORY.md"), "", { flag: "a" });

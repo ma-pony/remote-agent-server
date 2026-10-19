@@ -56,6 +56,7 @@ export type WebhookDelivery = {
   status: "pending" | "delivering" | "succeeded" | "failed";
   attemptCount: number;
 };
+type WebhookDeliveryPage = { items: WebhookDelivery[] };
 
 type WebhookRequest = {
   body: string;
@@ -336,7 +337,8 @@ const stopReceiver = async (server: Server): Promise<void> => {
   await new Promise<void>((resolve, reject) => server.close((error) => error === undefined ? resolve() : reject(error)));
 };
 
-const waitForReplyDeliveries = async (
+/** Polls the management Delivery page until each requested Task's reply is delivered. */
+export const waitForReplyDeliveries = async (
   management: JsonClient,
   config: SmokeConfig,
   endpointId: number,
@@ -344,13 +346,13 @@ const waitForReplyDeliveries = async (
 ): Promise<WebhookDelivery[]> => {
   const deadline = Date.now() + config.taskTimeoutMs;
   while (true) {
-    const deliveries = await management.request<WebhookDelivery[]>(
+    const page = await management.request<WebhookDeliveryPage>(
       `/api/integration-endpoints/${encodeURIComponent(endpointId)}/webhook-deliveries`,
       "GET",
       undefined,
       Math.min(config.requestTimeoutMs, remaining(deadline, "Webhook delivery"))
     );
-    const replies = deliveries.filter((delivery) =>
+    const replies = page.items.filter((delivery) =>
       delivery.eventType === "message.agent.reply" && delivery.taskId !== null && taskIds.includes(delivery.taskId));
     if (replies.length === taskIds.length && replies.every((delivery) => delivery.status === "succeeded")) {
       return replies;
@@ -362,7 +364,7 @@ const waitForReplyDeliveries = async (
   }
 };
 
-/** Validates durable Delivery order and the order observed by the local receiver against Task submission order. */
+/** Validates durable reply order and receipt of every expected event; retries may interleave across Tasks. */
 export const assertReplyDeliveryOrder = (
   taskIds: number[],
   deliveries: WebhookDelivery[],
@@ -383,17 +385,14 @@ export const assertReplyDeliveryOrder = (
 
   const expectedEventIds = ordered.map((delivery) => delivery.eventId);
   const observed = new Set<string>();
-  let previousIndex = -1;
   for (const eventId of receivedEventIds) {
-    const index = expectedEventIds.indexOf(eventId);
-    if (index === -1 || index < previousIndex) {
-      throw new Error("Local receiver order does not match Agent reply Delivery order");
+    if (!expectedEventIds.includes(eventId)) {
+      throw new Error("Local receiver observed an unexpected Agent reply event");
     }
-    previousIndex = index;
     observed.add(eventId);
   }
   if (expectedEventIds.some((eventId) => !observed.has(eventId))) {
-    throw new Error("Local receiver order is missing an Agent reply Delivery event");
+    throw new Error("Local receiver is missing an Agent reply Delivery event");
   }
   return ordered;
 };
@@ -425,10 +424,10 @@ export const refreshFailureTrace = async (management: JsonClient, trace: SmokeTr
   }
   if (trace.endpointId === undefined) return;
   try {
-    const deliveries = await management.request<WebhookDelivery[]>(
+    const page = await management.request<WebhookDeliveryPage>(
       `/api/integration-endpoints/${encodeURIComponent(trace.endpointId)}/webhook-deliveries`
     );
-    for (const delivery of deliveries) {
+    for (const delivery of page.items) {
       if (!trace.deliveryIds.includes(delivery.id)) trace.deliveryIds.push(delivery.id);
     }
   } catch (_deliveryLookupError) {
@@ -534,7 +533,7 @@ export const runIntegrationSmoke = async (config: SmokeConfig): Promise<void> =>
     );
     trace.deliveryIds.push(...orderedDeliveries.map((delivery) => delivery.id));
     if (orderedDeliveries[0]!.attemptCount < 2) throw new Error("First Agent reply Webhook was not retried after HTTP 500");
-    if (replyRequests.length < 3 || replyRequests[0]!.eventId !== replyRequests[1]!.eventId) {
+    if (replyRequests.filter((request) => request.eventId === orderedDeliveries[0]!.eventId).length < 2) {
       throw new Error("Local receiver did not observe the first Agent reply failure and retry");
     }
     if (replyRequests.some((request) => !verifyWebhookSignature(request, webhookCreation.signingSecret))) {

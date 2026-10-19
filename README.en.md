@@ -2,7 +2,7 @@
 
 [简体中文](README.md) · [MIT License](LICENSE) · Node.js 22 · macOS / Linux
 
-**Connect Claude Code, Codex, and Hermes to your ticketing systems, operations platforms, and internal business applications.**
+**Connect Claude Code, Codex, Hermes, and DeepSeek Harness to your ticketing systems, operations platforms, and internal business applications.**
 
 Remote Agent Server is a self-hosted service for agent tasks. Submit tasks from your applications through an HTTP API or run them directly from the web console. The service manages queues, workspaces, sessions, and execution records. Your application receives progress and results through polling, SSE, or signed webhooks.
 
@@ -206,6 +206,7 @@ Install and authenticate the provider CLI as the same operating-system user that
 - [Claude Code](https://code.claude.com/docs/en/getting-started)
 - [Codex CLI](https://developers.openai.com/codex/cli)
 - [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/)
+- [DeepSeek Harness (dsh)](https://github.com/deepseek-ai/deepseek-harness)
 
 Command reference: run only the commands for the provider you selected.
 
@@ -226,6 +227,21 @@ At startup, the server reads the login-shell PATH and merges it with the current
 The Codex ACP adapter is pinned to `2.2.2`, with Codex CLI `0.160.1` in the lockfile. Default `agent` mode allows ordinary commands to access the network inside the `workspace-write` sandbox. Every turn explicitly sends this network policy; `sandbox_workspace_write.network_access` in the host's `config.toml` does not override it. Upstream's default `auto_review` approval mode is retained. acpx's `approve-all` only approves permission requests forwarded to the client and does not bypass Codex automatic review; see the [security boundary](#security-boundary).
 
 When creating or restoring a Codex session, all selected MCP servers must be connected before model work starts. Failed, disabled, authentication-required, or unready connections after 30 seconds block execution. Cancelling a Run or closing its session while waiting prevents a late model request.
+
+#### DeepSeek Harness
+
+Use Node.js **22.19 or later within 22.x** and install the version whose ACP interface was checked, as the service user:
+
+```bash
+npm install --global @deepseek-ai/dsh@0.2.1-rc.2
+dsh --version
+```
+
+Configure credentials using the [DSH model configuration guide](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md), then select **DeepSeek Harness** when creating an Agent. The management API uses `provider: "deepseek_harness"`. The server launches `dsh --profile acp`, supporting conversation resumption, model policies, Agent instructions, Skills, and HTTP / stdio MCP through the existing queue, cancellation, and timeout flow.
+
+Host configuration comes from the service user's `DSH_HOME` (default `~/.dsh`). Credentials and Home-level configuration are reused; place custom model routes in `profiles/acp/cordis.patch.yml`. Routes configured only in the Web profile are not copied automatically. Legacy `settings.yaml` is converted into the Session's Profile patches before ACP starts, making its models selectable on the first Run without modifying the host file. Each Session has an isolated Home and retains its own history. Skill discovery is limited to the current Workspace's `.dsh/skills`, `.agents/skills`, and the service's selected Skill projections. DSH-native plugin / Hook selection and global MCP import are not provided.
+
+DSH is in developer preview; recheck ACP compatibility before upgrading. Its current ACP reports context occupancy rather than cumulative input / output tokens. Missing usage stays “Not reported” and is excluded from complete usage statistics. Automatic HTTP capture through `USAGE_CAPTURE_UPSTREAMS.deepseek_harness` is unsupported.
 
 ### 2. Create a project environment
 
@@ -326,7 +342,7 @@ After applying or rolling back a Skill, check its contents and expected artifact
 
 ### Provider extensions
 
-After installing plugins or hooks in the service user's Codex or Claude Code configuration, select them on the agent's **Extensions** tab. They are disabled by default. Hermes does not currently support this extension-management flow.
+After installing plugins or hooks in the service user's Codex or Claude Code configuration, select them on the agent's **Extensions** tab. They are disabled by default. Hermes and DeepSeek Harness do not currently support this extension-management flow.
 
 Plugin-provided Skills are marked **Follows plugin updates**. Their plugin controls enablement and version. After a host plugin upgrade, these Skills follow the installed version on subsequent Runs without separate installation or revision application. Git imports, ZIP uploads, and other independent Skills retain explicit revision selection.
 
@@ -359,7 +375,7 @@ Open **System settings → Runtime and concurrency** to adjust:
 - Webhook delivery concurrency;
 - project-environment build concurrency.
 
-The database stores these settings. Run timeout applies to newly started runs, storage retention applies at the next cleanup, and concurrency changes affect later scheduling immediately. Raising a limit dispatches queued work; lowering one does not cancel active work. The service always keeps runs in one Session serial, reuses one Session for one external Conversation, delivers each Webhook subscription in order, and coalesces duplicate synchronization requests for the same project environment.
+The database stores these settings. Run timeout applies to newly started runs, storage retention applies at the next cleanup, and concurrency changes affect later scheduling immediately. Raising a limit dispatches queued work; lowering one does not cancel active work. The service always keeps runs in one Session serial, reuses one Session for one external Conversation, delivers each Webhook subscription in order within a Task (different Tasks may run in parallel), and coalesces duplicate synchronization requests for the same project environment.
 
 The service runs storage cleanup once at startup and then every ten minutes. Retention is measured from the Session's last activity; restarting the service does not restart the retention period for already idle Sessions. Expired idle Sessions lose their Workspace, browser data, provider-native conversation, and Webhook delivery records for all their Tasks, including pending, delivering, and completed deliveries. Removed deliveries are no longer retried. Session, Run, Task/Conversation links, and token-usage records remain available; raw message/tool events follow the separate usage-event retention policy below. Test deliveries without a Task are unaffected, and resetting Provider context preserves delivery records.
 

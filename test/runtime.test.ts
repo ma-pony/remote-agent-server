@@ -1,5 +1,6 @@
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +16,7 @@ import type {
 } from "acpx/runtime";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parse } from "yaml";
 
 import type { AppConfig } from "../src/config.js";
 import type { RuntimeSessionInput } from "../src/runtime/agent-runtime.js";
@@ -38,6 +40,7 @@ import { SkillProjector } from "../src/runtime/skill-projector.js";
 import { SkillManager } from "../src/skills/skill-manager.js";
 import { ProviderExtensionManager } from "../src/provider-extensions/provider-extension-manager.js";
 import { ProviderExtensionProjector } from "../src/runtime/provider-extension-projector.js";
+import { SystemProviderSessionCleaner } from "../src/runtime/provider-session-cleaner.js";
 
 const AGENT_ID = 1;
 const SECOND_AGENT_ID = 2;
@@ -165,7 +168,8 @@ beforeEach(() => {
   for (const [name, directory] of [
     ["CODEX_HOME", "codex"],
     ["CLAUDE_CONFIG_DIR", "claude"],
-    ["HERMES_HOME", "hermes"]
+    ["HERMES_HOME", "hermes"],
+    ["DSH_HOME", "deepseek-harness"]
   ] as const) {
     const path = join(providerHomes, directory);
     mkdirSync(path, { recursive: true });
@@ -212,6 +216,7 @@ describe("SkillProjector", () => {
   it.each([
     ["claude_code", [".claude", "skills"]],
     ["codex", [".agents", "skills"]],
+    ["deepseek_harness", [".agents", "skills"]],
     ["hermes", ["data", "agents", AGENT_PATH_ID, "provider-home", "hermes", "sessions", "1", "skills"]]
   ] as const)("为 %s 投影托管 Skills 并保留已有 Skill", (provider, destinationParts) => {
     const root = makeRoot();
@@ -325,7 +330,8 @@ describe("AcpxAgentRuntime", () => {
   it.each([
     ["claude_code", "npx -y @agentclientprotocol/claude-agent-acp@^0.60.0"],
     ["codex", "codex-acp/dist/index.js"],
-    ["hermes", "hermes acp"]
+    ["hermes", "hermes acp"],
+    ["deepseek_harness", "dsh --profile acp"]
   ] as const)("固定 %s Provider 命令并安全转义路径", async (provider, providerCommand) => {
     const root = makeRoot();
     const config = makeConfig(root);
@@ -354,12 +360,126 @@ describe("AcpxAgentRuntime", () => {
       )}'`);
       expect(command).not.toContain("HERMES_HOME=");
       expect(command).not.toContain("CLAUDE_CONFIG_DIR=");
+    } else if (provider === "deepseek_harness") {
+      const home = join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "deepseek-harness", "sessions", SESSION_PATH_ID);
+      expect(command).toContain(`DSH_HOME='${home}'`);
+      expect(command).toContain(`--patch '${join(home, "remote-agent.patch.json")}'`);
+      expect(command).not.toContain("CODEX_HOME=");
+      expect(command).not.toContain("CLAUDE_CONFIG_DIR=");
+      expect(command).not.toContain("HERMES_HOME=");
     } else {
       expect(command).toContain(`CLAUDE_CONFIG_DIR='${join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "claude")}'`);
       expect(command).not.toContain("HERMES_HOME=");
       expect(command).not.toContain("CODEX_HOME=");
     }
     expect(options.agentRegistry.list()).toContain(target);
+  });
+
+  it("DeepSeek Harness 隔离历史、原样注入指令并恢复同一 Provider Session", async () => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const hostHome = process.env.DSH_HOME!;
+    mkdirSync(join(hostHome, "profiles", "acp"), { recursive: true });
+    mkdirSync(join(hostHome, "profiles", "acp", "node_modules", "lru-cache"), { recursive: true });
+    mkdirSync(join(hostHome, "sessions"), { recursive: true });
+    mkdirSync(join(hostHome, "storages"), { recursive: true });
+    mkdirSync(join(hostHome, "profiles", "web"), { recursive: true });
+    writeFileSync(join(hostHome, ".credentials.yaml"), "fixture credentials", { mode: 0o600 });
+    writeFileSync(join(hostHome, "cordis.patch.yml"), "[]");
+    writeFileSync(join(hostHome, "profiles", "acp", "package.json"), '{"dsh":{"profile":{"bundles":[]}}}');
+    writeFileSync(join(hostHome, "profiles", "acp", "cordis.patch.yml"), "[]");
+    writeFileSync(join(hostHome, "profiles", "acp", "node_modules", "lru-cache", "index.js"), "module.exports = {};");
+    writeFileSync(join(hostHome, "sessions", "other.jsonl"), "other conversation");
+    writeFileSync(join(hostHome, "storages", "other.json"), "other storage");
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(config);
+    const input = sessionInput(root, {
+      provider: "deepseek_harness", instructions: "Keep {{template}} literal.", model: "deepseek-v4-flash"
+    });
+    await runtime.ensureSession(input);
+    const home = join(config.dataDir, "agents", AGENT_PATH_ID, "provider-home", "deepseek-harness", "sessions", SESSION_PATH_ID);
+    expect(readFileSync(join(home, ".credentials.yaml"), "utf8")).toBe("fixture credentials");
+    expect(existsSync(join(home, "profiles", "acp", "package.json"))).toBe(true);
+    expect(existsSync(join(home, "profiles", "acp", "node_modules", "lru-cache", "index.js"))).toBe(true);
+    expect(existsSync(join(home, "profiles", "web"))).toBe(false);
+    expect(existsSync(join(home, "sessions"))).toBe(false);
+    expect(existsSync(join(home, "storages"))).toBe(false);
+    const patch = JSON.parse(readFileSync(join(home, "remote-agent.patch.json"), "utf8"));
+    const plugin = createRequire(import.meta.url)(patch[0].insert[0].name);
+    const section = vi.fn();
+    plugin.apply({ systemPrompt: { section } }, patch[0].insert[0].config);
+    expect(section).toHaveBeenCalledWith(expect.objectContaining({
+      interpolate: false,
+      text: expect.stringContaining("Keep {{template}} literal.")
+    }));
+    expect(section.mock.calls[0]![0].text).toContain(input.memory);
+    expect(patch[1].config).toEqual({
+      includeDefaultRoots: false,
+      customSkillDirs: [join(input.workspacePath, ".dsh", "skills"), join(input.workspacePath, ".agents", "skills")],
+      watch: false
+    });
+    expect(acp.ensureSession).toHaveBeenCalledWith(expect.objectContaining({ sessionOptions: { model: "deepseek-v4-flash" } }));
+
+    mkdirSync(join(home, "sessions"), { recursive: true });
+    writeFileSync(join(home, "sessions", "provider-session-1.jsonl"), "own conversation");
+    await runtime.releaseSession(input.sessionId);
+    await runtime.ensureSession({ ...input, providerSessionId: "provider-session-1", instructions: "Updated instructions" });
+    expect(acp.ensureSession).toHaveBeenLastCalledWith(expect.objectContaining({ resumeSessionId: "provider-session-1" }));
+    expect(readFileSync(join(home, "sessions", "provider-session-1.jsonl"), "utf8")).toBe("own conversation");
+    expect(readFileSync(join(home, "remote-agent.patch.json"), "utf8")).toContain("Updated instructions");
+
+    const sibling = join(home, "..", "2", "sessions");
+    mkdirSync(sibling, { recursive: true });
+    writeFileSync(join(sibling, "keep.jsonl"), "sibling conversation");
+    await runtime.reset(input);
+    await new SystemProviderSessionCleaner(config.dataDir).purge(input);
+    expect(existsSync(home)).toBe(false);
+    expect(existsSync(join(sibling, "keep.jsonl"))).toBe(true);
+    await runtime.ensureSession(input);
+    expect(readFileSync(join(home, ".credentials.yaml"), "utf8")).toBe("fixture credentials");
+    await runtime.shutdown();
+  });
+
+  it.each([false, true])("DSH 冷启动在 ACP 模型校验前转换旧配置（已有 Profile: %s）", async (withProfile) => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const hostHome = process.env.DSH_HOME!;
+    const legacy = "llm-pi-ai:\n  providers:\n    example:\n      baseUrl: https://example.invalid/v1\nagent-default-model:\n  provider: example\n  model: configured-model\nshell:\n  timeout: 30\n";
+    writeFileSync(join(hostHome, "settings.yaml"), legacy);
+    if (withProfile) {
+      mkdirSync(join(hostHome, "profiles", "acp"), { recursive: true });
+      writeFileSync(join(hostHome, "profiles", "acp", "package.json"), '{"dsh":{"profile":{"bundles":[]}}}');
+      writeFileSync(join(hostHome, "profiles", "acp", "cordis.patch.yml"), "- id: agent-default-model\n  config:\n    model: previous-model\n- id: llm-pi-ai\n  config:\n    providers:\n      other:\n        baseURL: https://other.example.invalid/v1\n      example:\n        headers:\n          x-review: preserved\n- id: example-plugin\n  config:\n    value: !!js ctx.example\n");
+    }
+    const handle: AcpRuntimeHandle = {
+      sessionKey: "remote-agent:1", backend: "acpx", runtimeSessionName: "test", agentSessionId: "native-session"
+    };
+    const acp = runtimeStub();
+    acp.ensureSession.mockImplementation(async () => {
+      const home = join(config.dataDir, "agents", "1", "provider-home", "deepseek-harness", "sessions", "1");
+      const patchPath = join(home, "profiles", "acp", "cordis.patch.yml");
+      const entries = existsSync(patchPath) ? parse(readFileSync(patchPath, "utf8"), { logLevel: "silent" }) : [];
+      const selected = entries.findLast((entry: { id: string }) => entry.id === "agent-default-model");
+      if (selected?.config.model !== "configured-model") throw new Error("ACP agent did not advertise the requested model");
+      const llm = entries.findLast((entry: { id: string }) => entry.id === "llm-pi-ai");
+      expect(llm.config).toMatchObject({ providers: { example: { baseUrl: "https://example.invalid/v1" } } });
+      if (withProfile) expect(llm.config).toMatchObject({ providers: {
+        other: { baseURL: "https://other.example.invalid/v1" }, example: { headers: { "x-review": "preserved" } }
+      } });
+      expect(entries).toContainEqual({ id: process.platform === "win32" ? "pwsh-sandbox" : "bash-sandbox", config: { timeout: 30 } });
+      expect(existsSync(join(home, "settings.yaml"))).toBe(false);
+      if (withProfile) expect(readFileSync(patchPath, "utf8")).toContain("!!js ctx.example");
+      return handle;
+    });
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(config);
+    try {
+      await expect(runtime.ensureSession(sessionInput(root, {
+        provider: "deepseek_harness", model: '["example","configured-model"]'
+      }))).resolves.toMatchObject({ providerSessionId: "native-session" });
+      expect(readFileSync(join(hostHome, "settings.yaml"), "utf8")).toBe(legacy);
+    } finally { await runtime.shutdown(); }
   });
 
   it("拒绝可注入 Registry target 的非法 ID", async () => {
@@ -631,7 +751,7 @@ describe("AcpxAgentRuntime", () => {
     });
   });
 
-  it("通过临时 ACP Session 自动读取 Agent Core 暴露的模型", async () => {
+  it.each(["codex", "deepseek_harness"] as const)("通过临时 %s ACP Session 自动读取 Agent Core 暴露的模型", async (provider) => {
     const root = makeRoot();
     const acp = runtimeStub({
       models: {
@@ -644,7 +764,7 @@ describe("AcpxAgentRuntime", () => {
 
     await expect(runtime.listModels?.({
       agentId: AGENT_ID,
-      provider: "codex",
+      provider,
       workspacePath: join(root, "workspace"),
       instructions: ""
     })).resolves.toEqual({
@@ -656,10 +776,31 @@ describe("AcpxAgentRuntime", () => {
       mode: "oneshot",
       cwd: join(root, "workspace")
     }));
-    expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({
-      reason: "model_catalog_loaded",
-      discardPersistentState: true
-    }));
+    expect(acp.close).toHaveBeenCalledWith({ handle: expect.anything(), reason: "model_catalog_loaded" });
+  });
+
+  it.each(["success", "status-error", "close-error"])("Hermes 模型探测仅释放连接并清理临时状态（%s）", async (outcome) => {
+    const root = makeRoot();
+    const config = makeConfig(root);
+    const businessHome = join(config.dataDir, "agents", "1", "provider-home", "hermes", "sessions", "1");
+    mkdirSync(businessHome, { recursive: true });
+    writeFileSync(join(businessHome, "keep.txt"), "business history");
+    const acp = runtimeStub({ models: { currentModelId: "configured-model", availableModelIds: ["configured-model"] } });
+    acp.close.mockImplementation(async (options) => {
+      if (options.discardPersistentState) throw new Error("ACP_BACKEND_UNSUPPORTED_CONTROL: session/close");
+      if (outcome === "close-error") throw new Error("release unavailable");
+    });
+    if (outcome === "status-error") acp.getStatus.mockRejectedValue(new Error("catalog unavailable"));
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(config);
+    try {
+      const catalog = runtime.listModels({ agentId: 1, provider: "hermes", instructions: "", workspacePath: root });
+      if (outcome !== "success") await expect(catalog).rejects.toThrow(outcome === "status-error" ? "catalog unavailable" : "release unavailable");
+      else await expect(catalog).resolves.toMatchObject({ supported: true, availableModels: ["configured-model"] });
+      expect(acp.close).toHaveBeenCalledWith({ handle: expect.anything(), reason: "model_catalog_loaded" });
+      expect(readdirSync(config.dataDir).filter(name => name.startsWith("model-catalog-"))).toEqual([]);
+      expect(readFileSync(join(businessHome, "keep.txt"), "utf8")).toBe("business history");
+    } finally { await runtime.shutdown(); }
   });
 
   it("Codex 为每个 Session 使用独立 Home 并写入 developer instructions", async () => {
@@ -714,7 +855,7 @@ describe("AcpxAgentRuntime", () => {
     expect(acp.ensureSession.mock.calls[0]?.[0]).not.toHaveProperty("sessionOptions");
   });
 
-  it("为当前 Session 创建独立 Runtime 并通过 ACP 注入 HTTP/stdio MCP", async () => {
+  it.each(["codex", "deepseek_harness"] as const)("为 %s Session 创建独立 Runtime 并通过 ACP 注入 HTTP/stdio MCP", async (provider) => {
     const root = makeRoot();
     const acp = runtimeStub();
     acpxMocks.createAcpRuntime.mockReturnValue(acp);
@@ -735,7 +876,7 @@ describe("AcpxAgentRuntime", () => {
       }
     ];
 
-    await runtime.ensureSession(sessionInput(root, { mcpServers }));
+    await runtime.ensureSession(sessionInput(root, { provider, mcpServers }));
 
     expect(acpxMocks.createAcpRuntime).toHaveBeenCalledTimes(1);
     expect(acpxMocks.createAcpRuntime.mock.calls[0]?.[0]).toMatchObject({ mcpServers });
@@ -1210,6 +1351,21 @@ describe("AcpxAgentRuntime", () => {
       },
       { type: "status", text: "working" }
     ]);
+  });
+
+  it("DeepSeek Harness 的上下文占用不冒充累计 token 用量", async () => {
+    const root = makeRoot();
+    acpxMocks.createAcpRuntime.mockReturnValue(runtimeStub({
+      events: [{ type: "status", tag: "usage_update", used: 200, size: 128_000, text: "context usage" }]
+    }));
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    await runtime.ensureSession(sessionInput(root, { provider: "deepseek_harness" }));
+    const turn = runtime.startTurn({ sessionId: SESSION_ID, requestId: REQUEST_ID, text: "go" });
+    const events = [];
+    for await (const event of turn.events) events.push(event);
+    expect(events).toEqual([{ type: "usage", usage: { contextUsedTokens: 200, contextWindowTokens: 128_000 } }]);
+    expect(await turn.result).not.toHaveProperty("usage.totalTokens");
+    await runtime.shutdown();
   });
 
   it("Turn 完成后不把 acpx 的有界 perRequest 当作累计用量", async () => {

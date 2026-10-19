@@ -6,7 +6,7 @@ import type {
 export type { WebhookReceiver, WebhookReceiverInput, WebhookProviderDefinition, WebhookReceiptDetail };
 import type { WebhookFilter, WebhookFilterEvent, WebhookFilterResult } from "../integrations/webhook-filter.js";
 
-export type Provider = "claude_code" | "codex" | "hermes";
+export type Provider = "claude_code" | "codex" | "hermes" | "deepseek_harness";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export type ConcurrencySettings = {

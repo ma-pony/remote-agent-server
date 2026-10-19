@@ -242,7 +242,7 @@ export class ProviderExtensionManager {
 
   list(agentId: number): ProviderExtensionCatalogItem[] {
     const provider = this.agentProvider(agentId);
-    if (provider === "hermes") return [];
+    if (provider !== "codex" && provider !== "claude_code") return [];
     const discovered = this.discover(provider);
     const assignments = this.assignmentRows(agentId);
     const byId = new Map(discovered.map((item) => [item.id, item]));
@@ -284,7 +284,7 @@ export class ProviderExtensionManager {
 
   async listSkills(agentId: number): Promise<SkillCatalogItem[]> {
     const provider = this.agentProvider(agentId);
-    if (provider === "hermes") return [];
+    if (provider !== "codex" && provider !== "claude_code") return [];
     const plugins = this.discover(provider).filter(item => item.kind === "plugin" && item.sourcePath !== null);
     const sourceFingerprint = fingerprint(plugins.map(item => [item.id, item.sourceFingerprint]));
     let snapshot = this.skillSnapshots.get(provider);
@@ -305,7 +305,7 @@ export class ProviderExtensionManager {
 
   async enabledSkills(agentId: number): Promise<SkillCatalogItem[]> {
     const provider = this.agentProvider(agentId);
-    if (provider === "hermes") return [];
+    if (provider !== "codex" && provider !== "claude_code") return [];
     const skills = await this.readSkills(provider, this.enabled(agentId));
     const selected = this.assignmentRows(agentId);
     return skills.filter(skill => selected.has(`plugin:${skill.sourceId}`)).map(skill => ({ ...skill, enabled: true }));
@@ -328,7 +328,7 @@ export class ProviderExtensionManager {
 
   setEnabled(agentId: number, id: string, enabled: boolean): ProviderExtensionCatalogItem | undefined {
     const provider = this.agentProvider(agentId);
-    if (provider === "hermes") return undefined;
+    if (provider !== "codex" && provider !== "claude_code") return undefined;
     const item = this.discover(provider).find((candidate) => candidate.id === id);
     if (enabled) {
       if (item === undefined) return undefined;
@@ -364,7 +364,7 @@ export class ProviderExtensionManager {
 
   enabled(agentId: number): DiscoveredProviderExtension[] {
     const provider = this.agentProvider(agentId);
-    if (provider === "hermes") return [];
+    if (provider !== "codex" && provider !== "claude_code") return [];
     const selected = this.assignmentRows(agentId);
     return this.discover(provider).filter((item) => selected.has(item.id));
   }

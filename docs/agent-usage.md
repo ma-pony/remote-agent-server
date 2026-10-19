@@ -150,7 +150,7 @@ USAGE_CAPTURE_UPSTREAMS='{"codex":{"baseUrl":"https://api.openai.com/v1","protoc
 
 此模式显式选择 API-key 路由。托管 Provider 只收到临时本地凭据和入口，转发层移除传入认证信息后注入所配置的上游 key。Codex 使用 Responses HTTP/SSE，关闭该托管入口的 WebSocket；Claude 使用 Messages HTTP/SSE。现成 OAuth、Bedrock、Vertex 以及绕过此入口的内部模型调用不属于该采集合同，不能因为启用了配置就声称全部覆盖。Chat Completions 的通用协议适配器也用于兼容端点。
 
-当前自动 Runtime 接入仅支持 `codex` 和 `claude_code`；配置 `hermes` 会明确报错。通用 Chat Completions 协议支持不等于已经接通 Hermes 的实际启动配置。未启用自动采集的 Runtime 继续使用已有日志与执行事件来源。
+当前自动 Runtime 接入仅支持 `codex` 和 `claude_code`；配置 `hermes` 或 `deepseek_harness` 会明确报错。通用 Chat Completions 协议支持不等于已经接通 Hermes 的实际启动配置。未启用自动采集的 Runtime 继续使用已有日志与执行事件来源。DeepSeek Harness 当前 ACP 仅报告上下文占用，没有累计输入 / 输出 token，也尚无原生日志适配器；缺失的用量保持未知。
 
 运行后查看用量页的采集状态，再检查具体 MCP Tool 排名。只有实际收到请求才有采集证据；“等待请求”、中断、解析失败或超限不会显示成已完整采集。请求正文只在内存中短暂处理，数据库保存用量、哈希、字节数、身份和估算结果，不保存请求／响应或工具正文。
 

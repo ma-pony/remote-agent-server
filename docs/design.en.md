@@ -40,7 +40,7 @@ Integration endpoint (token / parameter mapping / idempotency)
    v
 Task -> Conversation -> Session -> Run -> acpx/ACP -> Provider
    |                         |                 |
-   |                         |                 +-> Claude Code / Codex / Hermes
+   |                         |                 +-> Claude Code / Codex / Hermes / DeepSeek Harness
    |                         |
    |                         +-> Workspace / Skills / provider extensions / MCP
    |
@@ -75,7 +75,7 @@ The service uses one Node.js process and one deployment unit:
 - **Fastify API:** management routes, integration routes, event queries, and SSE.
 - **React console:** agents, project environments, sessions, MCP, Skills, provider extensions, endpoints, and concurrency settings.
 - **SQLite WAL:** configuration, queue state, execution records, tasks, Webhook deliveries, and token usage.
-- **acpx/ACP Runtime:** drives Claude Code, Codex, and Hermes and normalizes provider events.
+- **acpx/ACP Runtime:** drives Claude Code, Codex, Hermes, and DeepSeek Harness and normalizes provider events.
 - **Workspace layer:** APFS clones on macOS and Btrfs snapshots on Linux.
 - **In-process schedulers:** separate scheduling for runs, environment builds, and Webhook deliveries.
 
@@ -262,9 +262,15 @@ Codex-native plugin projection publishes selected packages into local marketplac
 
 Codex also stores its rollout compression lock under `.tmp`. A Session with compression enabled keeps that lock private so another Session cannot cause its compression pass to be skipped. Codex may keep a separate built-in marketplace checkout for each such Session. Rollout files remain in their respective Session homes.
 
+DeepSeek Harness (`deepseek_harness`) uses the installed `dsh --profile acp` through the same acpx Runtime. Each Session owns `agents/<id>/provider-home/deepseek-harness/sessions/<sessionId>` as its `DSH_HOME`. Preparation copies only `.credentials.yaml`, `.env`, Home patches, and the host ACP profile; other Sessions and `storages/` are excluded. Legacy `settings.yaml` is converted into the Session's ACP Profile patches before ACP starts, avoiding native asynchronous migration racing initial model validation. The host file and Profile YAML expressions are preserved, and Home patches still override the Profile. The last CLI patch installs a literal system-prompt section for Agent instructions, Workspace paths, and memory, preserving the native prompt. It disables default Skill roots and supplies only Workspace `.dsh/skills` and `.agents/skills`. Selected service Skills are projected into `.agents/skills`.
+
+acpx resumes the persisted DSH conversation through ACP `session/resume`. Model choices and HTTP / stdio MCP use the existing ACP contract; queueing, cancellation, timeout, and process ownership remain shared. Reset and idle storage cleanup remove only the addressed Session Home; later preparation restores credentials and configuration. DSH-native extension selection and global MCP import remain unsupported. ACP context occupancy is preserved separately from cumulative token usage, which DSH does not report. Old numeric-ID databases transactionally rebuild only the Agent table to extend its Provider CHECK constraint, preserving identifiers, foreign-key references, and the autoincrement sequence.
+
 Provider Home initialization excludes host conversation history, logs, and caches, as well as Codex's `app-server-daemon` and `app-server-control` runtime directories, so daemon sockets and metadata are not copied. When upgrading a legacy business conversation, Hermes migrates only the target conversation and its parent lineage, as described below. `DATA_DIR/secret.key` encrypts sensitive configuration saved through management APIs, which do not return plaintext secrets; native Provider authentication files retain their own format.
 
 Configuration changes take effect on the next run. Existing sessions refresh their runtime connection and keep the provider session when the provider supports resumption.
+
+Model catalog probes use temporary Provider homes and acpx storage without creating business Sessions. Completion releases the ACP connection and removes the temporary directory, without requiring Provider support for `session/close` or touching business history.
 
 Codex ACP `2.2.2` reuses upstream's MCP startup task, session-close cleanup, and paginated thread status query, retaining only the platform's readiness gate. New, loaded, and resumed Provider Sessions check the selected servers' `runtimeStatus` for the current thread, including same-name entries supplied by Codex config, and allow model work only when all are `connected`. Cached `serverInfo` and early startup notifications do not prove readiness. Explicit `failed`, `disabled`, and `authenticationRequired` states fail immediately; transient `cancelled` and other unready states keep waiting. The readiness wait ends within 30 seconds and blocks the prompt even when a status query does not respond; the outstanding RPC is released when its Runtime closes the ACP/app-server processes. The result remains until the Provider Session closes so later prompts cannot bypass a failure; reopening or automatic app-server recovery checks again. Cancelling a waiting prompt prevents model work, and closing the session aborts the wait and clears its timers. Sessions without selected MCP servers do not wait.
 
@@ -278,7 +284,7 @@ The diff list returns only status, `beforeBytes` / `afterBytes` (`null` for a mi
 
 `DATA_DIR/skill-sources/` stores the source index and immutable complete package snapshots; `skill-revisions/` retains selected content versions. Each agent's `skills/<id>/` is a private package copy containing its revision record and Skill-relative path. Legacy direct directories remain readable. Updates retain the old revision and swap the installation using staging and backup directories; startup recovers interrupted swaps. Digests include file paths, contents, and executable permissions. Text diffs are bounded while binary and large files still expose change status. Applying requires a matching `expectedRevision` and an unmodified installation, preventing stale pages from overwriting newer choices.
 
-Complete packages are copied into Session-owned directories before execution. Managed entries for nested Skills link to their corresponding package projection, preserving relative references to sibling resources. Runtime fingerprints use projected contents and are recorded in `runs.skills_revision`. Codex/Claude use Workspace directories; Hermes uses `agents/<id>/provider-home/hermes/sessions/<sessionId>/skills` so concurrent Sessions cannot overwrite each other. An atomic completion marker makes first-time Hermes initialization retryable. Migration retains the resumed conversation and parent lineage from a consistent backup of the old shared `state.db`; missing state fails resumption explicitly. Cleanup removes only the target Session Home and matching legacy conversation records.
+Complete packages are copied into Session-owned directories before execution. Managed entries for nested Skills link to their corresponding package projection, preserving relative references to sibling resources. Runtime fingerprints use projected contents and are recorded in `runs.skills_revision`. Codex/Claude/DeepSeek Harness use Workspace directories; Hermes uses `agents/<id>/provider-home/hermes/sessions/<sessionId>/skills` so concurrent Sessions cannot overwrite each other. An atomic completion marker makes first-time Hermes initialization retryable. Migration retains the resumed conversation and parent lineage from a consistent backup of the old shared `state.db`; missing state fails resumption explicitly. Cleanup removes only the target Session Home and matching legacy conversation records.
 
 | Management endpoint (prefix `/api`) | Behavior |
 | --- | --- |
@@ -299,7 +305,7 @@ Checking and applying are separate operations. Source deletion, failed refreshes
 
 - Global run, per-agent run, Webhook-delivery, and project-build concurrency are configurable at runtime.
 - Sessions and conversations serialize their work.
-- Each Webhook subscription delivers events in order.
+- Within a Webhook subscription, events for one Task are delivered in order; different Tasks may run in parallel, and retries block only their own Task.
 - Duplicate sync requests for one project environment are coalesced.
 - Events are persisted before clients query them; `seq` supports gap recovery.
 - Disconnecting SSE does not cancel a run.
@@ -325,7 +331,7 @@ Automatic model capture uses a loopback HTTP/SSE relay independent of business t
 
 Native plugin projection returns actual Skill names, versions and path aliases. The Runtime Session retains this mapping across handle reuse, and each Run registers it together with managed Skills before starting the turn. Claude transcript reconstruction associates injected instructions with their `Skill` call through `sourceToolUseID`. The association survives checkpoints until the next model-request boundary, then is released. Bodies are measured once and counted in each later request; input comparisons deduplicate overlapping tags by content position.
 
-Managed launch adapters currently support Codex Responses and Claude Messages. Hermes automatic-capture configuration is rejected; a reusable Chat Completions parser does not establish Hermes runtime integration. OAuth/Bedrock/Vertex routes keep existing log and execution sources. Actual captured requests take precedence over native cumulative intervals for the dated basis of each epoch/metric, without adding both. Cumulative parent scopes can still complete all-time totals, with uncovered residual usage left unplaced.
+Managed launch adapters currently support Codex Responses and Claude Messages. Hermes and DeepSeek Harness automatic-capture configuration is rejected; a reusable Chat Completions parser does not establish Hermes runtime integration. OAuth/Bedrock/Vertex routes keep existing log and execution sources. Actual captured requests take precedence over native cumulative intervals for the dated basis of each epoch/metric, without adding both. Cumulative parent scopes can still complete all-time totals, with uncovered residual usage left unplaced.
 
 Input evidence is queried directly from exposures by capability and model request, without requiring an execution or primary-tool invocation row. Skill/plugin tags, unused MCP definitions and unattributed input remain inspectable. A fixed set of filter bindings joins contexts with exposures, avoiding SQLite's parameter limit as history grows; a transactional first-result index preserves lifetime classification across date filters, late records and revisions. Separate global/runtime scopes retain their original semantics. Evidence pagination first selects a bounded set of matching contexts by persistent sort keys, then groups their exposures; invocation pages are SQL-bounded and MCP completion reads only its primary-key execution record.
 

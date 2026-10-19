@@ -63,6 +63,36 @@ it("Agent 列表只负责浏览，并从独立页面创建 Agent", async () => {
   expect(screen.getByLabelText("智能体名称")).toBeInTheDocument();
 });
 
+it("创建 DeepSeek Harness Agent 时保留指令并显示正确执行器名称", async () => {
+  window.history.replaceState({}, "", "/agents/new");
+  const created = { ...agent, name: "DeepSeek Agent", provider: "deepseek_harness", instructions: "先检查当前项目。" };
+  let requestBody: unknown;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (new URL(url, "http://localhost").pathname === "/api/project-environments") return pagedManagementResponse(url, [environment]);
+    if (url === "/api/agents" && init?.method === "POST") {
+      requestBody = JSON.parse(String(init.body));
+      return response(created);
+    }
+    if (url === `/api/agents/${agent.id}`) return response(created);
+    if (url === `/api/usage/summary?agentId=${agent.id}`) return response(usageSummary);
+    if (new URL(url, "http://localhost").pathname === "/api/integration-endpoints") return pagedManagementResponse(url, []);
+    throw new Error(`Unexpected request: ${url}`);
+  }));
+  render(<App />);
+  fireEvent.change(await screen.findByLabelText("执行器"), { target: { value: "deepseek_harness" } });
+  expect(screen.getByLabelText("智能体指令")).toBeEnabled();
+  fireEvent.change(screen.getByLabelText("智能体名称"), { target: { value: created.name } });
+  fireEvent.change(screen.getByLabelText("智能体指令"), { target: { value: created.instructions } });
+  await waitFor(() => expect(screen.getByLabelText("项目环境")).toHaveValue(String(environment.id)));
+  fireEvent.click(screen.getByRole("button", { name: "创建智能体" }));
+  await waitFor(() => expect(requestBody).toEqual({
+    name: created.name, provider: "deepseek_harness", instructions: created.instructions, projectEnvironmentId: environment.id
+  }));
+  expect(await screen.findByRole("heading", { name: created.name })).toBeInTheDocument();
+  expect(screen.getByText("DeepSeek Harness")).toBeInTheDocument();
+});
+
 it("在 Agent 列表页直接复制创建", async () => {
   const cloned = { ...agent, id: 2, name: "主力 Codex 副本" };
   let cloneBody: unknown;

@@ -35,7 +35,8 @@ import { SkillRevisionDialog, SkillSourcesDialog } from "@/components/skill-dial
 const providerNames: Record<Provider, string> = {
   claude_code: "Claude Code",
   codex: "Codex",
-  hermes: "Hermes"
+  hermes: "Hermes",
+  deepseek_harness: "DeepSeek Harness"
 };
 const maxSkillArchiveBytes = 10 * 1024 * 1024;
 type SchedulePolicy = Extract<AgentModelPolicy, { mode: "schedule" }>;

@@ -28,7 +28,7 @@
 | 术语 | 在本项目中指什么 |
 | --- | --- |
 | 智能体（Agent） | 一组执行配置，包括 Provider、项目环境、指令、技能、MCP 和模型策略。 |
-| 执行器（Provider） | 实际执行任务的 Claude Code、Codex 或 Hermes。 |
+| 执行器（Provider） | 实际执行任务的 Claude Code、Codex、Hermes 或 DeepSeek Harness。 |
 | 会话（Session） | 拥有独立工作区、可以连续执行多轮任务的 Agent 对话。 |
 | 单次运行（Run） | 会话中一次输入对应的执行过程与结果。排队与执行是不同状态。 |
 | 业务会话（Conversation） | 外部系统的多轮会话，结束前复用同一个 Session。 |

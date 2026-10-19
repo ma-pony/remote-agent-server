@@ -10,6 +10,7 @@ import {
   refreshFailureTrace,
   submitTask,
   verifyWebhookSignature,
+  waitForReplyDeliveries,
   type ExternalTask,
   type JsonClient
 } from "../scripts/smoke-integrations.js";
@@ -123,7 +124,7 @@ describe("integration smoke HTTP helpers", () => {
     )).toThrow(/Task submission order/);
   });
 
-  it("rejects receiver requests whose event IDs do not follow the Delivery order", () => {
+  it("allows receiver retries to interleave across Tasks while requiring every expected event", () => {
     const deliveries = [
       {
         id: 1, eventId: "event-first", dispatchOrder: 10, taskId: 1,
@@ -143,7 +144,17 @@ describe("integration smoke HTTP helpers", () => {
       [1, 2, 3],
       [...deliveries],
       ["event-first", "event-second", "event-first", "event-third"]
-    )).toThrow(/receiver order/);
+    )).not.toThrow();
+    expect(() => assertReplyDeliveryOrder(
+      [1, 2, 3],
+      [...deliveries],
+      ["event-first", "event-unknown", "event-second", "event-third"]
+    )).toThrow(/unexpected.*event/i);
+    expect(() => assertReplyDeliveryOrder(
+      [1, 2, 3],
+      [...deliveries],
+      ["event-first", "event-second"]
+    )).toThrow(/missing.*event/i);
   });
 
   it("refreshes late Session, Run and Delivery IDs for known Tasks after a failure", async () => {
@@ -161,7 +172,7 @@ describe("integration smoke HTTP helpers", () => {
             id: 1, sessionId: 1, runId: 2
           };
         }
-        return [{ id: 1 }];
+        return { items: [{ id: 1 }], latest: [{ id: 1 }], page: 1, pageSize: 20, total: 1, totalPages: 1 };
       }) as JsonClient["request"]
     };
 
@@ -173,5 +184,20 @@ describe("integration smoke HTTP helpers", () => {
       runIds: [2],
       deliveryIds: [1]
     });
+  });
+
+  it("polls reply deliveries from the real paginated response shape", async () => {
+    const deliveries = [1, 2].map(id => ({
+      id, eventId: `event-${id}`, dispatchOrder: id, taskId: id,
+      eventType: "message.agent.reply", status: "succeeded", attemptCount: 1
+    }));
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      items: deliveries, latest: [deliveries[1]], page: 1, pageSize: 20, total: 2, totalPages: 1
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const client = createJsonClient("http://127.0.0.1:3000", "management-token", 1_000, fetchMock);
+    const config = loadSmokeConfig({ SMOKE_BASE_URL: "http://127.0.0.1:3000", SMOKE_API_TOKEN: "management-token", SMOKE_AGENT_ID: "1" });
+
+    await expect(waitForReplyDeliveries(client, config, 1, [1, 2])).resolves.toEqual(deliveries);
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });

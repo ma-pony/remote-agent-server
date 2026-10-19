@@ -2,7 +2,7 @@
 
 [English](README.en.md) · [MIT License](LICENSE) · Node.js 22 · macOS / Linux
 
-**把 Claude Code、Codex 和 Hermes 接入你的工单、运维平台和内部业务系统。**
+**把 Claude Code、Codex、Hermes 和 DeepSeek Harness 接入你的工单、运维平台和内部业务系统。**
 
 Remote Agent Server 是自托管的 Agent 任务服务。业务系统通过 HTTP API 提交任务，管理人员也可以从 Web 管理台直接运行。服务负责排队、工作区、会话和执行记录；你的系统通过查询、SSE 或签名 Webhook 获取进度与结果。
 
@@ -206,6 +206,7 @@ Provider CLI 必须由运行服务的同一个操作系统用户安装并登录�
 - [Claude Code](https://code.claude.com/docs/en/getting-started)
 - [Codex CLI](https://developers.openai.com/codex/cli)
 - [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/)
+- [DeepSeek Harness（dsh）](https://github.com/deepseek-ai/deepseek-harness)
 
 下面是命令参考，只执行所选 Provider 对应的命令：
 
@@ -226,6 +227,21 @@ hermes --version
 Codex ACP adapter 固定为 `2.2.2`，锁文件中的配套 Codex CLI 为 `0.160.1`。默认 `agent` 模式允许普通命令在 `workspace-write` 沙箱中联网，每轮显式下发网络策略，主机 `config.toml` 的 `sandbox_workspace_write.network_access` 不会覆盖它。保留上游默认的 `auto_review` 审批；acpx 的 `approve-all` 只自动批准转交给客户端的权限请求，不绕过 Codex 自动审批，详见[安全边界](#安全边界)。
 
 新建或恢复 Codex 会话时，已选 MCP 必须全部连接就绪后才能开始模型请求。启动失败、被禁用、需要认证，或在 30 秒内未就绪都会阻断执行；等待期间取消 Run 或关闭会话不会迟到启动模型请求。
+
+#### DeepSeek Harness
+
+使用 Node.js **22.19 或更高的 22.x**，以服务用户安装已核对 ACP 接口的版本：
+
+```bash
+npm install --global @deepseek-ai/dsh@0.2.1-rc.2
+dsh --version
+```
+
+按 [DSH 模型配置文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md)配置凭据，然后在新建 Agent 时选择 **DeepSeek Harness**。管理 API 的 `provider` 值为 `deepseek_harness`。服务调用 `dsh --profile acp`，支持多轮恢复、模型策略、Agent 指令、Skills，以及 HTTP / stdio MCP，复用原有队列、取消和超时处理。
+
+宿主配置来自服务用户的 `DSH_HOME`（默认 `~/.dsh`）。凭据与 Home 级配置可复用；自定义模型路由应放在 `profiles/acp/cordis.patch.yml`，仅在 Web profile 中配置的路由不会自动复制。旧版 `settings.yaml` 会在启动 ACP 前转换为会话内的 Profile 补丁，首次运行即可选择其中的模型，宿主原文件保持不变。每个 Session 使用独立 Home，保留自身历史；只读取当前 Workspace 的 `.dsh/skills`、`.agents/skills` 与服务投影的所选 Skills。暂不提供 DSH 原生插件 / Hook 选择或全局 MCP 导入。
+
+DSH 仍处于开发预览阶段；升级前需重新验证 ACP 兼容性。当前 ACP 只报告上下文占用，不报告累计输入 / 输出 token；缺失的用量保持“未上报”，不参与完整用量统计，也不支持 `USAGE_CAPTURE_UPSTREAMS.deepseek_harness` 自动 HTTP 采集。
 
 ### 2. 创建项目环境
 
@@ -326,7 +342,7 @@ Skills、执行器扩展和 MCP 的变更从下一次 Run 生效。已有 Sessio
 
 ### 执行器扩展
 
-在服务用户的 Codex 或 Claude Code 配置中安装插件或添加 Hook 后，可在 Agent 的 **扩展** 页面选择启用，默认不启用。Hermes 目前不提供这项扩展管理能力。
+在服务用户的 Codex 或 Claude Code 配置中安装插件或添加 Hook 后，可在 Agent 的 **扩展** 页面选择启用，默认不启用。Hermes 和 DeepSeek Harness 目前不提供这项扩展管理能力。
 
 插件自带的 Skills 在技能页标为“随插件更新”，启停与版本由所属插件统一控制。升级宿主插件后，这些技能在后续 Run 跟随当前插件版本，无需逐项安装或应用更新。Git 来源、ZIP 上传及其他独立 Skills 继续使用显式版本选择。
 
@@ -359,7 +375,7 @@ Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选�
 - Webhook 投递并发；
 - 项目环境构建并发。
 
-设置保存在数据库中。Run 超时作用于新启动的 Run；存储保留期在下一次清理时生效；并发修改立即作用于后续调度。提高上限会继续派发排队工作，降低上限不会取消正在运行的工作。系统始终保证同一 Session 的 Run 串行、同一外部 Conversation 复用同一 Session 且串行、同一 Webhook 订阅按顺序投递，并合并同一项目环境的重复同步请求。
+设置保存在数据库中。Run 超时作用于新启动的 Run；存储保留期在下一次清理时生效；并发修改立即作用于后续调度。提高上限会继续派发排队工作，降低上限不会取消正在运行的工作。系统始终保证同一 Session 的 Run 串行、同一外部 Conversation 复用同一 Session 且串行、同一 Webhook 订阅内按 Task 保证投递顺序（不同 Task 可以并行），并合并同一项目环境的重复同步请求。
 
 服务启动时会立即执行一次存储清理，之后每 10 分钟检查一次。保留期按 Session 的最后活动时间计算，服务重启不会重新计算已空闲 Session 的保留期。达到保留期的空闲 Session 会删除 Workspace、浏览器数据、Provider 原生会话，以及该 Session 下所有 Task 的 Webhook 投递记录（含等待、投递中和已结束记录）；清理后不再重试这些投递。Session、Run、Task/Conversation 关联和 Token 统计继续保留；原始消息／工具事件另按下文的用量事件保留期处理。不关联 Task 的测试投递不受 Session 清理影响，重置 Provider 上下文也不删除投递记录。
 

@@ -31,7 +31,7 @@ export const pluginSkillReplacement = (
 
 /** Read host and projected plugin packages with the same declarations and stable identities. */
 export const readPluginSkills = async (
-  root: string, provider: Exclude<Provider, "hermes">, pluginId: string, limit = 512
+  root: string, provider: Extract<Provider, "codex" | "claude_code">, pluginId: string, limit = 512
 ): Promise<PluginSkill[]> => {
   let manifest: Record<string, unknown> = {};
   const manifestPaths = provider === "codex" ? ["plugin.json", ".codex-plugin/plugin.json"] : [".claude-plugin/plugin.json"];

@@ -17,7 +17,7 @@ import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js
 import type { CommandRunner, WorkspaceManager } from "./workspaces/workspace-manager.js";
 
 const execFileAsync = promisify(execFile);
-const providerCommands = ["codex", "claude", "hermes"];
+const providerCommands = ["codex", "claude", "hermes", "dsh"];
 
 type InstallationOptions = {
   directory?: string;
@@ -169,7 +169,7 @@ if (isEntrypoint) {
     if (values.root && !result.created) console.log("Existing configuration takes precedence; --root was not applied.");
     console.log(`Provider commands found: ${result.providers.join(", ") || "none"}. Authentication and model access have not been tested.`);
     if (result.providers.length === 0) console.log("Install one Provider before running a task. See README.en.md → Prepare a Provider.");
-    console.log("Log in with the service user: codex login or claude auth login. For Hermes, follow its official quickstart linked in README.en.md.");
+    console.log("Log in with the service user: codex login or claude auth login. For Hermes and DeepSeek Harness, follow their setup instructions in README.en.md.");
     const host = ["0.0.0.0", "::"].includes(result.config.host) ? "127.0.0.1" : result.config.host;
     const address = host.includes(":") ? `[${host}]` : host;
     console.log(`\nNext: pnpm start\nOpen http://${address}:${result.config.port}\nCopy API_TOKEN from ${result.fileExists ? ".env" : "your service configuration"} into the login screen; the token is never printed here.\nThen: prepare a project environment → create an Agent → start a session.`);

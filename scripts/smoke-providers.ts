@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { readEnvironmentFile } from "../src/environment-file.js";
 
-type Provider = "claude_code" | "codex" | "hermes";
+type Provider = "claude_code" | "codex" | "hermes" | "deepseek_harness";
 type HttpMethod = "GET" | "POST" | "PATCH";
 
 export type Agent = {
@@ -39,7 +39,7 @@ type FetchImplementation = (url: string, init: RequestInit) => Promise<FetchResp
 type SmokeTrace = { provider: Provider; agentId?: number; sessionId?: number; runIds: number[] };
 export type MainDependencies = { args?: string[]; api?: SmokeApi };
 
-const PROVIDERS = ["claude_code", "codex", "hermes"] as const;
+const PROVIDERS = ["claude_code", "codex", "hermes", "deepseek_harness"] as const;
 const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled"]);
 const NON_TERMINAL_RUN_STATUSES = new Set(["queued", "running"]);
 const DEFAULT_POLL_INTERVAL_MS = 1_000;

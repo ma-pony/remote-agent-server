@@ -31,6 +31,10 @@ export class SystemProviderSessionCleaner implements ProviderSessionCleaner {
       await rm(join(providerRoot, "codex", "sessions", String(input.sessionId)), { recursive: true, force: true });
       return;
     }
+    if (input.provider === "deepseek_harness") {
+      await rm(join(providerRoot, "deepseek-harness", "sessions", String(input.sessionId)), { recursive: true, force: true });
+      return;
+    }
     if (input.provider === "hermes") {
       const legacyHome = join(providerRoot, "hermes");
       await rm(join(legacyHome, "sessions", String(input.sessionId)), { recursive: true, force: true });

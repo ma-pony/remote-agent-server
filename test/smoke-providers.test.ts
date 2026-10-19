@@ -80,7 +80,7 @@ describe("provider smoke configuration", () => {
   });
 
   it("prepare only ensures Agents and does not create Sessions or Runs", async () => {
-    const agents = ["claude_code", "codex", "hermes"].map((provider) => ({
+    const agents = ["claude_code", "codex", "hermes", "deepseek_harness"].map((provider) => ({
       id: `agent-${provider}`,
       name: `remote-agent-smoke-${provider}`,
       provider,
@@ -93,7 +93,7 @@ describe("provider smoke configuration", () => {
 
     await main({ API_TOKEN: "test-token" }, { args: ["--prepare"], api });
 
-    expect(api.request).toHaveBeenCalledTimes(4);
+    expect(api.request).toHaveBeenCalledTimes(5);
     expect(api.request.mock.calls[0]?.[0]).toBe("/project-environments");
     expect(api.request.mock.calls.slice(1).every(([path]) => path === "/agents")).toBe(true);
   });

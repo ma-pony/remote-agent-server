@@ -11,7 +11,7 @@ import { handleSkillError } from "../skills/skill-routes.js";
 
 const createAgentSchema = z.object({
   name: z.string().trim().min(1),
-  provider: z.enum(["claude_code", "codex", "hermes"]),
+  provider: z.enum(["claude_code", "codex", "hermes", "deepseek_harness"]),
   projectEnvironmentId: z.number().int().positive(),
   instructions: z.string().max(20_000).default(""),
   maxConcurrentRuns: z.number().int().min(1).max(64).nullable().optional()
@@ -102,7 +102,7 @@ export const registerAgentRoutes = (
     if (!isPagedQuery(request.query)) return agentManager.list();
     const parsed = paginationQuerySchema.extend({
       enabled: z.enum(["true", "false"]).transform(value => value === "true").optional(),
-      provider: z.enum(["codex", "claude_code", "hermes"]).optional()
+      provider: z.enum(["codex", "claude_code", "hermes", "deepseek_harness"]).optional()
     }).strict().safeParse(request.query);
     return parsed.success ? agentManager.listPage(parsed.data) : badRequest(reply, "Invalid Agent pagination");
   });

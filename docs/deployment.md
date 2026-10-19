@@ -11,7 +11,7 @@
 
 生产验收需要分别确认 HTTP 接入、Provider 执行、项目环境与会话工作区、事件与 Webhook 返回。健康接口通过只代表服务可响应，还需用真实 Provider 和 Integration Task 验证执行与结果。[返回文档导航](README.md)。
 
-服务支持两种原生写时复制 Workspace：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。运行时会根据操作系统自动选择，不提供普通目录复制回退。它以 acpx 的 `approve-all` 模式运行 Claude Code、Codex 或 Hermes。`approve-all` 只减少 Provider 的交互确认，**不是安全沙箱**；Workspace 中的代码、网络和该用户能访问的文件都应视为 Agent 可操作范围。
+服务支持两种原生写时复制 Workspace：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。运行时会根据操作系统自动选择，不提供普通目录复制回退。它以 acpx 的 `approve-all` 模式运行 Claude Code、Codex、Hermes 或 DeepSeek Harness。`approve-all` 只减少 Provider 的交互确认，**不是安全沙箱**；Workspace 中的代码、网络和该用户能访问的文件都应视为 Agent 可操作范围。
 
 Codex ACP adapter 固定为 `2.2.2`，锁文件中的配套 Codex CLI 为 `0.160.1`；默认运行使用项目依赖中的 CLI，更新全局 `codex` 不会替换它。默认 `agent` 模式允许普通命令联网，继续采用 `workspace-write` 文件沙箱和原有临时目录规则。adapter 每轮显式下发网络策略，主机 `config.toml` 的 `sandbox_workspace_write.network_access` 不会覆盖该预设。保留上游默认 `auto_review` 审批；acpx 的 `approve-all` 只处理转交客户端的权限请求，不绕过 Codex 自动审批。
 
@@ -21,7 +21,7 @@ Codex 会话启动或恢复后，必须等待已选 MCP 全部连接就绪才能
 
 ## macOS：APFS 原生部署
 
-macOS 部署应使用实际登录桌面的普通用户，不使用 root，也不放入无图形会话的系统级 Daemon。这样 Claude Code、Codex、Hermes 的登录状态和有头浏览器都属于同一个用户会话。
+macOS 部署应使用实际登录桌面的普通用户，不使用 root，也不放入无图形会话的系统级 Daemon。这样 Claude Code、Codex、Hermes、DeepSeek Harness 的登录状态和有头浏览器都属于同一个用户会话。
 
 以下示例假设项目位于 `~/Projects/remote-agent-server`，运行数据位于 `~/Library/Application Support/remote-agent-server`。
 
@@ -45,7 +45,7 @@ pnpm run init --root "/Volumes/AgentData/remote-agent-server"
 
 ### 2. 登录一个 Provider
 
-以运行服务的同一个 macOS 用户安装并登录实际使用的 Provider。例如，选择 Codex 后执行 `codex login`；选择 Claude Code 后执行 `claude auth login`。不要求安装全部 Provider。安装入口见 [Claude Code](https://code.claude.com/docs/en/getting-started)、[Codex CLI](https://developers.openai.com/codex/cli) 和 [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/)。
+以运行服务的同一个 macOS 用户安装并登录实际使用的 Provider。例如，选择 Codex 后执行 `codex login`；选择 Claude Code 后执行 `claude auth login`。不要求安装全部 Provider。安装入口见 [Claude Code](https://code.claude.com/docs/en/getting-started)、[Codex CLI](https://developers.openai.com/codex/cli)、[Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart/) 和 [DeepSeek Harness](../README.md#deepseek-harness)。
 
 ### 3. 启动并打开管理台
 
@@ -156,7 +156,7 @@ sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && corepack enable
 sudo -u remote-agent -H bash -lc 'cd /opt/remote-agent-server && pnpm run init --root /srv/remote-agent'
 ```
 
-命令自动生成 `.env`、随机 Token 和全部存储路径；已有配置不会被覆盖。只有需要改变端口、监听地址或显示环境时才手动编辑 `.env`，无需再次生成 Token。程序自动读取该文件，进程环境优先；使用绝对路径，不写 `$HOME`、`~` 或 Shell 表达式。不要提交 `.env`，不要在仓库或 systemd unit 中硬编码 Provider 凭证。Claude/Codex 的原生登录状态由该系统用户保存；Hermes 的原生状态使用后文每个 Agent 的 `HERMES_HOME`。服务建议只监听内网；若需要跨网络访问，放在 TLS 反向代理后，并仅把 Bearer Token 分发给可信调用方。
+命令自动生成 `.env`、随机 Token 和全部存储路径；已有配置不会被覆盖。只有需要改变端口、监听地址或显示环境时才手动编辑 `.env`，无需再次生成 Token。程序自动读取该文件，进程环境优先；使用绝对路径，不写 `$HOME`、`~` 或 Shell 表达式。不要提交 `.env`，不要在仓库或 systemd unit 中硬编码 Provider 凭证。Claude/Codex 的原生登录状态由该系统用户保存；Hermes 的原生状态使用后文每个 Session 的 `HERMES_HOME`；DeepSeek Harness 使用每个 Session 的 `DSH_HOME`。服务建议只监听内网；若需要跨网络访问，放在 TLS 反向代理后，并仅把 Bearer Token 分发给可信调用方。
 
 如果项目环境使用 `uv sync`，需要安装 uv `>= 0.10.8`，并确认 `uv venv --help` 包含 `--relocatable`。服务检测到 `uv.lock` 后，会在项目准备命令前执行 `uv venv --relocatable .venv`，使后续 `uv sync` 安装的标准命令入口可以随 APFS Clone/Btrfs Snapshot 迁移。升级 uv 后需要在管理界面重新同步项目环境，已有 `.venv` 不会自动转换。
 
@@ -178,6 +178,17 @@ sudo -u remote-agent -H bash -lc 'codex login'
 ```
 
 选择 Claude Code 时，把最后一条命令换为 `claude auth login`。选择 Hermes 时，以服务用户执行 `hermes model`，按官方快速开始完成模型配置；服务随后会把静态配置复制到 Agent 的独立 Provider Home。不要使用管理员自己的 home，也不要把模型 token 写入 `.env.example` 或提交的文件。
+
+选择 DeepSeek Harness 时，先使用 Node **22.19+ 的 22.x**，然后以服务用户安装固定版本：
+
+```bash
+sudo -u remote-agent -H bash -lc 'npm install --global @deepseek-ai/dsh@0.2.1-rc.2'
+sudo -u remote-agent -H bash -lc 'dsh --version'
+```
+
+按 [DSH 官方文档](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/user/guide/providers.md)配置该用户的凭据。默认 Home 为 `~/.dsh`，也可在服务环境中设置绝对路径 `DSH_HOME`；自定义模型配置放在 `profiles/acp/cordis.patch.yml`，Web profile 的模型路由不会自动继承。服务通过 `dsh --profile acp` 启动，给每个 Session 准备独立 Home，只复制凭据、基础配置与 ACP profile，不复制宿主会话或存储。旧版 `settings.yaml` 会在 ACP 启动前转换为会话内 Profile 补丁，无需先运行一次 DSH，宿主原文件保持不变。首次任务前，在新建 Agent 时选择 **DeepSeek Harness** 并执行管理台运行检查。`pnpm run doctor` 只检查 `dsh` 可执行文件，不能证明模型认证成功。
+
+DSH 当前处于开发预览；固定版本避免默认 npm 标签与 ACP 源码接口不一致。升级 DSH 后重新验证真实双轮恢复、MCP 和取消；其 ACP 不提供累计输入 / 输出 token，管理台相应字段保留为未上报。
 
 ## 5. 构建并交给 systemd 管理
 
@@ -248,16 +259,16 @@ curl --fail http://127.0.0.1:3000/api/health
 3. 按项目填写可选准备命令，例如 `bundle install` 或 `pnpm install --frozen-lockfile`。
 4. 等待状态变成“可用”。失败时直接在页面查看失败项目、阶段和错误摘要。
 
-只有存在 ready 项目环境时，smoke 才会创建 Agent。脚本按名称和 ID 稳定选择第一个 ready 环境，并让三种 Provider 共用它。
+只有存在 ready 项目环境时，smoke 才会创建 Agent。脚本按名称和 ID 稳定选择第一个 ready 环境，并让四种 Provider 共用它。
 
-以下三 Provider smoke 是需要同时支持三种执行器时的扩展验收，不是首次启用的前置条件；它会调用真实模型。执行前，先在运行服务的系统用户下完成 Hermes 模型配置和 ACP 检查。服务启动 Provider 时会把这些静态配置复制到 Agent 的独立 Provider Home：
+以下四 Provider smoke 是需要同时支持四种执行器时的扩展验收，不是首次启用的前置条件；它会调用真实模型。执行前，先在运行服务的系统用户下完成所有四种 Provider 的配置，包括上文的 DeepSeek Harness 安装与凭据准备，以及 Hermes 模型配置和 ACP 检查。服务启动 Provider 时会把这些静态配置复制到 Agent 的独立 Provider Home：
 
 ```bash
 sudo -u remote-agent -H hermes model
 sudo -u remote-agent -H hermes acp --check
 ```
 
-然后用 `--prepare` 创建或复用三个固定名称的 Agent。该模式只确保并打印 Agent ID，**不会**创建 Session/Run，也不会调用 doctor。匹配 0 条时创建、1 条时复用或重新启用；同名同 Provider 多于 1 条时会以非零退出并打印所有冲突 ID，必须人工清理后再继续，不能任选一条。
+然后用 `--prepare` 创建或复用四个固定名称的 Agent。该模式只确保并打印 Agent ID，**不会**创建 Session/Run，也不会调用 doctor。匹配 0 条时创建、1 条时复用或重新启用；同名同 Provider 多于 1 条时会以非零退出并打印所有冲突 ID，必须人工清理后再继续，不能任选一条。
 
 两个 smoke 脚本都会自动读取当前目录的 `.env`，进程环境优先，无需在 Shell 中加载配置。若服务端口不同，显式设置 `SMOKE_BASE_URL`。
 
@@ -279,9 +290,9 @@ sudo -u remote-agent -H bash -lc '
 '
 ```
 
-该脚本通过 HTTP API 按 Claude Code、Codex、Hermes 顺序执行：确保固定 smoke Agent 存在并通过应用 doctor、创建新 Session、发送“只回复当前工作目录的目录名”、等待成功、在同一 Session 发送“只回复你上一轮看到的目录名”、等待成功，并读取第二轮 Run 的事件历史。每一步都会打印 Provider、Agent ID、Session ID 和 Run ID。每次 HTTP 请求（包括 response body）都有 Abort deadline；Run 轮询的每次读取受该 Run 的剩余 `SMOKE_RUN_TIMEOUT_MS` 限制。任一 Provider 未安装/未登录、Session 续接失败、Run 失败、未知 Run 状态、超时或事件 `seq` 未从 1 严格连续递增，命令都会以非零退出。它不 mock Provider，也不会在 `pnpm test` 中联网。
+该脚本通过 HTTP API 按 Claude Code、Codex、Hermes、DeepSeek Harness 顺序执行：确保固定 smoke Agent 存在并通过应用 doctor、创建新 Session、发送“只回复当前工作目录的目录名”、等待成功、在同一 Session 发送“只回复你上一轮看到的目录名”、等待成功，并读取第二轮 Run 的事件历史。每一步都会打印 Provider、Agent ID、Session ID 和 Run ID。每次 HTTP 请求（包括 response body）都有 Abort deadline；Run 轮询的每次读取受该 Run 的剩余 `SMOKE_RUN_TIMEOUT_MS` 限制。任一 Provider 未安装/未登录、Session 续接失败、Run 失败、未知 Run 状态、超时或事件 `seq` 未从 1 严格连续递增，命令都会以非零退出。它不 mock Provider，也不会在 `pnpm test` 中联网。
 
-Smoke 只覆盖三个 Provider 的顺序双轮真实连通性。仍须在目标服务器验收：两个不同 Session 并发、断开并重新连接 SSE 后 `seq` 不缺失/不重复、Session 修改不污染项目环境或另一个 Session、浏览器任务只在该 Session 的 `browser/` 产生 Profile、服务重启把在途 Run 标为 `failed/server_restarted` 且不重放输入。
+Smoke 只覆盖四个 Provider 的顺序双轮真实连通性。仍须在目标服务器验收：两个不同 Session 并发、断开并重新连接 SSE 后 `seq` 不缺失/不重复、Session 修改不污染项目环境或另一个 Session、浏览器任务只在该 Session 的 `browser/` 产生 Profile、服务重启把在途 Run 标为 `failed/server_restarted` 且不重放输入。
 
 ### 6.1 验证模型目录与模型策略
 
@@ -502,6 +513,8 @@ Skills 来源复用服务用户的 Git／SSH 凭证。为该用户配置无交�
 刷新来源只发现版本，独立 Skills 仍需在 Agent 中明确应用或回退。备份整个 `DATA_DIR`，包括 `skill-sources/`、`skill-revisions/`、`skill-library/` 和 `agents/`；版本历史暂不自动回收，需预留完整包副本的空间。历史 Run 没有记录过的 `skillsRevision` 保持 `null`。
 
 原生插件 Skills 在“扩展”页随所属插件启停，技能页标为“随插件更新”。宿主插件更新在后续 Run 生效，发现缓存默认最多 30 秒。升级前的独立插件 Skill 副本和版本历史保留：只有归属明确且已有启用的原生技能承接时，才在下一次 Run 交由插件接管；接管标记随 `agents/` 备份。其他副本（包括 Hermes）仍标为“旧插件独立副本”，可独立使用或停用。服务不会因旧副本启用而自动启用整个插件。
+
+升级首次启动会自动扩展 Agent 表的 Provider 约束，以允许 `deepseek_harness`；该事务仅重建 Agent 表，保留原有 ID、关联记录和自增序列。升级前仍需按本节备份数据库与 `secret.key`。
 
 旧版 Hermes 的 Agent Home 会在继续相应会话时迁移到 Session 独立 Home。升级前保留原 Home；状态缺失或不兼容会明确报恢复失败，并保留业务 Session、Workspace 和 Run 历史。核验备份后再恢复，或明确重建执行器会话后重试。
 

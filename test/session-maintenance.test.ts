@@ -256,14 +256,14 @@ describe("durable Session maintenance", () => {
     }
   });
 
-  it.each(["codex", "claude_code"] as const)("%s 的中断重置清除旧会话文件但保留 Workspace", async (provider) => {
+  it.each(["codex", "claude_code", "deepseek_harness"] as const)("%s 的中断重置清除旧会话文件但保留 Workspace", async (provider) => {
     const h = harness();
     h.db.prepare("UPDATE agents SET provider = ? WHERE id = ?").run(provider, h.seed.agent.id);
     h.db.prepare("UPDATE sessions SET status = 'running', pending_operation = 'reset' WHERE id = ?").run(h.session.id);
     const providerRoot = join(h.root, "agents", String(h.seed.agent.id), "provider-home");
-    const oldContext = provider === "codex"
-      ? join(providerRoot, "codex", "sessions", String(h.session.id), "rollout.jsonl")
-      : join(providerRoot, "claude", "projects", "project", "native-session.jsonl");
+    const oldContext = provider === "claude_code"
+      ? join(providerRoot, "claude", "projects", "project", "native-session.jsonl")
+      : join(providerRoot, provider === "codex" ? "codex" : "deepseek-harness", "sessions", String(h.session.id), "rollout.jsonl");
     mkdirSync(join(oldContext, ".."), { recursive: true });
     writeFileSync(oldContext, "old conversation");
 

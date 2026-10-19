@@ -1,8 +1,9 @@
 import { z } from "zod";
+import type { Provider } from "../../domain.js";
 export const captureProtocols = ["responses", "chat_completions", "anthropic_messages"] as const;
 export type CaptureProtocol = typeof captureProtocols[number];
 export type CaptureUpstream = { baseUrl: string; protocol: CaptureProtocol; apiKeyEnv: string; modelProvider?: string };
-export type CaptureUpstreams = Partial<Record<"codex" | "claude_code" | "hermes", CaptureUpstream>>;
+export type CaptureUpstreams = Partial<Record<Provider, CaptureUpstream>>;
 const upstream = z.object({
   baseUrl: z.string().url().refine((value) => {
     const url = new URL(value);
@@ -12,10 +13,11 @@ const upstream = z.object({
   modelProvider: z.string().trim().min(1).max(100).optional(),
   protocol: z.enum(captureProtocols), apiKeyEnv: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
 }).strict();
-export const captureUpstreamsSchema = z.object({ codex: upstream.optional(), claude_code: upstream.optional(), hermes: upstream.optional() }).strict()
+export const captureUpstreamsSchema = z.object({ codex: upstream.optional(), claude_code: upstream.optional(), hermes: upstream.optional(), deepseek_harness: upstream.optional() }).strict()
   .superRefine((value, ctx) => {
     if (value.codex && value.codex.protocol !== "responses") ctx.addIssue({ code: "custom", path: ["codex"], message: "Codex capture requires Responses" });
     if (value.claude_code && value.claude_code.protocol !== "anthropic_messages") ctx.addIssue({ code: "custom", path: ["claude_code"], message: "Claude capture requires Messages" });
+    if (value.deepseek_harness) ctx.addIssue({ code: "custom", path: ["deepseek_harness"], message: "DeepSeek Harness ACP capture configuration is not supported" });
     if (value.hermes) ctx.addIssue({ code: "custom", path: ["hermes"], message: "Hermes ACP capture configuration is not supported" });
   });
 /** Service-only keys, never serialized into runtime configuration. */

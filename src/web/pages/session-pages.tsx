@@ -85,7 +85,7 @@ export const SessionListPage = () => {
   }, [agentId, page, query, refresh, status]);
   const sessions = result?.items ?? [];
   const filtered = query.trim() !== "" || agentId !== "" || status !== "";
-  const providerLabel = (provider: SessionListItem["agentProvider"]): string => provider === "claude_code" ? "Claude Code" : provider === "codex" ? "Codex" : "Hermes";
+  const providerLabel = (provider: SessionListItem["agentProvider"]): string => provider === "claude_code" ? "Claude Code" : provider === "codex" ? "Codex" : provider === "deepseek_harness" ? "DeepSeek Harness" : "Hermes";
   const tokenTotal = (session: SessionListItem): string => {
     const summary = usageBySession?.[String(session.id)];
     if (!summary) return usageError ? text("加载失败", "Failed to load") : usageBySession ? text("未上报", "Not reported") : text("加载中…", "Loading…");

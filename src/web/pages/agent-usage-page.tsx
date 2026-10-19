@@ -380,7 +380,7 @@ export const AgentUsagePage = () => {
     && (ranking.items.length > 0 || (ranking.stages?.length ?? 0) > 0);
   const empty = summary !== null && ranking !== null && !hasModelEvidence && !hasCapabilityEvidence;
   const filteredEmpty = empty && (range !== "all" || agentId !== "" || sessionId !== "" || runtimeKind !== "");
-  const runtimeOptions = [...new Set(["codex", "claude_code", "hermes", runtimeKind].filter(Boolean))];
+  const runtimeOptions = [...new Set(["codex", "claude_code", "hermes", "deepseek_harness", runtimeKind].filter(Boolean))];
 
   return <PageContainer width="wide">
     <PageHeader title={text("用量分析", "Usage analysis")}

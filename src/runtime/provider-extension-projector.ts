@@ -87,7 +87,7 @@ const pluginsFrom = (extensions: DiscoveredProviderExtension[]): PluginProjectio
 const projectedPluginSkills = async (
   home: string, provider: Provider, plugins: PluginProjection[]
 ): Promise<ProjectedSkill[]> => {
-  if (provider === "hermes") return [];
+  if (provider !== "codex" && provider !== "claude_code") return [];
   const skills = new Map<string, ProjectedSkill>();
   for (const plugin of plugins) {
     if (skills.size >= 512) break;
@@ -435,7 +435,7 @@ export class ProviderExtensionProjector {
   constructor(private readonly manager: ProviderExtensionManager, private readonly dataDir: string) {}
 
   async prepare({ agentId, provider, home }: ProjectionInput): Promise<ProjectedSkill[]> {
-    if (provider === "hermes") return [];
+    if (provider !== "codex" && provider !== "claude_code") return [];
     await mkdir(home, { recursive: true });
     const extensions = await this.manager.enabledWithContentFingerprints(agentId);
     if (provider === "codex") await projectCodex(home,

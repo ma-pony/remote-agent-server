@@ -40,7 +40,7 @@ Agent 的推理、工具和原生会话由 Provider 负责。Remote Agent Server
    v
 Task -> Conversation -> Session -> Run -> acpx/ACP -> Provider
    |                         |                 |
-   |                         |                 +-> Claude Code / Codex / Hermes
+   |                         |                 +-> Claude Code / Codex / Hermes / DeepSeek Harness
    |                         |
    |                         +-> Workspace / Skills / 执行器扩展 / MCP
    |
@@ -75,7 +75,7 @@ Web 控制台复用同一套 Session、Run 和 Event 模型。控制台创建的
 - **Fastify API**：管理 API、外部 Integration API、Event 查询与 SSE。
 - **React 管理台**：Agent、项目环境、Session、MCP、Skills、执行器扩展、接入端点和系统并发设置。
 - **SQLite WAL**：配置、队列状态、执行记录、外部 Task、Webhook Delivery 和 Token 统计。
-- **acpx/ACP Runtime**：统一驱动 Claude Code、Codex 和 Hermes，并把 Provider 事件归一化。
+- **acpx/ACP Runtime**：统一驱动 Claude Code、Codex、Hermes 和 DeepSeek Harness，并把 Provider 事件归一化。
 - **Workspace 层**：macOS 使用 APFS Clone，Linux 使用 Btrfs Snapshot。
 - **进程内调度器**：分别调度 Run、项目环境构建和 Webhook Delivery。
 
@@ -260,9 +260,15 @@ Codex 的原生插件投影将当前 Agent 选中的包发布到 `agents/<id>/pr
 
 Codex 也在 `.tmp` 中保存 rollout 压缩锁。启用压缩的 Session 使用独立 `.tmp`，避免其他 Session 的锁跳过本会话的压缩；代价是 Codex 内置市场仓库可能在这些 Session 各保留一份。各 Session 的 rollout 文件仍保存在自己的 Home 中。
 
+DeepSeek Harness（`deepseek_harness`）通过同一 acpx Runtime 调用已安装的 `dsh --profile acp`。每个 Session 独占 `agents/<id>/provider-home/deepseek-harness/sessions/<sessionId>` 作为 `DSH_HOME`。准备阶段只复制 `.credentials.yaml`、`.env`、Home 级补丁和宿主 ACP profile，不复制其他会话与 `storages/`。旧版 `settings.yaml` 在 ACP 启动前转换为会话内 ACP Profile 的配置补丁，避免原生异步迁移晚于首次模型校验；保留宿主文件和 Profile 中的 YAML 表达式，Home 级补丁仍优先于 Profile。最后一层 CLI 补丁通过原生 system-prompt section 原样注入 Agent 指令、Workspace 路径与 Memory，保留原生提示词；关闭默认 Skill 根目录，只提供 Workspace 的 `.dsh/skills` 和 `.agents/skills`。服务选中的 Skills 投影至 `.agents/skills`。
+
+acpx 通过 ACP `session/resume` 续接已持久化的 DSH 会话。模型选择与 HTTP / stdio MCP 沿用现有 ACP 合同；队列、取消、超时和进程树归属不变。重置或闲置存储清理只删除目标 Session Home，后续准备重新恢复凭据和配置。DSH 原生扩展选择与全局 MCP 导入暂不支持。ACP 上下文占用与累计 token 独立保存，DSH 未上报的累计用量保持未知。旧数字 ID 数据库通过事务仅重建 Agent 表的 Provider CHECK 约束，保留 ID、外键引用和自增序列。
+
 初始化 Provider Home 时排除宿主的历史会话、日志和缓存，以及 Codex 的 `app-server-daemon` 和 `app-server-control` 运行态目录，避免复制 daemon 的 socket 和元数据。升级旧业务会话时，Hermes 仅迁移目标会话及其父链，见下文。服务通过管理接口保存的敏感配置使用 `DATA_DIR/secret.key` 加密，管理 API 不返回明文；原生 Provider 的认证文件继续使用其自身格式。
 
 配置变化从下一次 Run 生效。已有 Session 会刷新 Runtime 连接；Provider 支持恢复时继续原有 Provider Session。
+
+模型目录探测使用独立临时 Provider Home 和 acpx 存储，不创建业务 Session。探测结束后释放 ACP 连接并删除临时目录，不要求 Provider 实现 `session/close`，也不触碰业务会话历史。
 
 Codex ACP `2.2.2` 复用上游的 MCP 启动任务、会话关闭清理和线程级分页查询，仅保留平台的就绪阻断策略。新建、加载和恢复 Provider Session 时，对已选 MCP（包括 Codex 配置提供的同名项）查询当前线程的 `runtimeStatus`，全部为 `connected` 才允许 prompt 启动模型请求；缓存的 `serverInfo` 或提前到达的启动通知不代表连接就绪。明确的 `failed`、`disabled`、`authenticationRequired` 立即失败；暂态 `cancelled` 等未就绪状态继续等待。即使状态查询无响应，启动等待也在 30 秒内结束并阻断 prompt；底层未决 RPC 随 Runtime 关闭 ACP/app-server 进程释放。结果在 Provider Session 关闭前保留，后续 prompt 不能绕过失败；重新打开或 app-server 自动重启恢复后重新检查。取消中的 prompt 不启动模型请求，关闭会话会中止等待并清理定时器。未选择 MCP 时不等待。
 
@@ -276,7 +282,7 @@ Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace �
 
 `DATA_DIR/skill-sources/` 保存来源索引和不可变完整包快照；`skill-revisions/` 保存被选用的内容版本。Agent 的 `skills/<id>/` 是私有包副本，内含版本记录及包内 Skill 路径；旧式直接目录继续可读。更新先保留旧版本，再用临时目录与备份交换安装目录；启动恢复中断的交换。内容摘要包含全部文件、路径和可执行权限。版本预览限制文本体积，二进制、大文件仍返回变化状态。应用要求 `expectedRevision` 匹配且没有本地修改，防止旧页面覆盖新配置。
 
-运行前将包复制到 Session 专属目录，嵌套 Skill 的托管入口链接到同一次完整包投影，保留对同包其他资源的相对路径。配置指纹使用实际投影内容，而非仅使用 Skill 名称，并写入 `runs.skills_revision`。Codex/Claude 使用 Workspace 内目录；Hermes 使用 `agents/<id>/provider-home/hermes/sessions/<sessionId>/skills`，避免不同 Session 相互覆盖。Hermes 首次迁移使用完成标记保护可重试初始化，并从旧共享 `state.db` 的一致性快照保留目标会话及父链；状态缺失时明确拒绝恢复。清理只移除目标 Session Home 及旧共享状态中的对应会话记录。
+运行前将包复制到 Session 专属目录，嵌套 Skill 的托管入口链接到同一次完整包投影，保留对同包其他资源的相对路径。配置指纹使用实际投影内容，而非仅使用 Skill 名称，并写入 `runs.skills_revision`。Codex/Claude/DeepSeek Harness 使用 Workspace 内目录；Hermes 使用 `agents/<id>/provider-home/hermes/sessions/<sessionId>/skills`，避免不同 Session 相互覆盖。Hermes 首次迁移使用完成标记保护可重试初始化，并从旧共享 `state.db` 的一致性快照保留目标会话及父链；状态缺失时明确拒绝恢复。清理只移除目标 Session Home 及旧共享状态中的对应会话记录。
 
 | 管理接口（前缀 `/api`） | 行为 |
 | --- | --- |
@@ -297,7 +303,7 @@ Claude marketplace 的默认严格模式合并插件 manifest 与 marketplace �
 
 - 全局 Run、Agent Run、Webhook Delivery 和项目环境构建并发可以在线调整。
 - Session 和 Conversation 内部串行执行。
-- 同一 Webhook 订阅按顺序投递。
+- 同一 Webhook 订阅内，同一 Task 的事件按顺序投递；不同 Task 可以并行，重试只阻塞该 Task。
 - 同一项目环境的重复同步请求会被合并。
 - Event 先持久化再提供查询，`seq` 支持断线续读。
 - SSE 连接断开不会取消 Run。
@@ -325,7 +331,7 @@ MCP 包装器就地提取可见文本并估算参数／结果，通过私有 Uni
 
 原生插件投影返回实际 Skill 名称、版本及路径别名，由 Runtime Session 保留，复用 Handle 时仍返回同一映射；Run 在启动 Turn 前将其与托管 Skill 一并登记。Claude 会话重建使用 `sourceToolUseID` 将单独注入的指令消息关联到 `Skill` 调用。关联保留到下一模型请求边界，支持 checkpoint 恢复，之后释放；正文只计量一次并按后续请求累计，输入对照按内容位置去重。
 
-托管启动适配当前支持 Codex Responses 和 Claude Messages；Hermes 自动接入配置明确拒绝，通用 Chat Completions 解析器不代表已接通 Hermes。OAuth／Bedrock／Vertex 路由继续使用原有日志和执行来源。实际模型请求的日期依据优先于同 epoch／指标的原生累计差额，不能将两者相加；累计父范围仍用于补全不限日期总量，未覆盖部分保留为未定位用量。
+托管启动适配当前支持 Codex Responses 和 Claude Messages；Hermes 和 DeepSeek Harness 自动接入配置明确拒绝，通用 Chat Completions 解析器不代表已接通 Hermes。OAuth／Bedrock／Vertex 路由继续使用原有日志和执行来源。实际模型请求的日期依据优先于同 epoch／指标的原生累计差额，不能将两者相加；累计父范围仍用于补全不限日期总量，未覆盖部分保留为未定位用量。
 
 原生日志与 HTTP 记录使用共同 Provider 身份对账；Claude 采用原生 message ID。Codex 累计量保留父范围，已验证的累计差额作为 interval，不能伪装成模型请求或直接按导入日期分摊。`calls` 只包含执行证据，`contextOnlyCalls` 单列模型输入中的工具证据，MCP 的 ACP 镜像不会再次进入 CLI。发现和采集失败持久保留，启动补采也覆盖首次来源登记前退出的 Session。
 

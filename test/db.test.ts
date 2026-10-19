@@ -594,3 +594,36 @@ describe("database migration", () => {
     db.close();
   });
 });
+
+describe("DeepSeek Harness database upgrade", () => {
+  it("allows DeepSeek Harness while preserving existing Agent IDs, references and sequence", () => {
+    const db = openDatabase(":memory:");
+    try {
+      db.exec(`
+        CREATE TABLE agents (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'hermes')),
+          enabled INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO agents (id,name,provider,created_at,updated_at) VALUES
+          (4,'Existing','codex','2026-10-01','2026-10-01'),
+          (9,'Removed','hermes','2026-10-01','2026-10-01');
+        DELETE FROM agents WHERE id=9;
+        CREATE TABLE agent_reference (agent_id INTEGER REFERENCES agents(id));
+        INSERT INTO agent_reference VALUES (4);
+      `);
+      migrate(db);
+      migrate(db);
+      expect(db.prepare("SELECT name,provider FROM agents WHERE id=4").get()).toEqual({ name: "Existing", provider: "codex" });
+      expect(db.prepare("SELECT agent_id FROM agent_reference").get()).toEqual({ agent_id: 4 });
+      const added = db.prepare("INSERT INTO agents(name,provider,created_at,updated_at) VALUES (?,?,?,?)")
+        .run("DeepSeek", "deepseek_harness", "2026-10-19", "2026-10-19");
+      expect(Number(added.lastInsertRowid)).toBeGreaterThan(9);
+      expect(db.pragma("foreign_key_check")).toEqual([]);
+      expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
+    } finally { db.close(); }
+  });
+});

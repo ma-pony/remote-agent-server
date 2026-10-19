@@ -874,3 +874,27 @@ describe("Agent API", () => {
     expect(response.json()).toEqual({ ok: true });
   });
 });
+
+
+it("creates DeepSeek Harness agents with instructions, model policy and managed MCP", async () => {
+  const { app, projectEnvironmentId } = await createTestApp();
+  const response = await app.inject({
+    method: "POST", url: "/api/agents", headers: authHeaders(),
+    payload: { name: "DeepSeek Harness", provider: "deepseek_harness", projectEnvironmentId, instructions: "Inspect the repository first." }
+  });
+  expect(response.statusCode).toBe(201);
+  const agent = response.json() as { id: number };
+  expect(response.json()).toMatchObject({ provider: "deepseek_harness", instructions: "Inspect the repository first." });
+  const policy = await app.inject({
+    method: "PATCH", url: `/api/agents/${agent.id}`, headers: authHeaders(),
+    payload: { modelPolicy: { mode: "fixed", model: "deepseek-v4-flash" } }
+  });
+  expect(policy.statusCode).toBe(200);
+  expect((await app.inject({ url: `/api/agents/${agent.id}/extensions`, headers: authHeaders() })).json()).toEqual([]);
+  expect((await app.inject({ url: `/api/agents/${agent.id}/system-mcp-catalog`, headers: authHeaders() })).json()).toEqual([]);
+  const mcp = await app.inject({
+    method: "POST", url: `/api/agents/${agent.id}/mcp-servers`, headers: authHeaders(),
+    payload: { name: "example", transport: "http", url: "https://example.com/mcp", headers: [], enabled: true, checkTimeoutSeconds: 30 }
+  });
+  expect(mcp.statusCode).toBe(201);
+});

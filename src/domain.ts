@@ -1,6 +1,6 @@
 import type { AgentModelPolicy } from "./agents/model-policy.js";
 
-export type Provider = "claude_code" | "codex" | "hermes";
+export type Provider = "claude_code" | "codex" | "hermes" | "deepseek_harness";
 export type AgentProvider = Provider;
 export type SessionStatus = "idle" | "running";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";

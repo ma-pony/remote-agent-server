@@ -188,7 +188,7 @@ export class SkillProjector {
 
   private skillsRoot(agent: SkillProjectionAgent, session: SkillProjectionSession): string {
     if (agent.provider === "claude_code") return join(session.workspacePath, ".claude", "skills");
-    if (agent.provider === "codex") return join(session.workspacePath, ".agents", "skills");
+    if (agent.provider === "codex" || agent.provider === "deepseek_harness") return join(session.workspacePath, ".agents", "skills");
     if (!Number.isSafeInteger(session.id) || session.id <= 0) throw new Error("invalid_skill_projection_session");
     return join(this.dataDir, "agents", String(agent.id), "provider-home", "hermes", "sessions", String(session.id), "skills");
   }

@@ -28,7 +28,7 @@ Choose a guide for your current task. For a first installation, complete one tas
 | Term | Meaning in this project |
 | --- | --- |
 | Agent | Execution configuration: provider, project environment, instructions, Skills, MCP, and model policy. |
-| Provider | Claude Code, Codex, or Hermes, which performs the task. |
+| Provider | Claude Code, Codex, Hermes, or DeepSeek Harness, which performs the task. |
 | Session | An agent conversation with its own workspace that can run multiple turns. |
 | Run | One input and its execution within a session. Queued and running are distinct states. |
 | Conversation | An external multi-turn business conversation that reuses one Session until it ends. |

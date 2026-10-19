@@ -147,7 +147,7 @@ export class ProviderMcpCatalog {
 
   list(agentId: number): ProviderMcpCatalogItem[] {
     const provider = this.agentProvider(agentId);
-    if (provider === "hermes") return [];
+    if (provider !== "codex" && provider !== "claude_code") return [];
     const installedNames = new Set((this.options.db.prepare(
       "SELECT name FROM agent_mcp_servers WHERE agent_id = ?"
     ).all(agentId) as Array<{ name: string }>).map(({ name }) => name));
@@ -159,7 +159,7 @@ export class ProviderMcpCatalog {
 
   install(agentId: number, id: string): AgentMcpServerDetail | undefined {
     const provider = this.agentProvider(agentId);
-    if (provider === "hermes") return undefined;
+    if (provider !== "codex" && provider !== "claude_code") return undefined;
     const source = this.discover(provider).find((item) => item.id === id);
     return source === undefined ? undefined : this.options.mcpManager.createServer(agentId, source.input);
   }

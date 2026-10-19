@@ -3,7 +3,7 @@ import type { HostUsageCapture } from "../agent-usage/capture/host-capture.js";
 import type { RelayRoute } from "../agent-usage/capture/http-relay.js";
 import { captureRuntimeEnvironment } from "../agent-usage/capture/runtime-config.js";
 import { constants } from "node:fs";
-import { access, cp, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
@@ -41,23 +41,26 @@ import type {
 } from "./agent-runtime.js";
 import { settleBestEffort } from "./bounded-operation.js";
 import { ProviderExtensionProjector } from "./provider-extension-projector.js";
+import { prepareDeepSeekSettings, writeDeepSeekPatch } from "./deepseek-harness-config.js";
 
 export const RUNTIME_RELEASE_RETRY_MS = 5_000;
 
 export const ACP_AGENT = {
   claude_code: "claude",
   codex: "codex",
-  hermes: "hermes"
+  hermes: "hermes",
+  deepseek_harness: "deepseek-harness"
 } as const;
 
 const ACP_COMMAND: Record<(typeof ACP_AGENT)[Provider], string> = {
   claude: "npx -y @agentclientprotocol/claude-agent-acp@^0.60.0",
   codex: "",
-  hermes: "hermes acp"
+  hermes: "hermes acp",
+  "deepseek-harness": "dsh --profile acp"
 };
 const CODEX_ACP_ENTRYPOINT = createRequire(import.meta.url).resolve("@agentclientprotocol/codex-acp");
 
-const providers = new Set<Provider>(["claude_code", "codex", "hermes"]);
+const providers = new Set<Provider>(["claude_code", "codex", "hermes", "deepseek_harness"]);
 type RuntimeTarget = {
   captureRoute?: RelayRoute;
   provider: Provider;
@@ -66,6 +69,8 @@ type RuntimeTarget = {
   providerSessionId: string | null;
   browserProfilePath: string;
   instructions: string;
+  workspacePath: string;
+  memory: string;
 };
 
 export class AgentRuntimeError extends Error {
@@ -129,7 +134,8 @@ const isRuntimeProviderEntry = (name: string): boolean => {
 const copyProviderHome = async (
   source: string,
   destination: string,
-  preserveExistingEntries: ReadonlySet<string> = new Set()
+  preserveExistingEntries: ReadonlySet<string> = new Set(),
+  onlyEntries?: ReadonlySet<string>
 ): Promise<void> => {
   await mkdir(destination, { recursive: true });
   let entries: string[];
@@ -141,6 +147,7 @@ const copyProviderHome = async (
   }
 
   await Promise.all(entries.map(async (entry) => {
+    if (onlyEntries !== undefined && !onlyEntries.has(entry)) return;
     if (isRuntimeProviderEntry(entry)) return;
     const sourcePath = join(source, entry);
     const destinationPath = join(destination, entry);
@@ -351,6 +358,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     const environment = [`REMOTE_AGENT_BROWSER_PROFILE=${shellQuote(target.browserProfilePath)}`];
     const capture = target.captureRoute ? captureRuntimeEnvironment(target.provider, target.captureRoute) : undefined;
     let projectedSkills: ProjectedSkill[] = [];
+    let command = acpCommand(target.provider);
     if (target.provider === "hermes") {
       const legacyHome = join(providerHome, "hermes");
       const home = join(legacyHome, "sessions", String(target.sessionId));
@@ -376,6 +384,24 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       await writeFile(join(home, "config.toml"), config === "" ? "" : `${config}\n`, { mode: 0o600 });
       if (capture) await rm(join(home, "auth.json"), { force: true });
       environment.push(`CODEX_HOME=${shellQuote(home)}`);
+    } else if (target.provider === "deepseek_harness") {
+      const home = join(providerHome, "deepseek-harness", "sessions", String(target.sessionId));
+      const hostHome = process.env.DSH_HOME ?? join(homedir(), ".dsh");
+      await this.prepareHome(home, async () => {
+        await mkdir(home, { recursive: true, mode: 0o700 });
+        await copyProviderHome(hostHome, home, undefined,
+          new Set([".credentials.yaml", ".env", "cordis.patch.yml"]));
+        const hostProfile = join(hostHome, "profiles", "acp");
+        if (await fileExists(join(hostProfile, "package.json"))) {
+          await cp(hostProfile, join(home, "profiles", "acp"), {
+            recursive: true, force: true, mode: constants.COPYFILE_FICLONE
+          });
+        }
+        await prepareDeepSeekSettings(hostHome, home);
+      }, false);
+      const patch = await writeDeepSeekPatch(home, target.workspacePath, systemPrompt(target));
+      environment.push(`DSH_HOME=${shellQuote(home)}`);
+      command += ` --patch ${shellQuote(patch)}`;
     } else {
       const home = join(providerHome, "claude");
       const hostHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
@@ -394,7 +420,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     }
     if (capture) environment.push(...Object.entries(capture.values).map(([key, value]) => `${key}=${shellQuote(value)}`));
     const unset = capture?.unset.map((key) => `-u ${key}`).join(" ") ?? "";
-    this.commands.set(agentName, `env ${unset ? `${unset} ` : ""}${environment.join(" ")} ${acpCommand(target.provider)}`);
+    this.commands.set(agentName, `env ${unset ? `${unset} ` : ""}${environment.join(" ")} ${command}`);
     return projectedSkills;
   }
 
@@ -444,7 +470,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     });
   }
 
-  private async prepareHome(destination: string, prepare: () => Promise<void>): Promise<void> {
+  private async prepareHome(destination: string, prepare: () => Promise<void>, reusePrepared = true): Promise<void> {
     let preparation = this.providerHomePreparations.get(destination);
     if (preparation === undefined) {
       preparation = prepare();
@@ -455,7 +481,13 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
         }
       });
     }
-    await preparation;
+    try {
+      await preparation;
+    } finally {
+      if (!reusePrepared && this.providerHomePreparations.get(destination) === preparation) {
+        this.providerHomePreparations.delete(destination);
+      }
+    }
   }
 }
 
@@ -570,7 +602,7 @@ const mapResult = (result: AcpRuntimeTurnResult): RuntimeTurnResult => {
   return { status: "failed", code: result.error.code, message: result.error.message };
 };
 
-const systemPrompt = (input: RuntimeSessionInput): string => {
+const systemPrompt = (input: Pick<RuntimeSessionInput, "workspacePath" | "browserProfilePath" | "instructions" | "memory">): string => {
   const sections = [
     `Workspace root: ${input.workspacePath}`,
     `Browser profile: ${input.browserProfilePath}`
@@ -660,7 +692,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
       sessionId: input.sessionId,
       providerSessionId: input.providerSessionId,
       browserProfilePath: input.browserProfilePath,
-      instructions: input.instructions
+      instructions: input.instructions,
+      workspacePath: input.workspacePath,
+      memory: input.memory
     });
     let projectedSkills: ProjectedSkill[];
     try { projectedSkills = await registry.prepare(agent); }
@@ -884,10 +918,12 @@ export class AcpxAgentRuntime implements AgentRuntime {
     this.assertRunning();
     const sessionId = 0;
     assertTarget(input.provider, input.agentId, sessionId);
+    await mkdir(this.config.dataDir, { recursive: true });
+    const probeDataDir = await mkdtemp(join(this.config.dataDir, "model-catalog-"));
     const registry = new RemoteAgentRegistry(
-      this.config.dataDir,
+      probeDataDir,
       this.skillManager,
-      this.providerHomePreparations,
+      new Map(),
       this.extensionProjector
     );
     const probeAgent = registry.register({
@@ -895,13 +931,15 @@ export class AcpxAgentRuntime implements AgentRuntime {
       agentId: input.agentId,
       sessionId,
       providerSessionId: null,
-      browserProfilePath: join(this.config.dataDir, "agents", String(input.agentId), "model-catalog-browser"),
-      instructions: input.instructions
+      browserProfilePath: join(probeDataDir, "browser"),
+      instructions: input.instructions,
+      workspacePath: input.workspacePath,
+      memory: ""
     });
-    await registry.prepare(probeAgent);
-    const runtime = this.createRuntime(registry);
+    const runtime = this.createRuntime(registry, undefined, [], probeDataDir);
     let handle: AcpRuntimeHandle | undefined;
     try {
+      await registry.prepare(probeAgent);
       handle = await runtime.ensureSession({
         sessionKey: `remote-agent:model-catalog:${input.agentId}`,
         agent: probeAgent,
@@ -920,12 +958,12 @@ export class AcpxAgentRuntime implements AgentRuntime {
         if (handle !== undefined) {
           await runtime.close({
             handle,
-            reason: "model_catalog_loaded",
-            discardPersistentState: true
+            reason: "model_catalog_loaded"
           });
         }
       } finally {
         registry.clear();
+        await rm(probeDataDir, { recursive: true, force: true });
       }
     }
   }
@@ -946,7 +984,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
       sessionId,
       providerSessionId: null,
       browserProfilePath: join(this.config.dataDir, "agents", String(agentId), "doctor-browser"),
-      instructions: ""
+      instructions: "",
+      workspacePath: this.config.dataDir,
+      memory: ""
     });
     await registry.prepare(probeAgent);
     const runtime = this.createRuntime(registry, probeAgent);
@@ -1143,13 +1183,14 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private createRuntime(
     agentRegistry: AcpAgentRegistry,
     probeAgent?: string,
-    mcpServers: RuntimeSessionInput["mcpServers"] = []
+    mcpServers: RuntimeSessionInput["mcpServers"] = [],
+    dataDir = this.config.dataDir
   ): AcpRuntime {
     const providerMcpServers = mcpServers
       .map(({ startupTimeoutSeconds: _startupTimeoutSeconds, usageIdentity: _usageIdentity, ...server }) => server);
     const options: AcpRuntimeOptions = {
       cwd: this.config.projectEnvironmentsRoot,
-      sessionStore: createRuntimeStore({ stateDir: join(this.config.dataDir, "acpx") }),
+      sessionStore: createRuntimeStore({ stateDir: join(dataDir, "acpx") }),
       agentRegistry,
       permissionMode: "approve-all",
       nonInteractivePermissions: "fail",
