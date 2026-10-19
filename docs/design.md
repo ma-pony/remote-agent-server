@@ -270,6 +270,8 @@ acpx 通过 ACP `session/resume` 续接已持久化的 DSH 会话。模型选择
 
 模型目录探测使用独立临时 Provider Home 和 acpx 存储，不创建业务 Session。探测结束后释放 ACP 连接并删除临时目录，不要求 Provider 实现 `session/close`，也不触碰业务会话历史。
 
+Hermes 通过 Session Home 内生成的 ACP 入口启动，复用已安装 CLI 的 Python 解释器，不修改宿主安装。适配层只包裹本轮 `run_conversation`，在原生 ACP 完成历史保存及运行状态释放后，将结构化 `failed: true` 或被原生层吞掉的执行异常转成 ACP 请求错误，沿现有流程落为 Run／Task 失败。取消优先保留，下一轮重新判断；不匹配回复文本，也不将重试后成功的请求判为失败。
+
 Codex ACP `2.2.2` 复用上游的 MCP 启动任务、会话关闭清理和线程级分页查询，仅保留平台的就绪阻断策略。新建、加载和恢复 Provider Session 时，对已选 MCP（包括 Codex 配置提供的同名项）查询当前线程的 `runtimeStatus`，全部为 `connected` 才允许 prompt 启动模型请求；缓存的 `serverInfo` 或提前到达的启动通知不代表连接就绪。明确的 `failed`、`disabled`、`authenticationRequired` 立即失败；暂态 `cancelled` 等未就绪状态继续等待。即使状态查询无响应，启动等待也在 30 秒内结束并阻断 prompt；底层未决 RPC 随 Runtime 关闭 ACP/app-server 进程释放。结果在 Provider Session 关闭前保留，后续 prompt 不能绕过失败；重新打开或 app-server 自动重启恢复后重新检查。取消中的 prompt 不启动模型请求，关闭会话会中止等待并清理定时器。未选择 MCP 时不等待。
 
 Git 来源的稳定身份来自配置的 URL、ref 和子目录；Skill 身份还包含插件标识和包内路径。刷新操作在进程内串行，使用有截止时间、可取消并回收进程树的 Git 命令。发布前验证路径、文件类型和内容大小，来源索引原子替换，失败保留上一可用版本。来源仓库与 marketplace 引用的插件仓库分别记录实际 commit，外部插件未指定 ref 时跟随自身 HEAD。

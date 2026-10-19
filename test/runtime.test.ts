@@ -330,7 +330,7 @@ describe("AcpxAgentRuntime", () => {
   it.each([
     ["claude_code", "npx -y @agentclientprotocol/claude-agent-acp@^0.60.0"],
     ["codex", "codex-acp/dist/index.js"],
-    ["hermes", "hermes acp"],
+    ["hermes", "remote-agent-acp.py"],
     ["deepseek_harness", "dsh --profile acp"]
   ] as const)("固定 %s Provider 命令并安全转义路径", async (provider, providerCommand) => {
     const root = makeRoot();

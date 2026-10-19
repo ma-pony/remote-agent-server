@@ -179,6 +179,8 @@ sudo -u remote-agent -H bash -lc 'codex login'
 
 选择 Claude Code 时，把最后一条命令换为 `claude auth login`。选择 Hermes 时，以服务用户执行 `hermes model`，按官方快速开始完成模型配置；服务随后会把静态配置复制到 Agent 的独立 Provider Home。不要使用管理员自己的 home，也不要把模型 token 写入 `.env.example` 或提交的文件。
 
+Hermes 需使用原生 Python CLI 入口，且 `hermes` 命令可从服务 PATH 找到。服务按该入口的 shebang 使用同一 Python 环境，在 Session Home 内生成 ACP 适配文件；不修改全局安装，不额外安装 Python 包。升级后的新连接会正确将 Hermes 的明确执行失败标记为失败。
+
 选择 DeepSeek Harness 时，先使用 Node **22.19+ 的 22.x**，然后以服务用户安装固定版本：
 
 ```bash

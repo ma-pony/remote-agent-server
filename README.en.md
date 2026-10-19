@@ -222,6 +222,8 @@ hermes --version
 
 Authenticate and configure models only for the providers you intend to use, under the operating-system user that runs the service.
 
+Use the native Python CLI installation for Hermes. A small ACP adapter in the Session Home maps Hermes' explicit execution failures to failed Runs and Tasks. Cancellation remains cancellation, and ordinary reply text does not determine status.
+
 At startup, the server reads the login-shell PATH and merges it with the current Node directory and process PATH. Each agent has its own Provider Home. The server prepares baseline configuration, authentication, and model information from the service user's Provider Home while excluding session history, logs, and temporary runtime data, including Codex's `app-server-daemon` and `app-server-control` directories. System plugins, hooks, and global MCP from Codex and Claude Code are optional configuration sources; agents never inherit them implicitly.
 
 The Codex ACP adapter is pinned to `2.2.2`, with Codex CLI `0.160.1` in the lockfile. Default `agent` mode allows ordinary commands to access the network inside the `workspace-write` sandbox. Every turn explicitly sends this network policy; `sandbox_workspace_write.network_access` in the host's `config.toml` does not override it. Upstream's default `auto_review` approval mode is retained. acpx's `approve-all` only approves permission requests forwarded to the client and does not bypass Codex automatic review; see the [security boundary](#security-boundary).

@@ -222,6 +222,8 @@ hermes --version
 
 只需选择实际使用的 Provider，在运行服务的系统用户下完成认证和模型配置。
 
+Hermes 使用原生 Python CLI 安装。服务在 Session Home 内加载轻量 ACP 适配，将 Hermes 明确上报的执行失败标记为 Run／Task 失败；取消仍标记为取消，普通回复文本不参与状态判断。
+
 服务启动时读取登录 Shell 的 PATH，并合并当前 Node 目录和进程 PATH。每个 Agent 使用独立的 Provider Home。服务会从运行用户的 Provider Home 准备基础配置、认证与模型信息，不复制历史会话、日志和临时运行数据，包括 Codex 的 `app-server-daemon` 和 `app-server-control` 目录。Codex 和 Claude Code 的系统插件、Hook 与全局 MCP 只作为可选配置来源，不会被 Agent 隐式继承。
 
 Codex ACP adapter 固定为 `2.2.2`，锁文件中的配套 Codex CLI 为 `0.160.1`。默认 `agent` 模式允许普通命令在 `workspace-write` 沙箱中联网，每轮显式下发网络策略，主机 `config.toml` 的 `sandbox_workspace_write.network_access` 不会覆盖它。保留上游默认的 `auto_review` 审批；acpx 的 `approve-all` 只自动批准转交给客户端的权限请求，不绕过 Codex 自动审批，详见[安全边界](#安全边界)。

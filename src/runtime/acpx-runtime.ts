@@ -42,6 +42,7 @@ import type {
 import { settleBestEffort } from "./bounded-operation.js";
 import { ProviderExtensionProjector } from "./provider-extension-projector.js";
 import { prepareDeepSeekSettings, writeDeepSeekPatch } from "./deepseek-harness-config.js";
+import { prepareHermesAcp } from "./hermes-acp.js";
 
 export const RUNTIME_RELEASE_RETRY_MS = 5_000;
 
@@ -55,7 +56,7 @@ export const ACP_AGENT = {
 const ACP_COMMAND: Record<(typeof ACP_AGENT)[Provider], string> = {
   claude: "npx -y @agentclientprotocol/claude-agent-acp@^0.60.0",
   codex: "",
-  hermes: "hermes acp",
+  hermes: "",
   "deepseek-harness": "dsh --profile acp"
 };
 const CODEX_ACP_ENTRYPOINT = createRequire(import.meta.url).resolve("@agentclientprotocol/codex-acp");
@@ -365,6 +366,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const hostHome = process.env.HERMES_HOME ?? join(homedir(), ".hermes");
       await this.prepareHermesHome(hostHome, legacyHome, home, target.providerSessionId);
       environment.push(`HERMES_HOME=${shellQuote(home)}`);
+      command = await prepareHermesAcp(home);
     } else if (target.provider === "codex") {
       const agentHome = join(providerHome, "codex");
       const home = join(agentHome, "sessions", String(target.sessionId));
