@@ -22,6 +22,7 @@ const collectionSchema = z.object({ rebuild: z.boolean().optional() }).strict();
 const errorStatuses: Partial<Record<UsageErrorCode, number>> = {
   usage_source_conflict: 409, usage_mapping_conflict: 409, usage_mapping_revoked: 409,
   usage_subject_deleted: 409, usage_subject_mismatch: 409, usage_binding_stale: 409,
+  usage_details_expired: 410,
   usage_collection_pending: 409, usage_maintenance_conflict: 409, usage_epoch_mismatch: 400,
   usage_mapping_mismatch: 400, usage_source_path_denied: 400, usage_source_too_large: 400,
   usage_source_not_file: 400, usage_source_unsupported: 400, usage_source_changed: 409,

@@ -82,7 +82,7 @@
 
 能力排名按固定 UTC 自然日和 Session 维护唯一一份增量汇总，包含输入计数、去重 coverage 及对话内容计数。已完成的日期直接读取可索引的汇总列；排序先读取所需指标并分页，再读取当页能力的完整指标与估算来源。迟到数据、修订或删除仅使受影响分区失效，后台重建期间实时读取这些分区，避免使用旧聚合。跨天调用去重及 P50/P95 继续按原始调用计算，不相加每日去重数或百分位数。管理查询的 `from` 向 UTC 日初取整，非日界线的 `to` 向下一日开始取整，已对齐的 `to` 保持排他上界；响应返回实际范围。管理页面不再提供时区筛选，API 不再接受或返回 `timezone`。
 
-`GET /api/usage/status` 使用相同的管理鉴权及主体、日期、Runtime 筛选，返回 `revision`、`sourceCounts`、失败／采集计数和 `contentBackfill`，不执行模型总量或排名查询。`revision` 是不透明的统计变更标记，不能解释为新增 Token 数；普通运行 events 和采集 checkpoint 不改变它。另返回不受筛选影响的 `recovery`、`eventRetention`：`accountingProjectionPending`、`rankingInputProjectionPending`、`dailyRankingProjectionPending` 表示对应统计投影的回填尚未完成；`eventPayloadCompactionPending`、`exposureIdentityCompactionPending`、`rankingInputMetadataCompactionPending` 表示旧副本清理尚未到达升级时的主键上界。`compactedEventPayloads`、`compactedExposureIdentities`、`compactedRankingInputMetadata`、`reclaimedEstimateProfiles`、`compactedRevokedSources` 是本进程已处理数，重启后清零，不表示数据库剩余总量。请求输入展示 JSON 的清理保留原始曝光与计数，查询按曝光主键恢复展示元数据。原事件清理的 `checkedRuns`、`retiredEvents`、跳过原因与耗时仍按进程记录。后台恢复时页面轮询轻量状态，采集完成后刷新统计，隐藏页面暂停轮询。
+`GET /api/usage/status` 使用相同的管理鉴权及主体、日期、Runtime 筛选，返回 `revision`、`sourceCounts`、失败／采集计数和 `contentBackfill`，不执行模型总量或排名查询。`revision` 是不透明的统计变更标记，不能解释为新增 Token 数；普通运行 events 和采集 checkpoint 不改变它。另返回不受筛选影响的 `recovery`、`eventRetention`、`detailRetention`：`accountingProjectionPending`、`rankingInputProjectionPending`、`dailyRankingProjectionPending` 表示对应统计投影的回填尚未完成；`eventPayloadCompactionPending`、`exposureIdentityCompactionPending`、`rankingInputMetadataCompactionPending` 表示旧副本清理尚未到达升级时的主键上界。`compactedEventPayloads`、`compactedExposureIdentities`、`compactedRankingInputMetadata`、`reclaimedEstimateProfiles`、`compactedRevokedSources` 是本进程已处理数，重启后清零，不表示数据库剩余总量。请求输入展示 JSON 的清理保留原始曝光与计数，查询按曝光主键恢复展示元数据。原事件清理的 `checkedRuns`、`retiredEvents`、跳过原因与耗时仍按进程记录。后台恢复时页面轮询轻量状态，采集完成后刷新统计，隐藏页面暂停轮询。
 
 - `usage` 是当前筛选范围内可计量的已知部分；同时看 `completeness`、缺失请求数与来源状态。它不证明未观察到的调用为零。
 - `sourceCounts` 包含保留的历史来源状态，`sourceRecoveryCounts` 只统计仍有 active 映射的来源。`collectionFailureTotal` 包含清理后的缺口，`retryableCollectionFailureTotal` 只统计未清理会话的失败；这些数量覆盖全部分页。失败条目的 `retryable` 标识能否自动补采，页面不会将已清理的缺口显示为等待重试，也不会仅因这些缺口继续轮询。
@@ -91,6 +91,8 @@
 - 首次／重复根据 Session 和 Provider epoch 的完整已知历史分类；选择另一日期不会把重复输入重新算作首次。采集前历史不完整时，首次状态保留未知。
 - 不同 Server 的同名 Tool 分开。模型输入证据与包装进程的执行 ID 无法关联时分别展示，不能只凭内容或时间认定为同一次调用。
 - 分词结果是按配置模型词表进行的文本估算，图片等不支持的内容和不完整上下文保留缺口。查看调用详情可以检查出现位置与计数；新账本不保留正文。
+
+首次／重复结果排名的排序值与展示值一致：有上下文输入但没有该类结果时为已知零；存在该类结果但全部计数未知时仍为未知。明细、请求投影、日汇总和归档混合查询使用相同规则，未知值排在已知值之后，相同值按能力 ID 和完整身份稳定排序。统计数值与首次／重复／未知历史的分类不变。
 
 ## 配置多模型词表
 
@@ -116,6 +118,16 @@ USAGE_TOKENIZERS='[{"id":"qwen25-05b","models":["Qwen/Qwen2.5-0.5B"],"tokenizerP
 
 Claude 等未配置兼容本地词表的模型继续显示已报告 usage，工具级 token 使用兜底估算并说明原因。官方远程 token-count API 尚未接入；当前不会把正文再次发往外部计数服务。不能使用旧 Claude 或其他模型词表冒充当前模型的准确计数。
 
+## Usage 明细保留
+
+`USAGE_DETAIL_RETENTION_DAYS` 默认为 `7`，`0` 暂停。仅处理已完成存储清理的 Session；全部 Run 结束时间和最新上下文／对话明细时间都须达到截止时间，且 Session 空闲、无维护和活动 Run、无 active 来源映射。计量回填有缺失、错误、待办或落后，以及对话空计数、请求总量／每日汇总未就绪时，保留明细等待下次检查。因此 7 天是最短保留期，未清理存储的长会话会继续保留明细；现有 Session 保留期不变。
+
+处理先原子冻结 Session 的 UTC 日汇总，再分批移除 `agent_usage_exposures`、`agent_usage_context_inputs`、`agent_usage_conversation_content`。每批最多 250 行，失败回滚该批，重启从剩余行继续；整轮结束后间隔 5 分钟复查。保留 Provider 账本、请求总量、调用与 payload 计数、词表来源、上下文调用关联及每日排名。原来的首次／重复、coverage、跨日调用去重、P50/P95、未知与零值口径保持不变；新会话尚未回填时，也会同时查询冻结历史与当前明细。
+
+证据 API 沿用管理鉴权：列表返回仍可用的行，并以 `detailsExpired` 表明当前主体、日期、Runtime 和能力范围包含已过期证据；分页只覆盖可用明细。旧 context/content 详情链接返回 `410 usage_details_expired`，无法识别的链接返回 404。调用详情继续返回调用计数，附 `detailsExpired: true` 和空暴露列表，界面解释为过期，不解释为从未存在。归档后不再登记或提交该 Session 的回放、词表重算或迟到计量。保留的日汇总不能支持日内精确切分；管理统计继续使用 UTC 自然日，内部非日对齐查询涉及归档历史时明确返回过期错误。
+
+`GET /api/usage/status` 另提供全局进程内 `detailRetention`（`enabled`、`retentionDays`、`checkedSessions`、`retiredSessions`、`retiredRows`、`lastAction`、耗时、错误时间与 `skippedByReason`）和筛选范围内 `detailsExpired`。进程计数重启清零；持久化归档进度不会丢失。暂停不会恢复已删明细或解冻统计；需要明细时应在归档前调整配置并备份。此策略不删除 Session/Run/Task/Conversation 元数据或最终回复，不自动 VACUUM。
+
 ## 历史兜底估算与重算
 
 原始事件默认至少保留至 Run 结束后 7 天，由 `USAGE_EVENT_RETENTION_DAYS` 配置，`0` 关闭。后台每步按主键只检查一个 Run，连续批次直接复查同一 Run；扫到末尾后休息 5 分钟，再检查到期或恢复空闲的 Run。后台只在 Session 空闲、没有排队／执行中的 Run 或维护操作，且该 Run 内容计量与词表补算完成后删除到期的 `message`／`tool` 正文。等待词表、计量失败、空计数、回填缺失或游标落后时保留原文与进度，分别在跳过原因中显示 `backfill_incomplete` 或 `counting_incomplete`。已知零和明确不支持计数的媒体不阻止清理，未知计数不补零。回填游标用于检查清理资格，删除范围仍由原始事件和清理游标决定；清理独立调度，不等待其他 Run 或统计汇总回填。每批最多 100 条、4 MiB，单条大事件可独占一批。用户输入、最终回复、状态／错误事件、Provider 用量、能力排名和会话关联继续保留；这与 Workspace／Provider Home 的存储清理独立。
@@ -126,7 +138,7 @@ Claude 等未配置兼容本地词表的模型继续显示已报告 usage，工�
 
 词表按需获取，无需重启才能从等待状态恢复。Runtime 的等待记录使用原 Run、事件身份持久化重试进度；获取成功后自动补算，替换原记录的计数和计量来源，不新增调用、不改变 Provider 上报用量。运行中的 Run 可以提交后台补算，模型执行不等待下载。重试有 60 秒间隔，不反复扫描失败任务；页面超过一分钟后改为每 30 秒检查轻量状态，数据变化后再刷新统计，等待不再显示成加载失败。
 
-启动时只为新获得词表的模型重新安排已有 Runtime 回补任务，按 Run 保存已处理模型与游标。原始 Run 输入、Session 指令快照和保留的 message/tool 事件可以重算；历史 MCP 镜像仅在与包装器调用唯一匹配时升级原计数。完成事件没有正文时，使用最后一次进度事件的计量元数据；已成功的词表计数不被等待状态覆盖，原文不会复制到用量表。重算按事件和字节分批，先在事务外计量，再把一批计数与进度游标放在同一个短事务中提交，避免逐事件提交的写放大。重启沿用已提交游标，不重新扫描已完成批次，也不重复增加使用次数。
+启动时只为新获得词表的模型重新安排未归档 Session 的已有 Runtime 回补任务，按 Run 保存已处理模型与游标。原始 Run 输入、Session 指令快照和保留的 message/tool 事件可以重算；历史 MCP 镜像仅在与包装器调用唯一匹配时升级原计数。完成事件没有正文时，使用最后一次进度事件的计量元数据；已成功的词表计数不被等待状态覆盖，原文不会复制到用量表。重算按事件和字节分批，先在事务外计量，再把一批计数与进度游标放在同一个短事务中提交，避免逐事件提交的写放大。重启沿用已提交游标，不重新扫描已完成批次，也不重复增加使用次数。
 
 每批最多遍历 100 条事件，正文预算 4 MiB；单条最多 16 MiB 的既有采集边界保持不变。每处理一条后检查 25 毫秒软时间预算；后台调度在批次之间休息本轮耗时的 3 倍，最少 50 毫秒、最多 1 秒。回填发现没有待办时至少间隔 5 秒复查，整个恢复队列空闲时每 30 秒检查；原始事件清理由独立清理调度推进，后续新补算任务可能延后至下一轮被发现。单条大记录、文件采集和 SQLite 提交仍可能超过预算，这不是 CPU 硬配额。停止后台恢复会取消未完成计量，未提交批次下次从原游标继续。Worker 重建时先校验并加载已有磁盘词表，可立即计量，不会因空闲回收再次进入等待下载状态。
 
@@ -202,7 +214,7 @@ HTTP 观察副本的请求／响应各限 2 MiB，解压后各限 4 MiB，单 SS
 
    登记返回 201，相同配置重试返回 200，配置冲突返回 409。collect 返回 202 和持久化 collection ID；它只代表已接纳，不代表已完成。查看 sources 中该来源的 `status`，失败时显示稳定 `errorCode`；重复 collect 不会重复累加。
 
-   管理接口按类型化错误码映射已知的 400／404／409 错误。数据库等未预期内部异常返回 500 与通用 `usage_source_failed`，不返回原始异常内容，也不把内部故障当作无效输入。
+   管理接口按类型化错误码映射已知的 400／404／409／410 错误。向明细已归档的 Session 登记来源，或对只关联已归档 Session 的来源发起 collect，返回 410 `usage_details_expired`。共享来源仍可采集其他未归档 Session，归档映射的记录会被拒收。数据库等未预期内部异常返回 500 与通用 `usage_source_failed`，不返回原始异常内容，也不把内部故障当作无效输入。
 
    `GET /api/usage/sources` 支持可选 `agentId`、`sessionId`，同时提供时必须匹配同一映射。界面的来源列表与轮询使用当前 Agent／Session 筛选；返回来源时仍保留该来源的完整映射。来源状态不按日期裁剪。
 
@@ -213,7 +225,7 @@ HTTP 观察副本的请求／响应各限 2 MiB，解压后各限 4 MiB，单 SS
      "$USAGE_BASE_URL/api/usage/sources/$USAGE_SOURCE_ID/collect"
    ```
 
-   这只重建指定来源的估算，不重复累计模型上报用量，也不会自动重放全部历史来源。返回 202 后按来源状态核对 `completed`；单次采集超时会保留已提交游标，可用普通 collect 继续。源文件已被清理、轮换或旧前缀改写时不能重建，失败原因会保存在该来源的 `errorCode`。
+   这只重建未归档 Session 的指定来源估算，不重复累计模型上报用量，也不会自动重放全部历史来源。返回 202 后按来源状态核对 `completed`；单次采集超时会保留已提交游标，可用普通 collect 继续。源文件已被清理、轮换或旧前缀改写时不能重建，失败原因会保存在该来源的 `errorCode`。
 
 4. 完成后打开 `/usage?sessionId=1&range=all`（替换 Session ID），或查询：
 
@@ -261,6 +273,8 @@ Reset／存储 cleanup 先停止产生记录，冻结来源并尝试提交尾部
 快照文件上限 16 MiB；JSONL 日志流式读取，不设该整文件上限，单行最多 16 MiB。每上下文最多处理 2,048 块，超出块数保留 partial；已采集的每块文本完整计数，不另设分词字节上限。采集单次限时 30 秒，同来源串行；读取失败不影响已完成的业务结果；存储清理前尽力采集，失败或超时记录缺口后继续删除，旧来源映射转为 retained 并退出自动重试。Reset 仍要求采集屏障完成。备份现有 SQLite 即包含账本；已导入正文不进入新账本，源文件仍由操作者管理。
 
 ## 性能与恢复边界
+
+服务启动时将上次进程遗留的来源 `collecting` 状态改为 `failed / usage_collection_interrupted`，保留已提交 checkpoint 和采集 ID。有 active 映射的来源继续由恢复队列续采；只有 retained 映射的来源不自动重试，也不会再因遗留状态永久阻止明细过期。真实进行中的采集仍会阻止归档，已提交的用量不重复累计。
 
 能力排名读取按请求、能力、块类型、证据和估算配置合并的输入计数，保留原始暴露次数、已知／缺失数、字节数和全／单 Runtime 首次分类。上下文修订、迟到首项移动同时修复受影响投影；原始证据仍可下钻。最新优先、每批最多 5 个旧上下文后台回填，未完成的筛选范围继续使用明细查询。模型用量按 Session／epoch 和 Runtime 视角保存压缩的已对账事实，已完成 epoch 不再反复读取原账本或建立包含关系；脏 epoch 仍从账本核对，结果只有在修订号未变化时才提交。查询继续保留跨来源去重、累计父范围、跨日期区间和未归位统计，日期分配在对账后执行，成本仍随所选计量事实规模增长。排序／翻页不重新加载汇总与趋势。
 

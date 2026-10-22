@@ -3,6 +3,7 @@ import { setImmediate } from "node:timers/promises";
 import type { UsageFilter } from "./core/types.js";
 import { UsageError } from "./core/errors.js";
 import type { PreparedRuntimeContent } from "./runtime-content.js";
+import { ensureDetailArchives, unarchivedDetails } from "./storage/detail-archives.js";
 
 export type RuntimeBackfillStatus = { status: "pending" | "running" | "completed" | "failed"; processedEvents: number; errorCode: string | null };
 type EventMetadata = { id: number; seq: number; type: string; bytes: number; created_at: string };
@@ -19,6 +20,7 @@ export class RuntimeContentBackfill {
       prepareRun(runId: number, signal?: AbortSignal): Promise<PreparedRuntimeContent | undefined>;
       prepareMessage(runId: number, content: Record<string, unknown>, event: { sequence: number; occurredAt: string }, signal?: AbortSignal): Promise<PreparedRuntimeContent | undefined>;
     }, private readonly knownModels: string[] = []) {
+    ensureDetailArchives(db);
     db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_runtime_backfills (
       namespace TEXT NOT NULL, run_id INTEGER NOT NULL, session_id TEXT NOT NULL,
       last_seq INTEGER NOT NULL DEFAULT 0, processed_events INTEGER NOT NULL DEFAULT 0,
@@ -41,12 +43,13 @@ export class RuntimeContentBackfill {
     // Tool-only checkpoints predate conversation content. Replay them once; both sinks are idempotent.
     if (conversation) db.prepare(`UPDATE agent_usage_runtime_backfills SET content_version=2,
       last_seq=0,processed_events=0,status='pending',error_code=NULL WHERE namespace=? AND content_version<2
+      AND ${unarchivedDetails("agent_usage_runtime_backfills")}
       AND EXISTS (SELECT 1 FROM runs WHERE id=agent_usage_runtime_backfills.run_id AND events_pruned_through_seq=0)`).run(namespace);
     // Replay retained content once for models that now have a vocabulary. Other history is untouched.
     if (knownModels.length) db.prepare(`UPDATE agent_usage_runtime_backfills SET content_version=3,
       last_seq=0,processed_events=0,status='pending',error_code=NULL,retry_after=0,
       tokenizer_model=(SELECT resolved_model FROM runs WHERE id=agent_usage_runtime_backfills.run_id)
-      WHERE namespace=? AND tokenizer_model IS NULL AND EXISTS (
+      WHERE namespace=? AND tokenizer_model IS NULL AND ${unarchivedDetails("agent_usage_runtime_backfills")} AND EXISTS (
         SELECT 1 FROM runs WHERE id=agent_usage_runtime_backfills.run_id
           AND events_pruned_through_seq=0 AND resolved_model IN (SELECT value FROM json_each(?)))`).run(namespace, JSON.stringify(knownModels));
   }
@@ -120,7 +123,9 @@ export class RuntimeContentBackfill {
     // Commit projections and their cursor together. No tokenization or other await holds the lock.
     const committed = this.db.transaction(() => {
       // Older versions may have retired incomplete jobs. Never revive their missing evidence.
-      if (!this.db.prepare("SELECT 1 FROM runs WHERE id=? AND events_pruned_through_seq=0").get(job.run_id)) return false;
+      if (!this.db.prepare(`SELECT 1 FROM runs r WHERE id=? AND events_pruned_through_seq=0
+        AND NOT EXISTS (SELECT 1 FROM agent_usage_detail_archives a WHERE a.namespace=? AND a.session_id=CAST(r.session_id AS TEXT))`)
+        .get(job.run_id,this.namespace)) return false;
       let sequence = job.last_seq, processed = 0;
       try { prompt?.commit(); } catch { errorCode ??= "usage_runtime_prompt_failed"; }
       for (const item of batch) {
@@ -151,12 +156,13 @@ export class RuntimeContentBackfill {
     this.db.prepare(`INSERT INTO agent_usage_runtime_backfills
       (namespace,run_id,session_id,content_version,status,error_code,retry_after,tokenizer_model)
       SELECT ?,id,CAST(session_id AS TEXT),3,'pending',?,?,
-        CASE WHEN resolved_model IN (SELECT value FROM json_each(?)) THEN resolved_model ELSE NULL END FROM runs
+        CASE WHEN resolved_model IN (SELECT value FROM json_each(?)) THEN resolved_model ELSE NULL END FROM runs r
         WHERE id=? AND events_pruned_through_seq=0
+          AND NOT EXISTS (SELECT 1 FROM agent_usage_detail_archives a WHERE a.namespace=? AND a.session_id=CAST(r.session_id AS TEXT))
       ON CONFLICT(namespace,run_id) DO UPDATE SET status='pending',
         error_code=COALESCE(agent_usage_runtime_backfills.error_code,excluded.error_code),
         retry_after=MIN(agent_usage_runtime_backfills.retry_after,excluded.retry_after)`)
-      .run(this.namespace, errorCode, Date.now() + 1000, JSON.stringify(this.knownModels), runId);
+      .run(this.namespace, errorCode, Date.now() + 1000, JSON.stringify(this.knownModels), runId, this.namespace);
   }
 
   status(filter: UsageFilter = {}): RuntimeBackfillStatus {
@@ -185,7 +191,11 @@ export class RuntimeContentBackfill {
       WHERE u.namespace = ? AND u.state != 'active' AND ((u.kind = 'session' AND u.subject_id = CAST(s.id AS TEXT))
         OR (u.kind = 'agent' AND u.subject_id = CAST(a.id AS TEXT))))`,
     `NOT EXISTS (SELECT 1 FROM agent_usage_runtime_backfill_deleted_sessions d WHERE d.namespace = ? AND d.session_id = CAST(s.id AS TEXT))`];
-    if (!includeExpired) conditions.push("r.events_pruned_through_seq=0");
+    if (!includeExpired) {
+      conditions.push("r.events_pruned_through_seq=0",
+        "NOT EXISTS (SELECT 1 FROM agent_usage_detail_archives a WHERE a.namespace=? AND a.session_id=CAST(s.id AS TEXT))");
+      params.push(this.namespace);
+    }
     for (const [field, column] of [["sessionId", "s.id"], ["agentId", "a.id"], ["runtimeKind", "a.provider"]] as const) {
       if (filter[field] !== undefined) { conditions.push(`${column} = ?`); params.push(filter[field]); }
     }

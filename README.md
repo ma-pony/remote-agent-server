@@ -407,6 +407,10 @@ Provider 系统全局 MCP 使用独立流程：在 Agent 的 **MCP** 页面选�
 
 页面显示统计时间，可手动刷新。后台分批补齐保留的历史证据并支持重启续采；缺失值保留为未知。默认在 Run 结束至少 7 天后，且 Session 空闲、内容计量与词表补算完成时，清理原始 message／tool 事件正文；最终回复和统计保留。该保留期独立于工作区清理，可通过 `USAGE_EVENT_RETENTION_DAYS` 调整。
 
+usage 明细默认至少保留 7 天，仅对**已完成存储清理**的 Session 生效：全部 Run 已结束、最近用量明细也已满 7 天，且计量与每日汇总准备完成后，冻结历史统计并分批移除输入暴露、请求输入汇总和对话计量明细。实际调用、Token 统计与最终回复保留；详情显示过期状态。`USAGE_DETAIL_RETENTION_DAYS=0` 可暂停此项处理，不改变现有 Session 保留期。
+
+重启后保留已提交采集进度，已清理会话的遗留采集状态不会永久阻止明细过期。首次／重复结果排名在回填、归档前后采用一致的排序分页规则，区分已知零与未知值。
+
 采集来源、报表口径、历史重算、API 和保留策略见[用量指南](docs/agent-usage.md)；升级、备份和数据库空间维护见[部署文档](docs/deployment.md#用量数据保留与维护)。
 
 ## 其他系统如何接入
@@ -868,6 +872,7 @@ curl --fail-with-body \
 | `DATABASE_PATH` | 否 | `/srv/remote-agent/data/remote-agent.sqlite3` | SQLite 数据库路径。 |
 | `USAGE_TOKENIZERS` | 否 | `[]` | 按完整模型名匹配的本地词表覆盖与 SHA-256；内置模型按需下载，失败自动重试，未知模型使用文本兜底，见[多模型词表](docs/agent-usage.md#配置多模型词表)。 |
 | `USAGE_EVENT_RETENTION_DAYS` | 否 | `7` | 已完成 Run 原始消息／工具事件的最短保留天数；到期、会话空闲且内容计量与词表补算完成后分批清理，`0` 关闭。最终回复和统计继续保留。 |
+| `USAGE_DETAIL_RETENTION_DAYS` | 否 | `7` | 已完成存储清理的 Session 的 usage 明细最短保留天数；全部 Run 及明细满期、统计准备完成后分批处理，`0` 暂停。保留历史统计，不改变 Session 保留期。 |
 | `USAGE_IMPORT_ROOTS` | 否 | `{}` | 用量文件导入根目录的 JSON 对象，值必须是绝对路径；默认不允许外部目录导入，见[接入指南](docs/agent-usage.md)。 |
 | `USAGE_CAPTURE_UPSTREAMS` | 否 | `{}` | 托管 Runtime 自动模型请求采集的上游配置；声明协议、API base URL 和 API key 环境变量名。显式选择 API-key 路由，见[接入指南](docs/agent-usage.md)。 |
 | `PROJECT_ENVIRONMENTS_ROOT` | 否 | `/srv/remote-agent/environments` | 项目环境版本目录。 |

@@ -36,6 +36,22 @@ const setup = async (usageTokenizers = [fixtureTokenizerConfig()], fileBacked = 
 const register = (app: FastifyInstance, payload: unknown) => app.inject({ method: "POST", url: "/api/usage/sources", headers, payload });
 
 describe("usage source management API", () => {
+  it("rejects collection and registration for an archived Session without changing source state", async () => {
+    const { app,db,manager,registration,session }=await setup();
+    await manager.collector.stopRecovery();
+    const registered=await register(app,registration); expect(registered.statusCode).toBe(201);
+    const sourceId=registered.json().id as string;
+    db.prepare("UPDATE agent_usage_source_mappings SET state='retained' WHERE source_id=?").run(sourceId);
+    expect(manager.collector.attribution.dailyRankings.archiveSession(manager.collector.namespace,
+      manager.collector.binding(session.id).agentId,String(session.id),new Date().toISOString())).toBe(true);
+    const before=manager.collector.sources.listSources(manager.collector.namespace);
+    const collected=await app.inject({method:"POST",url:`/api/usage/sources/${sourceId}/collect`,headers});
+    expect(collected.statusCode).toBe(410); expect(collected.json().error.code).toBe("usage_details_expired");
+    const newSource=await register(app,{...registration,sourceKey:"late"});
+    expect(newSource.statusCode).toBe(410); expect(newSource.json().error.code).toBe("usage_details_expired");
+    await expect(manager.collector.sources.collect(sourceId)).rejects.toThrow("usage_details_expired");
+    expect(manager.collector.sources.listSources(manager.collector.namespace)).toEqual(before);
+  });
   it("loads usage and model context through query Workers after a transcript timeout and resumed collection", async () => {
     const { app, root, manager, registration, session } = await setup([fixtureTokenizerConfig()], true);
     await manager.collector.stopRecovery();

@@ -407,6 +407,10 @@ Reported usage and content estimates are shown separately. Hidden content, media
 
 The console shows the statistics timestamp and supports manual refresh. Background collection backfills retained evidence and resumes after restarts; missing values remain unknown. By default, raw message/tool bodies can expire once a Run has been finished for at least 7 days, its Session is idle, and content counting and vocabulary backfill are complete. Final replies and statistics remain. Configure this separately from workspace retention with `USAGE_EVENT_RETENTION_DAYS`.
 
+Usage details have a separate minimum retention of 7 days, applying only to Sessions whose **storage cleanup has completed**. Once all Runs and the latest usage details are old enough and counting and daily projections are ready, historical statistics are frozen before input exposures, request-input aggregates and conversation measurements are retired in batches. Actual calls, token statistics and final replies remain; expired details are clearly identified. `USAGE_DETAIL_RETENTION_DAYS=0` pauses this processing without changing Session retention.
+
+Restarts preserve committed collection progress, and stale collection states for cleaned Sessions do not block detail expiry indefinitely. First/repeated-result rankings use consistent sorting and pagination before and after backfill and archiving, preserving the distinction between known zero and unknown counts.
+
 See the [usage guide](docs/agent-usage.md) for collection, metrics, historical rebuilds, APIs, and retention, and the [deployment guide](docs/deployment.md#用量数据保留与维护) for upgrades, backups, and database maintenance.
 
 ## Integrating another system
@@ -862,6 +866,7 @@ The table lists application defaults when values are not supplied. `pnpm run ini
 | `SESSIONS_ROOT` | No | `/srv/remote-agent/sessions` | Session workspace directory. |
 | `USAGE_TOKENIZERS` | No | `[]` | Manual tokenizer overrides matched by exact model ID with pinned SHA-256. Known models fetch lazily and retry failures; unmapped models use a text heuristic; see the [tokenizer guide](docs/agent-usage.md). |
 | `USAGE_EVENT_RETENTION_DAYS` | No | `7` | Minimum retention days for completed Run message/tool events. Retire in batches only after expiry, while the Session is idle and content counting and vocabulary backfill are complete. `0` disables it. Final replies and statistics remain available. |
+| `USAGE_DETAIL_RETENTION_DAYS` | No | `7` | Minimum age of usage details in Sessions whose storage cleanup is complete. Retire in batches after all Runs/details expire and statistics are ready. `0` pauses it. Historical statistics and Session retention are preserved. |
 | `USAGE_IMPORT_ROOTS` | No | `{}` | JSON object mapping authorized usage import roots to absolute paths. External directory import is disabled by default; see the [import guide](docs/agent-usage.md). |
 | `USAGE_CAPTURE_UPSTREAMS` | No | `{}` | Upstreams for automatic model-request capture in managed runtimes: protocol, API base URL and API-key environment variable name. Explicitly selects API-key routing; see the [setup guide](docs/agent-usage.md). |
 | `MAX_CONCURRENT_RUNS` | No | `4` | Initial global run concurrency for a new database, from 1–64. Manage later changes in System settings. |

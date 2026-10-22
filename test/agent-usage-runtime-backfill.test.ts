@@ -243,6 +243,8 @@ describe("historical runtime content backfill", () => {
     expect(restarted.status({ namespace: "other" })).toEqual({ status: "completed", processedEvents: 0, errorCode: null });
   });
   it("starts with newest Runs, checkpoints bounded batches, and resumes without duplicate work", async () => {
+    // This case exercises the row limit; a busy machine may hit the independent time budget sooner.
+    vi.spyOn(performance, "now").mockReturnValue(0);
     const { db, run, event } = setup(), older = run(), newest = run();
     event(older.runId, 1);
     for (let sequence = 1; sequence <= 205; sequence++) event(newest.runId, sequence);

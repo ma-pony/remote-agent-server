@@ -565,7 +565,19 @@ Session 存储清理删除 Workspace、浏览器数据、Provider 原生会话�
 
 最终回复、输入、状态／错误、Token 统计和关联继续保留；过期正文接口返回 410。正文清理后不能用于历史回补或重新分词，升级前已删除的内容不会自动恢复。需要长期重算时，在升级启动前延长或关闭保留期。导入目录、公共 Task 事件及 Provider Home 不由这项规则删除。
 
+### Usage 明细保留
+
+`USAGE_DETAIL_RETENTION_DAYS=7` 默认启用，仅扫描 `storage_cleaned_at` 已写入、空闲且无维护或 queued/running Run 的 Session。整个 Session 的全部 Run 必须结束至少 7 天，最新上下文／对话明细时间也必须超过同一截止时间；尚未清理存储的 Session 不受影响。它不会修改数据库中的 Session 保留设置，也不会改变 `SESSION_RETENTION_HOURS` 或原始事件保留期。
+
+处理前确认来源已停止采集、保留原文的 Run 已完成无错误回填，以及请求计数和每日排名均已准备完成；空对话计数、缺失／失败回填或脏汇总会推迟处理。然后事务性发布归档标记，以已有日汇总作为历史依据，再每批删除最多 250 行 exposure、context input 或 conversation content。重启继续未完成批次；已发布的明细立即标为过期，分批删除不会使统计逐步减少。
+
+归档保留 Provider 账本、请求总量、调用及计量来源、跨日去重关联和每日汇总，保持原统计口径。归档后停止该 Session 的重新采集、词表重算及迟到写入，避免把不完整明细重新汇总。需要保留长期明细或重算能力时，应在升级启动前将此项设为 `0` 或延长天数；设为 `0` 也会暂停已发布归档的剩余删除，但不会撤销过期状态或恢复已删行。恢复明细需要一致的历史备份，不能仅删除归档标记或回退到不了解归档的旧程序。
+
+这项处理不会自动 checkpoint、VACUUM、重启服务或缩小 Btrfs／根盘镜像。释放的 SQLite 页面供后续复用，磁盘文件是否缩小应按下文单独维护和核验。
+
 ### 升级与后台准备
+
+重启时，遗留的来源 `collecting` 状态转为 `failed / usage_collection_interrupted`，已提交的采集游标、采集 ID 和用量保留。有 active 映射的来源自动续采；只有 retained 映射的来源不自动重试，但不会因遗留的采集状态永久卡住明细清理。当前进程真正进行中的采集仍阻止归档。
 
 用量账本、统计投影和清理游标都在现有 SQLite 中，无需外部数据库或遥测服务。迁移自动建立所需表和索引，后台按批准备历史统计并回收重复 payload、展示 JSON、身份哈希和无引用估算。保留去重身份、计数及证据关联；重启从已提交进度继续。首次升级大库需预留索引、统计表和 WAL 空间。
 
@@ -578,7 +590,9 @@ Session 存储清理删除 Workspace、浏览器数据、Provider 原生会话�
 | `recovery` 中的各项 `*ProjectionPending` | 账本、输入与每日排名的统计准备进度。待准备不等于原统计丢失。 |
 | `recovery` 中的各项 `*CompactionPending` | 旧副本清理是否到达已登记范围。 |
 | `eventRetention.skippedByReason` | 原始事件清理为何推迟，例如 `counting_incomplete` 或 `backfill_incomplete`。 |
-| 各 `compacted*`、`retiredEvents` 与耗时 | 当前进程处理量和诊断信息；重启会清零，不代表数据库剩余数量。 |
+| `detailRetention` | 明细保留天数、每步耗时、检查／删除行数、完成 Session 数、跳过原因及错误时间。`projection_pending` 需等待汇总；`backfill_incomplete` 需核对内容计量。 |
+| `detailsExpired` | 当前筛选范围是否包含已过期明细；统计仍保留。 |
+| 各 `compacted*`、`retiredEvents`、`retiredRows`、`retiredSessions` 与耗时 | 当前进程处理量和诊断信息；重启会清零，不代表数据库剩余数量。 |
 
 不要为释放空间手动标记补算完成。完整字段及查询期限见[用量指南](agent-usage.md#如何读报表)。
 
@@ -586,7 +600,7 @@ Session 存储清理删除 Workspace、浏览器数据、Provider 原生会话�
 
 ### 请求输入展示元数据去重
 
-请求输入汇总不再逐行复制能力展示 JSON，查询从保留的曝光记录读取元数据。历史副本按批清理，不重算 Token 或删除证据；`recovery.rankingInputMetadataCompactionPending` 与 `compactedRankingInputMetadata` 显示进度。
+请求输入汇总不再逐行复制能力展示 JSON，查询从保留的曝光记录读取元数据；已归档 Session 从冻结的每日展示汇总读取。历史副本按批清理，不重算 Token 或删除证据；`recovery.rankingInputMetadataCompactionPending` 与 `compactedRankingInputMetadata` 显示进度。
 
 旧代码依赖这些副本，清理后不能只回退代码；恢复升级前的一致备份，或先从保留的曝光明细重建汇总。UTC 每日排名表结构也应随匹配版本一起恢复。
 

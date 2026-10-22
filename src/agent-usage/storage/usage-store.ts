@@ -5,6 +5,7 @@ import { normalizeUsage, sumUsage } from "../core/usage.js";
 import { UsageAnalysis } from "../core/usage-analysis.js";
 import { trackUsageQueryChanges } from "./query-version.js";
 import { AccountingProjectionStore, type AccountingProjectionJob, type AccountingProjectionBatch } from "./accounting-projection.js";
+import { ensureDetailArchives, detailsArchived } from "./detail-archives.js";
 
 type SubjectRow = { agent_id: string | null; generation: number; state: "active" | "draining" | "deleted" };
 
@@ -13,6 +14,7 @@ export class UsageStore {
   private readonly projections: AccountingProjectionStore;
   constructor(readonly db: Database.Database) {
     if (db.readonly) { this.projections = new AccountingProjectionStore(db); return; }
+    ensureDetailArchives(db);
     db.exec(`
       CREATE TABLE IF NOT EXISTS agent_usage_migrations (version INTEGER PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS agent_usage_subjects (
@@ -64,6 +66,7 @@ export class UsageStore {
     if (session === undefined || agent === undefined || session.generation !== binding.generation || session.agent_id !== binding.agentId) {
       throw new UsageError("usage_binding_stale");
     }
+    if (detailsArchived(this.db,binding.namespace,binding.sessionId)) throw new UsageError("usage_details_expired");
   }
 
   observe(binding: UsageBinding, observation: UsageObservation): void {

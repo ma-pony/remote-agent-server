@@ -2,6 +2,8 @@ import type Database from "better-sqlite3";
 import { capabilityKey } from "./core/context.js";
 import { contentCapability, type Capability, type CapabilityKind, type TokenEstimate } from "./core/context-types.js";
 import type { UsageFilter } from "./core/types.js";
+import { detailsArchived, unarchivedDetails } from "./storage/detail-archives.js";
+import { UsageError } from "./core/errors.js";
 
 const categories = ["configured_instructions", "user_prompt", "assistant_output", "assistant_thought"] as const;
 export type RuntimeContentEvidence = {
@@ -65,11 +67,11 @@ const project = (row: ContentRow): RuntimeContentEvidence => ({ id: evidenceId(r
 export const listRuntimeContentEvidence = (db: Database.Database, filter: UsageFilter, options: RuntimeContentEvidenceOptions): RuntimeContentEvidence[] => {
   const scope = runtimeContentScope(db, filter, options);
   const params: Array<string | number> = [...scope.params];
-  let after = "";
+  let after = `WHERE ${unarchivedDetails("scoped")}`;
   if (options.cursor) {
     const decoded = decodeId(options.cursor.id);
     if (!decoded) return [];
-    after = "WHERE occurred_at<? OR (occurred_at=? AND (run_id<? OR (run_id=? AND (event_key>? OR (event_key=? AND category>?)))))";
+    after += " AND (occurred_at<? OR (occurred_at=? AND (run_id<? OR (run_id=? AND (event_key>? OR (event_key=? AND category>?))))))";
     params.push(options.cursor.t, options.cursor.t, decoded[0], decoded[0], decoded[1], decoded[1], decoded[2]);
   }
   return (db.prepare(`WITH scoped AS (${scope.sql}) SELECT * FROM scoped ${after}
@@ -81,5 +83,9 @@ export const getRuntimeContentEvidence = (db: Database.Database, namespace: stri
   const scope = runtimeContentScope(db, { namespace });
   const row = db.prepare(`WITH scoped AS (${scope.sql}) SELECT * FROM scoped WHERE run_id=? AND event_key=? AND category=?`)
     .get(...scope.params, ...decoded) as ContentRow | undefined;
+  // The business Run survives detail retention and lets old evidence links report expiry.
+  const session = row ?? (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'").get()
+    ? db.prepare("SELECT session_id FROM runs WHERE id=?").get(decoded[0]) as { session_id: number } | undefined : undefined);
+  if (session && detailsArchived(db,namespace,String(session.session_id))) throw new UsageError("usage_details_expired");
   return row ? project(row) : null;
 };

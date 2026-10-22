@@ -1,6 +1,8 @@
 import type Database from "better-sqlite3";
+import { UsageError } from "../core/errors.js";
 import { setTimeout as delay } from "node:timers/promises";
 import { runtimeContentScope } from "../runtime-content-evidence.js";
+import { detailsArchived, expiredDetailsInScope, unarchivedDetails } from "./detail-archives.js";
 import {
   capabilityKinds,
   contentCapability,
@@ -422,6 +424,8 @@ export class AttributionStore {
       const count = rows.length ? db.prepare(`DELETE FROM agent_usage_token_estimates AS t
         WHERE id IN (SELECT value FROM json_each(?))
           AND NOT EXISTS (SELECT 1 FROM agent_usage_context_inputs p WHERE p.estimate_id=t.id)
+          AND NOT EXISTS (SELECT 1 FROM agent_usage_ranking_inputs p WHERE p.estimate_id=t.id)
+          AND NOT EXISTS (SELECT 1 FROM agent_usage_ranking_content p WHERE p.estimate_id=t.id)
           AND NOT EXISTS (SELECT 1 FROM agent_usage_invocation_payloads p WHERE p.estimate_id=t.id) ${conversation}`)
         .run(JSON.stringify(rows.map(row => row.id))).changes : 0;
       db.prepare(`INSERT INTO agent_usage_storage_cursors VALUES('estimate-profiles',?)
@@ -548,7 +552,8 @@ export class AttributionStore {
     if (this.store.db.prepare(`SELECT 1 FROM agent_usage_contexts c
       ${contexts.clauses.length ? `WHERE ${contexts.clauses.join(" AND ")}` : ""} LIMIT 1`).get(...contexts.params)) return true;
     const content = runtimeContentScope(this.store.db, filter);
-    return this.store.db.prepare(`WITH scoped AS (${content.sql}) SELECT 1 FROM scoped LIMIT 1`).get(...content.params) !== undefined;
+    return this.store.db.prepare(`WITH scoped AS (${content.sql}) SELECT 1 FROM scoped LIMIT 1`).get(...content.params) !== undefined
+      || expiredDetailsInScope(this.store.db,filter);
   }
 
   contextSummary(filter: AttributionFilter) {
@@ -577,8 +582,8 @@ export class AttributionStore {
 
   /** Fill historical request totals in small transactions without blocking startup. */
   backfillContextTotals(limit: number): boolean {
-    const rows = this.store.db.prepare(`SELECT context_id FROM agent_usage_contexts
-      WHERE estimated_input_ready=0 LIMIT ?`).all(limit + 1) as Array<{ context_id: string }>;
+    const rows = this.store.db.prepare(`SELECT context_id FROM agent_usage_contexts c
+      WHERE estimated_input_ready=0 AND ${unarchivedDetails("c")} LIMIT ?`).all(limit + 1) as Array<{ context_id: string }>;
     if (rows.length === 0) return false;
     const totals = this.store.db.prepare(`SELECT SUM(tokens) AS tokens FROM (
       SELECT MAX(token_count) AS tokens FROM agent_usage_exposures WHERE context_id=? GROUP BY position)`);
@@ -628,7 +633,9 @@ export class AttributionStore {
         : options.sort === "argumentInputTokens" ? "e.block_kind='arguments'"
         : firstUse ? `${firstClassification}='${options.sort === "firstResultInputTokens" ? "first" : "repeat"}'` : undefined;
       const value = options.sort === "inputBytes" ? "SUM(e.byte_length)" : predicate
-        ? `CASE WHEN SUM(${predicate})=0 THEN 0 ELSE SUM(CASE WHEN ${predicate} THEN e.token_count END) END` : "SUM(e.token_count)";
+        // No matching input is known zero, even if raw first-use classification is NULL.
+        // Matching inputs whose token counts are all unknown must still sort as NULL.
+        ? `CASE WHEN COUNT(CASE WHEN ${predicate} THEN 1 END)=0 THEN 0 ELSE SUM(CASE WHEN ${predicate} THEN e.token_count END) END` : "SUM(e.token_count)";
       metric = `SELECT e.capability_key,${value} AS value FROM ${context.table}
         ${firstUse && !compact ? ResultFirstUseIndex.join : ""} WHERE ${context.clauses.join(" AND ")} GROUP BY e.capability_key`;
       if (firstUse && !compact) metricParams.push(filter.runtimeKind === undefined ? "" : JSON.stringify(filter.runtimeKind));
@@ -785,10 +792,11 @@ export class AttributionStore {
       latencyMsP50: null, latencyMsP95: null, latencySampleCount: 0
     });
     const dailyLatest = source.daily && aggregates.length ? this.dailyRankings.latest(filter) : undefined;
-    const latestByKey = new Map((dailyLatest ? this.store.db.prepare(`SELECT capability_key,capability_json FROM (
-      SELECT capability_key,capability_json,ROW_NUMBER() OVER (PARTITION BY capability_key
+    const latestByKey = new Map((dailyLatest ? this.store.db.prepare(`SELECT capability_key,
+      COALESCE(capability_json,${rankingCapabilityMetadata("ranked")}) AS capability_json FROM (
+      SELECT capability_key,capability_json,context_id,position,ROW_NUMBER() OVER (PARTITION BY capability_key
         ORDER BY occurred_at IS NULL DESC,occurred_at DESC,context_id DESC,position DESC) AS ordinal
-      FROM (${dailyLatest.sql}) WHERE capability_key IN (SELECT value FROM json_each(?))) WHERE ordinal=1`)
+      FROM (${dailyLatest.sql}) WHERE capability_key IN (SELECT value FROM json_each(?))) ranked WHERE ordinal=1`)
       .all(...dailyLatest.params, JSON.stringify(aggregates.map(row => row.capability_key))) as
       Array<{ capability_key: string; capability_json: string }> : []).map(row => [row.capability_key, row]));
     for (const aggregate of aggregates) {
@@ -912,7 +920,7 @@ export class AttributionStore {
     return row ? this.toInvocation(row, this.payloads([id]).get(id)) : null;
   }
 
-  detail(namespace: string, id: string, options: { limit?: number; offset?: number } = {}): (AttributionDetail & { exposureTotal: number }) | null {
+  detail(namespace: string, id: string, options: { limit?: number; offset?: number } = {}): (AttributionDetail & { exposureTotal: number; detailsExpired: boolean }) | null {
     const row = this.store.db.prepare("SELECT * FROM agent_usage_invocations WHERE namespace = ? AND public_id = ?")
       .get(namespace, id) as InvocationRow | undefined;
     if (row === undefined) return null;
@@ -930,6 +938,7 @@ export class AttributionStore {
     }));
     return {
       invocation: { ...this.toInvocation(row, this.payloads([id]).get(id)), capability },
+      detailsExpired: detailsArchived(this.store.db,namespace,row.session_id),
       exposures,
       exposureTotal: this.exposureCount({ namespace, sessionId: row.session_id }, ["c.provider_epoch_id=?", "e.tool_invocation_id=?", "e.capability_key=?"], [row.provider_epoch_id, row.invocation_id, row.capability_key]),
       subsequentModelInvocationIds: [...new Set(exposures.map((exposure) => exposure.modelInvocationId))]
@@ -938,6 +947,7 @@ export class AttributionStore {
 
   contextEvidence(filter: AttributionFilter = {}, options: AttributionPage = {}): ContextEvidence[] {
     const scope = this.contextWhere(filter);
+    scope.clauses.push(unarchivedDetails("c"));
     const capability: string[] = [], values: string[] = [];
     this.capabilityWhere(capability, values, "e", options);
     if (options.cursor) {
@@ -972,6 +982,7 @@ export class AttributionStore {
     const context = this.store.db.prepare("SELECT * FROM agent_usage_contexts WHERE namespace = ? AND context_id = ?")
       .get(namespace, contextId) as ContextRow | undefined;
     if (!context) return null;
+    if (detailsArchived(this.store.db,namespace,context.session_id)) throw new UsageError("usage_details_expired");
     const candidates = this.store.db.prepare("SELECT DISTINCT capability_key FROM agent_usage_exposures WHERE context_id=?")
       .all(contextId) as Array<{ capability_key: string }>;
     const key = candidates.find((row) => stableHash(row.capability_key) === capabilityHash)?.capability_key;
@@ -1035,14 +1046,17 @@ export class AttributionStore {
     if (origin === "context" && (filter.from !== undefined || filter.to !== undefined)) {
       const context = this.contextWhere({ from: filter.from, to: filter.to });
       const scope = this.contextWhere(filter);
-      const table = this.rankingInputs.ready(scope.clauses,scope.params) ? "agent_usage_context_calls" : "agent_usage_exposures";
+      const ready = this.rankingInputs.ready(scope.clauses,scope.params);
       // Start from the invocation index, then look up each referenced context by primary key.
       // Reordering this join can rescan a long Session's entire date range for every call.
-      clauses.push(`EXISTS (SELECT 1 FROM ${table} e CROSS JOIN agent_usage_contexts c ON c.context_id=e.context_id
+      const linked = (table: string, readiness = "1") => `EXISTS (SELECT 1 FROM ${table} e CROSS JOIN agent_usage_contexts c ON c.context_id=e.context_id
         WHERE e.tool_invocation_id=i.invocation_id AND e.capability_key=i.capability_key
           AND c.namespace=i.namespace AND c.session_id=i.session_id AND c.provider_epoch_id=i.provider_epoch_id
-          AND ${context.clauses.join(" AND ")})`);
+          AND (${readiness}) AND ${context.clauses.join(" AND ")})`;
+      clauses.push(ready ? linked("agent_usage_context_calls") : `(${linked("agent_usage_context_calls",
+        "c.ranking_inputs_ready=1")} OR ${linked("agent_usage_exposures","c.ranking_inputs_ready=0")})`);
       params.push(...context.params);
+      if (!ready) params.push(...context.params);
     } else {
       if (filter.from !== undefined) { clauses.push("COALESCE(i.started_at,i.ended_at)>=?"); params.push(new Date(filter.from).toISOString()); }
       if (filter.to !== undefined) { clauses.push("COALESCE(i.started_at,i.ended_at)<?"); params.push(new Date(filter.to).toISOString()); }
@@ -1056,9 +1070,9 @@ export class AttributionStore {
 
   private rankingSource(filter: AttributionFilter, dimension: RankingDimension, keys?: string[]) {
     const context = this.contextWhere(filter);
-    const compact = this.rankingInputs.ready(context.clauses, context.params);
+    const daily = this.dailyRankings.inputs(filter);
+    const compact = Boolean(daily) || this.rankingInputs.ready(context.clauses, context.params);
     const inputTable = compact ? "agent_usage_context_inputs" : "agent_usage_exposures";
-    const daily = compact ? this.dailyRankings.inputs(filter) : undefined;
     const clauses = daily ? ["1"] : [...context.clauses, "1"];
     const params: Array<string | number> = daily ? [...daily.params] : [...context.params];
     if (dimension !== "all") { clauses.push("json_extract(e.capability_key,'$[0]')=?"); params.push(dimension); }
@@ -1079,12 +1093,13 @@ export class AttributionStore {
 
   private exposureCount(filter: AttributionFilter, extra: string[], values: string[]): number {
     const scope = this.contextWhere(filter);
+    scope.clauses.push(unarchivedDetails("c"));
     return (this.store.db.prepare(`SELECT COUNT(*) AS count FROM agent_usage_contexts c JOIN agent_usage_exposures e ON e.context_id=c.context_id WHERE ${[...scope.clauses, ...extra].join(" AND ")}`).get(...scope.params, ...values) as { count: number }).count;
   }
 
   private exposureRows(filter: AttributionFilter, extra: string[] = [], values: string[] = [], options: { limit?: number; offset?: number } = {}): ExposureRow[] {
     const { clauses, params } = this.contextWhere(filter);
-    clauses.push(...extra); params.push(...values);
+    clauses.push(unarchivedDetails("c"), ...extra); params.push(...values);
     return this.store.db.prepare(`SELECT c.*, e.*, t.estimate_json, ${ResultFirstUseIndex.classification} AS first_use
       FROM agent_usage_contexts c JOIN agent_usage_exposures e ON e.context_id=c.context_id
       JOIN agent_usage_token_estimates t ON t.id=e.estimate_id ${ResultFirstUseIndex.join}

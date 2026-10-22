@@ -29,6 +29,40 @@ const adapter = (): UsageSourceAdapter => ({
 });
 
 describe("usage source coordinator", () => {
+  it("resumes an interrupted active source with its saved checkpoint and collection identity", async () => {
+    const first=adapter(); first.freeze=async()=>"1";
+    const { db,store,coordinator,config }=setup(first);
+    const source=coordinator.registerSource(config);
+    await coordinator.collect(source.id);
+    const collectionId=coordinator.listSources("test")[0]!.collectionId;
+    expect(store.summary().usage.totalTokens).toBe(1100);
+    // The next record was still in flight when the prior process exited.
+    db.prepare("UPDATE agent_usage_sources SET status='collecting' WHERE id=?").run(source.id);
+    const restarted=new UsageSourceCoordinator(new UsageStore(db),{fixture:adapter()});
+    expect(restarted.listSources("test")[0]).toMatchObject({status:"failed",errorCode:"usage_collection_interrupted",
+      checkpoint:"1",collectionId});
+    expect(restarted.recoverySources()).toEqual([{id:source.id,sessionIds:["session-1"]}]);
+    await restarted.collect(source.id);
+    expect(restarted.listSources("test")[0]).toMatchObject({status:"completed",errorCode:null,checkpoint:"4",collectionId});
+    expect(store.summary().usage.totalTokens).toBe(3300);
+  });
+
+  it("continues live mappings of a shared source without rewriting an archived Session", async () => {
+    const shared=adapter();
+    shared.collect=async function* () {
+      for(const [i,sourceSessionKey] of ["capture-1","capture-2"].entries())
+        yield {sourceSessionKey,observation:accountingRequests()[i]!,checkpoint:String(i+1)};
+    };
+    const { db,store,coordinator,config }=setup(shared);
+    const source=coordinator.registerSource({...config,mappings:[...config.mappings,
+      {sourceSessionKey:"capture-2",agentId:"agent-1",sessionId:"session-2",providerEpochId:"epoch-1"}]});
+    db.prepare("INSERT INTO agent_usage_detail_archives(namespace,session_id,agent_id,archived_at) VALUES('test','session-1','agent-1',?)")
+      .run(new Date().toISOString());
+    await coordinator.collect(source.id);
+    expect(store.summary({namespace:"test",sessionId:"session-1"}).usage.totalTokens).toBeNull();
+    expect(store.summary({namespace:"test",sessionId:"session-2"}).usage.totalTokens).toBe(1550);
+    expect(coordinator.listSources("test")[0]).toMatchObject({status:"completed",rejectedRecords:1,checkpoint:"2"});
+  });
   it("preserves a completed context before the next transcript record times out and resumes without duplication", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let blocked = true;

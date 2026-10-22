@@ -8,6 +8,8 @@ import { dailyBounds } from "./core/daily-time.js";
 import { UsageQueryCache } from "./query-cache.js";
 import { UsageQueryWorker, UsageQueryWorkerError } from "./query-worker.js";
 import type { DashboardFilter } from "./dashboard-types.js";
+import { UsageError } from "./core/errors.js";
+import { expiredDetailsInScope } from "./storage/detail-archives.js";
 
 const dashboardQuerySchema = z.object({
   agentId: z.string().regex(/^[1-9]\d*$/).optional(),
@@ -42,6 +44,8 @@ const insights = (row: AttributionRankRow) => [
   ...(row.failures > 0 ? [{ kind: "failed_calls", count: row.failures }] : [])
 ];
 const queryError = (error: Error, _request: FastifyRequest, reply: FastifyReply) => {
+  if (error instanceof UsageError && error.code === "usage_details_expired")
+    return reply.code(410).send({ error: { code: error.code, message: "Usage details have expired; historical statistics are retained" } });
   const code = error instanceof UsageQueryWorkerError ? error.code : "usage_query_failed";
   return reply.code(code === "usage_query_failed" ? 500 : 503)
     .send({ error: { code, message: "Usage analysis is temporarily unavailable" } });
@@ -104,10 +108,11 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
         collectionFailureTotal: collector.collectionFailureCount(filter),
         retryableCollectionFailureTotal: collector.collectionFailureCount(filter, true),
         captureHealthCounts: collector.capture?.healthCounts(filter) ?? {},
-        contentBackfill: collector.contentBackfill.status(filter)
+        contentBackfill: collector.contentBackfill.status(filter),
+        detailsExpired: expiredDetailsInScope(collector.db,filter)
       }));
       if (endpoint === "status") return { ...status, revision, recovery: collector.recoveryStatus(),
-        eventRetention: collector.eventRetention.status() };
+        eventRetention: collector.eventRetention.status(), detailRetention: collector.detailRetention.status() };
       const { sourceCounts, captureHealthCounts, contentBackfill } = status;
       const sourceCount = Object.values(sourceCounts).reduce((sum, count) => sum + count, 0);
       const failurePage = cache.get(`failures:${JSON.stringify([filter, query.failurePage])}`,
@@ -118,6 +123,7 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       const captureHealth = capturePage?.items ?? [];
       const capturePartial = Object.entries(captureHealthCounts).some(([status, count]) => status !== "observed" && count > 0);
       const metadata = { collectionFailures, collectionFailureTotal: failurePage.total,
+        detailsExpired: status.detailsExpired,
         retryableCollectionFailureTotal: status.retryableCollectionFailureTotal, sourceRecoveryCounts: status.sourceRecoveryCounts,
         captureHealth, captureHealthTotal: capturePage?.total ?? 0, captureHealthCounts,
         contentBackfill, revision, asOf: new Date().toISOString(), from: filter.from ?? null, to: filter.to ?? null,
@@ -164,14 +170,14 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
       if (endpoint === "content-evidence") {
         const rows = listRuntimeContentEvidence(collector.db, filter, page);
         const items = rows.slice(0, query.limit), last = items.at(-1);
-        return { ...metadata, items, nextCursor: rows.length > query.limit && last
+        return { ...metadata, detailsExpired: expiredDetailsInScope(collector.db,filter,page,"content"), items, nextCursor: rows.length > query.limit && last
           ? Buffer.from(JSON.stringify({ t: last.occurredAt, id: last.id })).toString("base64url") : null };
       }
       if (endpoint === "context-evidence") {
         const contexts = collector.attribution.contextEvidence(filter, page);
         const items = contexts.slice(0, query.limit);
         const last = items.at(-1);
-        return { ...metadata, items, nextCursor: contexts.length > query.limit && last
+        return { ...metadata, detailsExpired: expiredDetailsInScope(collector.db,filter,page,"context"), items, nextCursor: contexts.length > query.limit && last
           ? Buffer.from(JSON.stringify({ t: last.occurredAt ?? "", id: last.id })).toString("base64url") : null };
       }
       const calls = collector.attribution.invocations(filter, query.origin, page);
@@ -181,12 +187,12 @@ export const registerUsageQueryRoutes = (app: FastifyInstance, collector: HostUs
         ? Buffer.from(JSON.stringify({ t: last.startedAt ?? "", id: last.id })).toString("base64url") : null };
     });
   }
-  app.get<{ Params: { id: string } }>("/usage/content-evidence/:id", (request, reply) => {
+  app.get<{ Params: { id: string } }>("/usage/content-evidence/:id", { errorHandler: queryError }, (request, reply) => {
     const detail = getRuntimeContentEvidence(collector.db, namespace, request.params.id);
     if (!detail) return reply.code(404).send({ error: { code: "usage_content_evidence_not_found", message: "Content evidence not found" } });
     return { ...detail, bodyStatus: "not_retained", asOf: new Date().toISOString() };
   });
-  app.get<{ Params: { id: string } }>("/usage/context-evidence/:id", (request, reply) => {
+  app.get<{ Params: { id: string } }>("/usage/context-evidence/:id", { errorHandler: queryError }, (request, reply) => {
     const parsed = querySchema.safeParse(request.query);
     if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage query" } });
     const detail = collector.attribution.contextEvidenceDetail(namespace, request.params.id, parsed.data);

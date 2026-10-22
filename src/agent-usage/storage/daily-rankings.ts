@@ -3,6 +3,9 @@ import type { UsageFilter } from "../core/types.js";
 import { dailyBounds, dayStart, dayKey, shiftDay } from "../core/daily-time.js";
 import { runtimeContentTokenSql } from "../runtime-content-evidence.js";
 import { rankingCapabilityMetadata } from "./ranking-inputs.js";
+import { unarchivedDetails } from "./detail-archives.js";
+import { ResultFirstUseIndex } from "./result-first-use.js";
+import { UsageError } from "../core/errors.js";
 
 type Sql = { sql: string; params: Array<string | number> };
 export type DailyRankingJob = { id: number };
@@ -47,6 +50,8 @@ export class DailyRankingStore {
           ${columns.map(column => `${column} ${numeric.has(column) ? "INTEGER" : "TEXT"}`).join(",")},
           PRIMARY KEY(partition_id,${key},ordinal)) WITHOUT ROWID`);
       }
+      for (const kind of ["inputs","content"]) db.exec(`CREATE INDEX IF NOT EXISTS agent_usage_ranking_${kind}_estimate
+        ON agent_usage_ranking_${kind}(estimate_id)`);
       this.track("agent_usage_contexts", "UPDATE OF revision,occurred_at,runtime_kind,model,coverage,history_complete,ranking_inputs_ready,namespace,agent_id,session_id");
       // Replacing legacy triggers must not restart the preserved UTC discovery cursor.
       if (migrated && this.hasContent()) this.track("agent_usage_conversation_content", "UPDATE");
@@ -93,12 +98,15 @@ export class DailyRankingStore {
 
   private track(table: string, update: string): void {
     const invalidate = (row: string) => `INSERT INTO agent_usage_ranking_days(namespace,agent_id,session_id,day,from_at,to_at)
-      VALUES(${row}.namespace,${row}.agent_id,${row}.session_id,usage_day(${row}.occurred_at),
-        usage_day_start(usage_day(${row}.occurred_at)),usage_day_end(usage_day(${row}.occurred_at)))
+      SELECT ${row}.namespace,${row}.agent_id,${row}.session_id,usage_day(${row}.occurred_at),
+        usage_day_start(usage_day(${row}.occurred_at)),usage_day_end(usage_day(${row}.occurred_at)) WHERE ${unarchivedDetails(row)}
       ON CONFLICT(namespace,agent_id,session_id,day) DO UPDATE SET revision=revision+1,ready=0;`;
     for (const [event, suffix, rows] of [["INSERT", "insert", ["NEW"]], [update, "update", ["OLD", "NEW"]],
       ["DELETE", "delete", ["OLD"]]] as const) {
-      this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${table}_daily_${suffix} AFTER ${event} ON ${table}
+      const name = `${table}_daily_${suffix}`;
+      const old = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").get(name) as { sql: string } | undefined;
+      if (old && !old.sql.includes("agent_usage_detail_archives")) this.db.exec(`DROP TRIGGER ${name}`);
+      this.db.exec(`CREATE TRIGGER IF NOT EXISTS ${name} AFTER ${event} ON ${table}
         BEGIN ${rows.map(invalidate).join("\n")} END`);
     }
   }
@@ -130,14 +138,14 @@ export class DailyRankingStore {
 
   pending(): boolean {
     return Boolean(this.db.prepare("SELECT 1 FROM agent_usage_ranking_discovery WHERE context_complete=0 OR content_complete=0").get()
-      || this.db.prepare("SELECT 1 FROM agent_usage_ranking_days WHERE ready=0 LIMIT 1").get());
+      || this.db.prepare(`SELECT 1 FROM agent_usage_ranking_days j WHERE ready=0 AND ${unarchivedDetails("j")} LIMIT 1`).get());
   }
 
   nextJob(afterId = 0): DailyRankingJob | undefined {
     // Keep job selection metadata-only on the writer; readiness is checked in the worker.
-    return (this.db.prepare(`SELECT id FROM agent_usage_ranking_days WHERE ready=0 AND id>?
+    return (this.db.prepare(`SELECT id FROM agent_usage_ranking_days j WHERE ready=0 AND ${unarchivedDetails("j")} AND id>?
       ORDER BY id LIMIT 1`).get(afterId) ?? this.db.prepare(`SELECT id FROM agent_usage_ranking_days
-      WHERE ready=0 AND id<=? ORDER BY id LIMIT 1`).get(afterId)) as DailyRankingJob | undefined;
+      j WHERE ready=0 AND ${unarchivedDetails("j")} AND id<=? ORDER BY id LIMIT 1`).get(afterId)) as DailyRankingJob | undefined;
   }
 
   project(job: DailyRankingJob): DailyRankingBatch | undefined {
@@ -170,7 +178,7 @@ export class DailyRankingStore {
   commit(batch: DailyRankingBatch | undefined): boolean {
     if (!batch) return false;
     return this.db.transaction(() => {
-      if (!this.db.prepare("SELECT 1 FROM agent_usage_ranking_days WHERE id=? AND revision=? AND ready=0")
+      if (!this.db.prepare(`SELECT 1 FROM agent_usage_ranking_days j WHERE id=? AND revision=? AND ready=0 AND ${unarchivedDetails("j")}`)
         .get(batch.id, batch.revision)) return false;
       for (const [kind, columns] of Object.entries(projections)) {
         this.db.prepare(`DELETE FROM agent_usage_ranking_${kind} WHERE partition_id=?`).run(batch.id);
@@ -191,6 +199,28 @@ export class DailyRankingStore {
         WHERE partition_id IN (SELECT id FROM agent_usage_ranking_days WHERE namespace=? AND session_id=?)`)
         .run(namespace, sessionId);
       this.db.prepare("DELETE FROM agent_usage_ranking_days WHERE namespace=? AND session_id=?").run(namespace, sessionId);
+      this.db.prepare("DELETE FROM agent_usage_detail_archives WHERE namespace=? AND session_id=?").run(namespace,sessionId);
+    })();
+  }
+
+  /** Publish only after every source partition has a current, self-contained projection. */
+  archiveSession(namespace: string, agentId: string, sessionId: string, archivedAt: string): boolean {
+    return this.db.transaction(() => {
+      if (this.db.prepare(`SELECT 1 FROM agent_usage_contexts WHERE namespace=? AND session_id=?
+        AND (ranking_inputs_ready=0 OR estimated_input_ready=0) LIMIT 1`).get(namespace,sessionId)) return false;
+      for (const table of ["agent_usage_contexts","agent_usage_conversation_content"]) {
+        const hasDetails = table === "agent_usage_contexts"
+          ? "AND EXISTS (SELECT 1 FROM agent_usage_exposures e WHERE e.context_id=c.context_id)" : "";
+        if (this.db.prepare(`SELECT 1 FROM ${table} c WHERE c.namespace=? AND c.session_id=? ${hasDetails} AND NOT EXISTS (
+          SELECT 1 FROM agent_usage_ranking_days j WHERE j.namespace=c.namespace AND j.agent_id=c.agent_id
+            AND j.session_id=c.session_id AND j.day=usage_day(c.occurred_at) AND j.ready=1) LIMIT 1`).get(namespace,sessionId)) return false;
+      }
+      if (this.db.prepare("SELECT 1 FROM agent_usage_ranking_days WHERE namespace=? AND session_id=? AND ready=0 LIMIT 1").get(namespace,sessionId)) return false;
+      this.db.prepare("INSERT INTO agent_usage_detail_archives(namespace,session_id,agent_id,archived_at) VALUES(?,?,?,?)")
+        .run(namespace,sessionId,agentId,archivedAt);
+      // Evidence caches must not survive the atomic publication of expiry.
+      this.db.prepare("UPDATE agent_usage_query_version SET revision=revision+1,generation=generation+1 WHERE id=1").run();
+      return true;
     })();
   }
 
@@ -202,16 +232,24 @@ export class DailyRankingStore {
   /** Partial-day internal queries retain their original path; management queries normalize to days. */
   private scope(filter: UsageFilter): Sql | undefined {
     const normalized = dailyBounds(filter.from, filter.to);
-    if (filter.from !== undefined && normalized.from !== filter.from
-      || filter.to !== undefined && normalized.to !== filter.to) return;
+    const partialDay = filter.from !== undefined && normalized.from !== new Date(filter.from).toISOString()
+      || filter.to !== undefined && normalized.to !== new Date(filter.to).toISOString();
     const progress = this.db.prepare("SELECT context_complete,content_complete FROM agent_usage_ranking_discovery WHERE id=1")
       .get() as { context_complete: number; content_complete: number };
-    if (!progress.context_complete || !progress.content_complete) return;
     const clauses = ["1"], params: string[] = [];
     for (const [field, column] of dimensions) if (filter[field] !== undefined) { clauses.push(`j.${column}=?`); params.push(filter[field]); }
-    if (filter.from !== undefined) { clauses.push("j.day>=?"); params.push(dayKey(filter.from)); }
-    if (filter.to !== undefined) { clauses.push("j.day<?"); params.push(dayKey(filter.to)); }
+    if (normalized.from !== undefined) { clauses.push("j.day>=?"); params.push(dayKey(normalized.from)); }
+    if (normalized.to !== undefined) { clauses.push("j.day<?"); params.push(dayKey(normalized.to)); }
     if (filter.from !== undefined || filter.to !== undefined) clauses.push("j.day!=''");
+    const archived = Boolean(this.db.prepare(`SELECT 1 FROM agent_usage_ranking_days j
+      WHERE ${clauses.join(" AND ")} AND NOT (${unarchivedDetails("j")}) LIMIT 1`).get(...params));
+    // Management queries use UTC days. Never silently return partial archived totals to
+    // internal exact-time callers, for which the retired evidence is no longer available.
+    if (partialDay) {
+      if (archived) throw new UsageError("usage_details_expired");
+      return;
+    }
+    if ((!progress.context_complete || !progress.content_complete) && !archived) return;
     return { sql: clauses.join(" AND "), params };
   }
 
@@ -219,20 +257,50 @@ export class DailyRankingStore {
     columns = projections[kind].map(column => `v.${column}`).join(",")): Sql {
     return { sql: `SELECT ${columns}
       FROM agent_usage_ranking_days j CROSS JOIN agent_usage_ranking_${kind} v ON v.partition_id=j.id
-      WHERE ${scope.sql} AND j.ready=1 ${filter.runtimeKind === undefined ? "" : "AND v.runtime_kind=?"}`,
+      WHERE ${scope.sql} AND (j.ready=1 OR NOT (${unarchivedDetails("j")})) ${filter.runtimeKind === undefined ? "" : "AND v.runtime_kind=?"}`,
       params: [...scope.params, ...(filter.runtimeKind === undefined ? [] : [filter.runtimeKind])] };
   }
 
   private raw(scope: Sql, filter: UsageFilter, table: string, columns: string): Sql {
-    // Keep the timestamp predicates indexable. Only unbounded queries need the NULL-time branch.
-    const missing = filter.from === undefined && filter.to === undefined ? [false, true] : [false];
-    const params = [...scope.params, ...(filter.runtimeKind === undefined ? [] : [filter.runtimeKind])];
-    return { sql: missing.map(missingTime => `SELECT ${columns} FROM agent_usage_ranking_days j
-      CROSS JOIN ${table} c ON ${this.member("c", "j", missingTime)}
-      ${table === "agent_usage_contexts" ? "CROSS JOIN agent_usage_context_inputs e ON e.context_id=c.context_id" : ""}
-      WHERE ${scope.sql} AND j.ready=0 AND j.day${missingTime ? "=" : "!="}''
-      ${filter.runtimeKind === undefined ? "" : "AND c.runtime_kind=?"}`).join(" UNION ALL "),
-      params: missing.flatMap(() => params) };
+    const clauses = [unarchivedDetails("c")], sourceParams: string[] = [];
+    for (const [field,column] of [...dimensions,["runtimeKind","runtime_kind"]] as const)
+      if (filter[field] !== undefined) { clauses.push(`c.${column}=?`); sourceParams.push(filter[field]); }
+    if (filter.from !== undefined) { clauses.push("c.occurred_at>=?"); sourceParams.push(new Date(filter.from).toISOString()); }
+    if (filter.to !== undefined) { clauses.push("c.occurred_at<?"); sourceParams.push(new Date(filter.to).toISOString()); }
+    const contexts = table === "agent_usage_contexts";
+    const detailed = contexts && Boolean(this.db.prepare(`SELECT 1 FROM agent_usage_contexts c
+      WHERE ${clauses.join(" AND ")} AND ranking_inputs_ready=0 LIMIT 1`).get(...sourceParams));
+    const discovering = Boolean(this.db.prepare("SELECT 1 FROM agent_usage_ranking_discovery WHERE context_complete=0 OR content_complete=0").get());
+    const missing = filter.from === undefined && filter.to === undefined ? [false,true] : [false];
+    const queries: string[] = [], params: Array<string | number> = [];
+    for (const raw of detailed ? [false,true] : [false]) {
+      const first = ResultFirstUseIndex.classification;
+      const expanded = raw ? columns.replace(/e\.exposure_count\b/g,"1").replace(/e\.known_count\b/g,"(e.token_count IS NOT NULL)")
+        .replace(/e\.first_use\b/g,`COALESCE(${first},'')`)
+        .replace(/e\.runtime_first_use\b/g,`COALESCE(${first.replace(/\bf\b/g,"fr")},'')`) : columns;
+      const joins = (contexts ? `CROSS JOIN ${raw ? "agent_usage_exposures" : "agent_usage_context_inputs"} e ON e.context_id=c.context_id` : "")
+        + (raw && /e\.(first_use|runtime_first_use)\b/.test(columns)
+          ? ` ${ResultFirstUseIndex.join.replace("f.runtime_scope=?","f.runtime_scope=''")}
+            ${ResultFirstUseIndex.join.replace(/\bf\b/g,"fr").replace("fr.runtime_scope=?","fr.runtime_scope=json_quote(c.runtime_kind)")}` : "");
+      const readiness = contexts ? `AND c.ranking_inputs_ready=${raw ? 0 : 1}` : "";
+      // Keep known partitions driving indexed Session/time lookups, including NULL-time history.
+      for (const missingTime of missing) {
+        queries.push(`SELECT ${expanded} FROM agent_usage_ranking_days j
+          CROSS JOIN ${table} c ON ${this.member("c","j",missingTime)} ${joins}
+          WHERE ${scope.sql} AND j.ready=0 AND ${unarchivedDetails("j")} AND j.day${missingTime ? "=" : "!="}''
+          ${filter.runtimeKind === undefined ? "" : "AND c.runtime_kind=?"} ${readiness}`);
+        params.push(...scope.params,...(filter.runtimeKind === undefined ? [] : [filter.runtimeKind]));
+      }
+      // An interrupted historical discovery must still combine undiscovered live data with archives.
+      if (discovering) {
+        queries.push(`SELECT ${expanded} FROM ${table} c ${joins}
+          WHERE ${clauses.join(" AND ")} ${readiness} AND NOT EXISTS (
+            SELECT 1 FROM agent_usage_ranking_days j WHERE j.namespace=c.namespace AND j.agent_id=c.agent_id
+              AND j.session_id=c.session_id AND j.day=usage_day(c.occurred_at))`);
+        params.push(...sourceParams);
+      }
+    }
+    return { sql: queries.join(" UNION ALL "), params };
   }
 
   inputs(filter: UsageFilter): Sql | undefined {
@@ -261,7 +329,7 @@ export class DailyRankingStore {
   latest(filter: UsageFilter): Sql {
     const scope = this.scope(filter)!;
     const raw = this.raw(scope, filter, "agent_usage_contexts",
-      `e.capability_key,c.runtime_kind,${rankingCapabilityMetadata("e")} AS capability_json,c.occurred_at,c.context_id,e.position`);
+      "e.capability_key,c.runtime_kind,NULL AS capability_json,c.occurred_at,c.context_id,e.position");
     const cached = this.cached(scope, filter, "latest");
     return { sql: `${raw.sql} UNION ALL ${cached.sql}`, params: [...raw.params, ...cached.params] };
   }

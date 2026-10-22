@@ -1,5 +1,6 @@
 import type Database from "better-sqlite3";
 import { ResultFirstUseIndex } from "./result-first-use.js";
+import { unarchivedDetails } from "./detail-archives.js";
 
 export const rankingExposureColumns = ["context_id","position","block_kind","tool_invocation_id","capability_key",
   "capability_json","evidence","content_key","modality","byte_length","token_count","estimate_id","result_first_use"] as const;
@@ -33,9 +34,13 @@ export class RankingInputStore {
     for (const event of ["INSERT","UPDATE","DELETE"]) {
       const row = event === "DELETE" ? "OLD" : "NEW";
       const operation = event === "UPDATE" ? `UPDATE OF ${rankingExposureColumns.join(",")}` : event;
-      db.exec(`CREATE TRIGGER IF NOT EXISTS agent_usage_exposures_inputs_${event.toLowerCase()}
+      const name = `agent_usage_exposures_inputs_${event.toLowerCase()}`;
+      const old = db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").get(name) as { sql: string } | undefined;
+      if (old && !old.sql.includes("agent_usage_detail_archives")) db.exec(`DROP TRIGGER ${name}`);
+      db.exec(`CREATE TRIGGER IF NOT EXISTS ${name}
         AFTER ${operation} ON agent_usage_exposures BEGIN
-        UPDATE agent_usage_contexts SET ranking_inputs_ready=0 WHERE context_id=${row}.context_id AND ranking_inputs_ready=1;
+        UPDATE agent_usage_contexts SET ranking_inputs_ready=0 WHERE context_id=${row}.context_id AND ranking_inputs_ready=1
+          AND ${unarchivedDetails("agent_usage_contexts")};
         END`);
     }
     db.exec(`CREATE TRIGGER IF NOT EXISTS agent_usage_contexts_inputs_update
@@ -46,10 +51,11 @@ export class RankingInputStore {
 
   ready(clauses: string[], params: string[]): boolean {
     return !this.db.prepare(`SELECT 1 FROM agent_usage_contexts c
-      WHERE ${clauses.length ? clauses.join(" AND ") : "1"} AND ranking_inputs_ready=0 LIMIT 1`).get(...params);
+      WHERE ${clauses.length ? clauses.join(" AND ") : "1"} AND ranking_inputs_ready=0 AND ${unarchivedDetails("c")} LIMIT 1`).get(...params);
   }
 
   refresh(contextId: string): void {
+    if (!this.db.prepare(`SELECT 1 FROM agent_usage_contexts c WHERE context_id=? AND ${unarchivedDetails("c")}`).get(contextId)) return;
     this.db.prepare("DELETE FROM agent_usage_context_inputs WHERE context_id=?").run(contextId);
     this.db.prepare("DELETE FROM agent_usage_context_calls WHERE context_id=?").run(contextId);
     this.db.prepare(`INSERT INTO agent_usage_context_calls SELECT DISTINCT context_id,capability_key,tool_invocation_id
@@ -69,7 +75,7 @@ export class RankingInputStore {
   }
 
   backfill(limit: number): boolean {
-    const rows = this.db.prepare(`SELECT context_id FROM agent_usage_contexts WHERE ranking_inputs_ready=0
+    const rows = this.db.prepare(`SELECT context_id FROM agent_usage_contexts c WHERE ranking_inputs_ready=0 AND ${unarchivedDetails("c")}
       ORDER BY occurred_at DESC,context_id LIMIT ?`).all(limit+1) as Array<{ context_id: string }>;
     this.db.transaction(() => { for (const row of rows.slice(0,limit)) this.refresh(row.context_id); })();
     return rows.length>limit;

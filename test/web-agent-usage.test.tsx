@@ -49,6 +49,41 @@ beforeEach(() => {
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.unstubAllGlobals(); });
 const mount = () => render(<I18nProvider><BrowserRouter><AgentUsagePage /></BrowserRouter></I18nProvider>);
 
+it("distinguishes expired evidence from an empty history while keeping actual calls usable", async () => {
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input,init) => {
+    const path = new URL(String(input),"http://localhost").pathname;
+    if (path === "/api/usage/context-evidence") return response({ detailsExpired: true, items: [], nextCursor: null });
+    if (path === "/api/usage/invocations/call-1") return response({ detailsExpired: true,
+      invocation: { status: "succeeded", origin: "execution", executionId: "1", executionEvidence: "direct" },
+      bodyStatus: "not_retained", exposures: [], subsequentModelInvocationIds: [] });
+    return original(input,init);
+  });
+  mount();
+  fireEvent.click(await screen.findByRole("button",{ name: "查看 search 的调用" }));
+  fireEvent.click(await screen.findByRole("button",{ name: "打开调用 call-1" }));
+  expect(await screen.findByText("明细已过期，历史统计仍保留。")).toBeInTheDocument();
+  expect(screen.queryByText(/这次实际调用没有关联/)).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab",{ name: "模型输入证据" }));
+  expect(await screen.findByText("部分明细已过期")).toBeInTheDocument();
+  expect(screen.queryByText("没有匹配的模型输入证据。")).not.toBeInTheDocument();
+});
+
+it("explains evidence that expires between loading the list and opening its detail", async () => {
+  const fetch = vi.mocked(globalThis.fetch), original = fetch.getMockImplementation()!;
+  fetch.mockImplementation(async (input,init) => new URL(String(input),"http://localhost").pathname === "/api/usage/context-evidence/evidence-1"
+    ? response({error:{code:"usage_details_expired",message:"Usage details have expired"}},410) : original(input,init));
+  mount();
+  fireEvent.click(await screen.findByRole("button",{ name:"查看 search 的调用" }));
+  fireEvent.click(screen.getByRole("tab",{ name:"模型输入证据" }));
+  fireEvent.click(await screen.findByRole("button",{ name:"打开输入证据 evidence-1" }));
+  expect(await screen.findByText("部分明细已过期")).toBeInTheDocument();
+  expect(screen.queryByText("证据加载失败")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("tab",{ name:"实际调用" }));
+  expect(await screen.findByRole("button",{name:"打开调用 call-1"})).toBeInTheDocument();
+  expect(screen.queryByText("部分明细已过期")).not.toBeInTheDocument();
+});
+
 it("手动刷新读取最新统计并显示实际统计时间", async () => {
   mount();
   expect(await screen.findByText(/统计截至/)).toBeInTheDocument();

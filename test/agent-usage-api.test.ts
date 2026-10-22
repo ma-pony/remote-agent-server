@@ -62,6 +62,7 @@ const setup = async (sessionCleanupScheduler: SessionCleanupSchedulerLike = {
   return {
     app,
     db,
+    seed,
     manager,
     ids: {
       unboundSession: String(unbound.id),
@@ -190,6 +191,50 @@ const invocation = (
   sourceId: "synthetic-runtime",
   revision: 1,
   rawResultBytes: 64
+});
+
+it.each([false,true])("keeps historical API statistics and calls while reporting expired evidence (file-backed: %s)", async (fileBacked) => {
+  const { app, db, manager, bindings, seed } = await setup(undefined,fileBacked);
+  const collector = manager.collector;
+  await collector.stopRecovery();
+  const id = Number(bindings.first.sessionId), at = "2026-10-09T10:00:00.000Z";
+  seed.run(id,"succeeded");
+  db.prepare("UPDATE runs SET created_at=?,started_at=?,finished_at=? WHERE session_id=?").run(at,at,at,id);
+  db.prepare("UPDATE sessions SET storage_cleaned_at=? WHERE id=?").run(at,id);
+  const capability: Capability = { kind: "builtin_tool", id: "read", name: "Read" };
+  collector.attribution.observeInvocation(bindings.first,invocation("call",capability,at));
+  observe(manager,bindings.first,{ id: "old", at, total: 100 });
+  for (const [binding,key] of [[bindings.first,"old"],[bindings.second,"live"]] as const)
+    await collector.attribution.upsertContext(binding, { invocationId: key, occurredAt: at, providerEpochId: "epoch-1", sourceId: "fixture", revision: 1,
+      runtimeKind: "codex", model: null, coverage: "full", historyComplete: true,
+      blocks: [{ position: 0, kind: "result", toolInvocationId: "call", content: { identity: "result", modality: "text", text: "result" },
+        capabilities: [{ capability, evidence: "direct" }] }] });
+  while (await collector.contentBackfill.step()) { /* Finish counts before publication. */ }
+  const daily = collector.attribution.dailyRankings;
+  while (daily.discover()) { /* Complete discovery. */ }
+  let job; while ((job=daily.nextJob())) expect(daily.commit(daily.project(job))).toBe(true);
+  const oldFilter = `sessionId=${id}`;
+  const context = (await get(app,`/context-evidence?${oldFilter}`)).json().items[0];
+  const content = (await get(app,`/content-evidence?${oldFilter}`)).json().items[0];
+  const call = (await get(app,`/invocations?${oldFilter}`)).json().items[0];
+  const before = await Promise.all(["summary","timeseries","capabilities"].map(async endpoint => (await get(app,`/${endpoint}?${oldFilter}`)).json()));
+  expect(collector.detailRetention.step(Date.parse("2026-10-22T00:00:00Z"))).toBe("archived");
+  expect((await get(app,`/context-evidence?${oldFilter}`)).json()).toMatchObject({ detailsExpired: true, items: [], nextCursor: null });
+  expect((await get(app,"/context-evidence?capabilityId=missing")).json().detailsExpired).toBe(false);
+  expect((await get(app,`/context-evidence?sessionId=${bindings.second.sessionId}`)).json().detailsExpired).toBe(false);
+  expect((await get(app,"/context-evidence")).json()).toMatchObject({ detailsExpired: true, items: [expect.objectContaining({ sessionId: bindings.second.sessionId })] });
+  for (let i=0;i<20;i++) collector.detailRetention.step(Date.parse("2026-10-22T00:00:00Z"));
+  for (const [endpoint,evidence] of [["context-evidence",context],["content-evidence",content]] as const) {
+    const detail = await get(app,`/${endpoint}/${evidence.id}`);
+    expect(detail.statusCode).toBe(410); expect(detail.json().error.code).toBe("usage_details_expired");
+    expect((await get(app,`/${endpoint}/missing`)).statusCode).toBe(404);
+    expect((await app.inject({ url: `/api/usage/${endpoint}/${evidence.id}` })).statusCode).toBe(401);
+  }
+  expect((await get(app,`/invocations/${call.id}`)).json()).toMatchObject({ detailsExpired: true, exposures: [], invocation: { id: call.id } });
+  const after = await Promise.all(["summary","timeseries","capabilities"].map(async endpoint => (await get(app,`/${endpoint}?${oldFilter}&fresh=1`)).json()));
+  expect(after[0].usage).toEqual(before[0].usage); expect(after[0].contextAnalysis).toEqual(before[0].contextAnalysis);
+  expect(after[1].items).toEqual(before[1].items); expect(after[2].items).toEqual(before[2].items);
+  expect((await get(app,`/status?${oldFilter}`)).json()).toMatchObject({ detailsExpired: true, detailRetention: { retentionDays: 7, retiredSessions: 1 } });
 });
 
 describe("usage query API", () => {

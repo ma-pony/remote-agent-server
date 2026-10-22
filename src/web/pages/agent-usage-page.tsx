@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Database, RefreshCw, SearchX, TriangleAlert } from "lucide-react";
 import { useSearchParams } from "react-router";
 
-import { api, errorMessage, type Agent, type Page, type SessionListItem } from "@/api";
+import { api, errorMessage, type ApiError, type Agent, type Page, type SessionListItem } from "@/api";
 import { EmptyState, PageContainer, PageHeader } from "@/components/page-header";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +47,7 @@ type UsageMetadata = {
   to: string | null;
   analysisStatus: AnalysisStatus;
   hasCapabilityEvidence?: boolean;
+  detailsExpired?: boolean;
   contentBackfill?: { status: "pending" | "running" | "completed" | "failed"; processedEvents: number; errorCode: string | null };
   captureHealth?: Array<{ sessionId: string; runtimeKind: string; status: string; observed: number; incomplete: number; errorCode: string | null }>;
   collectionFailureTotal?: number;
@@ -84,7 +85,7 @@ type TimeseriesResponse = UsageMetadata & {
 };
 type InvocationOriginFilter = "counted" | "context";
 type InvocationPage = UsageMetadata & { origin?: "counted" | "execution" | "context"; items: Array<AttributionInvocation | ContextEvidence | ContentEvidence>; nextCursor: string | null };
-type InvocationDetail = (AttributionDetail | ContextEvidenceDetail) & { bodyStatus: "not_retained"; exposureTotal?: number; usageEvidence?: unknown[]; asOf?: string };
+type InvocationDetail = (AttributionDetail | ContextEvidenceDetail) & { bodyStatus: "not_retained"; exposureTotal?: number; usageEvidence?: unknown[]; asOf?: string; detailsExpired?: boolean };
 type UsageSource = {
   id: string;
   sourceKey: string;
@@ -671,12 +672,14 @@ const InvocationSheet = ({ capability, onClose, baseQuery, sessionSelected, init
   const [detail, setDetail] = useState<InvocationDetail | null>(null);
   const [exposurePage, setExposurePage] = useState(1);
   const [detailRequest, setDetailRequest] = useState<{ id: string; origin: InvocationOriginFilter } | null>(null);
+  const [detailExpired, setDetailExpired] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
     setPage(null);
     setDetailRequest(null);
+    setDetailExpired(false);
     setExposurePage(1);
     setDetail(null);
     setContentDetail(null);
@@ -707,16 +710,22 @@ const InvocationSheet = ({ capability, onClose, baseQuery, sessionSelected, init
     setDetail(null);
     setContentDetail(null);
     setError("");
+    setDetailExpired(false);
+    const failed = (reason: unknown) => {
+      if (controller.signal.aborted) return;
+      if (reason !== null && typeof reason === "object" && (reason as ApiError).error?.code === "usage_details_expired") setDetailExpired(true);
+      else setError(errorMessage(reason));
+    };
     if (contentCapability && detailRequest.origin === "counted") {
       void api<ContentEvidence>(`/usage/content-evidence/${encodeURIComponent(detailRequest.id)}`, { signal: controller.signal })
         .then((value) => { if (!controller.signal.aborted) setContentDetail(value); })
-        .catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+        .catch(failed);
       return () => controller.abort();
     }
     void api<InvocationDetail>(`/usage/${detailRequest.origin === "context" ? "context-evidence" : "invocations"}/${encodeURIComponent(detailRequest.id)}?limit=50&offset=${(exposurePage - 1) * 50}`,
       { signal: controller.signal }).then((value) => {
         if (!controller.signal.aborted) setDetail(value);
-      }).catch((reason: unknown) => { if (!controller.signal.aborted) setError(errorMessage(reason)); });
+      }).catch(failed);
     return () => controller.abort();
   }, [detailRequest, exposurePage, contentCapability]);
 
@@ -758,8 +767,9 @@ const InvocationSheet = ({ capability, onClose, baseQuery, sessionSelected, init
         </Tabs>
         {sessionSelected ? <Alert><Database /><AlertTitle>{scope === "range" ? text("按排名日期范围筛选", "Filtered by ranking date range") : text("显示全部会话记录", "Showing all Session records")}</AlertTitle><AlertDescription className="flex flex-wrap items-center justify-between gap-3"><span>{scope === "range" ? text("没有任何可用时间证据的记录可能不会出现。排名筛选保持不变。", "Records without any usable time evidence may be absent. The ranking filter remains unchanged.") : text("列表忽略日期范围，以包含无时间证据的记录；能力排名仍使用原日期范围。", "The list ignores the date range to include records without time evidence; capability ranking still uses the original range.")}</span><Button type="button" size="sm" variant="outline" onClick={() => { setScope((value) => value === "range" ? "session" : "range"); setCursorHistory([]); }}>{scope === "range" ? text("显示全部会话记录", "Show all Session records") : text("恢复日期筛选", "Restore date filter")}</Button></AlertDescription></Alert> : null}
         {error !== "" ? <Alert variant="destructive"><TriangleAlert /><AlertTitle>{text("证据加载失败", "Evidence failed to load")}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert> : null}
+        {page?.detailsExpired || detailExpired ? <Alert><Database /><AlertTitle>{text("部分明细已过期", "Some details have expired")}</AlertTitle><AlertDescription>{text("历史统计仍保留；列表仅显示保留期内可用的明细。", "Historical statistics are retained; this list shows only available details within retention.")}</AlertDescription></Alert> : null}
         {page === null && error === "" ? <Skeleton className="h-36" /> : page?.items.length === 0
-          ? <p className="py-8 text-center text-sm text-muted-foreground">{origin === "counted" ? contentCapability ? text("没有匹配的内容观测。", "No matching content observations.") : text("没有匹配的实际调用。", "No matching actual calls.") : text("没有匹配的模型输入证据。", "No matching model-input evidence.")}</p>
+          ? page.detailsExpired ? null : <p className="py-8 text-center text-sm text-muted-foreground">{origin === "counted" ? contentCapability ? text("没有匹配的内容观测。", "No matching content observations.") : text("没有匹配的实际调用。", "No matching actual calls.") : text("没有匹配的模型输入证据。", "No matching model-input evidence.")}</p>
           : <div className="divide-y rounded-lg border">{page?.items.map((invocation) => <div key={invocation.id} className="flex items-center justify-between gap-3 p-3"><div className="min-w-0"><p className="truncate font-mono text-xs">{"modelInvocationId" in invocation ? invocation.modelInvocationId : invocation.id}</p><p className="mt-1 text-xs text-muted-foreground">{"status" in invocation ? invocationStatusLabel(invocation.status) : "category" in invocation ? text("内容观测", "Content observation") : text("输入证据", "Input evidence")} · {formatDate("occurredAt" in invocation ? invocation.occurredAt : invocation.startedAt)}</p></div><Button type="button" size="sm" variant="outline" aria-label={origin === "counted" && contentCapability ? text(`打开内容证据 ${invocation.id}`, `Open content evidence ${invocation.id}`) : origin === "counted" ? text(`打开调用 ${invocation.id}`, `Open invocation ${invocation.id}`) : text(`打开输入证据 ${invocation.id}`, `Open input evidence ${invocation.id}`)} onClick={() => { setExposurePage(1); setDetailRequest({ id: invocation.id, origin }); }}>{origin === "counted" && !contentCapability ? text("打开调用", "Open invocation") : text("打开证据", "Open evidence")}</Button></div>)}</div>}
         {page !== null && (cursorHistory.length > 0 || page.nextCursor !== null) ? <div className="flex justify-end gap-2"><Button size="sm" variant="outline" disabled={cursorHistory.length === 0} onClick={() => { setCursorHistory((history) => history.slice(0, -1)); }}>{text("上一页", "Previous")}</Button><Button size="sm" variant="outline" disabled={page.nextCursor === null} onClick={() => { if (page.nextCursor !== null) setCursorHistory((history) => [...history, page.nextCursor!]); }}>{text("下一页", "Next")}</Button></div> : null}
         {contentDetail === null ? null : <Card><CardHeader><CardTitle>{text("持久化内容证据", "Persisted content evidence")}</CardTitle><CardDescription>{text("正文未保留；以下为观测计量与来源。", "Bodies are not retained; these are observed measurements and their source.")}</CardDescription></CardHeader><CardContent className="flex flex-col gap-4">
@@ -774,7 +784,7 @@ const InvocationSheet = ({ capability, onClose, baseQuery, sessionSelected, init
               <ToolContentMeasurement label={text("参数内容估算", "Argument content estimate")} content={detail.invocation.argumentEstimate} />
               <ToolContentMeasurement label={text("结果内容估算", "Result content estimate")} content={detail.invocation.resultEstimate} />
             </div> : null}
-            <div><p className="mb-2 text-xs font-medium text-muted-foreground">{text("上下文暴露", "Context exposures")}</p>{detail.exposures.length === 0 ? <p className="text-sm text-muted-foreground">{origin === "counted" ? text("这次实际调用没有关联到持久化的模型输入证据；可切换到“模型输入证据”查看独立记录。", "This actual call is not linked to persisted model-input evidence; switch to Model-input evidence to inspect independent records.") : text("没有已持久化的暴露。", "No persisted exposures.")}</p> : <div className="divide-y rounded-lg border">{detail.exposures.map((exposure, index) => <div key={`${exposure.modelInvocationId}:${exposure.position}:${index}`} className="p-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-mono text-xs">{exposure.modelInvocationId}</span><Badge variant={exposure.resultFirstUse === "repeat" ? "secondary" : "outline"}>{exposure.resultFirstUse === "first" ? text("首次", "First") : exposure.resultFirstUse === "repeat" ? text("重复", "Repeat") : text("未知", "Unknown")}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{"toolInvocationId" in exposure && typeof exposure.toolInvocationId === "string" ? `${exposure.toolInvocationId} · ` : ""}{exposureKindLabel(exposure.kind)} · {text("位置", "position")} {exposure.position} · {exposure.tokens == null ? text("Token 无法估算", "Token estimate unavailable") : text(`${exposure.tokens} 估算 Token`, `${exposure.tokens} estimated tokens`)}</p><TokenMeasurement estimate={exposure} /></div>)}</div>}</div>
+            <div><p className="mb-2 text-xs font-medium text-muted-foreground">{text("上下文暴露", "Context exposures")}</p>{detail.exposures.length === 0 ? <p className="text-sm text-muted-foreground">{detail.detailsExpired ? text("明细已过期，历史统计仍保留。", "Details have expired; historical statistics are retained.") : origin === "counted" ? text("这次实际调用没有关联到持久化的模型输入证据；可切换到“模型输入证据”查看独立记录。", "This actual call is not linked to persisted model-input evidence; switch to Model-input evidence to inspect independent records.") : text("没有已持久化的暴露。", "No persisted exposures.")}</p> : <div className="divide-y rounded-lg border">{detail.exposures.map((exposure, index) => <div key={`${exposure.modelInvocationId}:${exposure.position}:${index}`} className="p-3"><div className="flex flex-wrap items-center justify-between gap-2"><span className="font-mono text-xs">{exposure.modelInvocationId}</span><Badge variant={exposure.resultFirstUse === "repeat" ? "secondary" : "outline"}>{exposure.resultFirstUse === "first" ? text("首次", "First") : exposure.resultFirstUse === "repeat" ? text("重复", "Repeat") : text("未知", "Unknown")}</Badge></div><p className="mt-1 text-xs text-muted-foreground">{"toolInvocationId" in exposure && typeof exposure.toolInvocationId === "string" ? `${exposure.toolInvocationId} · ` : ""}{exposureKindLabel(exposure.kind)} · {text("位置", "position")} {exposure.position} · {exposure.tokens == null ? text("Token 无法估算", "Token estimate unavailable") : text(`${exposure.tokens} 估算 Token`, `${exposure.tokens} estimated tokens`)}</p><TokenMeasurement estimate={exposure} /></div>)}</div>}</div>
             <ListPagination page={exposurePage} pageSize={50} total={detail.exposureTotal ?? detail.exposures.length} totalPages={Math.ceil((detail.exposureTotal ?? detail.exposures.length) / 50)} onPageChange={setExposurePage} />
           </CardContent>
         </Card>}

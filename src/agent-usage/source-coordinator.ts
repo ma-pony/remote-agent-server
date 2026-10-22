@@ -1,6 +1,7 @@
 import { pageResult, type PaginationQuery } from "../pagination.js";
 import { createHash, randomUUID } from "node:crypto";
 import { UsageError } from "./core/errors.js";
+import { detailsArchived } from "./storage/detail-archives.js";
 import type { UsageBinding, UsageObservation } from "./core/types.js";
 import type { UsageStore } from "./storage/usage-store.js";
 import { trackUsageQueryChanges } from "./storage/query-version.js";
@@ -67,6 +68,10 @@ export class UsageSourceCoordinator {
     `);
     trackUsageQueryChanges(store.db,"agent_usage_sources",["status","error_code"]);
     trackUsageQueryChanges(store.db,"agent_usage_source_mappings",["state"]);
+    // A new coordinator owns no running jobs. Preserve committed progress, but do not
+    // let a previous process's collecting state act as a live maintenance barrier.
+    store.db.prepare(`UPDATE agent_usage_sources SET status='failed',error_code='usage_collection_interrupted'
+      WHERE status='collecting'`).run();
   }
 
   registerSource(config: SourceConfig): SourceRecord {
@@ -88,6 +93,7 @@ export class UsageSourceCoordinator {
         .run(id, config.namespace, config.sourceKey, config.kind, canonical(config.inputRef), canonical(config), canonical(adapter.describe()));
       for (const mapping of config.mappings) {
         const binding = this.store.bindSession(config.namespace, mapping.agentId, mapping.sessionId);
+        this.store.assertBinding(binding);
         this.store.db.prepare(`INSERT INTO agent_usage_source_mappings
           (source_id, source_session_key, namespace, agent_id, session_id, epoch_id, subject_generation) VALUES (?, ?, ?, ?, ?, ?, ?)`)
           .run(id, mapping.sourceSessionKey, config.namespace, mapping.agentId, mapping.sessionId, mapping.providerEpochId, binding.generation);
@@ -98,6 +104,7 @@ export class UsageSourceCoordinator {
 
   collect(id: string, frozenBoundary?: string, rebuild = false): Promise<void> {
     if (this.closed) return Promise.reject(new UsageError("usage_collector_closed"));
+    try { this.assertCollectible(id); } catch (error) { return Promise.reject(error); }
     const current = this.jobs.get(id);
     if (current) return rebuild ? Promise.reject(new UsageError("usage_collection_pending")) : current.promise;
     const source = this.source(id);
@@ -107,7 +114,8 @@ export class UsageSourceCoordinator {
     if (!adapter) return Promise.reject(new UsageError("usage_source_unsupported"));
     this.store.db.prepare("UPDATE agent_usage_sources SET capabilities_json=? WHERE id=? AND capabilities_json!=?")
       .run(canonical(adapter.describe()), id, canonical(adapter.describe()));
-    const collectionId = source.status === "collecting" && source.collection_id !== null ? source.collection_id : randomUUID();
+    const interrupted = source.status === "collecting" || source.error_code === "usage_collection_interrupted";
+    const collectionId = interrupted && source.collection_id !== null ? source.collection_id : randomUUID();
     this.store.db.prepare("UPDATE agent_usage_sources SET status = 'collecting', collection_id = ?, error_code = NULL WHERE id = ?").run(collectionId, id);
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
@@ -150,7 +158,7 @@ export class UsageSourceCoordinator {
                   for (const invocation of entry.invocations ?? []) this.attribution.observeInvocation(this.binding(mapping), { ...invocation, sourceId: id, providerEpochId: mapping.epoch_id });
                 }
               } catch (error) {
-                if (!(error instanceof UsageError) || !["usage_subject_deleted", "usage_binding_stale"].includes(error.code)) throw error;
+                if (!(error instanceof UsageError) || !["usage_subject_deleted", "usage_binding_stale", "usage_details_expired"].includes(error.code)) throw error;
                 rejected = true;
               }
             }
@@ -193,11 +201,19 @@ export class UsageSourceCoordinator {
 
   /** HTTP callers can return the persisted collection identity immediately. */
   startCollect(id: string, rebuild = false): SourceRecord {
+    this.assertCollectible(id);
     if (rebuild && this.jobs.has(id)) throw new UsageError("usage_collection_pending");
     void this.collect(id, undefined, rebuild).catch(() => { /* The persisted source state reports the sanitized error. */ });
     const row = this.source(id);
     if (!row) throw new UsageError("usage_source_not_found");
     return this.project(row);
+  }
+
+  private assertCollectible(id: string): void {
+    const mappings = this.mappings(id).filter(mapping => mapping.state !== "revoked");
+    // A shared source may still serve live Sessions; archived mappings are rejected at commit.
+    if (mappings.length && mappings.every(mapping => detailsArchived(this.store.db,mapping.namespace,mapping.session_id)))
+      throw new UsageError("usage_details_expired");
   }
 
   listSourcesPage(namespace: string, filter: SourceFilter, pagination: Pick<PaginationQuery, "page" | "pageSize">) {

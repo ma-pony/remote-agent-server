@@ -12,6 +12,7 @@ import { AttributionStore } from "./storage/attribution-store.js";
 import { RuntimeCapabilityCollector } from "./runtime-capabilities.js";
 import { RuntimeContentBackfill } from "./runtime-backfill.js";
 import { RuntimeEventRetention } from "./runtime-retention.js";
+import { UsageDetailRetention } from "./detail-retention.js";
 import { RuntimeConversationCollector } from "./runtime-conversation.js";
 import { TranscriptProfiles } from "./transcript-profiles.js";
 import { UsageQueryWorker } from "./query-worker.js";
@@ -55,9 +56,11 @@ export class HostUsageCollector {
   readonly contentBackfill: RuntimeContentBackfill;
   readonly conversationContent: RuntimeConversationCollector;
   readonly eventRetention: RuntimeEventRetention;
+  readonly detailRetention: UsageDetailRetention;
   readonly transcriptProfiles: TranscriptProfiles;
   constructor(readonly db: Database.Database, adapters: Record<string, UsageSourceAdapter> = {},
-    private readonly discoverManagedSources?: (sessionId: number, signal?: AbortSignal) => Promise<void>, tokenizers = new ModelTokenizers(), eventRetentionMs = 7 * 24 * 60 * 60 * 1000) {
+    private readonly discoverManagedSources?: (sessionId: number, signal?: AbortSignal) => Promise<void>, tokenizers = new ModelTokenizers(), eventRetentionMs = 7 * 24 * 60 * 60 * 1000,
+    detailRetentionMs = 7 * 86_400_000) {
     this.store = new UsageStore(db);
     db.exec(`CREATE TABLE IF NOT EXISTS agent_usage_harvests (
       namespace TEXT NOT NULL, session_id TEXT NOT NULL, status TEXT NOT NULL,
@@ -72,6 +75,7 @@ export class HostUsageCollector {
       (runId, content, event, signal) => this.runtimeCapabilities.prepareTool(runId, content, event, signal), this.conversationContent, tokenizers.knownModels());
     this.sources = new UsageSourceCoordinator(this.store, adapters, 30_000, this.attribution);
     this.eventRetention = new RuntimeEventRetention(db, this.namespace, this.conversationContent, eventRetentionMs);
+    this.detailRetention = new UsageDetailRetention(db, this.namespace, this.attribution.dailyRankings, detailRetentionMs);
   }
   binding(sessionId: number): UsageBinding {
     const session = this.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: number } | undefined;
@@ -128,7 +132,7 @@ export class HostUsageCollector {
           metrics: legacyMetrics(row)
         });
       } catch (error) {
-        if (!(error instanceof UsageError) || error.code !== "usage_subject_deleted") throw error;
+        if (!(error instanceof UsageError) || !["usage_subject_deleted","usage_details_expired"].includes(error.code)) throw error;
       }
     }
     const runs = this.db.prepare(`SELECT r.id, r.session_id, r.started_at, r.input_tokens, r.output_tokens, r.total_tokens,
@@ -149,7 +153,7 @@ export class HostUsageCollector {
           runtimeKind: row.provider, metrics: legacyMetrics(row)
         });
       } catch (error) {
-        if (!(error instanceof UsageError) || error.code !== "usage_subject_deleted") throw error;
+        if (!(error instanceof UsageError) || !["usage_subject_deleted","usage_details_expired"].includes(error.code)) throw error;
       }
     }
   }
@@ -381,12 +385,13 @@ export class HostUsageCollector {
       const started = performance.now();
       try {
         const retentionPending = this.eventRetention.step() !== "idle";
+        const detailPending = this.detailRetention.step() !== "idle";
         this.compactedEventPayloads += this.store.compactEventPayloads(100);
         this.compactedExposureIdentities += this.attribution.compactExposureIdentities(250);
         this.compactedRankingInputMetadata += this.attribution.compactRankingInputMetadata(250);
         this.reclaimedEstimateProfiles += this.attribution.cleanupUnusedEstimates(100);
         this.compactedRevokedSources += this.sources.compactRevokedSources(100);
-        const pending = retentionPending || this.store.eventPayloadCompactionPending() || this.attribution.exposureIdentityCompactionPending()
+        const pending = retentionPending || detailPending || this.store.eventPayloadCompactionPending() || this.attribution.exposureIdentityCompactionPending()
           || this.attribution.rankingInputMetadataCompactionPending();
         this.scheduleCompaction(pending ? Math.max(50,Math.min(1_000,(performance.now()-started)*3)) : 30_000);
       } catch {

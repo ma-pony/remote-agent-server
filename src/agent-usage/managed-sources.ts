@@ -51,7 +51,8 @@ export class ManagedUsageSources {
       })];
     })) as Record<SourceRegistration["kind"], FileUsageSource>;
     this.collector = new HostUsageCollector(db, this.adapters, (sessionId, signal) => this.discover(sessionId, signal),
-      loadModelTokenizers(config.usageTokenizers, resolve(config.dataDir, "tokenizers")), config.usageEventRetentionMs);
+      loadModelTokenizers(config.usageTokenizers, resolve(config.dataDir, "tokenizers")), config.usageEventRetentionMs,
+      config.usageDetailRetentionMs);
   }
 
   private async discover(sessionId: number, signal?: AbortSignal): Promise<void> {
@@ -93,6 +94,7 @@ export class ManagedUsageSources {
       const sessionId = Number(mapping.sessionId);
       const session = this.session(mapping.sessionId);
       const binding = this.collector.binding(sessionId);
+      this.collector.store.assertBinding(binding);
       const subject = this.db.prepare("SELECT state FROM agent_usage_subjects WHERE namespace = ? AND kind = 'session' AND subject_id = ?")
         .get(binding.namespace, binding.sessionId) as { state: string };
       if (subject.state !== "active") throw new UsageError("usage_collection_pending");
