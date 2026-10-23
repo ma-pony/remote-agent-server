@@ -393,6 +393,28 @@ const AGENT_COLUMNS = `
   updated_at TEXT NOT NULL
 `;
 
+/** Check only relationships changed by rebuilding agents, including incoming references. */
+const hasInvalidAgentForeignKeys = (db: Database.Database): boolean => {
+  if (db.prepare("PRAGMA foreign_key_check(agents)").get() !== undefined) return true;
+  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'")
+    .all() as Array<{ name: string }>;
+  for (const { name } of tables) {
+    const references = (db.prepare(`PRAGMA foreign_key_list(${quote(name)})`).all() as
+      Array<{ table: string; from: string; to: string | null; seq: number }>)
+      .filter(key => key.table.toLowerCase() === "agents");
+    if (references.length === 0) continue;
+    // The rebuilt agents table has exactly one parent key: its single-column id PK.
+    if (references.some(key => key.seq !== 0 || (key.to !== null && key.to.toLowerCase() !== "id"))) return true;
+    const missingParent = references.map(key =>
+      `(child.${quote(key.from)} IS NOT NULL AND NOT EXISTS
+        (SELECT 1 FROM agents AS parent WHERE parent.id = +child.${quote(key.from)}))`).join(" OR ");
+    // Unary + removes child affinity; SQLite foreign keys use the parent's affinity/collation.
+    // Do not check other foreign keys on these child tables or read unrelated usage tables.
+    if (db.prepare(`SELECT 1 FROM ${quote(name)} AS child WHERE ${missingParent} LIMIT 1`).get() !== undefined) return true;
+  }
+  return false;
+};
+
 /** SQLite requires rebuilding the table to extend a Provider CHECK constraint. */
 const migrateAgentProviders = (db: Database.Database): void => {
   const { sql } = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agents'")
@@ -413,7 +435,7 @@ const migrateAgentProviders = (db: Database.Database): void => {
         ALTER TABLE agents_new RENAME TO agents;
       `);
       db.prepare("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'agents'").run(sequence);
-      if ((db.pragma("foreign_key_check") as unknown[]).length > 0) {
+      if (hasInvalidAgentForeignKeys(db)) {
         throw new Error("Agent Provider migration violated foreign keys");
       }
     })();

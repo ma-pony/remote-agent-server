@@ -232,6 +232,8 @@ Codex ACP adapter 固定为 `2.2.2`，锁文件中的配套 Codex CLI 为 `0.160
 
 #### DeepSeek Harness
 
+旧库首次升级以支持该 Provider 时，会迁移 Agent 表并校验其自身外键及所有引用 Agent 的子表关系，保留 Agent ID 和自增序号。无关用量历史不参与这次校验；迁移失败或中断后可重试，成功后不会重复执行。恢复要求见[升级、备份与恢复](docs/deployment.md#8-升级备份与恢复)。
+
 使用 Node.js **22.19 或更高的 22.x**，以服务用户安装已核对 ACP 接口的版本：
 
 ```bash

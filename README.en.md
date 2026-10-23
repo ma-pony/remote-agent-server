@@ -232,6 +232,8 @@ When creating or restoring a Codex session, all selected MCP servers must be con
 
 #### DeepSeek Harness
 
+The first upgrade of an older database rebuilds the Agent table and validates its own foreign keys and every child relationship referencing an Agent, preserving IDs and the autoincrement sequence. Unrelated usage history is excluded from this check. Failed or interrupted migrations can be retried; committed migrations are skipped. See [upgrades, backups and recovery](docs/deployment.md#8-升级备份与恢复).
+
 Use Node.js **22.19 or later within 22.x** and install the version whose ACP interface was checked, as the service user:
 
 ```bash
