@@ -371,6 +371,9 @@ Provider-global MCP uses a separate import flow. Selecting **Import and enable**
 
 ### Runtime and concurrency
 
+This page also manages [RTK command output compression](docs/rtk.en.md). `pnpm run init` installs and enables it by default. Administrators can enable/disable, check stable releases, update, and roll back. The service checks daily; updates are manual. Changes apply to the next Run while active work keeps its original version. Installation failure falls back to original command output.
+The managed gate takes over standalone native RTK hooks so they follow the system setting. Reinitialization repairs a damaged current version while preserving enabled state and rollback history.
+
 Open **System settings → Runtime and concurrency** to adjust:
 
 - the hard timeout for one run;

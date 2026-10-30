@@ -3,19 +3,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseEnv } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RtkManager } from "../src/rtk/rtk-manager.js";
 
 import { readEnvironmentFile } from "../src/environment-file.js";
 import { initializeInstallation } from "../src/setup.js";
 import type { CommandRunner } from "../src/workspaces/workspace-manager.js";
 
 const directories: string[] = [];
+beforeEach(() => {
+  vi.spyOn(RtkManager.prototype, "ensureInstalled").mockImplementation(async function(this: RtkManager) { return this.status(); });
+});
 const temporaryDirectory = async () => {
   const directory = await mkdtemp(join(tmpdir(), "remote-agent-setup-"));
   directories.push(directory);
   return directory;
 };
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -52,6 +57,18 @@ describe("local environment file", () => {
 });
 
 describe("installation initialization", () => {
+  it("attempts RTK installation by default while doctor only inspects the existing tool", async () => {
+    const directory = await temporaryDirectory();
+    const options = { directory, root: join(directory, "storage"), platform: "darwin" as const,
+      environment: {}, commandRunner: workspaceRunner([]), fileSystemInspector: inspector };
+    await initializeInstallation(options);
+    expect(RtkManager.prototype.ensureInstalled).toHaveBeenCalledTimes(1);
+    const inspect = vi.spyOn(RtkManager.prototype, "inspect");
+    await initializeInstallation({ ...options, checkOnly: true });
+    expect(inspect).toHaveBeenCalledTimes(1);
+    expect(RtkManager.prototype.ensureInstalled).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["darwin", "linux"] as const)("creates a private config and verifies native workspace operations on %s", async (platform) => {
     const directory = await temporaryDirectory();
     const root = join(directory, "data root");

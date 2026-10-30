@@ -107,6 +107,7 @@ export type Page<T> = {
 };
 
 export type Run = {
+  rtk?: import("./rtk/rtk-types.js").RtkRunSnapshot | null;
   eventsPrunedAt?: string | null;
   eventsPrunedThroughSeq?: number;
   attachments?: import("./attachments/attachment-types.js").Attachment[];

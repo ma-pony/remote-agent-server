@@ -66,10 +66,14 @@ import {
 import { registerSessionRoutes } from "./sessions/session-routes.js";
 import { registerConcurrencySettingsRoutes } from "./settings/concurrency-settings-routes.js";
 import { ConcurrencySettingsStore } from "./settings/concurrency-settings-store.js";
+import { RtkManager } from "./rtk/rtk-manager.js";
+import { registerRtkRoutes } from "./rtk/rtk-routes.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import { type CommandRunner, type WorkspaceManager } from "./workspaces/workspace-manager.js";
 
 export type AppDependencies = {
+  rtkManager?: RtkManager;
+  backgroundRtkChecks?: boolean;
   config: AppConfig;
   db: Database.Database;
   runtime?: AgentRuntime;
@@ -101,6 +105,7 @@ export type AppDependencies = {
  */
 export const buildApp = (deps: AppDependencies): FastifyInstance => {
   const app = Fastify({ forceCloseConnections: true });
+  const rtkManager = deps.rtkManager ?? new RtkManager({ dataDir: deps.config.dataDir });
   const usageSources = deps.usageSources ?? new ManagedUsageSources(deps.db, deps.config);
   const usageObserver = new McpUsageObserver(usageSources.collector);
   const usageCapture = usageSources.collector.capture ?? new HostUsageCapture(usageSources.collector, deps.config.usageCaptureUpstreams ?? {},
@@ -186,6 +191,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     concurrencySettings: concurrencySettingsStore
   });
   const executor = new RunExecutor({
+    rtkManager,
     runtime,
     skillProjector,
     runRepository,
@@ -232,6 +238,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerUsageSourceRoutes(api, usageSources);
     registerUsageQueryRoutes(api, usageSources.collector);
     registerConcurrencySettingsRoutes(api, concurrencySettingsStore);
+    registerRtkRoutes(api, rtkManager);
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager, skillManager, runRepository, providerExtensionManager);
     registerSkillRoutes(api, agentManager, skillManager, skillSourceManager);
@@ -282,6 +289,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     if (stopped) return;
     stopped = true;
     const failures: unknown[] = [];
+    try { await rtkManager.close(); } catch (error) { failures.push(error); }
     try { await webhookBatchDispatcher.stop(); } catch (error) { failures.push(error); }
     try { await skillSourceManager.close(); } catch (error) { failures.push(error); }
     integrationTaskScheduler.stop();
@@ -323,6 +331,8 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     if (shutdownError !== undefined) throw shutdownError;
   });
   app.addHook("onReady", async () => {
+    await rtkManager.recover();
+    if (deps.backgroundRtkChecks) rtkManager.start();
     usageSources.collector.startRecovery();
     scheduler.start();
     integrationTaskScheduler.start();

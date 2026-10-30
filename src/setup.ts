@@ -15,11 +15,13 @@ import { applyServicePath, removeServiceSecretsFromEnvironment } from "./runtime
 import type { FileSystemInspector } from "./workspaces/apfs-workspace.js";
 import { createWorkspaceManager } from "./workspaces/create-workspace-manager.js";
 import type { CommandRunner, WorkspaceManager } from "./workspaces/workspace-manager.js";
+import { RtkManager } from "./rtk/rtk-manager.js";
 
 const execFileAsync = promisify(execFile);
 const providerCommands = ["codex", "claude", "hermes", "dsh"];
 
 type InstallationOptions = {
+  rtkManager?: Pick<RtkManager, "ensureInstalled" | "inspect" | "close">;
   directory?: string;
   root?: string;
   platform?: NodeJS.Platform;
@@ -78,9 +80,10 @@ const checkWorkspaceOperations = async (manager: WorkspaceManager, config: AppCo
 };
 
 export const initializeInstallation = async ({
+  rtkManager: injectedRtkManager,
   directory = process.cwd(), root, platform = process.platform, homeDirectory = homedir(),
   environment = process.env, checkOnly = false, commandRunner, fileSystemInspector
-}: InstallationOptions = {}): Promise<{ configPath: string; created: boolean; fileExists: boolean; config: AppConfig; providers: string[] }> => {
+}: InstallationOptions = {}): Promise<{ configPath: string; created: boolean; fileExists: boolean; config: AppConfig; providers: string[]; rtk: import("./rtk/rtk-types.js").RtkStatus }> => {
   const [major, minor] = process.versions.node.split(".").map(Number);
   if (major !== 22 || minor! < 13) throw new Error("Node.js 22.13 or later within Node 22 is required. Run nvm install && nvm use.");
   if (platform !== "darwin" && platform !== "linux") throw new Error("Use macOS with APFS or Linux with Btrfs.");
@@ -143,7 +146,11 @@ export const initializeInstallation = async ({
     }
   }
   if (!existing && !checkOnly) await writeFile(configPath, contents, { flag: "wx", mode: 0o600 });
-  return { configPath, created: !existing && !checkOnly, fileExists: existing || !checkOnly, config, providers };
+  const rtkManager = injectedRtkManager ?? new RtkManager({ dataDir: config.dataDir, platform });
+  let rtk;
+  try { rtk = checkOnly ? await rtkManager.inspect() : await rtkManager.ensureInstalled(); }
+  finally { await rtkManager.close(); }
+  return { configPath, created: !existing && !checkOnly, fileExists: existing || !checkOnly, config, providers, rtk };
 };
 
 const isEntrypoint = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -168,6 +175,9 @@ if (isEntrypoint) {
       : "Using configuration supplied by the service environment; no .env file was created.");
     if (values.root && !result.created) console.log("Existing configuration takes precedence; --root was not applied.");
     console.log(`Provider commands found: ${result.providers.join(", ") || "none"}. Authentication and model access have not been tested.`);
+    console.log(result.rtk.installed
+      ? `RTK ${result.rtk.currentVersion}: ${result.rtk.enabled ? "enabled" : "disabled"}. Changes apply to later Runs.`
+      : `RTK is unavailable (${result.rtk.operation?.error ?? "not installed"}). Tasks use original command output. ${values.check ? "Run pnpm run init to install it." : "Retry pnpm run init or install it from Runtime and concurrency settings."}`);
     if (result.providers.length === 0) console.log("Install one Provider before running a task. See README.en.md → Prepare a Provider.");
     console.log("Log in with the service user: codex login or claude auth login. For Hermes and DeepSeek Harness, follow their setup instructions in README.en.md.");
     const host = ["0.0.0.0", "::"].includes(result.config.host) ? "127.0.0.1" : result.config.host;

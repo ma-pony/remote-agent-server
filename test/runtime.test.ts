@@ -1067,6 +1067,24 @@ describe("AcpxAgentRuntime", () => {
     }]);
   });
 
+  it("refreshes the handle for an RTK version or enable change while resuming the same Provider Session", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    const handle = await acp.ensureSession(); acp.ensureSession.mockReset(); acp.ensureSession.mockResolvedValue(handle);
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    const rtk = { requested: true, enabled: true, version: "1.1.0", mode: "hook" as const, reason: null, binaryPath: "/managed/1.1.0/rtk" };
+    try {
+      await runtime.ensureSession(sessionInput(root, { rtk }));
+      await runtime.ensureSession(sessionInput(root, { providerSessionId: "provider-session-1", rtk: { ...rtk, version: "1.2.0", binaryPath: "/managed/1.2.0/rtk" } }));
+      await runtime.ensureSession(sessionInput(root, { providerSessionId: "provider-session-1", rtk: { ...rtk, enabled: false, mode: "off", reason: "disabled" } }));
+      expect(acp.ensureSession).toHaveBeenCalledTimes(3);
+      expect(acp.ensureSession.mock.calls[2]?.[0]).toMatchObject({ resumeSessionId: "provider-session-1" });
+      const options = acpxMocks.createAcpRuntime.mock.calls[2]?.[0] as AcpRuntimeOptions;
+      expect(options.agentRegistry.resolve(`remote:codex:${AGENT_ID}:${SESSION_ID}`)).toContain("REMOTE_AGENT_RTK_ENABLED='0'");
+    } finally { await runtime.shutdown(); }
+  });
+
   it("已有 Provider Session 的插件或 Hook 选择变化时刷新 Handle", async () => {
     const root = makeRoot();
     const acp = runtimeStub();
@@ -1085,6 +1103,31 @@ describe("AcpxAgentRuntime", () => {
     expect(acp.close).toHaveBeenCalledWith({ handle, reason: "session_handle_refreshed" });
     expect(acp.ensureSession).toHaveBeenCalledTimes(2);
     expect(acp.ensureSession.mock.calls[1]?.[0]).toMatchObject({ resumeSessionId: "provider-session-1" });
+  });
+
+  it("keeps the shared Claude RTK hook stable when doctor prepares a target without a Run plan", async () => {
+    const root = makeRoot();
+    const { db } = createTestDatabase();
+    db.prepare("UPDATE agents SET provider='claude_code' WHERE id=?").run(AGENT_ID);
+    const manager = new ProviderExtensionManager({ db, claudeHome: join(root, "empty-claude"), codexHome: join(root, "empty-codex") });
+    const acp = runtimeStub(); acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root), undefined, manager);
+    const rtk = { requested: true, enabled: true, version: "1.1.0", mode: "hook" as const, reason: null, binaryPath: "/managed/1.1.0/rtk" };
+    try {
+      await runtime.ensureSession(sessionInput(root, { provider: "claude_code", rtk }));
+      const path = join(makeConfig(root).dataDir, "agents", AGENT_PATH_ID, "provider-home/claude/settings.json");
+      const before = JSON.parse(readFileSync(path, "utf8")).hooks;
+      let doctorCommand = "";
+      acp.doctor.mockImplementation(async () => {
+        const options = acpxMocks.createAcpRuntime.mock.calls.at(-1)?.[0] as AcpRuntimeOptions;
+        doctorCommand = options.agentRegistry.resolve(`remote:claude_code:${AGENT_ID}:0`);
+        return { ok: true, message: "ready", details: [] };
+      });
+      await runtime.doctor("claude_code", AGENT_ID);
+      expect(JSON.stringify(before)).toContain("rtk-hook-process.ts");
+      expect(JSON.parse(readFileSync(path, "utf8")).hooks).toEqual(before);
+      expect(doctorCommand).toContain("REMOTE_AGENT_RTK_ENABLED='0'");
+    } finally { await runtime.shutdown(); db.close(); }
   });
 
   it("refreshes a resumed Claude Session when plugin contents change without a version bump", async () => {

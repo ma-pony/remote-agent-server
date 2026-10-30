@@ -39,7 +39,8 @@ const setup = (
   runRepositoryOptions: Record<string, unknown> = {},
   providerExtensionRevision = vi.fn(async () => "extensions-v1"),
   runTimeoutMs?: number,
-  runtimeSettings?: { getRuntime(): { runTimeoutMinutes: number; sessionStorageRetentionHours: number } }
+  runtimeSettings?: { getRuntime(): { runTimeoutMinutes: number; sessionStorageRetentionHours: number } },
+  rtkManager?: import("../src/runs/run-executor.js").RunExecutorDependencies["rtkManager"]
 ) => {
   const root = mkdtempSync(join(tmpdir(), "remote-agent-executor-"));
   tempDirectories.push(root);
@@ -70,6 +71,7 @@ const setup = (
   const skillProjector = { prepare };
   const usageCollector = new HostUsageCollector(db);
   const executor = new RunExecutor({
+    rtkManager,
     runtime,
     skillProjector,
     runRepository,
@@ -100,6 +102,24 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("resolves RTK when execution begins, passes the plan to Runtime, and persists a path-free snapshot", async () => {
+    const runtime = createFakeRuntime();
+    const ensure = vi.spyOn(runtime, "ensureSession");
+    let enabled = false;
+    const resolveForRun = vi.fn(async () => ({ requested: enabled, enabled, version: "1.1.0", mode: enabled ? "hook" as const : "off" as const,
+      reason: enabled ? null : "disabled" as const, binaryPath: "/private-managed/1.1.0/rtk" }));
+    const context = setup(runtime, undefined, undefined, {}, undefined, undefined, undefined, { resolveForRun });
+    enabled = true;
+    try {
+      await context.executor.execute(context.run.id);
+      expect(resolveForRun).toHaveBeenCalledOnce();
+      expect(ensure).toHaveBeenCalledWith(expect.objectContaining({ rtk: expect.objectContaining({ enabled: true, binaryPath: "/private-managed/1.1.0/rtk" }) }));
+      expect(context.runRepository.get(context.run.id)?.rtk).toEqual({ requested: true, enabled: true, version: "1.1.0", mode: "hook", reason: null });
+      const stored = context.db.prepare("SELECT rtk_snapshot_json FROM runs WHERE id=?").get(context.run.id) as { rtk_snapshot_json: string };
+      expect(stored.rtk_snapshot_json).not.toContain("private-managed");
+    } finally { context.db.close(); }
+  });
+
   it.each(["cancel", "timeout"] as const)("interrupts content counting on %s and leaves retained evidence for backfill", async mode => {
     vi.useFakeTimers();
     const waiting = deferred<void>();

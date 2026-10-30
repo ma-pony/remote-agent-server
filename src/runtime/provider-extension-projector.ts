@@ -6,6 +6,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import type { Provider } from "../domain.js";
 import { readPluginSkills } from "../provider-extensions/plugin-skills.js";
 import type { ProjectedSkill } from "./skill-projector.js";
+import { isNativeRtkHook } from "./rtk-command.js";
 import type {
   DiscoveredProviderExtension,
   ProviderExtensionManager
@@ -15,6 +16,7 @@ type ProjectionInput = {
   agentId: number;
   provider: Provider;
   home: string;
+  managedHooks?: DiscoveredProviderExtension[];
 };
 
 type PluginProjection = {
@@ -430,14 +432,21 @@ const projectClaude = async (home: string, extensions: DiscoveredProviderExtensi
   await writeFile(globalConfigPath, `${JSON.stringify(globalConfig, null, 2)}\n`, { mode: 0o600 });
 };
 
-/** Projects only the Provider-native extensions explicitly selected by an Agent. */
+/** Composes selected Provider-native extensions with service-owned stable hooks. */
 export class ProviderExtensionProjector {
   constructor(private readonly manager: ProviderExtensionManager, private readonly dataDir: string) {}
 
-  async prepare({ agentId, provider, home }: ProjectionInput): Promise<ProjectedSkill[]> {
+  async prepare({ agentId, provider, home, managedHooks = [] }: ProjectionInput): Promise<ProjectedSkill[]> {
     if (provider !== "codex" && provider !== "claude_code") return [];
     await mkdir(home, { recursive: true });
-    const extensions = await this.manager.enabledWithContentFingerprints(agentId);
+    const selected = await this.manager.enabledWithContentFingerprints(agentId);
+    const managesRtk = managedHooks.some(hook => hook.id === "remote-agent:rtk");
+    const extensions = [...selected.filter(extension => {
+      const config = object(extension.configuration);
+      const hook = object(config?.hook);
+      return !(managesRtk && extension.kind === "hook" && config?.event === "PreToolUse"
+        && hook?.type === "command" && typeof hook.command === "string" && isNativeRtkHook(hook.command));
+    }), ...managedHooks];
     if (provider === "codex") await projectCodex(home,
       resolve(this.dataDir, "agents", String(agentId), "provider-home", "codex"), extensions);
     else await projectClaude(home, extensions);

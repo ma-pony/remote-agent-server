@@ -149,7 +149,8 @@ export const startServer = async (options: StartServerOptions = {}): Promise<Run
       integrationStore,
       integrationProjection,
       webhookDispatcher,
-      concurrencySettingsStore
+      concurrencySettingsStore,
+      backgroundRtkChecks: options.runtime === undefined
     });
 
     let closing: Promise<void> | undefined;

@@ -11,6 +11,7 @@ import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/i18n";
+import { RtkSettings } from "@/components/rtk-settings";
 
 type Settings = ConcurrencySettings & RuntimeSettings;
 type Draft = Record<keyof Settings, string>;
@@ -82,6 +83,7 @@ export const ConcurrencySettingsPage = () => {
 
   return <PageContainer width="form">
     <PageHeader title={text("运行与并发", "Runtime and concurrency")} description={text("统一控制任务运行时间、会话大文件保留期和服务并发。修改不会中断正在运行的任务。", "Control run duration, large Session storage retention, and service concurrency. Changes do not interrupt active work.")} />
+    <div className="mb-5"><RtkSettings /></div>
     {error === "" || draft === null ? null : <Alert variant="destructive" className="mb-5"><XCircle /><AlertTitle>{text("保存失败", "Save failed")}</AlertTitle><AlertDescription>{error}</AlertDescription></Alert>}
     {saved ? <Alert className="mb-5 border-primary/30"><CheckCircle2 /><AlertTitle>{text("设置已保存", "Settings saved")}</AlertTitle><AlertDescription>{text("Run 超时作用于新启动的 Run；存储保留期在下一次清理时生效；并发限制立即作用于后续调度。", "Run timeout applies to newly started runs; storage retention applies at the next cleanup; concurrency limits affect subsequent scheduling immediately.")}</AlertDescription></Alert> : null}
     {draft === null ? error ? <ResourceLoadError title={text("设置加载失败", "Could not load settings")} message={error} onRetry={() => setRefresh(value => value + 1)} /> : <div role="status" aria-label={text("正在加载设置", "Loading settings")}><Skeleton className="h-[36rem]" /></div> : <form onSubmit={submit} className="space-y-5">

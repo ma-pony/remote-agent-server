@@ -141,11 +141,11 @@ it("offers a settings retry and never treats a blank retention field as zero", a
   let fails = true;
   vi.stubGlobal("fetch", vi.fn(async () => fails ? jsonResponse({ error: { message: "Unavailable" } }, 503) : jsonResponse(settings)));
   render(<App />);
-  expect(await screen.findByRole("alert")).toHaveTextContent("设置加载失败");
+  const settingsError = (await screen.findByText("设置加载失败")).closest('[role="alert"]')!;
   expect(screen.queryByText("保存失败")).not.toBeInTheDocument();
   expect(document.querySelector('[data-slot="skeleton"]')).toBeNull();
   fails = false;
-  fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
+  fireEvent.click(within(settingsError).getByRole("button", { name: "重新加载" }));
   const retention = await screen.findByLabelText("会话大文件保留（小时）");
   fireEvent.change(retention, { target: { value: "" } });
   expect(retention).toHaveAttribute("aria-invalid", "true");

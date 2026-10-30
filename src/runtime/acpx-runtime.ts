@@ -43,6 +43,8 @@ import { settleBestEffort } from "./bounded-operation.js";
 import { ProviderExtensionProjector } from "./provider-extension-projector.js";
 import { prepareDeepSeekSettings, writeDeepSeekPatch } from "./deepseek-harness-config.js";
 import { prepareHermesAcp } from "./hermes-acp.js";
+import { projectHermesRtk, rtkEnvironment, rtkManagedHooks } from "./rtk-projector.js";
+import type { RtkRunPlan } from "../rtk/rtk-types.js";
 
 export const RUNTIME_RELEASE_RETRY_MS = 5_000;
 
@@ -63,6 +65,7 @@ const CODEX_ACP_ENTRYPOINT = createRequire(import.meta.url).resolve("@agentclien
 
 const providers = new Set<Provider>(["claude_code", "codex", "hermes", "deepseek_harness"]);
 type RuntimeTarget = {
+  rtk?: RtkRunPlan;
   captureRoute?: RelayRoute;
   provider: Provider;
   agentId: number;
@@ -365,6 +368,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const home = join(legacyHome, "sessions", String(target.sessionId));
       const hostHome = process.env.HERMES_HOME ?? join(homedir(), ".hermes");
       await this.prepareHermesHome(hostHome, legacyHome, home, target.providerSessionId);
+      if (target.rtk) await projectHermesRtk(home);
       environment.push(`HERMES_HOME=${shellQuote(home)}`);
       command = await prepareHermesAcp(home);
     } else if (target.provider === "codex") {
@@ -372,7 +376,8 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const home = join(agentHome, "sessions", String(target.sessionId));
       const hostHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
       await this.prepareProviderHome(hostHome, home);
-      projectedSkills = await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home }) ?? [];
+      projectedSkills = await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home,
+        managedHooks: rtkManagedHooks(target.provider) }) ?? [];
       const disabledSkills = this.skillManager.hostSkillFiles().map((path) => [
         "[[skills.config]]",
         `path = ${JSON.stringify(path)}`,
@@ -408,7 +413,8 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       const home = join(providerHome, "claude");
       const hostHome = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
       await this.prepareProviderHome(hostHome, home);
-      projectedSkills = await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home }) ?? [];
+      projectedSkills = await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home,
+        managedHooks: rtkManagedHooks(target.provider) }) ?? [];
       if (capture) {
         await rm(join(home, ".credentials.json"), { force: true });
         const settingsPath = join(home, "settings.json");
@@ -420,8 +426,10 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       }
       environment.push(`CLAUDE_CONFIG_DIR=${shellQuote(home)}`);
     }
+    if (target.rtk) environment.push(...Object.entries(await rtkEnvironment(target.rtk, target.workspacePath)).map(([key, value]) => `${key}=${shellQuote(value)}`));
+    else environment.push("REMOTE_AGENT_RTK_ENABLED='0'", "REMOTE_AGENT_RTK_BINARY=''");
     if (capture) environment.push(...Object.entries(capture.values).map(([key, value]) => `${key}=${shellQuote(value)}`));
-    const unset = capture?.unset.map((key) => `-u ${key}`).join(" ") ?? "";
+    const unset = [...(capture?.unset ?? []), ...(target.rtk ? ["RTK_DISABLED", "RTK_HOOK_AUDIT"] : [])].map((key) => `-u ${key}`).join(" ");
     this.commands.set(agentName, `env ${unset ? `${unset} ` : ""}${environment.join(" ")} ${command}`);
     return projectedSkills;
   }
@@ -620,6 +628,7 @@ const configurationFingerprint = (input: RuntimeSessionInput): string => createH
     memory: input.memory,
     skillsRevision: input.skillsRevision ?? "",
     extensionsRevision: input.extensionsRevision ?? "",
+    rtk: input.rtk ?? null,
     mcpServers: input.mcpServers
   }))
   .digest("hex");
@@ -688,6 +697,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     );
     const captureRoute = await this.usageCapture?.prepare(input);
     const agent = registry.register({
+      rtk: input.rtk,
       captureRoute,
       provider: input.provider,
       agentId: input.agentId,

@@ -14,8 +14,10 @@ import type { SkillProjector } from "../runtime/skill-projector.js";
 import { SessionManagerError, type SessionManager } from "../sessions/session-manager.js";
 import type { ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 import { RunRepositoryError, type RunRepository } from "./run-repository.js";
+import type { RtkManager } from "../rtk/rtk-manager.js";
 
 export type RunExecutorDependencies = {
+  rtkManager?: Pick<RtkManager, "resolveForRun">;
   runtime: AgentRuntime;
   skillProjector: Pick<SkillProjector, "prepare">;
   runRepository: RunRepository;
@@ -68,6 +70,7 @@ type TurnRace =
  * Executes one persisted Run against the provider-neutral Runtime boundary.
  */
 export class RunExecutor {
+  private readonly rtkManager?: Pick<RtkManager, "resolveForRun">;
   private readonly runtime: AgentRuntime;
   private readonly skillProjector: Pick<SkillProjector, "prepare">;
   private readonly runRepository: RunRepository;
@@ -82,6 +85,7 @@ export class RunExecutor {
   private readonly usageCancellations = new Map<number, AbortController>();
 
   constructor({
+    rtkManager,
     runtime,
     skillProjector,
     runRepository,
@@ -93,6 +97,7 @@ export class RunExecutor {
     runTimeoutMs = DEFAULT_RUN_TIMEOUT_MS,
     usageCollector
   }: RunExecutorDependencies) {
+    this.rtkManager = rtkManager;
     this.runtime = runtime;
     this.skillProjector = skillProjector;
     this.runRepository = runRepository;
@@ -183,6 +188,11 @@ export class RunExecutor {
         return outcome.value;
       };
       const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
+      const rtk = await this.rtkManager?.resolveForRun(agent.provider);
+      if (rtk) {
+        const { binaryPath: _privatePath, ...snapshot } = rtk;
+        this.runRepository.setRtkSnapshot(run.id, snapshot);
+      }
       if (session.projectEnvironmentRevisionId !== null) {
         await withinRunTimeout(this.sessionManager.ensureWorkspacePrepared(session.id, runAbortController.signal));
       }
@@ -231,6 +241,7 @@ export class RunExecutor {
         else console.error(`runtime_content_persistence_failed runId=${run.id}`);
       }
       const runtimeSessionPromise = this.runtime.ensureSession({
+        ...(rtk ? { rtk } : {}),
         sessionId: session.id,
         agentId: agent.id,
         provider: agent.provider,

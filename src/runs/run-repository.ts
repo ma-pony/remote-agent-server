@@ -8,6 +8,7 @@ import type { Run, RunStatus, TokenUsage } from "../domain.js";
 import { assertSynchronousTransactionHook } from "../transaction-hook.js";
 
 type RunRow = {
+  rtk_snapshot_json: string | null;
   id: number;
   session_id: number;
   status: RunStatus;
@@ -46,6 +47,7 @@ const rowUsage = (row: RunRow): TokenUsage | null => {
 };
 
 const toRun = (row: RunRow): Run => ({
+  rtk: row.rtk_snapshot_json ? JSON.parse(row.rtk_snapshot_json) : null,
   id: row.id,
   sessionId: row.session_id,
   status: row.status,
@@ -108,6 +110,11 @@ export class RunRepositoryError extends Error {
  * Persists Run state transitions together with their owning Session state.
  */
 export class RunRepository {
+  setRtkSnapshot(id: number, snapshot: import("../rtk/rtk-types.js").RtkRunSnapshot): void {
+    const updated = this.db.prepare("UPDATE runs SET rtk_snapshot_json = ? WHERE id = ? AND status = 'running'")
+      .run(JSON.stringify(snapshot), id);
+    if (updated.changes !== 1) throw new RunRepositoryError("invalid_run_state");
+  }
   readonly attachments: AttachmentStore;
   private toRun = (row: RunRow): Run => ({ ...toRun(row), ...this.attachments.projection({ runId: row.id }) });
   private readonly db: Database.Database;

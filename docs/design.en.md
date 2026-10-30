@@ -248,6 +248,9 @@ Legacy usage import uses covering indexes containing only counters and relations
 
 ## 8. Agent capability projection
 
+RTK is a managed command-output compressor, installed and enabled by default. Its manager atomically owns configuration and version state under `DATA_DIR/tools/rtk/`. A Run resolves enabled state and its absolute executable path when execution starts; SQLite stores a snapshot without local paths. RTK state participates in the Runtime fingerprint, refreshing the connection and resuming the same Provider Session. A stable hook gate reads each process's snapshot so changes in a shared Claude Home do not alter concurrent Sessions. Updates download, verify and self-test before activation. Old executables remain during the process lifetime; startup reclaims versions other than current/previous. Session-owned raw output and tracking live under `runtime/rtk/` and follow large-storage cleanup. See [lifecycle and management API](rtk.en.md).
+Projection takes over standalone native RTK hooks and the Hermes rewrite plugin while preserving source configuration and extension selections. Command binding replaces only shell executable positions, retaining environment prefixes and argument semantics. Healthy same-version files are reused; damaged files are atomically repaired after candidate verification and self-tests, preserving enabled state and the rollback pointer.
+
 Each agent has an independent Provider Home. The service discovers reusable capabilities from the service user's provider configuration, then requires an explicit agent selection:
 
 ```text
