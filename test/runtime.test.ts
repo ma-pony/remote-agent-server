@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -161,6 +161,26 @@ const runtimeStub = (overrides: {
   } as unknown as RuntimeStub;
 };
 
+const codexTrustRuntimeFixture = (mode = "") => {
+  const root = makeRoot(), config = makeConfig(root);
+  const { db } = createTestDatabase();
+  db.prepare("UPDATE agents SET provider='codex' WHERE id=?").run(AGENT_ID);
+  const host = join(root, "host"); mkdirSync(host);
+  writeFileSync(join(host, "hooks.json"), JSON.stringify({ hooks: { PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "unrelated-check" }] }] } }));
+  const manager = new ProviderExtensionManager({ db, codexHome: host });
+  for (const hook of manager.list(AGENT_ID)) manager.setEnabled(AGENT_ID, hook.id, true);
+  const launcher = join(root, "codex");
+  writeFileSync(launcher, `#!${process.execPath}\nrequire(${JSON.stringify(join(import.meta.dirname, "fixtures/codex-hook-trust.cjs"))});\n`); chmodSync(launcher, 0o700);
+  const log = join(root, "requests.jsonl");
+  vi.stubEnv("CODEX_PATH", launcher); vi.stubEnv("CODEX_CONFIG", ""); vi.stubEnv("CODEX_TRUST_TEST_LOG", log);
+  vi.stubEnv("CODEX_TRUST_TEST_MODE", mode); vi.stubEnv("CODEX_TRUST_TEST_PID", join(root, "pid"));
+  const acp = runtimeStub(); acpxMocks.createAcpRuntime.mockReturnValue(acp);
+  const runtime = new AcpxAgentRuntime(config, undefined, manager);
+  const input = sessionInput(root, { rtk: { requested: true, enabled: true, version: "1.1.0", mode: "hook", reason: null, binaryPath: "/managed/rtk" } });
+  mkdirSync(input.workspacePath);
+  return { root, host, db, runtime, acp, input, requests: () => existsSync(log) ? readFileSync(log, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [] };
+};
+
 beforeEach(() => {
   acpxMocks.createAcpRuntime.mockReset();
   acpxMocks.createRuntimeStore.mockClear();
@@ -314,6 +334,42 @@ describe("SkillProjector", () => {
 });
 
 describe("AcpxAgentRuntime", () => {
+  it("trusts only the managed Codex RTK hook before creating the Core session", async () => {
+    const { root, host, db, runtime, acp, input, requests } = codexTrustRuntimeFixture();
+    acp.ensureSession.mockImplementation(async () => {
+      const edits = requests().find(request => request.method === "config/batchWrite")?.params.edits ?? [];
+      expect(edits).toHaveLength(1);
+      expect(edits[0].keyPath).toContain("pre_tool_use:1:0");
+      return { sessionKey: "test", backend: "acpx", runtimeSessionName: "test", agentSessionId: "provider-session-1" };
+    });
+    try {
+      await runtime.ensureSession(input);
+      expect(readFileSync(join(host, "hooks.json"), "utf8")).toContain("unrelated-check");
+      const pid = Number(readFileSync(join(root, "pid"), "utf8"));
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally { await runtime.shutdown(); db.close(); }
+  });
+
+  it("blocks Core creation when native trust verification fails", async () => {
+    const f = codexTrustRuntimeFixture("ignore_write");
+    try {
+      await expect(f.runtime.ensureSession(f.input)).rejects.toThrow("codex_managed_hook_trust_failed");
+      expect(f.acp.ensureSession).not.toHaveBeenCalled();
+    } finally { await f.runtime.shutdown(); f.db.close(); }
+  });
+
+  it.each(["cancel", "shutdown"] as const)("aborts managed hook preparation on %s before Core creation", async operation => {
+    const f = codexTrustRuntimeFixture("hang");
+    const pending = f.runtime.ensureSession(f.input);
+    const rejected = expect(pending).rejects.toThrow(operation === "shutdown" ? "Runtime is shutting down" : "codex_managed_hook_trust_failed");
+    try {
+      await vi.waitFor(() => expect(f.requests().some(r => r.method === "hooks/list")).toBe(true));
+      if (operation === "shutdown") await f.runtime.shutdown(); else await f.runtime.cancel(SESSION_ID);
+      await rejected;
+      expect(f.acp.ensureSession).not.toHaveBeenCalled();
+      expect(() => process.kill(Number(readFileSync(join(f.root, "pid"), "utf8")), 0)).toThrow();
+    } finally { await f.runtime.shutdown(); f.db.close(); }
+  });
   it("原样转发原生图片内容给 acpx", async () => {
     const root = makeRoot();
     const acp = runtimeStub();

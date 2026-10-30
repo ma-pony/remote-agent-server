@@ -45,6 +45,7 @@ import { prepareDeepSeekSettings, writeDeepSeekPatch } from "./deepseek-harness-
 import { prepareHermesAcp } from "./hermes-acp.js";
 import { projectHermesRtk, rtkEnvironment, rtkManagedHooks } from "./rtk-projector.js";
 import type { RtkRunPlan } from "../rtk/rtk-types.js";
+import { CodexHookTrustError, trustCodexManagedRtkHook } from "./codex-hook-trust.js";
 
 export const RUNTIME_RELEASE_RETRY_MS = 5_000;
 
@@ -646,6 +647,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   private shutdownPromise: Promise<void> | undefined;
   private readonly shutdownFailures: RuntimeShutdownFailure[] = [];
   private readonly providerHomePreparations = new Map<string, Promise<void>>();
+  private readonly hookTrustControllers = new Map<number, AbortController>();
   private readonly extensionProjector: ProviderExtensionProjector | undefined;
 
   constructor(
@@ -661,6 +663,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   async ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession> {
     this.assertRunning();
+    input.signal?.throwIfAborted();
     this.clearIdleTimer(input.sessionId);
     if (this.releaseRetryTimers.has(input.sessionId)) {
       this.clearReleaseRetryTimer(input.sessionId);
@@ -709,8 +712,27 @@ export class AcpxAgentRuntime implements AgentRuntime {
       memory: input.memory
     });
     let projectedSkills: ProjectedSkill[];
-    try { projectedSkills = await registry.prepare(agent); }
+    try {
+      projectedSkills = await registry.prepare(agent);
+      this.assertRunning();
+      input.signal?.throwIfAborted();
+    }
     catch (error) { await this.usageCapture?.release(input.sessionId); throw error; }
+    if (input.provider === "codex" && input.rtk?.enabled && this.extensionProjector) {
+      const controller = new AbortController();
+      this.hookTrustControllers.set(input.sessionId, controller);
+      try {
+        await trustCodexManagedRtkHook({
+          home: join(this.config.dataDir, "agents", String(input.agentId), "provider-home", "codex", "sessions", String(input.sessionId)),
+          cwd: input.workspacePath, signal: input.signal ? AbortSignal.any([controller.signal, input.signal]) : controller.signal
+        });
+      } catch (error) {
+        await this.usageCapture?.release(input.sessionId);
+        if (this.shuttingDown && error instanceof CodexHookTrustError && error.aborted)
+          throw new AgentRuntimeError("runtime_shutdown", "Runtime is shutting down");
+        throw error;
+      } finally { this.hookTrustControllers.delete(input.sessionId); }
+    }
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
     const sessionOptions = {
       ...(input.model === undefined ? {} : { model: input.model }),
@@ -845,6 +867,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   async cancel(sessionId: number): Promise<void> {
+    this.hookTrustControllers.get(sessionId)?.abort();
     const activeTurn = this.activeTurns.get(sessionId);
     if (activeTurn !== undefined) {
       await activeTurn.turn.cancel({ reason: "cancelled_by_request" });
@@ -858,6 +881,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   async releaseSession(sessionId: number): Promise<void> {
     this.assertRunning();
+    this.hookTrustControllers.get(sessionId)?.abort();
     this.clearIdleTimer(sessionId);
     this.clearReleaseRetryTimer(sessionId);
     await this.serializeSession(sessionId, async () => {
@@ -882,6 +906,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   async reset(input: RuntimeSessionInput): Promise<void> {
     this.assertRunning();
+    this.hookTrustControllers.get(input.sessionId)?.abort();
     await this.usageCapture?.release(input.sessionId);
     this.clearIdleTimer(input.sessionId);
     this.clearReleaseRetryTimer(input.sessionId);
@@ -906,6 +931,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   async forgetSession(sessionId: number): Promise<void> {
     this.assertRunning();
+    this.hookTrustControllers.get(sessionId)?.abort();
     await this.usageCapture?.release(sessionId);
     this.clearIdleTimer(sessionId);
     this.clearReleaseRetryTimer(sessionId);
@@ -1042,6 +1068,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   private async performShutdown(): Promise<void> {
     this.shuttingDown = true;
+    for (const controller of this.hookTrustControllers.values()) controller.abort();
     for (const timer of this.idleTimers.values()) clearTimeout(timer);
     this.idleTimers.clear();
     for (const timer of this.releaseRetryTimers.values()) clearTimeout(timer);
@@ -1058,7 +1085,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
     const operations = [...this.sessionOperations.entries()];
     await Promise.all(operations.map(async ([sessionId, operation]) => {
       const outcome = await settleBestEffort(() => operation.completion);
-      if (outcome.status !== "fulfilled") {
+      const interrupted = outcome.status === "rejected"
+        && outcome.reason instanceof AgentRuntimeError && outcome.reason.code === "runtime_shutdown";
+      if (outcome.status !== "fulfilled" && !interrupted) {
         this.recordShutdownFailure("session_operation", sessionId, outcome.reason);
       }
     }));

@@ -241,6 +241,7 @@ export class RunExecutor {
         else console.error(`runtime_content_persistence_failed runId=${run.id}`);
       }
       const runtimeSessionPromise = this.runtime.ensureSession({
+        signal: runAbortController.signal,
         ...(rtk ? { rtk } : {}),
         sessionId: session.id,
         agentId: agent.id,

@@ -67,10 +67,12 @@ const signalProcessTree = (child: ChildProcess, signal: NodeJS.Signals): void =>
   } catch {}
 };
 
-const terminateProcessTree = async (child: ChildProcess): Promise<void> => {
+export const terminateProcessTree = async (child: ChildProcess, force = false): Promise<void> => {
   if (!processTreeExists(child)) return;
-  signalProcessTree(child, "SIGTERM");
-  if (await waitForProcessTreeExit(child, PROCESS_TERM_GRACE_MS)) return;
+  if (!force) {
+    signalProcessTree(child, "SIGTERM");
+    if (await waitForProcessTreeExit(child, PROCESS_TERM_GRACE_MS)) return;
+  }
   signalProcessTree(child, "SIGKILL");
   if (!(await waitForProcessTreeExit(child, PROCESS_KILL_GRACE_MS))) {
     throw new Error(`Project command process group ${String(child.pid)} did not exit after SIGKILL`);

@@ -31,6 +31,18 @@ Claude Code 和 Codex 使用托管 `PreToolUse` Hook，Hermes 使用托管
 `rtk-rewrite` 插件，避免重复改写和绕过系统开关。宿主配置、保存的扩展选择及其他
 Hook 保持原样；包含其他命令的自定义 Hook 仍由其自身配置负责。
 
+Codex 在创建 Core Session 前通过当前 CLI 的原生 `hooks/list` 和配置 API 准备信任。
+只接受私有 Home 中、事件及 matcher 正确、命令与服务生成值完全一致的唯一 RTK Hook，
+使用 Core 返回的当前哈希授权后再次验证。已有有效信任直接复用；命令或哈希变化时重新检查。
+不会授权其他 Hook。若宿主用户配置关闭了原生 Hook 功能，只在私有 Home 中启用该功能。
+不兼容的 Core、冲突的 `CODEX_CONFIG.hooks` 或校验失败会在模型执行前以
+`codex_managed_hook_trust_failed` 终止本轮，关闭 RTK 后可继续使用原始命令。
+
+Claude Code 的私有投影为已选择和服务受管的 Hook 清除用户级 `disableAllHooks`；
+Hermes 明确启用 `remote-agent-rtk`，并只从 `plugins.disabled` 移除该名称，保留其他禁用项。
+原生机器管理策略仍由各 Core 执行。配置采用私有文件原子替换，导入的符号链接不会回写宿主；
+Hermes 的受管插件目录也由服务重新创建。
+
 ## 版本发布与恢复
 
 状态保存在 `DATA_DIR/tools/rtk/state.json`，权限为 `0600`，包含启停、激活版本、
@@ -46,6 +58,7 @@ Hook 保持原样；包含其他命令的自定义 Hook 仍由其自身配置负
 修复同版本保持启停和上一版本记录，失败保留原文件。回退先自检已保留的版本，再切换指针。
 
 后台操作和初始化通过进程锁排他执行，服务关闭时取消下载、自检并等待资源释放。
+Codex 信任探测有 10 秒期限和 1 MiB 响应上限，取消、超时或关闭时终止其完整进程组。
 失败及进程中断保留原激活版本；启动调度 Run 之前清理中断的 staging。
 已发布但尚未激活的目录可在恢复时清理。运行期间保留已安装版本，以保护活动 Run
 及空闲 Runtime Handle 的引用；下次服务启动时只保留当前版和上一版。

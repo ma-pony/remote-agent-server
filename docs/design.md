@@ -248,6 +248,7 @@ Session 使用可空的内部字段 `pending_operation` 持久化 `cleanup`、`d
 
 RTK 是服务默认安装、默认启用的托管命令输出压缩能力。管理模块在 `DATA_DIR/tools/rtk/` 原子维护启停和版本状态；Run 实际启动时解析设置和绝对二进制路径，SQLite 保存不含本机路径的配置快照。版本与启停纳入 Runtime 配置指纹，后续刷新连接并恢复原 Provider Session。稳定 Hook 入口读取各进程的配置快照，避免共享 Claude Home 的启停切换影响并行 Session。更新先下载、校验、自检再切换，运行期间保留旧二进制，下次启动回收非当前及非回退版本。Session 的 RTK 原始输出及 tracking 数据归 Session `runtime/rtk/` 所有并随大文件清理。[生命周期与管理 API](rtk.md)。
 投影时接管独立原生 RTK Hook 和 Hermes 的原生改写插件，保留来源配置与扩展选择。命令绑定只替换 shell 中的可执行位置，保留环境前缀及参数语义。健康同版本复用原文件，损坏文件在候选校验、自检后原子修复，保持启停和回退指针。
+Codex 的受管 Hook 信任属于 Runtime 启动准备：在 Core Session 创建前，用同一个 CLI 的原生哈希及配置 API 校验唯一的服务 RTK 入口，再验证授权结果。探测有时间及输出上限，继承 Run 取消信号，并随 Runtime 关闭清理进程组；准备失败不进入模型执行。其他 Hook 的信任不改变。Claude Code 和 Hermes 分别准备私有 Home 中的 Hook／插件启用开关，保留其他禁用项及原生机器策略。配置原子发布及 Hermes 受管插件目录替换隔离宿主符号链接。
 
 每个 Agent 使用独立 Provider Home。服务从运行用户的 Provider 配置中发现可复用能力，再由管理员明确选择：
 

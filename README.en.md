@@ -373,6 +373,7 @@ Provider-global MCP uses a separate import flow. Selecting **Import and enable**
 
 This page also manages [RTK command output compression](docs/rtk.en.md). `pnpm run init` installs and enables it by default. Administrators can enable/disable, check stable releases, update, and roll back. The service checks daily; updates are manual. Changes apply to the next Run while active work keeps its original version. Installation failure falls back to original command output.
 The managed gate takes over standalone native RTK hooks so they follow the system setting. Reinitialization repairs a damaged current version while preserving enabled state and rollback history.
+Before Codex starts, the server verifies and trusts its own RTK hook. Claude Code and Hermes prepare the required enablement settings in their private Homes without changing host configuration. Codex trust preparation failures stop before model execution; disable RTK to retry without compression.
 
 Open **System settings → Runtime and concurrency** to adjust:
 

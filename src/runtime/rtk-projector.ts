@@ -1,11 +1,12 @@
 import { createRequire } from "node:module";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse, stringify } from "yaml";
 import type { DiscoveredProviderExtension } from "../provider-extensions/provider-extension-manager.js";
 import type { Provider } from "../domain.js";
 import type { RtkRunPlan } from "../rtk/rtk-types.js";
+import { writeProviderHomeFile } from "./provider-home-files.js";
 
 const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
 export const rtkHookLauncher = (provider: Provider): string[] => {
@@ -36,6 +37,7 @@ export const rtkEnvironment = async (plan: RtkRunPlan, workspacePath: string): P
 /** Adapt upstream's pre_tool_call contract without mutating the service user's Hermes home. */
 export const projectHermesRtk = async (home: string): Promise<void> => {
   const root = join(home, "plugins", "remote-agent-rtk");
+  await rm(root, { recursive: true, force: true });
   await mkdir(root, { recursive: true, mode: 0o700 });
   await writeFile(join(root, "plugin.yaml"), "name: remote-agent-rtk\nversion: '1.0.0'\ndescription: Managed RTK command output compression\nhooks: [pre_tool_call]\nprovides_hooks: [pre_tool_call]\n", { mode: 0o600 });
   const launcher = JSON.stringify(rtkHookLauncher("hermes"));
@@ -53,6 +55,7 @@ export const projectHermesRtk = async (home: string): Promise<void> => {
   const plugins = (config.plugins ?? {}) as Record<string, unknown>;
   const enabled = Array.isArray(plugins.enabled) ? plugins.enabled : [];
   plugins.enabled = [...new Set([...enabled.filter(name => name !== "rtk-rewrite"), "remote-agent-rtk"])];
+  if (Array.isArray(plugins.disabled)) plugins.disabled = plugins.disabled.filter(name => name !== "remote-agent-rtk");
   config.plugins = plugins;
-  await writeFile(path, stringify(config), { mode: 0o600 });
+  await writeProviderHomeFile(path, stringify(config));
 };

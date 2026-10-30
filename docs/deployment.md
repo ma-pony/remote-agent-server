@@ -498,6 +498,7 @@ RTK 随 `pnpm run init` 默认安装、启用；已有部署可在管理台“�
 不需要重启服务；不要手动覆盖或删除版本目录。推荐版本之外的更新需先检测稳定版。
 进程中断后，下次启动会清理未完成下载及无引用的历史版本，保留当前与上一版本。
 详见 [RTK 运维与 API](rtk.md)。
+Codex 的 RTK 信任由服务在私有 Home 自动准备，不需要在宿主执行手动授权。自定义 `CODEX_PATH` 必须支持当前的原生 Hook 信任 API；`CODEX_CONFIG.hooks` 覆盖会与受管入口冲突。若 Run 报 `codex_managed_hook_trust_failed`，检查 Core 版本和覆盖配置，或关闭 RTK 后重试。Claude Code／Hermes 的用户级禁用开关只在私有投影中调整；机器管理策略仍由原生 Core 执行。
 
 ### 升级步骤
 

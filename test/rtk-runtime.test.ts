@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -176,6 +176,46 @@ describe("RTK runtime seam", () => {
     expect(contents.match(/remote-agent-rtk/g)).toHaveLength(1);
     expect(contents).not.toContain("rtk-rewrite");
     expect(await readFile(join(root, "plugins/remote-agent-rtk/__init__.py"), "utf8")).toContain("pre_tool_call");
+  });
+
+  it("enables the managed Hermes plugin without clearing other explicit plugin denials", async () => {
+    const root = await rootDirectory();
+    await writeFile(join(root, "config.yaml"), "plugins:\n  enabled: [other]\n  disabled: [remote-agent-rtk, blocked-plugin]\n");
+    await projectHermesRtk(root);
+    const content = await readFile(join(root, "config.yaml"), "utf8");
+    expect(content).toContain("blocked-plugin");
+    expect(content.match(/remote-agent-rtk/g)).toHaveLength(1);
+  });
+
+  it("enables projected Claude hooks despite an inherited user-level disable switch", async () => {
+    const root = await rootDirectory();
+    const { db, seed } = createTestDatabase();
+    db.prepare("UPDATE agents SET provider='claude_code' WHERE id=?").run(seed.agent.id);
+    const host = join(root, "host"), home = join(root, "managed"); await mkdir(host); await mkdir(home);
+    const original = { disableAllHooks: true, env: { PUBLIC_FIXTURE_FLAG: "preserve" } };
+    await writeFile(join(host, "settings.json"), JSON.stringify(original));
+    await symlink(join(host, "settings.json"), join(home, "settings.json"));
+    try {
+      await new ProviderExtensionProjector(new ProviderExtensionManager({ db, claudeHome: host }), root)
+        .prepare({ agentId: seed.agent.id, provider: "claude_code", home, managedHooks: rtkManagedHooks("claude_code") });
+      const projected = JSON.parse(await readFile(join(home, "settings.json"), "utf8"));
+      expect(projected.disableAllHooks).toBe(false);
+      expect(projected.env).toEqual(original.env);
+      expect(JSON.parse(await readFile(join(host, "settings.json"), "utf8"))).toEqual(original);
+    } finally { db.close(); }
+  });
+
+  it("keeps host Hermes configuration and plugin code intact when imported paths are symlinks", async () => {
+    const root = await rootDirectory(), home = join(root, "home"), host = join(root, "host");
+    await mkdir(home); await mkdir(host); await mkdir(join(home, "plugins"));
+    const original = "plugins:\n  enabled: [other]\n";
+    await writeFile(join(host, "config.yaml"), original);
+    await writeFile(join(host, "__init__.py"), "host-owned plugin\n");
+    await symlink(join(host, "config.yaml"), join(home, "config.yaml"));
+    await symlink(host, join(home, "plugins", "remote-agent-rtk"));
+    await projectHermesRtk(home);
+    expect(await readFile(join(host, "config.yaml"), "utf8")).toBe(original);
+    expect(await readFile(join(host, "__init__.py"), "utf8")).toBe("host-owned plugin\n");
   });
 
   it("never exposes malformed Hermes configuration content in projection errors", async () => {

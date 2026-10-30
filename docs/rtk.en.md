@@ -38,6 +38,21 @@ Hermes replaces its enabled `rtk-rewrite` plugin. This avoids duplicate rewritin
 bypassing the system setting. Host configuration, saved extension selections, and other
 hooks remain intact. Custom hooks containing additional commands retain their own controls.
 
+Before creating a Codex Core Session, the server uses the installed CLI's native
+`hooks/list` and configuration APIs to prepare trust. It accepts only one RTK command hook
+in the private Home with the expected event, matcher, and exact server-generated command.
+It trusts the Core's current hash and reads it back for verification. Existing valid trust
+is reused; changed commands or hashes are checked again. Other hooks are never authorized.
+An inherited disabled native hook feature is enabled only in the private Home. Unsupported
+Cores, conflicting `CODEX_CONFIG.hooks`, or verification failures stop the Run before model
+execution with `codex_managed_hook_trust_failed`. Disable RTK to retry without compression.
+
+Claude Code clears the user-level `disableAllHooks` switch in its private projection for
+selected and service-managed hooks. Hermes explicitly enables `remote-agent-rtk` and removes
+only that name from `plugins.disabled`, retaining other denials. Native machine-managed
+policies remain enforced by each Core. Atomic private-file replacement prevents imported
+symlinks from writing back to the host; the managed Hermes plugin directory is recreated.
+
 ## Publication and recovery
 
 `DATA_DIR/tools/rtk/state.json` (mode `0600`) owns enabled state, active and previous
@@ -56,6 +71,8 @@ enabled state and the rollback target; failure retains the old file. Rollback te
 retained executable before switching the pointer.
 
 A process lock excludes concurrent initialization and background mutations. Shutdown
+cancels Codex trust probes as well: each has a ten-second deadline, a 1 MiB response limit,
+and complete process-group cleanup on cancellation, timeout, or shutdown. Shutdown
 cancels downloads and self-tests and awaits cleanup. Failure or interruption preserves the
 active version. Startup recovery removes incomplete staging before dispatch. Published but
 unactivated candidates may be reclaimed. Installed versions remain during the process

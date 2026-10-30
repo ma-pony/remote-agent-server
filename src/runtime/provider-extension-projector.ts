@@ -7,6 +7,7 @@ import type { Provider } from "../domain.js";
 import { readPluginSkills } from "../provider-extensions/plugin-skills.js";
 import type { ProjectedSkill } from "./skill-projector.js";
 import { isNativeRtkHook } from "./rtk-command.js";
+import { writeProviderHomeFile } from "./provider-home-files.js";
 import type {
   DiscoveredProviderExtension,
   ProviderExtensionManager
@@ -397,11 +398,10 @@ const projectCodex = async (home: string, agentHome: string, extensions: Discove
     "enabled = true"
   ].join("\n")).join("\n\n");
   const config = [base, marketplaceConfig, pluginConfig].filter((section) => section !== "").join("\n\n");
-  await writeFile(configPath, config === "" ? "" : `${config}\n`, { mode: 0o600 });
-  await writeFile(
+  await writeProviderHomeFile(configPath, config === "" ? "" : `${config}\n`);
+  await writeProviderHomeFile(
     join(home, "hooks.json"),
-    `${JSON.stringify({ hooks: projectedHooks(extensions) }, null, 2)}\n`,
-    { mode: 0o600 }
+    `${JSON.stringify({ hooks: projectedHooks(extensions) }, null, 2)}\n`
   );
   scheduleCodexCachePrune(agentHome);
 };
@@ -415,7 +415,8 @@ const projectClaude = async (home: string, extensions: DiscoveredProviderExtensi
   const plugins = await copyPlugins(home, extensions);
   settings.enabledPlugins = Object.fromEntries(plugins.map(({ id }) => [id, true]));
   settings.hooks = projectedHooks(extensions);
-  await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+  if (extensions.some(extension => extension.kind === "hook")) settings.disableAllHooks = false;
+  await writeProviderHomeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
 
   const installedPlugins = Object.fromEntries(plugins.map((plugin) => [plugin.id, [{
     scope: "user",
@@ -424,12 +425,12 @@ const projectClaude = async (home: string, extensions: DiscoveredProviderExtensi
   }]]));
   const metadataPath = join(home, "plugins", "installed_plugins.json");
   await mkdir(dirname(metadataPath), { recursive: true });
-  await writeFile(metadataPath, `${JSON.stringify({ version: 2, plugins: installedPlugins }, null, 2)}\n`, { mode: 0o600 });
+  await writeProviderHomeFile(metadataPath, `${JSON.stringify({ version: 2, plugins: installedPlugins }, null, 2)}\n`);
 
   const globalConfigPath = `${home}.json`;
   const globalConfig = await readJsonObject(globalConfigPath);
   delete globalConfig.mcpServers;
-  await writeFile(globalConfigPath, `${JSON.stringify(globalConfig, null, 2)}\n`, { mode: 0o600 });
+  await writeProviderHomeFile(globalConfigPath, `${JSON.stringify(globalConfig, null, 2)}\n`);
 };
 
 /** Composes selected Provider-native extensions with service-owned stable hooks. */

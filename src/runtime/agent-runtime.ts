@@ -4,6 +4,7 @@ import type { UsageObservation } from "../agent-usage/core/types.js";
 import type { ProjectedSkill } from "./skill-projector.js";
 
 export type RuntimeSessionInput = {
+  signal?: AbortSignal;
   rtk?: import("../rtk/rtk-types.js").RtkRunPlan;
   sessionId: number;
   agentId: number;
