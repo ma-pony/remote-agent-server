@@ -130,7 +130,9 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     dataDir: deps.config.dataDir,
     runtime,
     projectEnvironmentStore,
-    concurrencySettingsStore
+    concurrencySettingsStore,
+    rtkManager,
+    providerExtensionManager
   });
   const integrationStore = deps.integrationStore ?? new IntegrationStore({ db: deps.db });
   const integrationEndpointManager = new IntegrationEndpointManager({

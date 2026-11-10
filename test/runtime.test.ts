@@ -1221,6 +1221,60 @@ describe("AcpxAgentRuntime", () => {
     } finally { await runtime.shutdown(); db.close(); }
   });
 
+  it("projects Hermes Skills into the active context home while retaining legacy numeric homes", () => {
+    const root = makeRoot();
+    const dataDir = join(root, "data");
+    const source = join(dataDir, "agents", AGENT_PATH_ID, "skills", "review");
+    mkdirSync(source, { recursive: true });
+    writeFileSync(join(source, "SKILL.md"), "# Review");
+    const projector = new SkillProjector(dataDir);
+    for (const storageKey of ["context-41", "7"]) {
+      const result = projector.prepare({ id: AGENT_ID, provider: "hermes" },
+        { id: SESSION_ID, workspacePath: root, storageKey });
+      expect(result.projectedSkills![0]!.skillMdPath).toContain(`/hermes/sessions/${storageKey}/skills/`);
+      expect(readFileSync(result.projectedSkills![0]!.skillMdPath, "utf8")).toBe("# Review");
+    }
+  });
+
+  it("resetting the new context preserves the cached retired context's persistent state", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    try {
+      await runtime.ensureSession(sessionInput(root, { executionContextId: 101 }));
+      const currentHome = join(root, "data", "agents", AGENT_PATH_ID, "provider-home", "deepseek-harness", "sessions", "context-102");
+      mkdirSync(currentHome, { recursive: true });
+      writeFileSync(join(currentHome, "current"), "current");
+      await runtime.reset(sessionInput(root, { provider: "deepseek_harness", executionContextId: 102, storageKey: "context-102" }));
+      expect(acp.close).toHaveBeenCalledWith(expect.objectContaining({ discardPersistentState: false }));
+      expect(existsSync(currentHome)).toBe(false);
+      expect(existsSync(join(root, "data", "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", "context-101"))).toBe(true);
+    } finally { await runtime.shutdown(); }
+  });
+
+  it("isolates A→B→A native keys and ignores a retired context release", async () => {
+    const root = makeRoot();
+    const acp = runtimeStub();
+    acpxMocks.createAcpRuntime.mockReturnValue(acp);
+    const runtime = new AcpxAgentRuntime(makeConfig(root));
+    try {
+      for (const [executionContextId, provider] of [[101, "codex"], [102, "deepseek_harness"], [103, "codex"]] as const) {
+        await runtime.ensureSession(sessionInput(root, { provider, executionContextId }));
+      }
+      expect(acp.ensureSession.mock.calls.map(([input]) => input.sessionKey))
+        .toEqual(["remote-agent:context:101", "remote-agent:context:102", "remote-agent:context:103"]);
+      expect(acp.ensureSession.mock.calls.every(([input]) => input.resumeSessionId === undefined)).toBe(true);
+      expect(acp.close).toHaveBeenCalledTimes(2);
+      await runtime.releaseSession(SESSION_ID, 101);
+      expect(acp.close).toHaveBeenCalledTimes(2);
+      await runtime.releaseSession(SESSION_ID, 103);
+      expect(acp.close).toHaveBeenCalledTimes(3);
+      expect(existsSync(join(root, "data", "agents", AGENT_PATH_ID, "provider-home", "codex", "sessions", "context-101"))).toBe(true);
+      expect(existsSync(join(root, "data", "agents", AGENT_PATH_ID, "provider-home", "deepseek-harness", "sessions", "context-102"))).toBe(true);
+    } finally { await runtime.shutdown(); }
+  });
+
   it("preserves native plugin Skill identities when reusing a Runtime handle", async () => {
     const root = makeRoot();
     const acp = runtimeStub();

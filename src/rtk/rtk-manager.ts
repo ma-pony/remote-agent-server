@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { access, chmod, mkdir, mkdtemp, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
-import type { Provider } from "../domain.js";
+import { PROVIDER_CAPABILITIES, type Provider } from "../domain.js";
 import { runProcess } from "../project-environments/project-environment-commands.js";
 import { removeServiceSecretsFromEnvironment } from "../runtime/service-path.js";
 import { compareRtkVersions, fetchRtkBytes, fetchRtkRelease, RtkError, rtkTarget, unpackRtk } from "./rtk-download.js";
@@ -17,10 +17,9 @@ const stateSchema = z.object({
 type State = z.infer<typeof stateSchema>;
 const defaults = (): State => ({ enabled: true, currentVersion: null, previousVersion: null, latestVersion: null, lastCheckedAt: null, checkError: null });
 const CHECK_INTERVAL = 24 * 60 * 60 * 1000;
-const integrations = [
-  { provider: "claude_code", integration: "hook" }, { provider: "codex", integration: "hook" },
-  { provider: "hermes", integration: "plugin" }, { provider: "deepseek_harness", integration: "unsupported" }
-] as const;
+const integrations = (Object.keys(PROVIDER_CAPABILITIES) as Provider[]).map(provider => ({
+  provider, integration: PROVIDER_CAPABILITIES[provider].rtk
+}));
 
 type Options = {
   dataDir: string;
@@ -120,7 +119,7 @@ export class RtkManager {
   async resolveForRun(provider: Provider): Promise<RtkRunPlan> {
     this.status();
     const { enabled: requested, currentVersion: version } = this.state;
-    const integration = integrations.find((item) => item.provider === provider)!.integration;
+    const integration = PROVIDER_CAPABILITIES[provider].rtk;
     let available = false;
     if (version !== null) try { await access(this.binary(version), constants.X_OK); available = true; } catch {}
     const reason = !requested ? "disabled" : !available ? "unavailable" : integration === "unsupported" ? "unsupported" : null;

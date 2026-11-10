@@ -14,10 +14,10 @@ import type { SourceConfig, SourceRecord } from "./source-coordinator.js";
 export type SourceRegistration = {
   sourceKey: string;
   kind: "codex_log" | "claude_log" | "context_snapshot";
-  inputRef: { importRootId: string; relativePath: string } | { providerSessionRef: string; relativePath: string };
+  inputRef: { importRootId: string; relativePath: string } | { providerSessionRef: string; executionContextRef?: string; relativePath: string };
   mappings: Array<{ sourceSessionKey: string; sessionId: string; providerEpochId: string }>;
 };
-type HostSession = { agent_id: number; provider: string; provider_session_id: string | null };
+type HostSession = { agent_id: number; provider: string; provider_session_id: string | null; storage_key?: string; context_id?: number; legacy_storage_session_id?: number | null; usage_epoch_id?: string | null };
 
 /** Host authority over paths and subject mappings; the reusable coordinator never discovers files. */
 export class ManagedUsageSources {
@@ -57,13 +57,20 @@ export class ManagedUsageSources {
 
   private async discover(sessionId: number, signal?: AbortSignal): Promise<void> {
     signal?.throwIfAborted();
-    const session = this.session(String(sessionId));
+    const contexts = this.db.prepare(`SELECT c.id FROM execution_contexts c WHERE c.session_id=? AND c.provider_session_id IS NOT NULL`).all(sessionId) as Array<{ id: number }>;
+    if (contexts.length) {
+      for (const context of contexts) await this.discoverContext(sessionId, String(context.id), signal);
+    } else await this.discoverContext(sessionId, undefined, signal);
+  }
+
+  private async discoverContext(sessionId: number, executionContextRef?: string, signal?: AbortSignal): Promise<void> {
+    const session = this.session(String(sessionId), executionContextRef);
     if (!session.provider_session_id || !["codex", "claude_code"].includes(session.provider)) return;
     const nativeSessionId = session.provider_session_id;
     const providerRoot = join(this.config.dataDir, "agents", String(session.agent_id), "provider-home");
     const kind = session.provider === "codex" ? "codex_log" : "claude_log";
-    const root = kind === "codex_log" ? join(providerRoot, "codex", "sessions", String(sessionId)) : join(providerRoot, "claude");
-    const epoch = this.collector.epoch(sessionId);
+    const root = kind === "codex_log" ? join(providerRoot, "codex", "sessions", session.storage_key ?? String(sessionId)) : join(providerRoot, "claude");
+    const epoch = session.usage_epoch_id ?? this.collector.epoch(sessionId);
     const existing = new Set(this.collector.sources.listSources(this.collector.namespace, { sessionId: String(sessionId) })
       .map((source) => source.sourceKey));
     let visited = 0;
@@ -81,7 +88,7 @@ export class ManagedUsageSources {
         const path = relative(root, join(directory, entry.name));
         const sourceKey = `managed:${epoch}:${path}`;
         if (existing.has(sourceKey)) continue;
-        await this.register({ sourceKey, kind, inputRef: { providerSessionRef: String(sessionId), relativePath: path },
+        await this.register({ sourceKey, kind, inputRef: { providerSessionRef: String(sessionId), ...(executionContextRef ? { executionContextRef } : {}), relativePath: path },
           mappings: [{ sourceSessionKey: nativeSessionId, sessionId: String(sessionId), providerEpochId: epoch }] }, signal);
       }
     };
@@ -92,7 +99,7 @@ export class ManagedUsageSources {
     signal?.throwIfAborted();
     const mappings = request.mappings.map((mapping) => {
       const sessionId = Number(mapping.sessionId);
-      const session = this.session(mapping.sessionId);
+      const session = this.session(mapping.sessionId, "providerSessionRef" in request.inputRef ? request.inputRef.executionContextRef : undefined);
       const binding = this.collector.binding(sessionId);
       this.collector.store.assertBinding(binding);
       const subject = this.db.prepare("SELECT state FROM agent_usage_subjects WHERE namespace = ? AND kind = 'session' AND subject_id = ?")
@@ -101,7 +108,8 @@ export class ManagedUsageSources {
       const currentEpoch = this.collector.epoch(sessionId);
       const knownEpoch = this.db.prepare("SELECT 1 FROM agent_usage_ledger WHERE namespace = ? AND session_id = ? AND epoch_id = ? LIMIT 1")
         .get(binding.namespace, binding.sessionId, mapping.providerEpochId);
-      if (mapping.providerEpochId !== currentEpoch && knownEpoch === undefined) throw new UsageError("usage_epoch_mismatch");
+      const contextEpoch = session.usage_epoch_id;
+      if (mapping.providerEpochId !== currentEpoch && mapping.providerEpochId !== contextEpoch && knownEpoch === undefined) throw new UsageError("usage_epoch_mismatch");
       if ("providerSessionRef" in request.inputRef && (request.inputRef.providerSessionRef !== mapping.sessionId
         || session.provider_session_id !== mapping.sourceSessionKey)) throw new UsageError("usage_mapping_mismatch");
       return { ...mapping, agentId: String(session.agent_id) };
@@ -121,9 +129,16 @@ export class ManagedUsageSources {
     return { source: this.collector.sources.registerSource(config), created: !existed };
   }
 
-  private session(id: string): HostSession {
+  private session(id: string, contextId?: string): HostSession {
     if (!/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) throw new UsageError("usage_session_not_found");
-    const row = this.db.prepare("SELECT s.agent_id, s.provider_session_id, a.provider FROM sessions s JOIN agents a ON a.id = s.agent_id WHERE s.id = ?")
+    if (contextId !== undefined) {
+      if (!/^[1-9]\d*$/.test(contextId) || !Number.isSafeInteger(Number(contextId))) throw new UsageError("usage_mapping_mismatch");
+      const context = this.db.prepare(`SELECT s.agent_id, c.id AS context_id, c.provider, c.provider_session_id, c.legacy_storage_session_id, c.usage_epoch_id
+        FROM execution_contexts c JOIN sessions s ON s.id=c.session_id WHERE c.id=? AND s.id=?`).get(Number(contextId), Number(id)) as HostSession | undefined;
+      if (!context) throw new UsageError("usage_mapping_mismatch");
+      return { ...context, storage_key: context.legacy_storage_session_id == null ? `context-${context.context_id}` : String(context.legacy_storage_session_id) };
+    }
+    const row = this.db.prepare("SELECT s.agent_id, COALESCE(c.provider_session_id,s.provider_session_id) AS provider_session_id, COALESCE(c.provider,a.provider) AS provider FROM sessions s JOIN agents a ON a.id = s.agent_id LEFT JOIN execution_contexts c ON c.id=(SELECT id FROM execution_contexts WHERE session_id=s.id AND legacy_storage_session_id IS NOT NULL ORDER BY id LIMIT 1) WHERE s.id = ?")
       .get(Number(id)) as HostSession | undefined;
     if (!row) throw new UsageError("usage_session_not_found");
     return row;
@@ -138,9 +153,9 @@ export class ManagedUsageSources {
       if (!configured) throw new UsageError("usage_source_path_denied");
       root = configured;
     } else if (input.providerSessionRef !== undefined && input.importRootId === undefined) {
-      const session = this.session(input.providerSessionRef);
+      const session = this.session(input.providerSessionRef, input.executionContextRef);
       if (kind === "codex_log" && session.provider === "codex") {
-        root = join(this.config.dataDir, "agents", String(session.agent_id), "provider-home", "codex", "sessions", input.providerSessionRef);
+        root = join(this.config.dataDir, "agents", String(session.agent_id), "provider-home", "codex", "sessions", session.storage_key ?? input.providerSessionRef);
       } else if (kind === "claude_log" && session.provider === "claude_code" && session.provider_session_id !== null) {
         if (path.split(/[\\/]/).at(-1) !== `${session.provider_session_id}.jsonl`) throw new UsageError("usage_source_path_denied");
         root = join(this.config.dataDir, "agents", String(session.agent_id), "provider-home", "claude");

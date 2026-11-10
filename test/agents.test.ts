@@ -3,10 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { FastifyInstance } from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { buildApp } from "../src/app.js";
 import { constantTimeTokenEqual } from "../src/auth.js";
+import { SkillProjector } from "../src/runtime/skill-projector.js";
 import { SecretStore } from "../src/mcp/secret-store.js";
 import type {
   AgentRuntime,
@@ -47,7 +48,7 @@ const createFakeRuntime = (models: RuntimeModelCatalog = {
 
 const apps: Array<{ app: FastifyInstance; close: () => Promise<void> }> = [];
 
-const createTestApp = async (runtime = createFakeRuntime()): Promise<{
+const createTestApp = async (runtime = createFakeRuntime(), rtkManager?: import("../src/rtk/rtk-manager.js").RtkManager): Promise<{
   app: FastifyInstance;
   dataDir: string;
   db: ReturnType<typeof createTestDatabase>["db"];
@@ -75,6 +76,7 @@ const createTestApp = async (runtime = createFakeRuntime()): Promise<{
     },
     db,
     runtime,
+    ...(rtkManager ? { rtkManager } : {}),
     concurrencySettingsStore
   });
 
@@ -96,6 +98,140 @@ afterEach(async () => {
 });
 
 describe("Agent API", () => {
+  const cores = ["codex", "claude_code", "hermes", "deepseek_harness"] as const;
+  it.each(cores.flatMap(source => cores.filter(target => target !== source).map(target => ({ source, target }))))(
+    "switches $source → $target without replacing the Agent, Workspace, history or independent Skills", async ({ source, target }) => {
+      const { app, db, dataDir, projectEnvironmentId } = await createTestApp();
+      const agent = (await app.inject({ method: "POST", url: "/api/agents", headers: authHeaders(),
+        payload: { name: "Matrix Agent", provider: source, projectEnvironmentId } })).json();
+      const workspacePath = join(dataDir, "matrix-workspace");
+      mkdirSync(workspacePath, { recursive: true });
+      writeFileSync(join(workspacePath, "retained.txt"), "Workspace content");
+      const skill = join(dataDir, "agents", String(agent.id), "skills", "independent");
+      mkdirSync(skill, { recursive: true });
+      writeFileSync(join(skill, "SKILL.md"), "---\nname: independent\ndescription: Independent\n---\nRetained skill");
+      const sessionId = Number(db.prepare(`INSERT INTO sessions (agent_id, title, status, workspace_path, created_at, updated_at)
+        VALUES (?, 'retained', 'idle', ?, 'now', 'now')`).run(agent.id, workspacePath).lastInsertRowid);
+      const contextId = Number(db.prepare(`INSERT INTO execution_contexts (session_id, provider, provider_session_id, created_at)
+        VALUES (?, ?, 'old-native', 'now')`).run(sessionId, source).lastInsertRowid);
+      const runId = Number(db.prepare(`INSERT INTO runs (session_id, provider, execution_context_id, status, input, created_at)
+        VALUES (?, ?, ?, 'succeeded', 'Historical request', 'now')`).run(sessionId, source, contextId).lastInsertRowid);
+      const before = db.prepare("SELECT * FROM runs WHERE id = ?").get(runId);
+      const switched = await app.inject({ method: "POST", url: `/api/agents/${agent.id}/provider-switch`, headers: authHeaders(), payload: { provider: target } });
+      expect(switched.statusCode).toBe(200);
+      expect(switched.json()).toMatchObject({ id: agent.id, name: agent.name, provider: target, projectEnvironmentId });
+      expect(db.prepare("SELECT * FROM runs WHERE id = ?").get(runId)).toEqual(before);
+      expect(db.prepare("SELECT agent_id, workspace_path FROM sessions WHERE id = ?").get(sessionId)).toEqual({ agent_id: agent.id, workspace_path: workspacePath });
+      expect(readFileSync(join(workspacePath, "retained.txt"), "utf8")).toBe("Workspace content");
+      const current = db.prepare("SELECT id, provider FROM execution_contexts WHERE session_id = ? AND retired_at IS NULL").get(sessionId) as { id: number; provider: string };
+      expect(current.provider).toBe(target);
+      expect(current.id).not.toBe(contextId);
+      const projected = new SkillProjector(dataDir).prepare({ id: agent.id, provider: target }, { id: sessionId, workspacePath, storageKey: `context-${current.id}` });
+      expect(projected.projectedSkills).toHaveLength(1);
+      expect(readFileSync(projected.projectedSkills![0]!.skillMdPath, "utf8")).toContain("Retained skill");
+    });
+
+  it("rejects a DeepSeek switch while the enabled system RTK has no target adapter", async () => {
+    const rtkManager = {
+      resolveForRun: vi.fn(async () => ({ requested: true, enabled: false, version: "1.1.0", binaryPath: "/rtk", mode: "off" as const, reason: "unsupported" as const })),
+      recover: async () => undefined, close: async () => undefined, status: () => ({}), setEnabled: () => ({}), check: () => ({}), install: async () => ({}), rollback: () => ({})
+    } as unknown as import("../src/rtk/rtk-manager.js").RtkManager;
+    const { app } = await createTestApp(createFakeRuntime(), rtkManager);
+    const agent = (await app.inject({ url: "/api/agents", headers: authHeaders() })).json()[0] as { id: number };
+    const response = await app.inject({ method: "POST", url: `/api/agents/${agent.id}/provider-switch`, headers: authHeaders(), payload: { provider: "deepseek_harness" } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: { code: "agent_rtk_unsupported" } });
+  });
+
+  it("can explicitly replace an unavailable saved target model with the provider default", async () => {
+    const { app, db } = await createTestApp();
+    const agent = (await app.inject({ url: "/api/agents", headers: authHeaders() })).json()[0];
+    db.prepare(`INSERT INTO agent_provider_model_policies(agent_id,provider,model_policy_json) VALUES (?,'deepseek_harness',?)`)
+      .run(agent.id, JSON.stringify({ mode: "fixed", model: "removed-model" }));
+    const request = { method: "POST" as const, url: `/api/agents/${agent.id}/provider-switch`, headers: authHeaders() };
+    expect((await app.inject({ ...request, payload: { provider: "deepseek_harness" } })).statusCode).toBe(400);
+    const changed = await app.inject({ ...request, payload: { provider: "deepseek_harness", modelPolicy: { mode: "provider_default" } } });
+    expect(changed.statusCode).toBe(200);
+    expect(changed.json()).toMatchObject({ provider: "deepseek_harness", modelPolicy: { mode: "provider_default" } });
+  });
+
+  it("rejects an unavailable target without changing the Agent or creating contexts", async () => {
+    const runtime = createFakeRuntime();
+    runtime.doctor = async () => ({ ok: false, message: "private diagnostics", details: [] });
+    const { app, db } = await createTestApp(runtime);
+    const original = (await app.inject({ url: "/api/agents", headers: authHeaders() })).json()[0];
+    const contexts = db.prepare("SELECT count(*) AS n FROM execution_contexts").get();
+    const switched = await app.inject({ method: "POST", url: `/api/agents/${original.id}/provider-switch`,
+      headers: authHeaders(), payload: { provider: "deepseek_harness" } });
+    expect(switched.statusCode).toBe(400);
+    expect(switched.json().error.code).toBe("agent_provider_unavailable");
+    expect(switched.body).not.toContain("private diagnostics");
+    expect((await app.inject({ url: `/api/agents/${original.id}`, headers: authHeaders() })).json()).toEqual(original);
+    expect(db.prepare("SELECT count(*) AS n FROM execution_contexts").get()).toEqual(contexts);
+  });
+
+  it("rechecks configuration after asynchronous target preflight", async () => {
+    const runtime = createFakeRuntime();
+    const { app, db } = await createTestApp(runtime);
+    const original = (await app.inject({ url: "/api/agents", headers: authHeaders() })).json()[0];
+    runtime.doctor = async () => {
+      db.prepare("UPDATE agents SET instructions = 'Changed while probing' WHERE id = ?").run(original.id);
+      return { ok: true, message: "ready", details: [] };
+    };
+    const switched = await app.inject({ method: "POST", url: `/api/agents/${original.id}/provider-switch`,
+      headers: authHeaders(), payload: { provider: "deepseek_harness" } });
+    expect(switched.statusCode).toBe(409);
+    expect(switched.json().error.code).toBe("agent_changed");
+    expect((await app.inject({ url: `/api/agents/${original.id}`, headers: authHeaders() })).json())
+      .toMatchObject({ provider: original.provider, instructions: "Changed while probing" });
+  });
+
+  it("rejects Hermes when an existing Session still owns incompatible instructions", async () => {
+    const { app, db } = await createTestApp();
+    const agent = (await app.inject({ url: "/api/agents", headers: authHeaders() })).json()[0] as { id: number };
+    db.prepare("UPDATE agents SET instructions = '' WHERE id = ?").run(agent.id);
+    db.prepare(`INSERT INTO sessions (agent_id, title, status, workspace_path, instructions_snapshot, created_at, updated_at)
+      VALUES (?, 'retained', 'idle', '/tmp/retained', 'Keep these instructions', 'now', 'now')`).run(agent.id);
+    const response = await app.inject({ method: "POST", url: `/api/agents/${agent.id}/provider-switch`,
+      headers: authHeaders(), payload: { provider: "hermes" } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("agent_instructions_unsupported");
+    expect(db.prepare("SELECT provider FROM agents WHERE id = ?").get(agent.id)).toEqual({ provider: "codex" });
+  });
+
+  it("switches an idle Agent through fresh provider contexts and preserves each provider model policy", async () => {
+    const { app, db } = await createTestApp();
+    const agent = (await app.inject({ url: "/api/agents", headers: authHeaders() })).json()[0] as { id: number };
+    const firstSession = Number(db.prepare(`INSERT INTO sessions
+      (agent_id, title, status, workspace_path, created_at, updated_at) VALUES (?, 'one', 'idle', '/tmp/one', 'now', 'now')`).run(agent.id).lastInsertRowid);
+    db.prepare("UPDATE sessions SET provider_session_id = 'old-native' WHERE id = ?").run(firstSession);
+    db.prepare("INSERT INTO execution_contexts (session_id, provider, provider_session_id, created_at) VALUES (?, 'codex', 'old-native', 'now')").run(firstSession);
+    const switched = await app.inject({ method: "POST", url: `/api/agents/${agent.id}/provider-switch`, headers: authHeaders(),
+      payload: { provider: "deepseek_harness", handoff: "Continue the verified plan." } });
+    expect(db.prepare("SELECT provider_session_id FROM sessions WHERE id = ?").get(firstSession)).toEqual({ provider_session_id: null });
+    expect(db.prepare("SELECT provider_session_id FROM execution_contexts WHERE session_id = ? AND retired_at IS NOT NULL").get(firstSession))
+      .toEqual({ provider_session_id: "old-native" });
+    expect(switched.statusCode).toBe(200);
+    expect(switched.json()).toMatchObject({ provider: "deepseek_harness" });
+    expect(db.prepare(`SELECT provider, handoff, legacy_storage_session_id FROM execution_contexts WHERE session_id = ? AND retired_at IS NULL`).get(firstSession))
+      .toEqual({ provider: "deepseek_harness", handoff: "Continue the verified plan.", legacy_storage_session_id: null });
+    await app.inject({ method: "POST", url: `/api/agents/${agent.id}/provider-switch`, headers: authHeaders(), payload: { provider: "codex" } });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM execution_contexts WHERE session_id = ?").get(firstSession)).toEqual({ count: 3 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM execution_contexts WHERE session_id = ? AND retired_at IS NULL").get(firstSession)).toEqual({ count: 1 });
+  });
+
+  it("rejects Agent provider switching while a sibling Session is queued, running, or under maintenance", async () => {
+    const { app, db } = await createTestApp();
+    const agent = (await app.inject({ url: "/api/agents", headers: authHeaders() })).json()[0] as { id: number };
+    const sessionId = Number(db.prepare(`INSERT INTO sessions
+      (agent_id, title, status, pending_operation, workspace_path, created_at, updated_at)
+      VALUES (?, 'busy', 'running', 'cleanup', '/tmp/busy', 'now', 'now')`).run(agent.id).lastInsertRowid);
+    db.prepare("INSERT INTO runs (session_id, status, input, created_at) VALUES (?, 'queued', 'x', 'now')").run(sessionId);
+    const response = await app.inject({ method: "POST", url: `/api/agents/${agent.id}/provider-switch`, headers: authHeaders(), payload: { provider: "deepseek_harness" } });
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: { code: "agent_has_running_sessions" } });
+  });
+
   it("pages and searches Agents before mapping results, and preserves the legacy inventory", async () => {
     const { app, projectEnvironmentId } = await createTestApp();
     for (let i = 0; i < 5; i++) await app.inject({ method: "POST", url: "/api/agents", headers: authHeaders(),

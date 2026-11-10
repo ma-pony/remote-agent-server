@@ -36,6 +36,29 @@ const setup = async (usageTokenizers = [fixtureTokenizerConfig()], fileBacked = 
 const register = (app: FastifyInstance, payload: unknown) => app.inject({ method: "POST", url: "/api/usage/sources", headers, payload });
 
 describe("usage source management API", () => {
+  it("discovers retired native contexts after an Agent switch without conflating their usage", async () => {
+    const { db, root, manager, session } = await setup();
+    await manager.collector.stopRecovery();
+    const agentId = (db.prepare("SELECT agent_id FROM sessions WHERE id=?").get(session.id) as { agent_id: number }).agent_id;
+    const contexts = [1, 2].map(() => Number(db.prepare(`INSERT INTO execution_contexts
+      (session_id, provider, provider_session_id, created_at, retired_at) VALUES (?, 'codex', 'codex-session-1', 'now', 'later')`)
+      .run(session.id).lastInsertRowid));
+    for (const id of contexts) {
+      const directory = join(root, "agents", String(agentId), "provider-home", "codex", "sessions", `context-${id}`, "sessions");
+      await mkdir(directory, { recursive: true });
+      await copyFile("test/fixtures/agent-usage/provider-logs/codex-token-count.jsonl", join(directory, "codex-session-1.jsonl"));
+    }
+    db.prepare("UPDATE agents SET provider='deepseek_harness' WHERE id=?").run(agentId);
+    await manager.collector.collectSession(session.id);
+    const sources = manager.collector.sources.listSources(manager.collector.namespace, { sessionId: String(session.id) });
+    expect(sources).toHaveLength(2);
+    expect(new Set(sources.map(source => source.sourceKey)).size).toBe(2);
+    await manager.collector.collectSession(session.id);
+    expect(manager.collector.sources.listSources(manager.collector.namespace, { sessionId: String(session.id) })).toHaveLength(2);
+    const epochs = db.prepare("SELECT DISTINCT epoch_id FROM agent_usage_ledger WHERE session_id=?").all(String(session.id));
+    expect(epochs).toEqual(expect.arrayContaining(contexts.map(id => ({ epoch_id: `session:${session.id}:context:${id}` }))));
+  });
+
   it("rejects collection and registration for an archived Session without changing source state", async () => {
     const { app,db,manager,registration,session }=await setup();
     await manager.collector.stopRecovery();

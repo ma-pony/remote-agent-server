@@ -134,6 +134,97 @@ afterEach(async () => {
 });
 
 describe("Provider extensions", () => {
+  it.each(["hermes", "claude_code", "deepseek_harness"] as const)("rejects switching to %s without a native installation even for a skills-only plugin", async target => {
+    const { app, codexAgentId, codexHome, claudeHome, db } = await fixture();
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const plugin = manager.list(codexAgentId).find(item => item.name === "browser")!;
+    manager.setEnabled(codexAgentId, plugin.id, true);
+    const source = manager.enabled(codexAgentId)[0]!.sourcePath!;
+    mkdirSync(join(source, "skills", "inspect"), { recursive: true });
+    writeFileSync(join(source, "skills", "inspect", "SKILL.md"), "---\nname: inspect\ndescription: Inspect\n---\nBody");
+    const response = await app.inject({ method: "POST", url: `/api/agents/${codexAgentId}/provider-switch`,
+      headers: authHeaders, payload: { provider: target } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("agent_extension_incompatible");
+    expect((await app.inject({ url: `/api/agents/${codexAgentId}`, headers: authHeaders })).json().provider).toBe("codex");
+    expect(manager.list(codexAgentId)).toContainEqual(expect.objectContaining({ id: plugin.id, enabled: true }));
+  });
+
+  it("retains disabled selections across unsupported Cores without enabling host plugins", async () => {
+    const { app, codexAgentId, codexHome, claudeHome, db } = await fixture();
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const plugin = manager.list(codexAgentId).find(item => item.kind === "plugin")!;
+    manager.setEnabled(codexAgentId, plugin.id, true);
+    manager.setEnabled(codexAgentId, plugin.id, false);
+    for (const provider of ["hermes", "deepseek_harness", "codex"]) {
+      const switched = await app.inject({ method: "POST", url: `/api/agents/${codexAgentId}/provider-switch`, headers: authHeaders, payload: { provider } });
+      expect(switched.statusCode).toBe(200);
+      expect(manager.list(codexAgentId)).toContainEqual(expect.objectContaining({ id: plugin.id, enabled: false, available: provider === "codex" }));
+      expect(manager.enabled(codexAgentId)).toEqual([]);
+    }
+    manager.setEnabled(codexAgentId, plugin.id, true);
+    expect(manager.enabled(codexAgentId)).toHaveLength(1);
+  });
+
+  it.each(["codex", "claude_code"] as const)("installs the complete native plugin when switching from %s and retains selection on return", async sourceProvider => {
+    const { app, root, codexHome, claudeHome, codexAgentId, claudeAgentId, db } = await fixture();
+    const agentId = sourceProvider === "codex" ? codexAgentId : claudeAgentId;
+    const target = sourceProvider === "codex" ? "claude_code" : "codex";
+    const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });
+    const plugin = manager.list(agentId).find(item => item.kind === "plugin")!;
+    manager.setEnabled(agentId, plugin.id, true);
+    const pluginId = plugin.id.slice("plugin:".length);
+    const [name, market] = pluginId.split("@");
+    const home = target === "codex" ? codexHome : claudeHome;
+    const native = join(home, "plugins", "cache", market!, name!, "3.0.0");
+    const manifestDirectory = target === "codex" ? ".codex-plugin" : ".claude-plugin";
+    mkdirSync(join(native, manifestDirectory), { recursive: true });
+    writeFileSync(join(native, manifestDirectory, "plugin.json"), JSON.stringify({ name, version: "3.0.0" }));
+    for (const directory of ["hooks", "commands", "skills/inspect"]) mkdirSync(join(native, directory), { recursive: true });
+    const hooks = JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "native-stop" }] }] } });
+    const mcp = JSON.stringify({ mcpServers: { native: { command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/server.js"] } } });
+    writeFileSync(join(native, "hooks", "hooks.json"), hooks);
+    writeFileSync(join(native, ".mcp.json"), mcp);
+    writeFileSync(join(native, "commands", "inspect.md"), "Native command");
+    writeFileSync(join(native, "server.js"), "Native implementation");
+    writeFileSync(join(native, "skills", "inspect", "SKILL.md"), "---\nname: inspect\ndescription: Native skill\n---\nNative skill body");
+    if (target === "codex") writeFileSync(join(home, "config.toml"), `[plugins."${pluginId}"]\nenabled = true\n`);
+    else writeFileSync(join(home, "settings.json"), JSON.stringify({ enabledPlugins: { [pluginId]: true } }));
+    const switchTo = async (provider: string) => {
+      const response = await app.inject({ method: "POST", url: `/api/agents/${agentId}/provider-switch`, headers: authHeaders, payload: { provider } });
+      expect(response.statusCode).toBe(200);
+    };
+    // Preflight runs before the Agent provider is changed in the database.
+    const projector = new ProviderExtensionProjector(manager, join(root, "data"));
+    const probeHome = join(root, "target-probe");
+    await projector.prepare({ agentId, provider: target, home: probeHome });
+    const probeVersion = readdirSync(join(probeHome, "plugins", "cache", market!, name!))[0]!;
+    const probePackage = join(probeHome, "plugins", "cache", market!, name!, probeVersion);
+    expect(readFileSync(join(probePackage, "server.js"), "utf8")).toBe("Native implementation");
+    expect(existsSync(join(probePackage, manifestDirectory, "plugin.json"))).toBe(true);
+    expect((await app.inject({ url: `/api/agents/${agentId}`, headers: authHeaders })).json().provider).toBe(sourceProvider);
+    await switchTo(target);
+    expect(manager.enabled(agentId)).toHaveLength(1);
+    expect(manager.enabled(agentId)[0]).toMatchObject({ provider: target, sourcePath: native });
+    const projectedHome = join(root, "native-context");
+    const projected = await projector.prepare({ agentId, provider: target, home: projectedHome });
+    const version = readdirSync(join(projectedHome, "plugins", "cache", market!, name!))[0]!;
+    const installed = join(projectedHome, "plugins", "cache", market!, name!, version);
+    expect(readFileSync(join(installed, "hooks", "hooks.json"), "utf8")).toBe(hooks);
+    expect(readFileSync(join(installed, ".mcp.json"), "utf8")).toBe(mcp);
+    expect(readFileSync(join(installed, "commands", "inspect.md"), "utf8")).toBe("Native command");
+    expect(readFileSync(join(installed, "server.js"), "utf8")).toBe("Native implementation");
+    expect(projected).toContainEqual(expect.objectContaining({ name: "inspect" }));
+    if (target === "codex") expect(readFileSync(join(projectedHome, "config.toml"), "utf8")).toContain(`[plugins."${pluginId}"]`);
+    else expect(JSON.parse(readFileSync(join(projectedHome, "settings.json"), "utf8")).enabledPlugins).toEqual({ [pluginId]: true });
+    const url = `/api/agents/${agentId}/extensions/${encodeURIComponent(plugin.id)}`;
+    expect((await app.inject({ method: "PUT", url, headers: authHeaders, payload: { enabled: false } })).statusCode).toBe(200);
+    expect((await app.inject({ url: `/api/agents/${agentId}/extensions`, headers: authHeaders })).json()).toContainEqual(expect.objectContaining({ id: plugin.id, enabled: false }));
+    expect((await app.inject({ method: "PUT", url, headers: authHeaders, payload: { enabled: true } })).statusCode).toBe(200);
+    await switchTo(sourceProvider);
+    expect(manager.list(agentId)).toContainEqual(expect.objectContaining({ id: plugin.id, enabled: true }));
+  }, 15_000);
+
   it.each(["hermes", "missing", "disabled", "unknown-owner"] as const)("preserves independently enabled plugin Skills through the API when replacement is %s", async scenario => {
     const { app, root, codexHome, claudeHome, codexAgentId, db } = await fixture();
     const manager = new ProviderExtensionManager({ db, codexHome, claudeHome, cacheTtlMs: 0 });

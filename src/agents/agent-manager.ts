@@ -1,3 +1,5 @@
+import { PROVIDER_CAPABILITIES } from "../domain.js";
+import { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -8,6 +10,7 @@ import type { Agent, Provider } from "../domain.js";
 import { insertedId } from "../db.js";
 import { ProjectEnvironmentStore } from "../project-environments/project-environment-store.js";
 import type { AgentRuntime, RuntimeDoctor, RuntimeModelCatalog } from "../runtime/agent-runtime.js";
+import type { RtkManager } from "../rtk/rtk-manager.js";
 import { ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
 import {
   configuredModels,
@@ -51,12 +54,16 @@ export type CloneAgentInput = {
   name: string;
 };
 
+export type SwitchAgentProviderInput = { provider: Provider; handoff?: string; modelPolicy?: AgentModelPolicy };
+
 export type AgentManagerDependencies = {
   db: Database.Database;
   dataDir: string;
   runtime: AgentRuntime;
   projectEnvironmentStore?: ProjectEnvironmentStore;
   concurrencySettingsStore?: ConcurrencySettingsStore;
+  rtkManager?: Pick<RtkManager, "resolveForRun">;
+  providerExtensionManager?: ProviderExtensionManager;
 };
 
 const toAgent = (row: AgentRow, globalRunConcurrency: number): Agent => ({
@@ -89,13 +96,17 @@ export class AgentManager {
   private readonly projectEnvironmentStore: ProjectEnvironmentStore;
   private readonly modelSnapshots = new Map<number, {key: string; expiresAt: number; catalog: Promise<RuntimeModelCatalog>}>();
   private readonly concurrencySettingsStore: ConcurrencySettingsStore;
+  private readonly providerExtensionManager: ProviderExtensionManager;
+  private readonly rtkManager: Pick<RtkManager, "resolveForRun"> | undefined;
 
-  constructor({ db, dataDir, runtime, projectEnvironmentStore, concurrencySettingsStore }: AgentManagerDependencies) {
+  constructor({ db, dataDir, runtime, projectEnvironmentStore, concurrencySettingsStore, rtkManager, providerExtensionManager }: AgentManagerDependencies) {
     this.db = db;
     this.dataDir = dataDir;
     this.runtime = runtime;
     this.projectEnvironmentStore = projectEnvironmentStore ?? new ProjectEnvironmentStore({ db });
     this.concurrencySettingsStore = concurrencySettingsStore ?? new ConcurrencySettingsStore(db);
+    this.rtkManager = rtkManager;
+    this.providerExtensionManager = providerExtensionManager ?? new ProviderExtensionManager({ db });
   }
 
   create(input: CreateAgentInput): Agent {
@@ -144,6 +155,76 @@ export class AgentManager {
       createdAt,
       updatedAt: createdAt
     };
+  }
+
+  /** Changes the default Provider only when no Session under this Agent is active. */
+  async switchProvider(id: number, input: SwitchAgentProviderInput): Promise<Agent | undefined> {
+    const current = this.get(id);
+    if (current === undefined) return undefined;
+    this.requireSupportedInstructions(input.provider, current.instructions);
+    const assertIdle = () => {
+      const snapshots = this.db.prepare("SELECT instructions_snapshot FROM sessions WHERE agent_id = ? AND storage_cleaned_at IS NULL")
+        .all(id) as Array<{ instructions_snapshot: string }>;
+      for (const session of snapshots) this.requireSupportedInstructions(input.provider, session.instructions_snapshot);
+      const busy = this.db.prepare(`
+        SELECT 1 FROM sessions session
+        WHERE session.agent_id = ?
+          AND (session.status = 'running' OR session.pending_operation IS NOT NULL
+            OR EXISTS (SELECT 1 FROM runs WHERE session_id = session.id AND status IN ('queued', 'running')))
+        LIMIT 1
+      `).get(id);
+      if (busy !== undefined) throw new AgentManagerError("agent_has_running_sessions");
+    };
+    assertIdle();
+    if (input.provider === current.provider) return current;
+    if (this.rtkManager !== undefined) {
+      const rtk = await this.rtkManager.resolveForRun(input.provider);
+      if (rtk.requested && rtk.reason === "unsupported") throw new AgentManagerError("agent_rtk_unsupported");
+    }
+    this.providerExtensionManager.assertSwitchCompatible(id, input.provider);
+    let catalog: RuntimeModelCatalog;
+    try {
+      const report = await this.runtime.doctor(input.provider, id);
+      if (!report.ok) throw new AgentManagerError("agent_provider_unavailable");
+      catalog = await this.discoverModels({ ...current, provider: input.provider });
+    } catch { throw new AgentManagerError("agent_provider_unavailable"); }
+    const now = new Date().toISOString();
+    const handoff = input.handoff?.trim() || null;
+    this.db.transaction(() => {
+      assertIdle();
+      if (JSON.stringify(this.get(id)) !== JSON.stringify(current)) throw new AgentManagerError("agent_changed");
+      this.providerExtensionManager.assertSwitchCompatible(id, input.provider);
+      this.db.prepare(`
+        INSERT INTO agent_provider_model_policies (agent_id, provider, model_policy_json)
+        VALUES (?, ?, ?)
+        ON CONFLICT(agent_id, provider) DO UPDATE SET
+          model_policy_json = excluded.model_policy_json
+      `).run(id, current.provider, JSON.stringify(current.modelPolicy));
+      const target = this.db.prepare(`
+        SELECT model_policy_json FROM agent_provider_model_policies
+        WHERE agent_id = ? AND provider = ?
+      `).get(id, input.provider) as { model_policy_json: string } | undefined;
+      const targetPolicy = input.modelPolicy ?? parseStoredModelPolicy(target?.model_policy_json ?? JSON.stringify(PROVIDER_DEFAULT_MODEL_POLICY));
+      const requested = configuredModels(targetPolicy);
+      if (requested.length && !catalog.supported) throw new AgentManagerError("agent_model_selection_unsupported");
+      if (requested.some(model => !catalog.availableModels.includes(model))) throw new AgentManagerError("agent_model_unavailable");
+      this.db.prepare(`
+        UPDATE agents SET provider = ?, model_policy_json = ?, provider_default_model = ?, updated_at = ? WHERE id = ?
+      `).run(input.provider, JSON.stringify(targetPolicy), selectableDefaultModel(catalog), now, id);
+      const sessions = this.db.prepare("SELECT id FROM sessions WHERE agent_id = ? AND storage_cleaned_at IS NULL").all(id) as Array<{ id: number }>;
+      for (const session of sessions) {
+        this.db.prepare("UPDATE sessions SET provider_session_id = NULL WHERE id = ?").run(session.id);
+        this.db.prepare("UPDATE execution_contexts SET retired_at = ? WHERE session_id = ? AND retired_at IS NULL")
+          .run(now, session.id);
+        this.db.prepare(`
+          INSERT INTO execution_contexts (session_id, provider, provider_session_id, handoff, created_at)
+          VALUES (?, ?, NULL, ?, ?)
+        `).run(session.id, input.provider, handoff, now);
+      }
+    })();
+    this.modelSnapshots.delete(id);
+    this.concurrencySettingsStore.notify();
+    return this.get(id);
   }
 
   clone(id: number, input: CloneAgentInput): Agent | undefined {
@@ -259,9 +340,9 @@ export class AgentManager {
         this.db.prepare(`
           INSERT INTO agent_provider_extensions
             (agent_id, provider, kind, extension_id, name, description,
-             source_fingerprint, created_at, updated_at)
+             source_fingerprint, enabled, created_at, updated_at)
           SELECT ?, provider, kind, extension_id, name, description,
-                 source_fingerprint, ?, ?
+                 source_fingerprint, enabled, ?, ?
           FROM agent_provider_extensions
           WHERE agent_id = ?
         `).run(clonedId, createdAt, createdAt, id);
@@ -350,6 +431,7 @@ export class AgentManager {
       }
       providerDefaultModel = selectableDefaultModel(catalog);
     }
+    if (JSON.stringify(this.get(id)) !== JSON.stringify(agent)) throw new AgentManagerError("agent_changed");
     const updatedAt = new Date().toISOString();
     this.db
       .prepare(`
@@ -368,6 +450,12 @@ export class AgentManager {
         updatedAt,
         id
       );
+    this.db.prepare(`
+      INSERT INTO agent_provider_model_policies (agent_id, provider, model_policy_json)
+      VALUES (?, ?, ?)
+      ON CONFLICT(agent_id, provider) DO UPDATE SET
+        model_policy_json = excluded.model_policy_json
+    `).run(id, agent.provider, JSON.stringify(modelPolicy));
     if (maxConcurrentRuns !== agent.maxConcurrentRuns
       || JSON.stringify(modelPolicy) !== JSON.stringify(agent.modelPolicy)) {
       this.concurrencySettingsStore.notify();
@@ -406,10 +494,12 @@ export class AgentManager {
       }
     }
     const catalog = await snapshot.catalog;
+    if (this.get(id)?.provider !== agent.provider) throw new AgentManagerError("agent_changed");
     const providerDefaultModel = selectableDefaultModel(catalog);
     if (providerDefaultModel !== agent.providerDefaultModel) {
       this.db.prepare("UPDATE agents SET provider_default_model = ? WHERE id = ?")
         .run(providerDefaultModel, id);
+
     }
     return catalog;
   }
@@ -492,7 +582,7 @@ export class AgentManager {
   }
 
   private requireSupportedInstructions(provider: Provider, instructions: string): void {
-    if (provider === "hermes" && instructions.trim() !== "") {
+    if (!PROVIDER_CAPABILITIES[provider].instructions && instructions.trim() !== "") {
       throw new AgentManagerError("agent_instructions_unsupported");
     }
   }
@@ -503,9 +593,13 @@ export class AgentManagerError extends Error {
     | "project_environment_unavailable"
     | "agent_has_sessions"
     | "agent_has_integration_endpoints"
+    | "agent_has_running_sessions"
+    | "agent_provider_unavailable"
+    | "agent_changed"
     | "agent_instructions_unsupported"
     | "agent_model_selection_unsupported"
     | "agent_model_unavailable"
+    | "agent_rtk_unsupported"
   ) {
     super(code);
   }

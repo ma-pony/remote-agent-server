@@ -156,6 +156,16 @@ describe("managed RTK lifecycle", () => {
     expect(compareRtkVersions("1.10.0", "1.9.0")).toBeGreaterThan(0);
   });
 
+  it.each([
+    ["codex", "hook"], ["claude_code", "hook"], ["hermes", "plugin"], ["deepseek_harness", "off"]
+  ] as const)("uses the native %s RTK adapter without mutating RTK settings", async (provider, mode) => {
+    const { manager } = await setup();
+    await manager.ensureInstalled();
+    const before = manager.status();
+    expect(await manager.resolveForRun(provider)).toMatchObject({ requested: true, mode, enabled: mode !== "off" });
+    expect(manager.status()).toEqual(before);
+  });
+
   it("pins old Run paths across update and rollback, preserving the previous usable binary", async () => {
     const { manager, setLatest } = await setup();
     await manager.ensureInstalled();

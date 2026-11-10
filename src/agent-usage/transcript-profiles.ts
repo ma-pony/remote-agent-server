@@ -34,7 +34,7 @@ export class TranscriptProfiles {
   }
 
   private run(sessionId: string, time: string | null) {
-    return this.db.prepare(`SELECT r.id,r.resolved_model,s.instructions_snapshot,s.workspace_path,a.provider,
+    return this.db.prepare(`SELECT r.id,r.resolved_model,s.instructions_snapshot,s.workspace_path,COALESCE(r.provider,a.provider) AS provider,
       u.provider_epoch_id FROM runs r JOIN sessions s ON s.id=r.session_id JOIN agents a ON a.id=s.agent_id
       LEFT JOIN agent_usage_runtime_runs u ON u.namespace=? AND u.session_id=? AND u.execution_id=CAST(r.id AS TEXT)
       WHERE r.session_id=? ${time === null ? "" : "AND r.started_at<=?"} ORDER BY r.started_at DESC,r.id DESC LIMIT 1`)

@@ -16,6 +16,7 @@ export type SkillProjectionAgent = {
 export type SkillProjectionSession = {
   id: number;
   workspacePath: string;
+  storageKey?: string;
 };
 
 export type SkillProjection = {
@@ -189,7 +190,8 @@ export class SkillProjector {
   private skillsRoot(agent: SkillProjectionAgent, session: SkillProjectionSession): string {
     if (agent.provider === "claude_code") return join(session.workspacePath, ".claude", "skills");
     if (agent.provider === "codex" || agent.provider === "deepseek_harness") return join(session.workspacePath, ".agents", "skills");
-    if (!Number.isSafeInteger(session.id) || session.id <= 0) throw new Error("invalid_skill_projection_session");
-    return join(this.dataDir, "agents", String(agent.id), "provider-home", "hermes", "sessions", String(session.id), "skills");
+    if (!Number.isSafeInteger(session.id) || session.id <= 0
+      || session.storageKey !== undefined && !/^(?:context-[1-9]\d*|[1-9]\d*)$/.test(session.storageKey)) throw new Error("invalid_skill_projection_session");
+    return join(this.dataDir, "agents", String(agent.id), "provider-home", "hermes", "sessions", session.storageKey ?? String(session.id), "skills");
   }
 }

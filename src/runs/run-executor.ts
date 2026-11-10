@@ -10,6 +10,7 @@ import type { RunMcpPreparer } from "../mcp/run-mcp-preparer.js";
 import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 import type { AgentRuntime, RuntimeEvent, RuntimeTurn, RuntimeTurnResult } from "../runtime/agent-runtime.js";
 import { settleBestEffort } from "../runtime/bounded-operation.js";
+import { executionContextStorageKey } from "../runtime/execution-context-storage.js";
 import type { SkillProjector } from "../runtime/skill-projector.js";
 import { SessionManagerError, type SessionManager } from "../sessions/session-manager.js";
 import type { ConcurrencySettingsStore } from "../settings/concurrency-settings-store.js";
@@ -187,8 +188,8 @@ export class RunExecutor {
         }
         return outcome.value;
       };
-      const { agent, session } = this.sessionManager.getRuntimeContext(run.sessionId);
-      const rtk = await this.rtkManager?.resolveForRun(agent.provider);
+      const { agent, session, executionContext } = this.sessionManager.getRuntimeContext(run.sessionId, run.executionContextId);
+      const rtk = await this.rtkManager?.resolveForRun(executionContext.provider);
       if (rtk) {
         const { binaryPath: _privatePath, ...snapshot } = rtk;
         this.runRepository.setRtkSnapshot(run.id, snapshot);
@@ -214,8 +215,12 @@ export class RunExecutor {
         publicNoticeCode = "mcp_preflight_failed";
         throw error;
       }
-      const pluginSkills = await withinRunTimeout(this.providerExtensionManager.enabledSkills(agent.id));
-      const { memory, revision: skillsRevision, projectedSkills } = this.skillProjector.prepare(agent, session, pluginSkills);
+      const providerMatchesAgent = agent.provider === executionContext.provider;
+      const pluginSkills = providerMatchesAgent
+        ? await withinRunTimeout(this.providerExtensionManager.enabledSkills(agent.id))
+        : [];
+      const { memory, revision: skillsRevision, projectedSkills } = this.skillProjector.prepare(agent, { ...session, storageKey: executionContext.legacyStorageSessionId === null
+        ? executionContextStorageKey(executionContext.id) : String(executionContext.legacyStorageSessionId) }, pluginSkills);
       this.runRepository.setSkillsRevision(run.id, skillsRevision);
       try {
         this.usageCollector.runtimeCapabilities.recordRun(run.id);
@@ -231,7 +236,9 @@ export class RunExecutor {
           console.error(`runtime_capability_projection_failed runId=${run.id}`);
         }
       }
-      const extensionsRevision = await withinRunTimeout(this.providerExtensionManager.revision(agent.id));
+      const extensionsRevision = providerMatchesAgent
+        ? await withinRunTimeout(this.providerExtensionManager.revision(agent.id))
+        : "";
       const resolvedModel = resolveModelPolicy(agent.modelPolicy, new Date()) ?? agent.providerDefaultModel ?? undefined;
       this.runRepository.setResolvedModel(run.id, resolvedModel ?? null);
       try { await this.usageCollector.conversationContent.recordRun(run.id, usageController.signal); }
@@ -244,11 +251,15 @@ export class RunExecutor {
         signal: runAbortController.signal,
         ...(rtk ? { rtk } : {}),
         sessionId: session.id,
+        executionContextId: executionContext.id,
+        storageKey: executionContext.legacyStorageSessionId === null
+          ? executionContextStorageKey(executionContext.id)
+          : String(executionContext.legacyStorageSessionId),
         agentId: agent.id,
-        provider: agent.provider,
+        provider: executionContext.provider,
         workspacePath: session.workspacePath,
         browserProfilePath,
-        providerSessionId: session.providerSessionId,
+        providerSessionId: executionContext.providerSessionId,
         instructions: session.instructionsSnapshot,
         memory,
         skillsRevision,
@@ -262,13 +273,14 @@ export class RunExecutor {
       } catch (error) {
         if (error instanceof RunTimedOutError) {
           void runtimeSessionPromise.then(
-            () => this.releaseSessionBestEffort(session.id),
+            () => this.runtime.releaseSession?.(session.id, executionContext.id).catch(() => undefined),
             () => undefined
           );
         }
         throw error;
       }
-      this.sessionManager.saveProviderSessionId(session.id, runtimeSession.providerSessionId);
+      this.sessionManager.saveExecutionContextProviderSessionId(executionContext.id, runtimeSession.providerSessionId);
+      const handoff = this.sessionManager.pendingExecutionContextHandoff(executionContext.id);
       if (runtimeSession.projectedSkills?.length) {
         try {
           this.usageCollector.runtimeCapabilities.recordProjection(run.id, [...(projectedSkills ?? []), ...runtimeSession.projectedSkills]);
@@ -281,12 +293,14 @@ export class RunExecutor {
         await this.releaseSessionBestEffort(session.id);
         return this.finishRun(run.id, { status: "cancelled" }, usage);
       }
-      const prompt = await withinRunTimeout(prepareAttachments(this.runRepository.attachments, run.id, session.workspacePath, run.input, runAbortController.signal));
+      const input = handoff === null ? run.input : `Context handed off by an operator:\n${handoff}\n\nUser request:\n${run.input}`;
+      const prompt = await withinRunTimeout(prepareAttachments(this.runRepository.attachments, run.id, session.workspacePath, input, runAbortController.signal));
       if (this.cancellationIntents.has(run.id)) {
         await this.releaseSessionBestEffort(session.id);
         return this.finishRun(run.id, { status: "cancelled" }, usage);
       }
       const turn = this.runtime.startTurn({ sessionId: session.id, requestId: run.id, ...prompt });
+      if (handoff !== null) this.sessionManager.markExecutionContextHandoffDelivered(executionContext.id, run.id);
       liveTurn = turn;
       let output = "";
       const iterator = turn.events[Symbol.asyncIterator]();
@@ -319,7 +333,7 @@ export class RunExecutor {
           const closeOutcome = await settleBestEffort(() => turn.closeEvents());
           const iteratorOutcome = await settleBestEffort(async () => iterator.return?.());
           if (closeOutcome.status !== "fulfilled" || iteratorOutcome.status !== "fulfilled") {
-            await this.releaseSessionBestEffort(run.sessionId);
+            await this.releaseSessionBestEffort(session.id);
           }
           liveTurn = undefined;
           liveIterator = undefined;
@@ -386,7 +400,7 @@ export class RunExecutor {
     } catch (error) {
       clearMessageFlushTimer();
       await this.cleanupFailedTurn(liveTurn, liveIterator);
-      if (error instanceof RunTimedOutError) await this.releaseSessionBestEffort(run.sessionId);
+      if (error instanceof RunTimedOutError && run.executionContextId !== null) await this.releaseSessionBestEffort(run.sessionId);
       const message = errorMessage(error);
       const stableNoticeCode = publicNoticeCode
         ?? (error instanceof SessionManagerError && error.code === "agent_disabled" ? "agent_disabled" : undefined);
@@ -422,7 +436,7 @@ export class RunExecutor {
     if (run.status === "running") {
       this.cancellationIntents.add(run.id);
       this.usageCancellations.get(run.id)?.abort();
-      await this.runtime.cancel(run.sessionId);
+      if (run.executionContextId !== null) await this.runtime.cancel(run.sessionId);
     }
     return this.requireRun(runId);
   }

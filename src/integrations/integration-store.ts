@@ -326,6 +326,8 @@ const toDelivery = (row: DeliveryRow): WebhookDelivery => ({
 const toRun = (row: LinkedRunRow): Run => ({
   id: row.id,
   sessionId: row.session_id,
+  executionContextId: null,
+  provider: null,
   status: row.status,
   input: row.input,
   result: row.result,

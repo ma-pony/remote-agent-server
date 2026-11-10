@@ -45,16 +45,23 @@ export class McpUsageObserver {
   private ready: Promise<string> | undefined;
   constructor(private readonly collector: HostUsageCollector) { collector.observer = this; }
 
+  private context(sessionId: number): { epoch: string; runtimeKind: string } {
+    const row = this.collector.db.prepare(`SELECT a.provider, c.usage_epoch_id FROM sessions s
+      JOIN agents a ON a.id = s.agent_id
+      LEFT JOIN execution_contexts c ON c.session_id = s.id AND c.retired_at IS NULL
+      WHERE s.id = ? ORDER BY c.id DESC LIMIT 1`).get(sessionId) as { provider: string; usage_epoch_id: string | null };
+    return { epoch: row.usage_epoch_id ?? this.collector.epoch(sessionId), runtimeKind: row.provider };
+  }
+
   issueTicket(sessionId: number, serverId: number): string {
     const binding = this.collector.binding(sessionId);
-    const epoch = this.collector.epoch(sessionId);
-    const key = `${serverId}:${epoch}`;
+    const { epoch, runtimeKind } = this.context(sessionId);
+    const key = `${serverId}:${epoch}:${runtimeKind}`;
     const sessionKeys = this.ticketKeys.get(sessionId) ?? new Map<string, string>();
     const existing = sessionKeys.get(key);
     if (existing) return existing;
-    const row = this.collector.db.prepare("SELECT provider FROM agents WHERE id = ?").get(Number(binding.agentId)) as { provider: string };
     const token = randomUUID();
-    this.tickets.set(token, { binding, epoch, serverId: String(serverId), runtimeKind: row.provider });
+    this.tickets.set(token, { binding, epoch, serverId: String(serverId), runtimeKind });
     sessionKeys.set(key, token);
     this.ticketKeys.set(sessionId, sessionKeys);
     return token;
@@ -73,7 +80,8 @@ export class McpUsageObserver {
     const event = observationSchema.parse(value);
     const id = stableHash(ticket.binding.namespace, ticket.binding.sessionId, ticket.epoch, event.invocationId);
     if (event.phase === "start") {
-      if (ticket.epoch !== this.collector.epoch(Number(ticket.binding.sessionId))) throw new UsageError("usage_binding_stale");
+      const current = this.context(Number(ticket.binding.sessionId));
+      if (ticket.epoch !== current.epoch || ticket.runtimeKind !== current.runtimeKind) throw new UsageError("usage_binding_stale");
       const run = this.collector.db.prepare("SELECT id FROM runs WHERE session_id = ? AND status = 'running' ORDER BY id DESC LIMIT 1")
         .get(Number(ticket.binding.sessionId)) as { id: number } | undefined;
       this.collector.attribution.observeInvocation(ticket.binding, { invocationId: event.invocationId, providerEpochId: ticket.epoch,
@@ -94,8 +102,11 @@ export class McpUsageObserver {
   revokeSession(sessionId: number, retainServerIds: ReadonlySet<number> = new Set()): void {
     const keys = this.ticketKeys.get(sessionId);
     if (!keys) return;
+    const retained = new Set([...retainServerIds].map(String));
+    const current = retained.size > 0 ? this.context(sessionId) : undefined;
     for (const [key, token] of keys) {
-      if (retainServerIds.has(Number(this.tickets.get(token)?.serverId))) continue;
+      const ticket = this.tickets.get(token);
+      if (ticket && retained.has(ticket.serverId) && ticket.epoch === current?.epoch && ticket.runtimeKind === current.runtimeKind) continue;
       this.tickets.delete(token); keys.delete(key);
     }
     if (keys.size === 0) this.ticketKeys.delete(sessionId);

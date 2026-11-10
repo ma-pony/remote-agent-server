@@ -1,6 +1,13 @@
 import type { AgentModelPolicy } from "./agents/model-policy.js";
 
 export type Provider = "claude_code" | "codex" | "hermes" | "deepseek_harness";
+/** Application-supported runtime behavior, shared by preflight and management UI. */
+export const PROVIDER_CAPABILITIES = {
+  claude_code: { label: "Claude Code", instructions: true, rtk: "hook" },
+  codex: { label: "Codex", instructions: true, rtk: "hook" },
+  hermes: { label: "Hermes", instructions: false, rtk: "plugin" },
+  deepseek_harness: { label: "DeepSeek Harness", instructions: true, rtk: "unsupported" }
+} as const satisfies Record<Provider, { label: string; instructions: boolean; rtk: "hook" | "plugin" | "unsupported" }>;
 export type AgentProvider = Provider;
 export type SessionStatus = "idle" | "running";
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -85,6 +92,18 @@ export type Session = {
   updatedAt: string;
 };
 
+/** A provider-native conversation owned by one business Session. */
+export type ExecutionContext = {
+  id: number;
+  sessionId: number;
+  provider: Provider;
+  providerSessionId: string | null;
+  legacyStorageSessionId: number | null;
+  handoff: string | null;
+  createdAt: string;
+  retiredAt: string | null;
+};
+
 export type SessionListItem = Session & {
   agentName: string;
   agentProvider: Provider;
@@ -113,6 +132,8 @@ export type Run = {
   attachments?: import("./attachments/attachment-types.js").Attachment[];
   id: number;
   sessionId: number;
+  executionContextId: number | null;
+  provider: Provider | null;
   status: RunStatus;
   input: string;
   result: string | null;

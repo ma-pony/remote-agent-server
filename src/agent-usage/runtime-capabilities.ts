@@ -140,13 +140,13 @@ export class RuntimeCapabilityCollector {
   recordRun(runId: number): void {
     const run = this.runContext(runId);
     const binding = this.store.bindSession(this.namespace, String(run.agentId), String(run.sessionId));
-    this.runEpoch(binding.namespace, binding.sessionId, String(runId), false);
+    this.runEpoch(binding.namespace, binding.sessionId, String(runId), false, run.usageEpochId);
   }
 
   recordProjection(runId: number, projectedSkills: readonly ProjectedSkill[]): void {
     const run = this.runContext(runId);
     const binding = this.store.bindSession(this.namespace, String(run.agentId), String(run.sessionId));
-    const epoch = this.runEpoch(binding.namespace, binding.sessionId, String(runId), false);
+    const epoch = this.runEpoch(binding.namespace, binding.sessionId, String(runId), false, run.usageEpochId);
     const skills = projectedSkills.slice(0, MAX_PROJECTED_SKILLS);
     this.store.db.transaction(() => {
       this.store.assertBinding(binding);
@@ -193,7 +193,7 @@ export class RuntimeCapabilityCollector {
     if (nativeId === undefined) return;
     const run = this.runContext(runId);
     const binding = this.store.bindSession(this.namespace, String(run.agentId), String(run.sessionId));
-    const epoch = this.runEpoch(binding.namespace, binding.sessionId, String(runId), event !== undefined);
+    const epoch = this.runEpoch(binding.namespace, binding.sessionId, String(runId), event !== undefined, run.usageEpochId);
     const kind = typeof content.kind === "string" ? content.kind : "unknown";
     const input = toolInput(content.rawInput);
     const mcp = record(content.mcp);
@@ -314,12 +314,14 @@ export class RuntimeCapabilityCollector {
       .run(namespace, sessionId);
   }
 
-  private runContext(runId: number): RunContext & { agentId: number } {
-    const row = this.store.db.prepare(`SELECT r.session_id, r.resolved_model, s.agent_id, s.workspace_path, a.provider
-      FROM runs r JOIN sessions s ON s.id = r.session_id JOIN agents a ON a.id = s.agent_id WHERE r.id = ?`)
-      .get(runId) as { session_id: number; agent_id: number; workspace_path: string; provider: string; resolved_model: string | null } | undefined;
+  private runContext(runId: number): RunContext & { agentId: number; usageEpochId: string | null } {
+    const row = this.store.db.prepare(`SELECT r.session_id, r.resolved_model, s.agent_id, s.workspace_path, COALESCE(r.provider, a.provider) AS provider,
+      context.usage_epoch_id
+      FROM runs r JOIN sessions s ON s.id = r.session_id JOIN agents a ON a.id = s.agent_id
+      LEFT JOIN execution_contexts context ON context.id = r.execution_context_id WHERE r.id = ?`)
+      .get(runId) as { session_id: number; agent_id: number; workspace_path: string; provider: string; resolved_model: string | null; usage_epoch_id: string | null } | undefined;
     if (row === undefined) throw new UsageError("usage_run_not_found");
-    return { sessionId: row.session_id, agentId: row.agent_id, workspacePath: row.workspace_path, runtimeKind: row.provider, model: row.resolved_model };
+    return { sessionId: row.session_id, agentId: row.agent_id, workspacePath: row.workspace_path, runtimeKind: row.provider, model: row.resolved_model, usageEpochId: row.usage_epoch_id };
   }
 
   private epoch(namespace: string, sessionId: string): string {
@@ -330,7 +332,7 @@ export class RuntimeCapabilityCollector {
     return `session:${sessionId}:epoch:${row.epoch}`;
   }
 
-  private runEpoch(namespace: string, sessionId: string, executionId: string, historical: boolean): string {
+  private runEpoch(namespace: string, sessionId: string, executionId: string, historical: boolean, contextEpoch?: string | null): string {
     const existing = this.store.db.prepare(`SELECT provider_epoch_id FROM agent_usage_runtime_runs
       WHERE namespace=? AND session_id=? AND execution_id=?`).get(namespace, sessionId, executionId) as { provider_epoch_id: string } | undefined;
     if (existing) return existing.provider_epoch_id;
@@ -340,7 +342,7 @@ export class RuntimeCapabilityCollector {
       .get(namespace, sessionId, executionId) as { provider_epoch_id: string } | undefined;
     const projection = this.store.db.prepare(`SELECT provider_epoch_id FROM agent_usage_runtime_skill_projections
       WHERE namespace=? AND session_id=? AND execution_id=? LIMIT 1`).get(namespace, sessionId, executionId) as { provider_epoch_id: string } | undefined;
-    const epoch = prior?.provider_epoch_id ?? projection?.provider_epoch_id
+    const epoch = prior?.provider_epoch_id ?? projection?.provider_epoch_id ?? contextEpoch
       ?? (historical ? `session:${sessionId}:run:${executionId}` : this.epoch(namespace, sessionId));
     this.store.db.prepare("INSERT INTO agent_usage_runtime_runs VALUES (?, ?, ?, ?)").run(namespace, sessionId, executionId, epoch);
     return epoch;

@@ -3,12 +3,15 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import Database from "better-sqlite3";
 import type { Provider } from "../domain.js";
+import { executionContextAcpSessionKey } from "./execution-context-storage.js";
 
 export type ProviderSessionStorage = {
   agentId: number;
   provider: Provider;
   sessionId: number;
   providerSessionId: string | null;
+  /** Provider home namespace. Omit only for pre-context Session storage. */
+  storageKey?: string;
 };
 
 export interface ProviderSessionCleaner {
@@ -22,22 +25,26 @@ export class SystemProviderSessionCleaner implements ProviderSessionCleaner {
   constructor(private readonly dataDir: string) {}
 
   async purge(input: ProviderSessionStorage): Promise<void> {
-    const acpxKey = encodeURIComponent(`remote-agent:${input.sessionId}`);
+    const storageKey = input.storageKey ?? String(input.sessionId);
+    const acpxSessionKey = input.storageKey === undefined || /^\d+$/.test(input.storageKey)
+      ? `remote-agent:${input.storageKey ?? input.sessionId}`
+      : executionContextAcpSessionKey(Number(input.storageKey.slice("context-".length)));
+    const acpxKey = encodeURIComponent(acpxSessionKey);
     const acpxSessionPath = join(this.dataDir, "acpx", "sessions", `${acpxKey}.json`);
     await this.removeAcpxEventLog(acpxSessionPath, acpxKey);
     await rm(acpxSessionPath, { force: true });
     const providerRoot = join(this.dataDir, "agents", String(input.agentId), "provider-home");
     if (input.provider === "codex") {
-      await rm(join(providerRoot, "codex", "sessions", String(input.sessionId)), { recursive: true, force: true });
+      await rm(join(providerRoot, "codex", "sessions", storageKey), { recursive: true, force: true });
       return;
     }
     if (input.provider === "deepseek_harness") {
-      await rm(join(providerRoot, "deepseek-harness", "sessions", String(input.sessionId)), { recursive: true, force: true });
+      await rm(join(providerRoot, "deepseek-harness", "sessions", storageKey), { recursive: true, force: true });
       return;
     }
     if (input.provider === "hermes") {
       const legacyHome = join(providerRoot, "hermes");
-      await rm(join(legacyHome, "sessions", String(input.sessionId)), { recursive: true, force: true });
+      await rm(join(legacyHome, "sessions", storageKey), { recursive: true, force: true });
       if (input.providerSessionId !== null) {
         const retainedByChild = await this.removeLegacyHermesState(input.agentId, input.providerSessionId);
         if (!retainedByChild) {
@@ -128,8 +135,8 @@ export class SystemProviderSessionCleaner implements ProviderSessionCleaner {
       throw error;
     }
     for (const entry of entries) {
-      // Isolated service Session homes are numeric directories. Do not descend into them.
-      if (/^(?:0|[1-9]\d*)$/.test(entry.name)) continue;
+      // Isolated legacy and execution-context homes are not native transcript entries.
+      if (/^(?:0|[1-9]\d*|context-[1-9]\d*)$/.test(entry.name)) continue;
       if (entry.name === providerSessionId || entry.name.startsWith(`${providerSessionId}.`)) {
         await rm(join(directory, entry.name), { recursive: true, force: true });
       }

@@ -24,6 +24,7 @@ import type { AppConfig } from "../config.js";
 import Database from "better-sqlite3";
 import type { Provider, TokenUsage } from "../domain.js";
 import { SystemProviderSessionCleaner } from "./provider-session-cleaner.js";
+import { executionContextAcpSessionKey, executionContextStorageKey } from "./execution-context-storage.js";
 import type { ProviderExtensionManager } from "../provider-extensions/provider-extension-manager.js";
 import { SkillManager } from "../skills/skill-manager.js";
 import type { ProjectedSkill } from "./skill-projector.js";
@@ -71,6 +72,7 @@ type RuntimeTarget = {
   provider: Provider;
   agentId: number;
   sessionId: number;
+  storageKey: string;
   providerSessionId: string | null;
   browserProfilePath: string;
   instructions: string;
@@ -333,7 +335,7 @@ const assertTarget = (provider: Provider, agentId: number, sessionId: number): v
 
 const targetName = (target: RuntimeTarget): string => {
   assertTarget(target.provider, target.agentId, target.sessionId);
-  return `remote:${target.provider}:${target.agentId}:${target.sessionId}`;
+  return `remote:${target.provider}:${target.agentId}:${target.storageKey}`;
 };
 
 class RemoteAgentRegistry implements AcpAgentRegistry {
@@ -366,7 +368,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
     let command = acpCommand(target.provider);
     if (target.provider === "hermes") {
       const legacyHome = join(providerHome, "hermes");
-      const home = join(legacyHome, "sessions", String(target.sessionId));
+      const home = join(legacyHome, "sessions", target.storageKey);
       const hostHome = process.env.HERMES_HOME ?? join(homedir(), ".hermes");
       await this.prepareHermesHome(hostHome, legacyHome, home, target.providerSessionId);
       if (target.rtk) await projectHermesRtk(home);
@@ -374,7 +376,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       command = await prepareHermesAcp(home);
     } else if (target.provider === "codex") {
       const agentHome = join(providerHome, "codex");
-      const home = join(agentHome, "sessions", String(target.sessionId));
+      const home = join(agentHome, "sessions", target.storageKey);
       const hostHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
       await this.prepareProviderHome(hostHome, home);
       projectedSkills = await this.extensionProjector?.prepare({ agentId: target.agentId, provider: target.provider, home,
@@ -393,7 +395,7 @@ class RemoteAgentRegistry implements AcpAgentRegistry {
       if (capture) await rm(join(home, "auth.json"), { force: true });
       environment.push(`CODEX_HOME=${shellQuote(home)}`);
     } else if (target.provider === "deepseek_harness") {
-      const home = join(providerHome, "deepseek-harness", "sessions", String(target.sessionId));
+      const home = join(providerHome, "deepseek-harness", "sessions", target.storageKey);
       const hostHome = process.env.DSH_HOME ?? join(homedir(), ".dsh");
       await this.prepareHome(home, async () => {
         await mkdir(home, { recursive: true, mode: 0o700 });
@@ -508,6 +510,7 @@ type ManagedSession = {
   handle: AcpRuntimeHandle;
   providerSessionId: string | null;
   provider: Provider;
+  executionContextId: number | undefined;
   agentId: number;
   workspacePath: string;
   browserProfilePath: string;
@@ -662,19 +665,20 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   async ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession> {
+    const key = input.sessionId;
     this.assertRunning();
     input.signal?.throwIfAborted();
-    this.clearIdleTimer(input.sessionId);
-    if (this.releaseRetryTimers.has(input.sessionId)) {
-      this.clearReleaseRetryTimer(input.sessionId);
-      await this.releaseSession(input.sessionId);
+    this.clearIdleTimer(key);
+    if (this.releaseRetryTimers.has(key)) {
+      this.clearReleaseRetryTimer(key);
+      await this.releaseSession(input.sessionId, input.executionContextId);
     }
-    return this.serializeSession(input.sessionId, () => this.ensureSessionLocked(input));
+    return this.serializeSession(key, () => this.ensureSessionLocked(input, key));
   }
 
-  private async ensureSessionLocked(input: RuntimeSessionInput): Promise<RuntimeSession> {
-    assertTarget(input.provider, input.agentId, input.sessionId);
-    const existing = this.sessions.get(input.sessionId);
+  private async ensureSessionLocked(input: RuntimeSessionInput, key: number): Promise<RuntimeSession> {
+    assertTarget(input.provider, input.agentId, key);
+    const existing = this.sessions.get(key);
     const reusable = existing !== undefined && this.canReuse(existing, input);
     if (reusable) {
       await this.applyModel(existing, input.model);
@@ -688,7 +692,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
         handle: existing.handle,
         reason: this.hasSameTarget(existing, input) ? "session_handle_refreshed" : "session_handle_replaced"
       });
-      this.sessions.delete(input.sessionId);
+      this.sessions.delete(key);
       existing.registry.unregister(existing.target);
     }
 
@@ -705,6 +709,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       provider: input.provider,
       agentId: input.agentId,
       sessionId: input.sessionId,
+      storageKey: input.storageKey ?? (input.executionContextId === undefined ? String(input.sessionId) : executionContextStorageKey(input.executionContextId)),
       providerSessionId: input.providerSessionId,
       browserProfilePath: input.browserProfilePath,
       instructions: input.instructions,
@@ -720,10 +725,10 @@ export class AcpxAgentRuntime implements AgentRuntime {
     catch (error) { await this.usageCapture?.release(input.sessionId); throw error; }
     if (input.provider === "codex" && input.rtk?.enabled && this.extensionProjector) {
       const controller = new AbortController();
-      this.hookTrustControllers.set(input.sessionId, controller);
+      this.hookTrustControllers.set(key, controller);
       try {
         await trustCodexManagedRtkHook({
-          home: join(this.config.dataDir, "agents", String(input.agentId), "provider-home", "codex", "sessions", String(input.sessionId)),
+          home: join(this.config.dataDir, "agents", String(input.agentId), "provider-home", "codex", "sessions", input.storageKey ?? (input.executionContextId === undefined ? String(input.sessionId) : executionContextStorageKey(input.executionContextId))),
           cwd: input.workspacePath, signal: input.signal ? AbortSignal.any([controller.signal, input.signal]) : controller.signal
         });
       } catch (error) {
@@ -731,7 +736,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
         if (this.shuttingDown && error instanceof CodexHookTrustError && error.aborted)
           throw new AgentRuntimeError("runtime_shutdown", "Runtime is shutting down");
         throw error;
-      } finally { this.hookTrustControllers.delete(input.sessionId); }
+      } finally { this.hookTrustControllers.delete(key); }
     }
     const runtime = this.createRuntime(registry, undefined, input.mcpServers);
     const sessionOptions = {
@@ -741,7 +746,9 @@ export class AcpxAgentRuntime implements AgentRuntime {
         : {})
     };
     const handle = await runtime.ensureSession({
-      sessionKey: `remote-agent:${input.sessionId}`,
+      sessionKey: input.storageKey !== undefined && /^\d+$/.test(input.storageKey)
+        ? `remote-agent:${input.storageKey}`
+        : input.executionContextId === undefined ? `remote-agent:${input.sessionId}` : executionContextAcpSessionKey(input.executionContextId),
       agent,
       mode: "persistent",
       cwd: input.workspacePath,
@@ -755,12 +762,13 @@ export class AcpxAgentRuntime implements AgentRuntime {
       if (outcome.status === "fulfilled") {
         registry.unregister(agent);
       } else {
-        this.sessions.set(input.sessionId, {
+        this.sessions.set(key, {
           runtime,
           registry,
           handle,
           providerSessionId,
           provider: input.provider,
+          executionContextId: input.executionContextId,
           agentId: input.agentId,
           workspacePath: input.workspacePath,
           browserProfilePath: input.browserProfilePath,
@@ -770,7 +778,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
           projectedSkills,
           ...(input.model === undefined ? {} : { model: input.model })
         });
-        this.recordShutdownFailure("late_handle_close", input.sessionId, outcome.reason);
+        this.recordShutdownFailure("late_handle_close", key, outcome.reason);
       }
       throw new AgentRuntimeError("runtime_shutdown", "Runtime is shutting down");
     }
@@ -786,7 +794,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
           reason: "provider_session_id_mismatch"
         });
       } finally {
-        this.sessions.delete(input.sessionId);
+        this.sessions.delete(key);
         registry.unregister(agent);
         await this.usageCapture?.release(input.sessionId);
       }
@@ -796,12 +804,13 @@ export class AcpxAgentRuntime implements AgentRuntime {
       );
     }
 
-    this.sessions.set(input.sessionId, {
+    this.sessions.set(key, {
       runtime,
       registry,
       handle,
       providerSessionId,
       provider: input.provider,
+      executionContextId: input.executionContextId,
       agentId: input.agentId,
       workspacePath: input.workspacePath,
       browserProfilePath: input.browserProfilePath,
@@ -815,16 +824,17 @@ export class AcpxAgentRuntime implements AgentRuntime {
   }
 
   startTurn(input: RuntimeTurnInput): RuntimeTurn {
+    const key = input.sessionId;
     this.assertRunning();
-    this.clearIdleTimer(input.sessionId);
-    if (this.sessionOperations.has(input.sessionId) || this.releaseRetryTimers.has(input.sessionId)) {
+    this.clearIdleTimer(key);
+    if (this.sessionOperations.has(key) || this.releaseRetryTimers.has(key)) {
       throw new AgentRuntimeError("session_not_ready", "Runtime session is being changed");
     }
-    const session = this.sessions.get(input.sessionId);
+    const session = this.sessions.get(key);
     if (session === undefined) {
       throw new AgentRuntimeError("session_not_ready", "Runtime session has not been ensured");
     }
-    if (this.activeTurns.has(input.sessionId)) {
+    if (this.activeTurns.has(key)) {
       throw new AgentRuntimeError("session_not_ready", "Runtime session still has an active Turn");
     }
     this.usageCapture?.startRun(input.sessionId, input.requestId);
@@ -837,10 +847,10 @@ export class AcpxAgentRuntime implements AgentRuntime {
       requestId: String(input.requestId)
     }); } catch (error) { this.usageCapture?.endRun(input.sessionId, input.requestId); throw error; }
     const activeTurn = { handle: session.handle, turn };
-    this.activeTurns.set(input.sessionId, activeTurn);
+    this.activeTurns.set(key, activeTurn);
     const result = turn.result.then(mapResult);
     void result.then(() => this.usageCapture?.endRun(input.sessionId, input.requestId), () => this.usageCapture?.endRun(input.sessionId, input.requestId));
-    const clearActiveTurn = (): void => { this.usageCapture?.endRun(input.sessionId, input.requestId); this.clearActiveTurn(input.sessionId, activeTurn); };
+    const clearActiveTurn = (): void => { this.usageCapture?.endRun(input.sessionId, input.requestId); this.clearActiveTurn(key, activeTurn); };
 
     return {
       events: {
@@ -866,27 +876,33 @@ export class AcpxAgentRuntime implements AgentRuntime {
     };
   }
 
-  async cancel(sessionId: number): Promise<void> {
-    this.hookTrustControllers.get(sessionId)?.abort();
-    const activeTurn = this.activeTurns.get(sessionId);
+  async cancel(sessionId: number, executionContextId?: number): Promise<void> {
+    const key = sessionId;
+    const session = this.sessions.get(key);
+    if (executionContextId !== undefined && session?.executionContextId !== executionContextId) return;
+    this.hookTrustControllers.get(key)?.abort();
+    const activeTurn = this.activeTurns.get(key);
     if (activeTurn !== undefined) {
       await activeTurn.turn.cancel({ reason: "cancelled_by_request" });
       return;
     }
-    const session = this.sessions.get(sessionId);
     if (session !== undefined) {
       await session.runtime.cancel({ handle: session.handle, reason: "cancelled_by_request" });
     }
   }
 
-  async releaseSession(sessionId: number): Promise<void> {
+  async releaseSession(sessionId: number, executionContextId?: number): Promise<void> {
+    const key = sessionId;
+    const current = this.sessions.get(key);
+    if (executionContextId !== undefined && current?.executionContextId !== executionContextId) return;
     this.assertRunning();
-    this.hookTrustControllers.get(sessionId)?.abort();
-    this.clearIdleTimer(sessionId);
-    this.clearReleaseRetryTimer(sessionId);
-    await this.serializeSession(sessionId, async () => {
-      const session = this.sessions.get(sessionId);
+    this.hookTrustControllers.get(key)?.abort();
+    this.clearIdleTimer(key);
+    this.clearReleaseRetryTimer(key);
+    await this.serializeSession(key, async () => {
+      const session = this.sessions.get(key);
       if (session === undefined) return;
+      if (executionContextId !== undefined && session.executionContextId !== executionContextId) return;
       try {
         await session.runtime.close({
           handle: session.handle,
@@ -894,38 +910,41 @@ export class AcpxAgentRuntime implements AgentRuntime {
           discardPersistentState: false
         });
       } catch (error) {
-        this.scheduleReleaseRetry(sessionId);
+        this.scheduleReleaseRetry(key);
         throw error;
       }
-      if (this.sessions.get(sessionId) === session) this.sessions.delete(sessionId);
-      this.activeTurns.delete(sessionId);
+      if (this.sessions.get(key) === session) this.sessions.delete(key);
+      this.activeTurns.delete(key);
       session.registry.unregister(session.target);
       await this.usageCapture?.release(sessionId);
     });
   }
 
   async reset(input: RuntimeSessionInput): Promise<void> {
+    const key = input.sessionId;
     this.assertRunning();
-    this.hookTrustControllers.get(input.sessionId)?.abort();
+    this.hookTrustControllers.get(key)?.abort();
     await this.usageCapture?.release(input.sessionId);
-    this.clearIdleTimer(input.sessionId);
-    this.clearReleaseRetryTimer(input.sessionId);
-    await this.serializeSession(input.sessionId, async () => {
-      const session = this.sessions.get(input.sessionId);
-      if (session === undefined) {
-        await new SystemProviderSessionCleaner(this.config.dataDir).purge({
-          agentId: input.agentId, provider: input.provider, sessionId: input.sessionId, providerSessionId: input.providerSessionId
+    this.clearIdleTimer(key);
+    this.clearReleaseRetryTimer(key);
+    await this.serializeSession(key, async () => {
+      const session = this.sessions.get(key);
+      if (session !== undefined) {
+        const isCurrent = session.executionContextId === input.executionContextId && session.provider === input.provider;
+        await session.runtime.close({
+          handle: session.handle,
+          reason: isCurrent ? "provider_session_reset" : "runtime_released",
+          discardPersistentState: isCurrent
         });
-        return;
+        this.sessions.delete(key);
+        this.activeTurns.delete(key);
+        session.registry.unregister(session.target);
       }
-      await session.runtime.close({
-        handle: session.handle,
-        reason: "provider_session_reset",
-        discardPersistentState: true
+      await new SystemProviderSessionCleaner(this.config.dataDir).purge({
+        agentId: input.agentId, provider: input.provider, sessionId: input.sessionId,
+        providerSessionId: input.providerSessionId,
+        ...(input.storageKey === undefined ? {} : { storageKey: input.storageKey })
       });
-      this.sessions.delete(input.sessionId);
-      this.activeTurns.delete(input.sessionId);
-      session.registry.unregister(session.target);
     });
   }
 
@@ -966,6 +985,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
     );
     const probeAgent = registry.register({
       provider: input.provider,
+      storageKey: "model-catalog",
       agentId: input.agentId,
       sessionId,
       providerSessionId: null,
@@ -1020,6 +1040,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
       provider,
       agentId,
       sessionId,
+      storageKey: String(sessionId),
       providerSessionId: null,
       browserProfilePath: join(this.config.dataDir, "agents", String(agentId), "doctor-browser"),
       instructions: "",
@@ -1133,6 +1154,7 @@ export class AcpxAgentRuntime implements AgentRuntime {
 
   private canReuse(session: ManagedSession, input: RuntimeSessionInput): boolean {
     return this.hasSameTarget(session, input)
+      && session.executionContextId === input.executionContextId
       && session.instructions === input.instructions
       && session.configurationFingerprint === configurationFingerprint(input);
   }

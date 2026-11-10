@@ -82,3 +82,25 @@ it("按 Provider 展示插件和 Hook，并允许 Agent 显式启用", async () 
   fireEvent.click(screen.getByRole("button", { name: "启用 browser" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "停用 browser" })).toBeVisible());
 });
+
+it("允许停用缺失原生来源的插件，停用后不能重新启用", async () => {
+  let enabled = true;
+  const plugin = { id: "plugin:missing@example", provider: "codex", kind: "plugin", name: "missing",
+    description: "Native source missing", version: null, available: false };
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === `/api/agents/${agent.id}`) return response(agent);
+    if (new URL(url, "http://localhost").pathname === `/api/agents/${agent.id}/extensions`) return pagedManagementResponse(url, [{ ...plugin, enabled }]);
+    if (url === `/api/agents/${agent.id}/extensions/${encodeURIComponent(plugin.id)}` && init?.method === "PUT") {
+      expect(JSON.parse(String(init.body))).toEqual({ enabled: false });
+      enabled = false;
+      return response({ ...plugin, enabled });
+    }
+    throw new Error(url);
+  }));
+  render(<App />);
+  const disable = await screen.findByRole("button", { name: "停用 missing" });
+  expect(disable).toBeEnabled();
+  fireEvent.click(disable);
+  await waitFor(() => expect(screen.getByRole("button", { name: "启用 missing" })).toBeDisabled());
+});

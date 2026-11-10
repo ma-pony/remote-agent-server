@@ -6,7 +6,8 @@ import type {
 export type { WebhookReceiver, WebhookReceiverInput, WebhookProviderDefinition, WebhookReceiptDetail };
 import type { WebhookFilter, WebhookFilterEvent, WebhookFilterResult } from "../integrations/webhook-filter.js";
 
-export type Provider = "claude_code" | "codex" | "hermes" | "deepseek_harness";
+import type { Provider } from "../domain.js";
+export type { Provider };
 export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export type ConcurrencySettings = {
@@ -301,6 +302,8 @@ export type AgentMcpServerDetail = AgentMcpServerSummary & (
 );
 
 export type Run = {
+  provider?: Provider | null;
+  executionContextId?: number | null;
   eventsPrunedAt?: string | null;
   eventsPrunedThroughSeq?: number;
   attachments?: import("../attachments/attachment-types.js").Attachment[];

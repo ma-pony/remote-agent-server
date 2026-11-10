@@ -4,13 +4,15 @@ import type Database from "better-sqlite3";
 
 import { parseStoredModelPolicy, type AgentModelPolicy } from "../agents/model-policy.js";
 import { insertedId } from "../db.js";
-import type { Run, RunStatus, TokenUsage } from "../domain.js";
+import type { Provider, Run, RunStatus, TokenUsage } from "../domain.js";
 import { assertSynchronousTransactionHook } from "../transaction-hook.js";
 
 type RunRow = {
   rtk_snapshot_json: string | null;
   id: number;
   session_id: number;
+  execution_context_id: number | null;
+  provider: Provider | null;
   status: RunStatus;
   input: string;
   result: string | null;
@@ -50,6 +52,8 @@ const toRun = (row: RunRow): Run => ({
   rtk: row.rtk_snapshot_json ? JSON.parse(row.rtk_snapshot_json) : null,
   id: row.id,
   sessionId: row.session_id,
+  executionContextId: row.execution_context_id,
+  provider: row.provider,
   status: row.status,
   input: row.input,
   result: row.result,
@@ -152,14 +156,32 @@ export class RunRepository {
           }
           throw new RunRepositoryError("session_busy");
         }
+        const owner = this.db.prepare(`
+          SELECT agent.provider FROM sessions session JOIN agents agent ON agent.id = session.agent_id WHERE session.id = ?
+        `).get(input.sessionId) as { provider: Provider } | undefined;
+        if (owner === undefined) throw new RunRepositoryError("session_busy");
+        let context = this.db.prepare(`
+          SELECT id, provider FROM execution_contexts
+          WHERE session_id = ? AND retired_at IS NULL ORDER BY id DESC LIMIT 1
+        `).get(input.sessionId) as { id: number; provider: Provider } | undefined;
+        if (context === undefined || context.provider !== owner.provider) {
+          this.db.prepare("UPDATE execution_contexts SET retired_at = ? WHERE session_id = ? AND retired_at IS NULL")
+            .run(createdAt, input.sessionId);
+          const contextId = insertedId(this.db.prepare(`
+            INSERT INTO execution_contexts (session_id, provider, created_at) VALUES (?, ?, ?)
+          `).run(input.sessionId, owner.provider, createdAt));
+          context = { id: contextId, provider: owner.provider };
+        }
         const id = insertedId(this.db
-          .prepare("INSERT INTO runs (session_id, status, input, created_at) VALUES (?, ?, ?, ?)")
-          .run(input.sessionId, "queued", input.input, createdAt));
+          .prepare("INSERT INTO runs (session_id, execution_context_id, provider, status, input, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+          .run(input.sessionId, context.id, context.provider, "queued", input.input, createdAt));
         this.attachments.insert(input.sessionId, { runId: id }, input.attachments);
         const run: Run = {
           ...this.attachments.projection({ runId: id }),
           id,
           sessionId: input.sessionId,
+          executionContextId: context.id,
+          provider: context.provider,
           status: "queued",
           input: input.input,
           result: null,
@@ -381,6 +403,28 @@ export class RunRepository {
   recoverAfterRestart(): void {
     const now = new Date().toISOString();
     this.inImmediateTransaction(() => {
+      // Queued attempts can predate execution contexts (or have been persisted
+      // immediately before an upgrade). They have not executed yet, so bind a
+      // fresh context now; terminal history deliberately remains unbound.
+      this.db.prepare(`
+        INSERT INTO execution_contexts (session_id, provider, created_at)
+        SELECT session.id, agent.provider, ?
+        FROM sessions session JOIN agents agent ON agent.id = session.agent_id
+        WHERE EXISTS (SELECT 1 FROM runs WHERE session_id = session.id AND status = 'queued' AND execution_context_id IS NULL)
+          AND NOT EXISTS (SELECT 1 FROM execution_contexts WHERE session_id = session.id AND retired_at IS NULL)
+      `).run(now);
+      this.db.prepare(`
+        UPDATE runs SET execution_context_id = (
+          SELECT context.id FROM execution_contexts context
+          WHERE context.session_id = runs.session_id AND context.retired_at IS NULL
+          ORDER BY context.id DESC LIMIT 1
+        ), provider = COALESCE(provider, (
+          SELECT context.provider FROM execution_contexts context
+          WHERE context.session_id = runs.session_id AND context.retired_at IS NULL
+          ORDER BY context.id DESC LIMIT 1
+        ))
+        WHERE status = 'queued' AND execution_context_id IS NULL
+      `).run();
       const interruptedRuns = this.db.prepare("SELECT id FROM runs WHERE status = 'running' ORDER BY created_at, id")
         .all() as Array<{ id: number }>;
       for (const run of interruptedRuns) {

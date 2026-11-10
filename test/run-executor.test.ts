@@ -102,6 +102,54 @@ afterEach(() => {
 });
 
 describe("RunExecutor", () => {
+  it("binds A→B→A Runs to fresh native contexts and delivers a manual handoff only to B's first Turn", async () => {
+    const runtime = createFakeRuntime({ result: { status: "completed" }, providerSessionId: "native" });
+    runtime.ensureSession = vi.fn(runtime.ensureSession);
+    runtime.startTurn = vi.fn(runtime.startTurn);
+    const resolveForRun = vi.fn(async (provider: "codex" | "deepseek_harness") => ({
+      requested: true,
+      enabled: provider === "codex",
+      version: "1.1.0",
+      binaryPath: provider === "codex" ? "/private/rtk" : null,
+      mode: provider === "codex" ? "hook" as const : "off" as const,
+      reason: provider === "codex" ? null : "unsupported" as const
+    }));
+    const mcpServers = [{ name: "preserved", command: "node", args: ["server.js"], env: { API_TOKEN: "secret" } }];
+    const mcpPrepare = vi.fn(async () => mcpServers);
+    const h = setup(runtime, undefined, mcpPrepare, {}, undefined, undefined, undefined, { resolveForRun });
+
+    await h.executor.execute(h.run.id);
+    const first = h.runRepository.get(h.run.id)!;
+    h.db.prepare("UPDATE agents SET provider = 'deepseek_harness' WHERE id = (SELECT agent_id FROM sessions WHERE id = ?)")
+      .run(TEST_SESSION_ID);
+    const b = h.runRepository.create({ sessionId: TEST_SESSION_ID, input: "continue B" });
+    h.db.prepare("UPDATE execution_contexts SET handoff = ? WHERE id = ?").run("carry the checked findings", b.executionContextId);
+    await h.executor.execute(b.id);
+    const bSecond = h.runRepository.create({ sessionId: TEST_SESSION_ID, input: "second B" });
+    await h.executor.execute(bSecond.id);
+    h.db.prepare("UPDATE agents SET provider = 'codex' WHERE id = (SELECT agent_id FROM sessions WHERE id = ?)")
+      .run(TEST_SESSION_ID);
+    const aAgain = h.runRepository.create({ sessionId: TEST_SESSION_ID, input: "back to A" });
+    await h.executor.execute(aAgain.id);
+
+    const contexts = [first, b, bSecond, aAgain].map(run => run.executionContextId);
+    expect(new Set(contexts).size).toBe(3);
+    expect([first.provider, b.provider, bSecond.provider, aAgain.provider]).toEqual(["codex", "deepseek_harness", "deepseek_harness", "codex"]);
+    expect(resolveForRun.mock.calls.map(([provider]) => provider)).toEqual(["codex", "deepseek_harness", "deepseek_harness", "codex"]);
+    expect(runtime.ensureSession).toHaveBeenNthCalledWith(1, expect.objectContaining({ provider: "codex", executionContextId: first.executionContextId, storageKey: `context-${first.executionContextId}` }));
+    expect(runtime.ensureSession).toHaveBeenNthCalledWith(2, expect.objectContaining({ provider: "deepseek_harness", executionContextId: b.executionContextId, storageKey: `context-${b.executionContextId}` }));
+    expect(mcpPrepare).toHaveBeenCalledTimes(4);
+    for (const [input] of (runtime.ensureSession as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(input.mcpServers).toEqual(mcpServers);
+    }
+    const texts = (runtime.startTurn as ReturnType<typeof vi.fn>).mock.calls.map(([input]) => input.text);
+    expect(texts[1]).toContain("carry the checked findings");
+    expect(texts[2]).not.toContain("carry the checked findings");
+    expect(h.db.prepare("SELECT handoff_delivered_run_id FROM execution_contexts WHERE id = ?").get(b.executionContextId))
+      .toEqual({ handoff_delivered_run_id: b.id });
+    h.db.close();
+  });
+
   it("resolves RTK when execution begins, passes the plan to Runtime, and persists a path-free snapshot", async () => {
     const runtime = createFakeRuntime();
     const ensure = vi.spyOn(runtime, "ensureSession");

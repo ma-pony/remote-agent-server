@@ -57,6 +57,63 @@ const harness = (options: { beforeDelete?: () => Promise<void>; usageAdapters?: 
 };
 
 describe("durable Session maintenance", () => {
+  it.each(["repeat", "retry", "restart"] as const)("preserves retired legacy state when an already reset Session is reset again via %s", async mode => {
+    const h = harness();
+    h.runtime.reset = vi.fn(h.runtime.reset);
+    h.db.prepare("UPDATE agents SET provider = 'deepseek_harness' WHERE id = ?").run(h.seed.agent.id);
+    h.db.prepare(`INSERT INTO execution_contexts (session_id, provider, provider_session_id, legacy_storage_session_id, created_at, retired_at)
+      VALUES (?, 'codex', 'retained-native', ?, 'old', 'switched')`).run(h.session.id, h.session.id);
+    const currentId = Number(h.db.prepare(`INSERT INTO execution_contexts (session_id, provider, created_at)
+      VALUES (?, 'deepseek_harness', 'switched')`).run(h.session.id).lastInsertRowid);
+    const oldHome = join(h.root, "agents", String(h.seed.agent.id), "provider-home", "codex", "sessions", String(h.session.id));
+    const currentHome = join(h.root, "agents", String(h.seed.agent.id), "provider-home", "deepseek-harness", "sessions", `context-${currentId}`);
+    mkdirSync(oldHome, { recursive: true }); mkdirSync(currentHome, { recursive: true });
+    writeFileSync(join(oldHome, "retained.txt"), "Old native context");
+    const acpDirectory = join(h.root, "acpx", "sessions"); mkdirSync(acpDirectory, { recursive: true });
+    const oldAcp = join(acpDirectory, `${encodeURIComponent(`remote-agent:${h.session.id}`)}.json`);
+    writeFileSync(oldAcp, "{}");
+    await h.manager.resetProviderSession(h.session.id);
+    expect(existsSync(currentHome)).toBe(false);
+    expect(existsSync(oldAcp)).toBe(true);
+    if (mode !== "repeat") h.db.prepare("UPDATE sessions SET status = 'running', pending_operation = 'reset' WHERE id = ?").run(h.session.id);
+    if (mode === "restart") await recoverSessionMaintenance({ ...h, usageCollector: h.manager.usageCollector });
+    else await h.manager.resetProviderSession(h.session.id);
+    expect(h.runtime.reset).toHaveBeenCalledTimes(1);
+    expect(readFileSync(oldAcp, "utf8")).toBe("{}");
+    expect(readFileSync(join(oldHome, "retained.txt"), "utf8")).toBe("Old native context");
+    expect(h.manager.get(h.session.id)).toMatchObject({ status: "idle", providerSessionId: null });
+    expect(readFileSync(join(h.workspace, "work.txt"), "utf8")).toBe("user work");
+    // Full storage cleanup still owns every context, including retired legacy state.
+    await h.manager.cleanupStorage(h.session.id, "2099-01-01T00:00:00Z");
+    expect(existsSync(oldAcp)).toBe(false);
+    expect(existsSync(oldHome)).toBe(false);
+    expect(h.db.prepare("SELECT COUNT(*) AS n FROM runs WHERE session_id = ?").get(h.session.id)).toEqual({ n: 1 });
+  });
+
+  it("cleans only the retired execution-context homes owned by the maintained Session", async () => {
+    const h = harness();
+    const other = h.seed.session();
+    const now = "2026-08-12T00:00:00.000Z";
+    const old = Number(h.db.prepare(`INSERT INTO execution_contexts
+      (session_id, provider, provider_session_id, created_at, retired_at) VALUES (?, 'codex', 'old', ?, ?)`)
+      .run(h.session.id, now, now).lastInsertRowid);
+    const current = Number(h.db.prepare(`INSERT INTO execution_contexts
+      (session_id, provider, provider_session_id, created_at) VALUES (?, 'deepseek_harness', 'new', ?)`)
+      .run(h.session.id, now).lastInsertRowid);
+    const foreign = Number(h.db.prepare(`INSERT INTO execution_contexts
+      (session_id, provider, provider_session_id, created_at) VALUES (?, 'codex', 'foreign', ?)`)
+      .run(other.id, now).lastInsertRowid);
+    const root = join(h.root, "agents", String(h.seed.agent.id), "provider-home");
+    const oldHome = join(root, "codex", "sessions", `context-${old}`);
+    const currentHome = join(root, "deepseek-harness", "sessions", `context-${current}`);
+    const foreignHome = join(root, "codex", "sessions", `context-${foreign}`);
+    for (const path of [oldHome, currentHome, foreignHome]) mkdirSync(path, { recursive: true });
+    await h.manager.cleanupStorage(h.session.id, "2099-01-01T00:00:00Z");
+    expect(existsSync(oldHome)).toBe(false);
+    expect(existsSync(currentHome)).toBe(false);
+    expect(existsSync(foreignHome)).toBe(true);
+  });
+
   it("collects the final unread source tail before cleanup destroys provider files", async () => {
     let stopped = false;
     const h: ReturnType<typeof harness> = harness({ usageAdapters: { "test-tail": {

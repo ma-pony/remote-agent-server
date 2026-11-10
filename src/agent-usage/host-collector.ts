@@ -91,13 +91,14 @@ export class HostUsageCollector {
   }
 
   recordRunUsage(runId: number, usage: Partial<TokenUsage>, observation?: UsageObservation): void {
-    const run = this.db.prepare(`SELECT r.session_id, r.started_at, a.provider FROM runs r
-      JOIN sessions s ON s.id = r.session_id JOIN agents a ON a.id = s.agent_id WHERE r.id = ?`)
-      .get(runId) as { session_id: number; started_at: string | null; provider: string } | undefined;
+    const run = this.db.prepare(`SELECT r.session_id, r.started_at, COALESCE(r.provider, a.provider) AS provider,
+      context.usage_epoch_id FROM runs r JOIN sessions s ON s.id = r.session_id
+      JOIN agents a ON a.id = s.agent_id LEFT JOIN execution_contexts context ON context.id = r.execution_context_id WHERE r.id = ?`)
+      .get(runId) as { session_id: number; started_at: string | null; provider: string; usage_epoch_id: string | null } | undefined;
     if (!run) throw new UsageError("usage_run_not_found");
     this.producers.add(run.session_id);
     const binding = this.binding(run.session_id);
-    const epoch = this.epoch(run.session_id);
+    const epoch = run.usage_epoch_id ?? this.epoch(run.session_id);
     const sourceId = observation?.sourceId ?? "runtime";
     const previous = this.db.prepare(`SELECT MAX(revision) AS revision FROM agent_usage_ledger
       WHERE namespace = ? AND source_id = ? AND session_id = ? AND epoch_id = ? AND coverage_id = ?`)
@@ -136,7 +137,7 @@ export class HostUsageCollector {
       }
     }
     const runs = this.db.prepare(`SELECT r.id, r.session_id, r.started_at, r.input_tokens, r.output_tokens, r.total_tokens,
-      r.cached_read_tokens, r.cached_write_tokens, r.thought_tokens, a.provider FROM runs r
+      r.cached_read_tokens, r.cached_write_tokens, r.thought_tokens, COALESCE(r.provider, a.provider) AS provider FROM runs r
       JOIN sessions s ON s.id = r.session_id JOIN agents a ON a.id = s.agent_id
       WHERE ${sessionId === undefined ? "" : "r.session_id = ? AND "}(r.input_tokens IS NOT NULL OR r.output_tokens IS NOT NULL OR r.total_tokens IS NOT NULL
         OR r.cached_read_tokens IS NOT NULL OR r.cached_write_tokens IS NOT NULL OR r.thought_tokens IS NOT NULL)
@@ -230,7 +231,7 @@ export class HostUsageCollector {
   private eligibleSessions(includeCompleted = true): Array<{ id: number }> {
     this.db.prepare(`INSERT INTO agent_usage_harvests (namespace, session_id, status)
       SELECT ?, CAST(s.id AS TEXT), 'pending' FROM sessions s JOIN agents a ON a.id = s.agent_id
-      WHERE a.provider IN ('codex', 'claude_code') AND s.provider_session_id IS NOT NULL
+      WHERE (EXISTS (SELECT 1 FROM execution_contexts c WHERE c.session_id=s.id AND c.provider IN ('codex', 'claude_code') AND c.provider_session_id IS NOT NULL) OR (a.provider IN ('codex', 'claude_code') AND s.provider_session_id IS NOT NULL))
         AND s.storage_cleaned_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM agent_usage_subjects u WHERE u.namespace = ?
           AND ((u.kind = 'session' AND u.subject_id = CAST(s.id AS TEXT))
@@ -238,7 +239,7 @@ export class HostUsageCollector {
       ON CONFLICT(namespace, session_id) DO NOTHING`).run(this.namespace, this.namespace);
     return this.db.prepare(`SELECT s.id FROM sessions s JOIN agents a ON a.id = s.agent_id
       JOIN agent_usage_harvests h ON h.namespace = ? AND h.session_id = CAST(s.id AS TEXT)
-      WHERE a.provider IN ('codex', 'claude_code') AND s.provider_session_id IS NOT NULL AND s.storage_cleaned_at IS NULL
+      WHERE (EXISTS (SELECT 1 FROM execution_contexts c WHERE c.session_id=s.id AND c.provider IN ('codex', 'claude_code') AND c.provider_session_id IS NOT NULL) OR (a.provider IN ('codex', 'claude_code') AND s.provider_session_id IS NOT NULL)) AND s.storage_cleaned_at IS NULL
         AND (? OR h.status != 'completed')
         AND NOT EXISTS (SELECT 1 FROM agent_usage_subjects u WHERE u.namespace = ?
           AND ((u.kind = 'session' AND u.subject_id = CAST(s.id AS TEXT))

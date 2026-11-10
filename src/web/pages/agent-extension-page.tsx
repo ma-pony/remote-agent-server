@@ -26,7 +26,7 @@ const ExtensionRow = ({ item, busy, onToggle }: {
         <p className="font-medium">{item.name}</p>
         <Badge variant="outline">{item.kind === "plugin" ? text("插件", "Plugin") : text("钩子", "Hook")}</Badge>
         {item.version === null ? null : <Badge variant="secondary">v{item.version}</Badge>}
-        {!item.available ? <Badge variant="destructive">{text("来源已移除", "Source unavailable")}</Badge> : null}
+        {!item.available ? <Badge variant="destructive">{text("当前原生来源不可用", "Native source unavailable")}</Badge> : null}
       </div>
       <p className="mt-1 line-clamp-1 text-sm text-muted-foreground" title={item.description}>
         {item.description || text("暂无说明", "No description")}
@@ -35,7 +35,7 @@ const ExtensionRow = ({ item, busy, onToggle }: {
     <Button
       size="sm"
       variant={item.enabled ? "outline" : "default"}
-      disabled={busy || !item.available}
+      disabled={busy || (!item.enabled && !item.available)}
       aria-label={text(`${item.enabled ? "停用" : "启用"} ${item.name}`, `${item.enabled ? "Disable" : "Enable"} ${item.name}`)}
       onClick={onToggle}
     >

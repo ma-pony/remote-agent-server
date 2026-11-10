@@ -1,3 +1,4 @@
+import { AgentProviderSwitch } from "@/components/agent-provider-switch";
 import { FormEvent, useEffect, useState } from "react";
 import { ArrowLeft, BarChart3, Bot, Cable, CheckCircle2, Copy, GitBranch, Loader2, Plus, RefreshCw, Search, Settings2, ShieldCheck, Trash2, Upload, XCircle } from "lucide-react";
 import { Link, Outlet, useLocation, useNavigate, useOutletContext, useParams } from "react-router";
@@ -363,11 +364,11 @@ export const AgentDetailLayout = () => {
 
   return <PageContainer>
     <Button variant="ghost" asChild className="mb-4"><Link to="/agents"><ArrowLeft />{text("返回智能体", "Back to agents")}</Link></Button>
-    <PageHeader eyebrow={providerNames[agent.provider]} title={agent.name} description={text("配置项目环境、模型、技能和 MCP，查看运行检查结果。", "Configure the project environment, model, Skills, and MCP, and review readiness checks.")} action={<div className="flex flex-wrap items-center gap-2"><Button asChild size="sm" variant="outline"><Link to={`/usage?agentId=${agent.id}&range=all`}><BarChart3 />{text("用量分析", "Usage analysis")}</Link></Button><AgentCloneDialog key={agent.id} agent={agent} /><Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div>} />
+    <PageHeader eyebrow={providerNames[agent.provider]} title={agent.name} description={text("配置项目环境、模型、技能和 MCP，查看运行检查结果。", "Configure the project environment, model, Skills, and MCP, and review readiness checks.")} action={<div className="flex flex-wrap items-center gap-2"><Button asChild size="sm" variant="outline"><Link to={`/usage?agentId=${agent.id}&range=all`}><BarChart3 />{text("用量分析", "Usage analysis")}</Link></Button><AgentCloneDialog key={agent.id} agent={agent} /><AgentProviderSwitch agent={agent} onChanged={setAgent} /><Badge variant={agent.enabled ? "default" : "secondary"}>{agent.enabled ? text("已启用", "Enabled") : text("已停用", "Disabled")}</Badge></div>} />
     <Tabs value={section} onValueChange={(value) => navigate(value === "overview" ? `/agents/${id}` : `/agents/${id}/${value}`)}>
       <TabsList variant="line" aria-label={text("智能体管理", "Agent management")}><TabsTrigger value="overview">{text("概览", "Overview")}</TabsTrigger><TabsTrigger value="skills">{text("技能", "Skills")}</TabsTrigger><TabsTrigger value="extensions">{text("扩展", "Extensions")}</TabsTrigger><TabsTrigger value="parameters">{text("会话参数", "Session parameters")}</TabsTrigger><TabsTrigger value="mcp">MCP</TabsTrigger><TabsTrigger value="settings">{text("设置", "Settings")}</TabsTrigger></TabsList>
     </Tabs>
-    <div className="mt-6"><Outlet context={{ agent, setAgent } satisfies AgentDetailContext} /></div>
+    <div className="mt-6"><Outlet key={`${agent.id}:${agent.provider}`} context={{ agent, setAgent } satisfies AgentDetailContext} /></div>
   </PageContainer>;
 };
 

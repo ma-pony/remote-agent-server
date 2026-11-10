@@ -1100,6 +1100,14 @@ describe("Server startup and shutdown", () => {
     const options = startOptions(root, runtime, commandRunner);
     options.listen = async (app) => {
       order.push("listen");
+      const observer = openDatabase(databasePath);
+      // Dispatch precedes listening; a fast runtime may already have completed.
+      const dispatched = observer.prepare("SELECT status, started_at FROM runs WHERE id = ?").get(QUEUED_RUN_ID) as { status: string; started_at: string | null };
+      expect(["running", "succeeded"]).toContain(dispatched.status);
+      expect(dispatched.started_at).toEqual(expect.any(String));
+      expect(observer.prepare("SELECT status, error FROM runs WHERE id = ?").get(OLD_RUN_ID))
+        .toEqual({ status: "failed", error: "server_restarted" });
+      observer.close();
       await app.ready();
     };
 
@@ -1113,7 +1121,8 @@ describe("Server startup and shutdown", () => {
       expect(delivery).toEqual({ status: "succeeded" });
     });
 
-    expect(order).toEqual(["check", "check", "runtime", "listen"]);
+    expect(order.slice(0, 2)).toEqual(["check", "check"]);
+    expect(order.slice(2).sort()).toEqual(["listen", "runtime"]);
     expect(commandRunner.run.mock.calls).toEqual([
       ["btrfs", ["filesystem", "show", join(root, "environments")]],
       ["btrfs", ["filesystem", "show", join(root, "sessions")]]

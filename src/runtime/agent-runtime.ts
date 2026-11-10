@@ -7,6 +7,10 @@ export type RuntimeSessionInput = {
   signal?: AbortSignal;
   rtk?: import("../rtk/rtk-types.js").RtkRunPlan;
   sessionId: number;
+  /** Native-context identity. Business sessionId stays stable across Provider switches. */
+  executionContextId?: number;
+  /** Explicit Provider-home namespace; legacy contexts retain their original Session home. */
+  storageKey?: string;
   agentId: number;
   provider: Provider;
   workspacePath: string;
@@ -21,7 +25,7 @@ export type RuntimeSessionInput = {
 };
 
 export type RuntimeSession = { providerSessionId: string | null; projectedSkills?: ProjectedSkill[] };
-export type RuntimeTurnInput = { sessionId: number; requestId: number; text: string; attachments?: Array<{ mediaType: string; data: string }> };
+export type RuntimeTurnInput = { sessionId: number; executionContextId?: number; requestId: number; text: string; attachments?: Array<{ mediaType: string; data: string }> };
 export type RuntimeEvent =
   | { type: "message"; stream: "output" | "thought"; text: string }
   | { type: "tool"; content: Record<string, unknown> }
@@ -56,9 +60,9 @@ export type RuntimeTurn = {
 export interface AgentRuntime {
   ensureSession(input: RuntimeSessionInput): Promise<RuntimeSession>;
   startTurn(input: RuntimeTurnInput): RuntimeTurn;
-  cancel(sessionId: number): Promise<void>;
+  cancel(sessionId: number, executionContextId?: number): Promise<void>;
   /** Closes the live Runtime handle while preserving Provider persistent state. */
-  releaseSession?(sessionId: number): Promise<void>;
+  releaseSession?(sessionId: number, executionContextId?: number): Promise<void>;
   reset(input: RuntimeSessionInput): Promise<void>;
   forgetSession(sessionId: number): Promise<void>;
   doctor(provider: Provider, agentId: number): Promise<RuntimeDoctor>;

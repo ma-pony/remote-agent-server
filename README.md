@@ -937,3 +937,11 @@ pnpm smoke:integrations
 ## 许可证
 
 本项目使用 [MIT License](LICENSE)。
+
+### 切换 Agent 执行器
+
+Agent 可通过管理台或 `POST /api/agents/:id/provider-switch` 更换执行器。仅在该 Agent 没有排队、运行中任务或会话维护操作时允许切换。Agent 身份、集成接入、业务 Session、Workspace、文件和历史 Run 保留。现有空闲 Session 下一次运行建立目标执行器的新原生上下文；不会把其他执行器的原生会话 ID 传给目标执行器。
+
+模型策略按执行器分别保存。切换前应配置目标 CLI 的认证与模型。插件保持完整的原生安装，不拆解为独立 Skills、MCP 或 Hook。切换前按完整插件标识（包含 marketplace）查找目标 Core 目录中的原生版本；仅名称相同不作为匹配依据。匹配成功后沿用 Agent 的启用选择，并通过目标 Core 现有的插件缓存、注册及启用配置安装完整包。独立 Hook 不跨 Core 转换。缺少目标原生版本或安装适配时返回 `agent_extension_incompatible`，原 Agent 与配置不变。当前项目的原生扩展管理仅接入 Codex、Claude Code；Hermes、DeepSeek 的原生插件格式不同，尚未接入此管理流程，不能通过拆解插件绕过。未被 Agent 选中的插件不会自动启用；独立 Skills、MCP 和会话参数继续沿用。 RTK 按目标适配；当前 DeepSeek 不支持 RTK 自动改写，RTK 生效时返回 `agent_rtk_unsupported`。交接文字是背景材料，不是原生对话迁移。切回旧 Core 也创建新上下文，历史用量保留实际执行器归属。
+
+切换请求示例：`{"provider":"deepseek_harness","modelPolicy":{"mode":"provider_default"},"handoff":"先阅读工作区中的交接文档。"}`。`modelPolicy` 可省略以恢复目标执行器保存的策略；`handoff` 可省略，提供时会用于每个已有会话的新上下文。目标检查失败返回 `400 agent_provider_unavailable`；任务或维护未结束返回 `409 agent_has_running_sessions`；检查期间配置被修改返回 `409 agent_changed`。

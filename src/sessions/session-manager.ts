@@ -9,7 +9,7 @@ import { HostUsageCollector } from "../agent-usage/host-collector.js";
 
 import type { AgentManager } from "../agents/agent-manager.js";
 import { insertedId } from "../db.js";
-import type { Agent, Page, Provider, Session, SessionListItem, SessionStatus } from "../domain.js";
+import type { Agent, ExecutionContext, Page, Provider, Session, SessionListItem, SessionStatus } from "../domain.js";
 import { McpManager } from "../mcp/mcp-manager.js";
 import { SecretStore } from "../mcp/secret-store.js";
 import type { SessionMcpStatus } from "../mcp/mcp-types.js";
@@ -87,7 +87,7 @@ export type CreateSessionInput = {
 export type SessionWithMcpStatus = Session & SessionMcpStatus;
 export type SessionMcpSummary = { mcpParametersValid: boolean; missingMcpParameterCount: number };
 export type SessionListItemWithMcpStatus = SessionListItem & SessionMcpSummary;
-export type SessionRuntimeContext = { agent: Agent; session: Session };
+export type SessionRuntimeContext = { agent: Agent; session: Session; executionContext: ExecutionContext };
 export type ListSessionsInput = {
   page: number;
   pageSize: number;
@@ -195,6 +195,15 @@ export class SessionManager {
     this.providerSessionCleaner = providerSessionCleaner ?? new SystemProviderSessionCleaner(dataDir);
     this.usageCollector = usageCollector ?? new HostUsageCollector(db);
     this.usageCollector.importLegacy();
+    // Legacy native homes predate context epochs. Freeze the current Session
+    // epoch once so later reset/maintenance cannot relabel their retained logs.
+    const legacyContexts = this.db.prepare(`SELECT id, session_id FROM execution_contexts
+      WHERE legacy_storage_session_id IS NOT NULL AND usage_epoch_id IS NULL`).all() as Array<{ id: number; session_id: number }>;
+    for (const context of legacyContexts) {
+      const epoch = this.usageCollector.epoch(context.session_id);
+      this.db.prepare("UPDATE execution_contexts SET usage_epoch_id = ? WHERE id = ? AND usage_epoch_id IS NULL")
+        .run(epoch, context.id);
+    }
   }
 
   /**
@@ -432,28 +441,52 @@ export class SessionManager {
   /**
    * Loads the persisted Session and its Agent for one Runtime turn.
    */
-  getRuntimeContext(id: number): SessionRuntimeContext {
+  getRuntimeContext(id: number, executionContextId?: number | null): SessionRuntimeContext {
     const session = this.get(id);
     if (session === undefined) throw new SessionManagerError("session_not_found");
     if (session.storageCleanedAt !== null) throw new SessionManagerError("session_storage_cleaned");
     const agent = this.agentManager.get(session.agentId);
     if (agent === undefined) throw new SessionManagerError("agent_not_found");
     if (!agent.enabled) throw new SessionManagerError("agent_disabled");
-    return { agent, session };
+    const row = executionContextId === undefined || executionContextId === null
+      ? this.db.prepare(`SELECT id, session_id, provider, provider_session_id, legacy_storage_session_id, handoff, created_at, retired_at
+        FROM execution_contexts WHERE session_id = ? ORDER BY id DESC LIMIT 1`).get(id)
+      : this.db.prepare(`SELECT id, session_id, provider, provider_session_id, legacy_storage_session_id, handoff, created_at, retired_at
+        FROM execution_contexts WHERE id = ? AND session_id = ?`).get(executionContextId, id);
+    if (row === undefined) throw new SessionManagerError("session_not_found");
+    const context = row as { id: number; session_id: number; provider: Provider; provider_session_id: string | null; legacy_storage_session_id: number | null;
+      handoff: string | null; created_at: string; retired_at: string | null };
+    return { agent, session, executionContext: {
+      id: context.id, sessionId: context.session_id, provider: context.provider,
+      providerSessionId: context.provider_session_id, legacyStorageSessionId: context.legacy_storage_session_id, handoff: context.handoff,
+      createdAt: context.created_at, retiredAt: context.retired_at
+    } };
   }
 
-  /**
-   * Saves the Provider's durable Session identifier before a Turn starts.
-   */
-  saveProviderSessionId(id: number, providerSessionId: string | null): Session {
-    const session = this.get(id);
-    if (session === undefined) throw new SessionManagerError("session_not_found");
+  saveExecutionContextProviderSessionId(contextId: number, providerSessionId: string | null): void {
+    this.inImmediateTransaction(() => {
+      this.db.prepare("UPDATE execution_contexts SET provider_session_id = ? WHERE id = ?").run(providerSessionId, contextId);
+      // Retained only as a legacy compatibility projection; native identity ownership is the context row above.
+      this.db.prepare(`UPDATE sessions SET provider_session_id = ?, updated_at = ?
+        WHERE id = (SELECT session_id FROM execution_contexts WHERE id = ?)
+          AND EXISTS (SELECT 1 FROM execution_contexts WHERE id = ? AND retired_at IS NULL)`)
+        .run(providerSessionId, new Date().toISOString(), contextId, contextId);
+    });
+  }
 
-    const updatedAt = new Date().toISOString();
-    this.db
-      .prepare("UPDATE sessions SET provider_session_id = ?, updated_at = ? WHERE id = ?")
-      .run(providerSessionId, updatedAt, id);
-    return { ...session, providerSessionId, updatedAt };
+  /** Returns a pending handoff without destroying its audit record. */
+  pendingExecutionContextHandoff(contextId: number): string | null {
+    const row = this.db.prepare(`SELECT handoff FROM execution_contexts
+      WHERE id = ? AND handoff IS NOT NULL AND handoff_delivered_run_id IS NULL`).get(contextId) as { handoff: string } | undefined;
+    return row?.handoff ?? null;
+  }
+
+  /** Records delivery only after the runtime has accepted the Turn. */
+  markExecutionContextHandoffDelivered(contextId: number, runId: number): void {
+    return this.inImmediateTransaction(() => {
+      this.db.prepare(`UPDATE execution_contexts SET handoff_delivered_run_id = ?
+        WHERE id = ? AND handoff IS NOT NULL AND handoff_delivered_run_id IS NULL`).run(runId, contextId);
+    });
   }
 
   /**
@@ -466,6 +499,10 @@ export class SessionManager {
       if (session.storageCleanedAt !== null) throw new SessionManagerError("session_storage_cleaned");
       const agent = this.agentManager.get(session.agentId);
       if (agent === undefined) throw new SessionManagerError("agent_not_found");
+      const context = this.db.prepare(`
+        SELECT id, provider, provider_session_id, legacy_storage_session_id, retired_at FROM execution_contexts
+        WHERE session_id = ? ORDER BY id DESC LIMIT 1
+      `).get(id) as { id: number; provider: Provider; provider_session_id: string | null; legacy_storage_session_id: number | null; retired_at: string | null } | undefined;
       const claim = this.claimMaintenance(id, "reset");
       await this.prepareUsageMaintenance(id, "reset");
       if (claim === "resuming") {
@@ -481,13 +518,26 @@ export class SessionManager {
       }
 
       try {
-        await this.runtime.reset({
+        if (context === undefined) await this.runtime.reset({
           sessionId: session.id,
           agentId: agent.id,
           provider: agent.provider,
           workspacePath: session.workspacePath,
           browserProfilePath: join(dirname(session.workspacePath), "browser"),
           providerSessionId: session.providerSessionId,
+          instructions: session.instructionsSnapshot,
+          memory: readFileSync(join(this.dataDir, "agents", String(agent.id), "MEMORY.md"), "utf8"),
+          mcpServers: []
+        });
+        else if (context.retired_at === null) await this.runtime.reset({
+          sessionId: session.id,
+          executionContextId: context.id,
+          storageKey: context.legacy_storage_session_id === null ? `context-${context.id}` : String(context.legacy_storage_session_id),
+          agentId: agent.id,
+          provider: context.provider,
+          workspacePath: session.workspacePath,
+          browserProfilePath: join(dirname(session.workspacePath), "browser"),
+          providerSessionId: context.provider_session_id,
           instructions: session.instructionsSnapshot,
           memory: readFileSync(join(this.dataDir, "agents", String(agent.id), "MEMORY.md"), "utf8"),
           mcpServers: []

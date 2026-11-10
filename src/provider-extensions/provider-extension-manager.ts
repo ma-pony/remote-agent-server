@@ -31,6 +31,7 @@ export type DiscoveredProviderExtension = Omit<ProviderExtensionCatalogItem, "en
 };
 
 type ExtensionRow = {
+  enabled: number;
   agent_id: number;
   provider: "codex" | "claude_code";
   kind: ProviderExtensionKind;
@@ -242,9 +243,8 @@ export class ProviderExtensionManager {
 
   list(agentId: number): ProviderExtensionCatalogItem[] {
     const provider = this.agentProvider(agentId);
-    if (provider !== "codex" && provider !== "claude_code") return [];
-    const discovered = this.discover(provider);
-    const assignments = this.assignmentRows(agentId);
+    const discovered = this.nativeCatalog(provider);
+    const assignments = this.assignmentRows(agentId, true);
     const byId = new Map(discovered.map((item) => [item.id, item]));
     const result: ProviderExtensionCatalogItem[] = discovered.map((item) => ({
       id: item.id,
@@ -253,7 +253,7 @@ export class ProviderExtensionManager {
       name: item.name,
       description: item.description,
       version: item.version,
-      enabled: assignments.has(item.id),
+      enabled: assignments.get(item.id)?.enabled === 1,
       available: true
     }));
     for (const row of assignments.values()) {
@@ -265,7 +265,7 @@ export class ProviderExtensionManager {
         name: row.name,
         description: row.description,
         version: null,
-        enabled: true,
+        enabled: row.enabled === 1,
         available: false
       });
     }
@@ -328,8 +328,7 @@ export class ProviderExtensionManager {
 
   setEnabled(agentId: number, id: string, enabled: boolean): ProviderExtensionCatalogItem | undefined {
     const provider = this.agentProvider(agentId);
-    if (provider !== "codex" && provider !== "claude_code") return undefined;
-    const item = this.discover(provider).find((candidate) => candidate.id === id);
+    const item = this.nativeCatalog(provider).find(candidate => candidate.id === id);
     if (enabled) {
       if (item === undefined) return undefined;
       const now = new Date().toISOString();
@@ -338,13 +337,16 @@ export class ProviderExtensionManager {
           (agent_id, provider, kind, extension_id, name, description, source_fingerprint, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(agent_id, extension_id) DO UPDATE SET
+          enabled = 1,
+          provider = excluded.provider,
+          kind = excluded.kind,
           name = excluded.name,
           description = excluded.description,
           source_fingerprint = excluded.source_fingerprint,
           updated_at = excluded.updated_at
       `).run(
         agentId,
-        provider,
+        item.provider,
         item.kind,
         item.id,
         item.name,
@@ -355,22 +357,41 @@ export class ProviderExtensionManager {
       );
     } else {
       const deleted = this.options.db.prepare(
-        "DELETE FROM agent_provider_extensions WHERE agent_id = ? AND extension_id = ?"
+        "UPDATE agent_provider_extensions SET enabled = 0 WHERE agent_id = ? AND extension_id = ?"
       ).run(agentId, id);
       if (deleted.changes === 0 && item === undefined) return undefined;
     }
-    return this.list(agentId).find((candidate) => candidate.id === id);
+    return this.list(agentId).find((candidate) => candidate.id === id)
+      ?? (item ? { id: item.id, provider: item.provider, kind: item.kind, name: item.name, description: item.description,
+        version: item.version, enabled: false, available: true } : undefined);
   }
 
-  enabled(agentId: number): DiscoveredProviderExtension[] {
-    const provider = this.agentProvider(agentId);
-    if (provider !== "codex" && provider !== "claude_code") return [];
+  private nativeCatalog(provider: Provider): DiscoveredProviderExtension[] {
+    // Only runtimes with an implemented native installer expose selectable packages.
+    return provider === "codex" || provider === "claude_code" ? this.discover(provider) : [];
+  }
+
+  assertSwitchCompatible(agentId: number, target: Provider): void {
+    const installed = this.nativeCatalog(target);
+    for (const selected of this.assignmentRows(agentId).values()) {
+      const native = installed.find(item => item.id === selected.extension_id && item.kind === selected.kind);
+      // Plugin IDs include the marketplace; display names alone never identify a replacement.
+      if (!native || selected.kind === "hook" && selected.provider !== target) {
+        throw new ProviderExtensionCompatibilityError(selected.name);
+      }
+    }
+  }
+
+  enabled(agentId: number, provider: Provider = this.agentProvider(agentId)): DiscoveredProviderExtension[] {
     const selected = this.assignmentRows(agentId);
-    return this.discover(provider).filter((item) => selected.has(item.id));
+    return this.nativeCatalog(provider).filter(item => {
+      const row = selected.get(item.id);
+      return row !== undefined && (item.kind === "plugin" || row.provider === provider);
+    });
   }
 
-  async enabledWithContentFingerprints(agentId: number): Promise<DiscoveredProviderExtension[]> {
-    return Promise.all(this.enabled(agentId).map(async (item) => {
+  async enabledWithContentFingerprints(agentId: number, provider?: Provider): Promise<DiscoveredProviderExtension[]> {
+    return Promise.all(this.enabled(agentId, provider).map(async (item) => {
       if (item.kind !== "plugin" || item.sourcePath === null) return item;
       let cached = this.pluginFingerprints.get(item.sourcePath);
       if (cached === undefined || Date.now() - cached.capturedAt >= this.cacheTtlMs) {
@@ -407,10 +428,10 @@ export class ProviderExtensionManager {
     return row.provider;
   }
 
-  private assignmentRows(agentId: number): Map<string, ExtensionRow> {
+  private assignmentRows(agentId: number, includeDisabled = false): Map<string, ExtensionRow> {
     const rows = this.options.db.prepare(
-      "SELECT * FROM agent_provider_extensions WHERE agent_id = ? ORDER BY created_at ASC, extension_id ASC"
-    ).all(agentId) as ExtensionRow[];
+      "SELECT * FROM agent_provider_extensions WHERE agent_id = ? AND (? OR enabled = 1) ORDER BY created_at ASC, extension_id ASC"
+    ).all(agentId, Number(includeDisabled)) as ExtensionRow[];
     return new Map(rows.map((row) => [row.extension_id, row]));
   }
 }
@@ -418,5 +439,12 @@ export class ProviderExtensionManager {
 export class ProviderExtensionManagerError extends Error {
   constructor(readonly code: "agent_not_found") {
     super(code);
+  }
+}
+
+export class ProviderExtensionCompatibilityError extends Error {
+  readonly code = "agent_extension_incompatible";
+  constructor(readonly extensionName: string) {
+    super(`No compatible native installation for extension: ${extensionName}`);
   }
 }

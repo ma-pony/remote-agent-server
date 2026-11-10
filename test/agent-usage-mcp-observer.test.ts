@@ -14,6 +14,19 @@ const setup = () => {
 };
 
 describe("MCP usage observer ownership", () => {
+  it("rotates retained MCP tickets when the execution context changes", () => {
+    const { db, session, observer, host } = setup();
+    const first = observer.issueTicket(session.id, 7);
+    db.prepare("UPDATE agents SET provider = 'deepseek_harness' WHERE id = (SELECT agent_id FROM sessions WHERE id = ?)").run(session.id);
+    db.prepare("INSERT INTO execution_contexts (session_id, provider, created_at) VALUES (?, 'deepseek_harness', datetime('now'))").run(session.id);
+    const event = { invocationId: randomUUID(), toolName: "search", phase: "start", occurredAt: "2026-09-21T01:00:00Z" };
+    expect(() => observer.record(first, event)).toThrow("usage_binding_stale");
+    observer.revokeSession(session.id, new Set([7]));
+    const next = observer.issueTicket(session.id, 7);
+    expect(next).not.toBe(first);
+    observer.record(next, event);
+    expect(host.attribution.invocations()[0]).toMatchObject({ runtimeKind: "deepseek_harness" });
+  });
   it("persists default argument and result estimates independently of model context capture", () => {
     const { session, host, observer } = setup();
     const token = observer.issueTicket(session.id, 7), invocationId = randomUUID();

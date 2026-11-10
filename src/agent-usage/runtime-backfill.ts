@@ -196,7 +196,7 @@ export class RuntimeContentBackfill {
         "NOT EXISTS (SELECT 1 FROM agent_usage_detail_archives a WHERE a.namespace=? AND a.session_id=CAST(s.id AS TEXT))");
       params.push(this.namespace);
     }
-    for (const [field, column] of [["sessionId", "s.id"], ["agentId", "a.id"], ["runtimeKind", "a.provider"]] as const) {
+    for (const [field, column] of [["sessionId", "s.id"], ["agentId", "a.id"], ["runtimeKind", "COALESCE(r.provider, a.provider)"]] as const) {
       if (filter[field] !== undefined) { conditions.push(`${column} = ?`); params.push(filter[field]); }
     }
     // A Run may overlap the requested window even when it started before that window.

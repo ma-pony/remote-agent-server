@@ -1,3 +1,4 @@
+import { ProviderExtensionCompatibilityError } from "../provider-extensions/provider-extension-manager.js";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
 import { paginationQuerySchema, isPagedQuery, pageResult } from "../pagination.js";
@@ -35,6 +36,11 @@ const updateAgentSchema = z.object({
 const cloneAgentSchema = z.object({
   name: z.string().trim().min(1)
 }).strict();
+const switchProviderSchema = z.object({
+  provider: z.enum(["codex", "claude_code", "hermes", "deepseek_harness"]),
+  handoff: z.string().trim().max(20_000).optional(),
+  modelPolicy: agentModelPolicySchema.optional()
+}).strict();
 
 const updateSkillSchema = z.object({ enabled: z.boolean() }).strict();
 const updateExtensionSchema = z.object({ enabled: z.boolean() }).strict();
@@ -55,18 +61,30 @@ const notFound = (reply: FastifyReply) =>
   reply.code(404).send({ error: { code: "not_found", message: "Agent not found" } });
 
 const handleAgentError = (reply: FastifyReply, error: unknown) => {
+  if (error instanceof ProviderExtensionCompatibilityError) return reply.code(400).send({ error: {
+    code: error.code, message: `插件「${error.extensionName}」在目标执行器中没有匹配的原生安装或安装适配；请先处理原生兼容性，或停用该插件。`
+  } });
   if (error instanceof AgentManagerError) {
+    if (error.code === "agent_provider_unavailable" || error.code === "agent_changed") {
+      return reply.code(error.code === "agent_changed" ? 409 : 400).send({ error: { code: error.code, message: error.code === "agent_changed"
+        ? "Agent configuration changed during the check; retry the switch"
+        : "Target executor is unavailable; check its installation, authentication and model configuration" } });
+    }
+    if (error.code === "agent_rtk_unsupported") {
+      return reply.code(400).send({ error: { code: error.code, message: "Target executor cannot apply the enabled RTK integration" } });
+    }
     if (error.code === "agent_instructions_unsupported") {
       return reply.code(400).send({
         error: { code: error.code, message: "Hermes 当前不支持智能体指令" }
       });
     }
-    if (error.code === "agent_has_sessions" || error.code === "agent_has_integration_endpoints") {
+    if (error.code === "agent_has_sessions" || error.code === "agent_has_integration_endpoints" || error.code === "agent_has_running_sessions") {
       return reply.code(409).send({
         error: {
           code: error.code,
           message: error.code === "agent_has_sessions"
             ? "Agent has Sessions and cannot be deleted; disable it instead"
+            : error.code === "agent_has_running_sessions" ? "Agent has running Sessions; wait for them to become idle"
             : "Agent has Integration Endpoints and cannot be deleted; delete or reassign them first"
         }
       });
@@ -136,6 +154,17 @@ export const registerAgentRoutes = (
     } catch (error) {
       return handleAgentError(reply, error);
     }
+  });
+
+  app.post<{ Params: { id: string } }>("/agents/:id/provider-switch", async (request, reply) => {
+    const parsed = switchProviderSchema.safeParse(request.body);
+    if (!parsed.success) return badRequest(reply, "Invalid Provider switch");
+    try {
+      const id = parseId(request.params.id);
+      if (id === undefined) return notFound(reply);
+      const agent = await agentManager.switchProvider(id, parsed.data);
+      return agent === undefined ? notFound(reply) : agent;
+    } catch (error) { return handleAgentError(reply, error); }
   });
 
   app.patch<{ Params: { id: string } }>("/agents/:id", async (request, reply) => {

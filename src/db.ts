@@ -604,6 +604,8 @@ export const migrate = (
     CREATE TABLE IF NOT EXISTS runs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id INTEGER NOT NULL REFERENCES sessions(id),
+      execution_context_id INTEGER,
+      provider TEXT CHECK (provider IN ('claude_code', 'codex', 'hermes', 'deepseek_harness')),
       status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
       input TEXT NOT NULL,
       result TEXT,
@@ -622,6 +624,18 @@ export const migrate = (
       context_used_tokens INTEGER,
       context_window_tokens INTEGER
     );
+
+    CREATE TABLE IF NOT EXISTS execution_contexts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'hermes', 'deepseek_harness')),
+      provider_session_id TEXT,
+      handoff TEXT,
+      created_at TEXT NOT NULL,
+      retired_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS execution_contexts_session_recent
+      ON execution_contexts(session_id, id DESC);
 
     CREATE UNIQUE INDEX IF NOT EXISTS one_active_run_per_session
     ON runs(session_id) WHERE status IN ('queued', 'running');
@@ -894,6 +908,17 @@ export const migrate = (
   if (!hasColumn("agents", "provider_default_model")) {
     db.exec("ALTER TABLE agents ADD COLUMN provider_default_model TEXT");
   }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS agent_provider_model_policies (
+      agent_id INTEGER NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+      provider TEXT NOT NULL CHECK (provider IN ('codex', 'claude_code', 'hermes', 'deepseek_harness')),
+      model_policy_json TEXT NOT NULL,
+      PRIMARY KEY (agent_id, provider)
+    )
+  `);
+  if (!hasColumn("agent_provider_extensions", "enabled")) {
+    db.exec("ALTER TABLE agent_provider_extensions ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))");
+  }
   migrateAgentProviders(db);
   if (!hasColumn("agent_mcp_servers", "source_mcp_server_id")) {
     db.exec("ALTER TABLE agent_mcp_servers ADD COLUMN source_mcp_server_id INTEGER");
@@ -976,6 +1001,51 @@ export const migrate = (
   if (!hasColumn("runs", "resolved_model")) {
     db.exec("ALTER TABLE runs ADD COLUMN resolved_model TEXT");
   }
+  if (!hasColumn("runs", "execution_context_id")) db.exec("ALTER TABLE runs ADD COLUMN execution_context_id INTEGER");
+  if (!hasColumn("runs", "provider")) db.exec("ALTER TABLE runs ADD COLUMN provider TEXT");
+  db.exec(`CREATE TABLE IF NOT EXISTS execution_contexts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL CHECK (provider IN ('claude_code', 'codex', 'hermes', 'deepseek_harness')),
+    provider_session_id TEXT,
+    legacy_storage_session_id INTEGER,
+    usage_epoch_id TEXT,
+    handoff TEXT,
+    handoff_delivered_run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    retired_at TEXT
+  )`);
+  if (!hasColumn("execution_contexts", "legacy_storage_session_id")) {
+    db.exec("ALTER TABLE execution_contexts ADD COLUMN legacy_storage_session_id INTEGER");
+  }
+  if (!hasColumn("execution_contexts", "handoff_delivered_run_id")) {
+    db.exec("ALTER TABLE execution_contexts ADD COLUMN handoff_delivered_run_id INTEGER REFERENCES runs(id) ON DELETE SET NULL");
+  }
+  if (!hasColumn("execution_contexts", "usage_epoch_id")) {
+    db.exec("ALTER TABLE execution_contexts ADD COLUMN usage_epoch_id TEXT");
+  }
+  db.exec(`CREATE TRIGGER IF NOT EXISTS execution_context_usage_epoch
+    AFTER INSERT ON execution_contexts
+    WHEN NEW.legacy_storage_session_id IS NULL AND NEW.usage_epoch_id IS NULL
+    BEGIN
+      UPDATE execution_contexts SET usage_epoch_id = 'session:' || NEW.session_id || ':context:' || NEW.id
+      WHERE id = NEW.id;
+    END`);
+  db.exec("CREATE INDEX IF NOT EXISTS execution_contexts_session_recent ON execution_contexts(session_id, id DESC)");
+  // A legacy native identity belongs to the business Session's current Provider
+  // only. Historical Runs deliberately remain unbound: resets could have replaced
+  // that native identity before this migration.
+  db.exec(`INSERT INTO execution_contexts (session_id, provider, provider_session_id, legacy_storage_session_id, created_at)
+    SELECT session.id, agent.provider, session.provider_session_id, session.id, session.updated_at
+    FROM sessions session JOIN agents agent ON agent.id = session.agent_id
+    WHERE session.provider_session_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM execution_contexts context WHERE context.session_id = session.id)`);
+  // Historical Runs keep their immutable historical Provider but are not assigned a native context:
+  // session.provider_session_id may have been reset and cannot prove ownership of an old Run.
+  db.exec(`UPDATE runs SET provider = (
+    SELECT agent.provider FROM sessions session JOIN agents agent ON agent.id = session.agent_id
+    WHERE session.id = runs.session_id
+  ) WHERE provider IS NULL`);
   if (!hasColumn("runs", "skills_revision")) {
     db.exec("ALTER TABLE runs ADD COLUMN skills_revision TEXT");
   }

@@ -129,7 +129,8 @@ const publicationTemporaryName = /^([0-9a-f]{20})\.tmp-[0-9a-f-]{36}$/;
 
 /** Retires snapshots no Session can still reference, leaving new publications time to become visible. */
 const pruneCodexPluginCaches = async (agentHome: string, force = false): Promise<void> => {
-  if (!force && Date.now() - (lastCodexCachePrune.get(agentHome) ?? 0) < 10 * 60_000) return;
+  const startedAt = Date.now();
+  if (!force && startedAt - (lastCodexCachePrune.get(agentHome) ?? 0) < 10 * 60_000) return;
   const sharedRoot = join(agentHome, "shared-plugins");
   const cachesRoot = join(agentHome, "plugin-caches");
   let marketplaces: Array<{ name: string; isDirectory(): boolean }>;
@@ -166,7 +167,7 @@ const pruneCodexPluginCaches = async (agentHome: string, force = false): Promise
   }
   for (const path of stalePublications) await rm(path, { recursive: true, force: true });
   if (snapshotCandidates.length === 0 && cacheCandidates.length === 0) {
-    lastCodexCachePrune.set(agentHome, Date.now());
+    lastCodexCachePrune.set(agentHome, startedAt);
     return;
   }
   const referencedSnapshots = new Set<string>();
@@ -197,7 +198,7 @@ const pruneCodexPluginCaches = async (agentHome: string, force = false): Promise
   for (const path of cacheCandidates) {
     if (!referencedCaches.has(path)) await rm(path, { recursive: true, force: true });
   }
-  lastCodexCachePrune.set(agentHome, Date.now());
+  lastCodexCachePrune.set(agentHome, startedAt);
 };
 
 const scheduleCodexCachePrune = (agentHome: string): void => {
@@ -440,7 +441,7 @@ export class ProviderExtensionProjector {
   async prepare({ agentId, provider, home, managedHooks = [] }: ProjectionInput): Promise<ProjectedSkill[]> {
     if (provider !== "codex" && provider !== "claude_code") return [];
     await mkdir(home, { recursive: true });
-    const selected = await this.manager.enabledWithContentFingerprints(agentId);
+    const selected = await this.manager.enabledWithContentFingerprints(agentId, provider);
     const managesRtk = managedHooks.some(hook => hook.id === "remote-agent:rtk");
     const extensions = [...selected.filter(extension => {
       const config = object(extension.configuration);

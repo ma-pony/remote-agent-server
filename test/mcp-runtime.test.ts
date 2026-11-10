@@ -33,6 +33,39 @@ afterEach(() => {
 });
 
 describe("RunMcpPreparer", () => {
+  const cores = ["codex", "claude_code", "hermes", "deepseek_harness"] as const;
+  it.each(cores.flatMap(source => cores.filter(target => target !== source).map(target => ({ source, target }))))(
+    "keeps encrypted MCP settings and tool filtering across $source → $target", async ({ source, target }) => {
+    const check = vi.fn(async () => ({ status: "passed" as const, toolCount: 2, message: "ready", tools: [
+      { name: "ticket_get", description: "read" }, { name: "ticket_write", description: "write" }
+    ] }));
+    const fixture = setup({ check });
+    fixture.db.prepare("UPDATE agents SET provider = ? WHERE id = ?").run(source, fixture.agentId);
+    fixture.manager.createParameterDefinition(fixture.agentId, { key: "tenant", label: "Tenant", description: null, required: true, secret: false });
+    fixture.manager.insertSessionValuesInTransaction(fixture.sessionId,
+      fixture.manager.normalizeSessionValues(fixture.agentId, { tenant: "team-a" }, true));
+    const created = fixture.manager.createServer(fixture.agentId, {
+      name: "portable-mcp", transport: "http", enabled: true, url: "https://example.test/mcp", checkTimeoutSeconds: 5,
+      headers: [
+        { name: "Authorization", source: "fixed", value: "Bearer encrypted-secret", secret: true },
+        { name: "X-Tenant", source: "session_parameter", parameterKey: "tenant" }
+      ]
+    });
+    fixture.manager.setAllowedTools(fixture.agentId, created.id, ["ticket_get"]);
+    const before = await fixture.preparer.prepare({ agentId: fixture.agentId, sessionId: fixture.sessionId, runId: 1, workspacePath: "/workspace", browserProfilePath: "/browser" });
+    // A Provider switch creates/uses another runtime context but deliberately leaves Agent MCP rows untouched.
+    fixture.db.prepare("UPDATE agents SET provider = ? WHERE id = ?").run(target, fixture.agentId);
+    fixture.db.prepare("INSERT INTO execution_contexts (session_id, provider, created_at) VALUES (?, ?, 'now')").run(fixture.sessionId, target);
+    const after = await fixture.preparer.prepare({ agentId: fixture.agentId, sessionId: fixture.sessionId, runId: 2, workspacePath: "/workspace", browserProfilePath: "/browser" });
+    expect(after).toEqual(before);
+    expect(check).toHaveBeenLastCalledWith(expect.objectContaining({ headers: [
+      { name: "Authorization", value: "Bearer encrypted-secret" }, { name: "X-Tenant", value: "team-a" }
+    ] }), 5000);
+    const management = fixture.manager.listServers(fixture.agentId)[0]!;
+    expect(management).not.toHaveProperty("headers.0.value", "Bearer encrypted-secret");
+    fixture.db.close();
+  });
+
   it("解析并检查所有 enabled MCP 后返回 ACP 配置", async () => {
     const check = vi.fn(async () => ({ status: "passed" as const, toolCount: 2, message: "2 tools available" }));
     const fixture = setup({ check });

@@ -3,6 +3,7 @@ import { HostUsageCollector } from "../agent-usage/host-collector.js";
 
 import type { Provider } from "../domain.js";
 import type { ProviderSessionCleaner } from "../runtime/provider-session-cleaner.js";
+import { executionContextStorageKey } from "../runtime/execution-context-storage.js";
 import type { WorkspaceManager } from "../workspaces/workspace-manager.js";
 
 export type SessionMaintenanceOperation = "cleanup" | "delete" | "reset";
@@ -13,6 +14,8 @@ type MaintenanceRow = {
   provider: Provider;
   provider_session_id: string | null;
 };
+
+type ContextRow = { id: number; provider: Provider; provider_session_id: string | null; legacy_storage_session_id: number | null; retired_at: string | null };
 
 type MaintenanceDependencies = {
   db: Database.Database;
@@ -62,6 +65,8 @@ export const finishSessionMaintenance = (
       `).run(completedAt, id);
     } else {
       usageCollector.finishMaintenance(id);
+      db.prepare("UPDATE execution_contexts SET retired_at = ? WHERE session_id = ? AND retired_at IS NULL")
+        .run(completedAt, id);
       db.prepare(`
         UPDATE sessions SET status = 'idle', pending_operation = NULL, provider_session_id = NULL, updated_at = ?
         WHERE id = ?
@@ -83,12 +88,26 @@ export const completeSessionMaintenance = async (
   else {
     await usageCollector.prepareMaintenance(id, operation);
   }
-  await dependencies.providerSessionCleaner.purge({
-    agentId: row.agent_id,
-    provider: row.provider,
-    sessionId: id,
-    providerSessionId: row.provider_session_id
-  });
+  const contexts = dependencies.db.prepare(`
+    SELECT id, provider, provider_session_id, legacy_storage_session_id, retired_at FROM execution_contexts
+    WHERE session_id = ?
+  `).all(id) as ContextRow[];
+  // Only Sessions with no context history use legacy storage. Repeated reset must
+  // not fall back to a retired context’s legacy Session key.
+  const targets = contexts.length === 0
+    ? [{ id, provider: row.provider, provider_session_id: row.provider_session_id, legacy_storage_session_id: id }]
+    : contexts.filter(context => operation !== "reset" || context.retired_at === null);
+  for (const context of targets) {
+    await dependencies.providerSessionCleaner.purge({
+      agentId: row.agent_id,
+      provider: context.provider,
+      sessionId: id,
+      providerSessionId: context.provider_session_id,
+      ...(contexts.length === 0 ? {} : { storageKey: context.legacy_storage_session_id === null
+        ? executionContextStorageKey(context.id)
+        : String(context.legacy_storage_session_id) })
+    });
+  }
   if (operation !== "reset") await dependencies.workspaceManager.deleteSession(id);
   finishSessionMaintenance(dependencies.db, id, operation, completedAt, usageCollector);
 };

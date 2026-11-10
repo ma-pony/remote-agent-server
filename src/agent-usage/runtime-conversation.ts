@@ -78,7 +78,7 @@ export class RuntimeConversationCollector {
     const existing = this.store.db.prepare(`SELECT COALESCE(t.estimate_json,c.estimate_json) AS estimate_json
       FROM agent_usage_conversation_content c LEFT JOIN agent_usage_token_estimates t ON t.id=c.estimate_id
       WHERE c.namespace=? AND c.run_id=? AND c.event_key=? AND c.category=?`).get(this.namespace, runId, key, category) as { estimate_json: string } | undefined;
-    const row = this.store.db.prepare(`SELECT s.id AS session_id,s.agent_id,a.provider,r.resolved_model,
+    const row = this.store.db.prepare(`SELECT s.id AS session_id,s.agent_id,COALESCE(r.provider,a.provider) AS provider,r.resolved_model,
       COALESCE(r.started_at,r.created_at) AS occurred_at FROM runs r JOIN sessions s ON s.id=r.session_id
       JOIN agents a ON a.id=s.agent_id WHERE r.id=?`).get(runId) as {
       session_id: number; agent_id: number; provider: string; resolved_model: string | null; occurred_at: string
