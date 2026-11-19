@@ -18,6 +18,7 @@ import { TranscriptProfiles } from "./transcript-profiles.js";
 import { UsageQueryWorker } from "./query-worker.js";
 import { trackUsageQueryChanges } from "./storage/query-version.js";
 import type { AccountingProjectionJob } from "./storage/accounting-projection.js";
+import { readUsageAnalysisEnabled } from "../settings/usage-analysis-settings-store.js";
 
 type CollectionFailure = { sessionId: string; status: string; errorCode: string | null; retryable: boolean };
 
@@ -77,6 +78,18 @@ export class HostUsageCollector {
     this.eventRetention = new RuntimeEventRetention(db, this.namespace, this.conversationContent, eventRetentionMs);
     this.detailRetention = new UsageDetailRetention(db, this.namespace, this.attribution.dailyRankings, detailRetentionMs);
   }
+  /** Global switch for analysis pipelines. Reported-token ledger writes do not depend on it. */
+  analysisEnabled(): boolean {
+    return readUsageAnalysisEnabled(this.db);
+  }
+
+  /** The switch value frozen when the Run started; queued or unknown Runs follow the current switch. */
+  runAnalysisEnabled(runId: number): boolean {
+    const row = this.db.prepare("SELECT status, usage_analysis_enabled AS enabled FROM runs WHERE id = ?")
+      .get(runId) as { status: string; enabled: number } | undefined;
+    return row === undefined || row.status === "queued" ? this.analysisEnabled() : row.enabled === 1;
+  }
+
   binding(sessionId: number): UsageBinding {
     const session = this.db.prepare("SELECT agent_id FROM sessions WHERE id = ?").get(sessionId) as { agent_id: number } | undefined;
     if (!session) throw new UsageError("usage_session_not_found");
@@ -166,12 +179,13 @@ export class HostUsageCollector {
     if (pending && pending.operation !== operation) throw new UsageError("usage_maintenance_conflict");
     // A ready barrier already attempted collection. Its files may now be partially purged.
     if (pending?.state === "ready") return;
+    const analysis = this.analysisEnabled();
     const collected = await this.sources.prepareMaintenance(binding, operation, pending?.id ?? `${this.epoch(sessionId)}:${operation}`, async signal => {
       await this.capture?.release(sessionId);
       signal.throwIfAborted();
       this.importLegacy(sessionId);
-      await this.discover(sessionId, signal);
-    });
+      if (analysis) await this.discover(sessionId, signal);
+    }, analysis);
     if (!collected) {
       this.db.prepare(`INSERT INTO agent_usage_harvests (namespace,session_id,status,error_code,attempted_at)
         VALUES (?,?,'failed','usage_collection_failed',?) ON CONFLICT(namespace,session_id) DO UPDATE SET
@@ -197,6 +211,7 @@ export class HostUsageCollector {
   }
 
   async collectSession(sessionId: number): Promise<void> {
+    if (!this.analysisEnabled()) return;
     this.producers.add(sessionId);
     await this.harvestSession(sessionId);
   }
@@ -255,7 +270,7 @@ export class HostUsageCollector {
     this.nextContextTotalsCheckAt = 0;
     this.setRecoveryPhase("idle");
     this.recoveryController = new AbortController();
-    this.queueRecovery(true);
+    if (this.analysisEnabled()) this.queueRecovery(true);
     this.scheduleRecovery(0);
     this.scheduleCompaction(0);
   }
@@ -313,8 +328,11 @@ export class HostUsageCollector {
   private async recoveryBatch(): Promise<void> {
     const started = performance.now();
     try {
+      // Disabled analysis keeps only reported-token accounting projections for the dashboard.
+      const analysis = this.analysisEnabled();
+      if (!analysis) this.recoveryQueue = [];
       let contentPending = false, contextTotalsPending = false;
-      if (performance.now() >= this.nextBackfillCheckAt || performance.now() >= this.nextContextTotalsCheckAt) {
+      if (analysis && (performance.now() >= this.nextBackfillCheckAt || performance.now() >= this.nextContextTotalsCheckAt)) {
         this.setRecoveryPhase("backfill");
         const backfillStarted = performance.now();
         try {
@@ -333,11 +351,11 @@ export class HostUsageCollector {
         }
       }
       if (this.recoveryStopped) return;
-      const rankingInputsPending = this.attribution.backfillRankingInputs(5);
-      const dailyDiscoveryPending = this.attribution.dailyRankings.discover();
+      const rankingInputsPending = analysis && this.attribution.backfillRankingInputs(5);
+      const dailyDiscoveryPending = analysis && this.attribution.dailyRankings.discover();
       this.setRecoveryPhase("sources");
       // Source retries have their own deadline; historical projection work may never become idle.
-      if (this.recoveryQueue.length === 0 && performance.now() >= this.nextSourceRetryAt) this.queueRecovery(false);
+      if (analysis && this.recoveryQueue.length === 0 && performance.now() >= this.nextSourceRetryAt) this.queueRecovery(false);
       const deadline = performance.now() + 25;
       let admitted = 0;
       while (!this.recoveryStopped && this.recoveryQueue.length > 0 && admitted++ < 100 && performance.now() < deadline) {
@@ -359,7 +377,7 @@ export class HostUsageCollector {
         this.store.commitAccountingProjection(batch);
       }
       if (this.recoveryStopped) return;
-      const dailyJob = this.attribution.dailyRankings.nextJob(this.lastDailyRankingJob);
+      const dailyJob = analysis ? this.attribution.dailyRankings.nextJob(this.lastDailyRankingJob) : undefined;
       if (dailyJob) {
         this.lastDailyRankingJob = dailyJob.id;
         this.projectionReader ??= new UsageQueryWorker(this);
@@ -371,7 +389,7 @@ export class HostUsageCollector {
       // Yield real idle time, not just an event-loop turn. Large individual records can still
       // exceed the soft work budget; the worker keeps their tokenization off the main thread.
       if (this.recoveryQueue.length > 0 || contentPending || contextTotalsPending || rankingInputsPending || projectionJob || dailyDiscoveryPending || dailyJob) this.scheduleRecovery(Math.max(50, Math.min(1_000, (performance.now() - started) * 3)));
-      else this.scheduleRecovery(Math.max(50, this.nextSourceRetryAt - performance.now()));
+      else this.scheduleRecovery(analysis ? Math.max(50, this.nextSourceRetryAt - performance.now()) : 30_000);
     } finally {
       if (!this.recoveryStopped) this.setRecoveryPhase("idle");
     }
@@ -419,6 +437,7 @@ export class HostUsageCollector {
   }
 
   async harvestFinalSessions(): Promise<void> {
+    if (!this.analysisEnabled()) return;
     const eligible = new Set(this.eligibleSessions().map(({ id }) => id));
     const sessions = [...this.producers].filter((id) => eligible.has(id));
     // Persist the finite producer barrier before starting any awaited final collection.

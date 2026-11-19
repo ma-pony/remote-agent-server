@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as attachmentPreparation from "../src/attachments/prepare-attachments.js";
 import { AgentManager } from "../src/agents/agent-manager.js";
 import { HostUsageCollector } from "../src/agent-usage/host-collector.js";
+import { UsageAnalysisSettingsStore } from "../src/settings/usage-analysis-settings-store.js";
 import { ModelTokenizers } from "../src/agent-usage/core/tokenizers.js";
 import { EventStore } from "../src/events/event-store.js";
 import type {
@@ -230,6 +231,29 @@ describe("RunExecutor", () => {
       expect(result.status).toBe("failed");
       expect(h.usageCollector.store.records({ namespace: h.usageCollector.namespace })[0]?.metrics.inputTotalTokens).toBe(123);
       expect(h.eventStore.list(h.run.id, 0).some((event) => String(event.type) === "usage")).toBe(false);
+    } finally { h.db.close(); }
+  });
+  it("records only reported tokens for a Run started while usage analysis is disabled", async () => {
+    const h = setup(createFakeRuntime({ events: [
+      { type: "message", stream: "output", text: "private reply" },
+      { type: "tool", content: { toolCallId: "read-1", kind: "read", status: "completed", rawOutput: "private tool result" } },
+      { type: "usage", usage: { inputTokens: 123, outputTokens: 7 } }
+    ] }));
+    const settings = new UsageAnalysisSettingsStore(h.db);
+    settings.update({ enabled: false });
+    try {
+      expect(await h.executor.execute(h.run.id)).toMatchObject({ status: "succeeded" });
+      expect(h.usageCollector.store.records({ namespace: h.usageCollector.namespace })[0]?.metrics)
+        .toMatchObject({ inputTotalTokens: 123, outputTotalTokens: 7 });
+      expect(h.db.prepare("SELECT usage_analysis_enabled AS enabled FROM runs WHERE id = ?").get(h.run.id)).toEqual({ enabled: 0 });
+      expect(h.db.prepare("SELECT COUNT(*) AS total FROM agent_usage_conversation_content WHERE run_id = ?").get(h.run.id)).toEqual({ total: 0 });
+      expect(h.usageCollector.attribution.rankings({}, "builtin_tool")).toEqual([]);
+      expect(h.usageCollector.runtimeCapabilities.stageCounts({ namespace: h.usageCollector.namespace })).toEqual([]);
+      // Re-enabling never replays the disabled Run from its retained events.
+      settings.update({ enabled: true });
+      expect(await h.usageCollector.contentBackfill.step()).toBe(false);
+      expect(h.db.prepare("SELECT COUNT(*) AS total FROM agent_usage_runtime_backfills WHERE run_id = ?").get(h.run.id)).toEqual({ total: 0 });
+      expect(h.usageCollector.attribution.rankings({}, "builtin_tool")).toEqual([]);
     } finally { h.db.close(); }
   });
   it("persists the projected Skill fingerprint on the executed Run", async () => {

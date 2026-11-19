@@ -403,6 +403,8 @@ The session chart filters by creation date and opens the latest 50 Sessions, ord
 
 Open **Usage analysis** from the sidebar, an Agent, or a Session. Filter by Agent, Session, date, and Runtime to find tools, Skills, and content with high usage.
 
+Usage analysis is disabled by default; enable it under **System settings → Usage analysis** (`PUT /api/system-settings/usage-analysis` with `{"enabled":true}`). Upgraded installations also start disabled. Runs started while it is disabled record and analyze no prompt, reply, tool, Skill, MCP, or context estimates, and no provider-native logs, HTTP model requests, or manual sources are collected; the HTTP capture relay still forwards model requests. Provider-reported tokens, the usage dashboard, and existing analysis data are kept, and retention cleanup continues. The switch is frozen when a Run starts, so active Runs keep their original setting. After re-enabling, Runs started while disabled are not backfilled with content or tool estimates; retained native logs resume from their last checkpoint.
+
 - **Model usage:** inspect provider-reported input, output, and totals alongside missing, conflicting, or undated usage.
 - **Model input context** (default): reconstruct each request's visible input from Codex and Claude Code logs. Separate definitions, arguments, and first/repeated results to identify context that accumulates across turns.
 - **Observed content and capability rankings:** compare MCP, built-ins, CLIs, Skills, plugins, hooks, prompts, replies, and observed reasoning, with call counts, content estimates, and linked evidence.

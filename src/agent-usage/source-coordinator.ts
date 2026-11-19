@@ -271,7 +271,7 @@ export class UsageSourceCoordinator {
   }
 
   async prepareMaintenance(binding: UsageBinding, operation: "reset" | "cleanup", id: string,
-    beforeCollect?: (signal: AbortSignal) => Promise<void>): Promise<boolean> {
+    beforeCollect?: (signal: AbortSignal) => Promise<void>, collectSources = true): Promise<boolean> {
     this.store.assertBinding(binding);
     let pending = this.maintenance(binding);
     if (pending && (pending.id !== id || pending.operation !== operation)) throw new UsageError("usage_maintenance_conflict");
@@ -294,9 +294,10 @@ export class UsageSourceCoordinator {
         } finally { clearTimeout(timer!); }
       }
       this.saveMaintenance(binding, pending);
-      const sources = this.store.db.prepare(`SELECT DISTINCT s.* FROM agent_usage_sources s
+      // Disabled usage analysis keeps the maintenance barrier but reads no Provider source files.
+      const sources = collectSources ? this.store.db.prepare(`SELECT DISTINCT s.* FROM agent_usage_sources s
         JOIN agent_usage_source_mappings m ON m.source_id = s.id
-        WHERE m.namespace = ? AND m.session_id = ? AND m.state = 'active'`).all(binding.namespace, binding.sessionId) as SourceRow[];
+        WHERE m.namespace = ? AND m.session_id = ? AND m.state = 'active'`).all(binding.namespace, binding.sessionId) as SourceRow[] : [];
       for (const source of sources) {
         sourceId = source.id;
         // The host must have stopped the producer without discarding its files before this entrypoint.

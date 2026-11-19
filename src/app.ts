@@ -65,6 +65,8 @@ import {
 } from "./sessions/session-cleanup-scheduler.js";
 import { registerSessionRoutes } from "./sessions/session-routes.js";
 import { registerConcurrencySettingsRoutes } from "./settings/concurrency-settings-routes.js";
+import { registerUsageAnalysisSettingsRoutes } from "./settings/usage-analysis-settings-routes.js";
+import { UsageAnalysisSettingsStore } from "./settings/usage-analysis-settings-store.js";
 import { ConcurrencySettingsStore } from "./settings/concurrency-settings-store.js";
 import { RtkManager } from "./rtk/rtk-manager.js";
 import { registerRtkRoutes } from "./rtk/rtk-routes.js";
@@ -240,6 +242,7 @@ export const buildApp = (deps: AppDependencies): FastifyInstance => {
     registerUsageSourceRoutes(api, usageSources);
     registerUsageQueryRoutes(api, usageSources.collector);
     registerConcurrencySettingsRoutes(api, concurrencySettingsStore);
+    registerUsageAnalysisSettingsRoutes(api, new UsageAnalysisSettingsStore(deps.db));
     registerRtkRoutes(api, rtkManager);
     registerProjectEnvironmentRoutes(api, projectEnvironmentStore, projectEnvironmentScheduler);
     registerAgentRoutes(api, agentManager, skillManager, runRepository, providerExtensionManager);

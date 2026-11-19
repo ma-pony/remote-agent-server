@@ -30,6 +30,10 @@
 
 每日 Token 与单会话历史总量的统计范围不同，不能直接比较两张图的合计。今天尚未结束；尚未上报、来源冲突与无法定位日期的情况保留各自提示。
 
+## 启用与关闭
+
+用量分析默认关闭（新安装和升级后均如此），需在 **系统设置 → 用量分析** 或通过 `GET/PUT /api/system-settings/usage-analysis`（`{"enabled":true}`）开启；`/usage` 页面在关闭时只显示已关闭状态，不发起分析查询。关闭仅影响之后启动的 Run，下表所有采集来源都不再记录，后台回补和排名暂停；`POST /api/usage/sources` 与 `POST /api/usage/sources/:id/collect` 返回 409 `usage_analysis_disabled`。Provider 上报的 token、用量看板、会话 Token 汇总、已有分析数据和保留期清理不受影响。重新开启后，关闭期间启动的 Run 不会从保留事件补算；仍保留的原生日志会从上次 checkpoint 继续采集。
+
 ## 采集范围
 
 | 来源 | 自动采集 | 能说明什么 |

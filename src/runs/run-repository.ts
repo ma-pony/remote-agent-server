@@ -304,7 +304,9 @@ export class RunRepository {
       if (run.status !== "queued") throw new RunRepositoryError("invalid_run_state");
 
       const startedAt = new Date().toISOString();
-      this.db.prepare("UPDATE runs SET status = ?, started_at = ? WHERE id = ?").run("running", startedAt, id);
+      // The analysis switch is frozen with the start transition, so a later toggle never changes an active Run.
+      this.db.prepare(`UPDATE runs SET status = ?, started_at = ?, usage_analysis_enabled =
+        COALESCE((SELECT usage_analysis_enabled FROM system_settings WHERE scope = 'global'), 0) WHERE id = ?`).run("running", startedAt, id);
       const started = { ...run, status: "running" as const, startedAt };
       assertSynchronousTransactionHook(this.projection.onStarted(started));
       return started;

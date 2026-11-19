@@ -24,21 +24,23 @@ export class RunMcpPreparer {
     } catch (_error) {
       throw new RunMcpPreparationError("MCP configuration check failed");
     }
-    this.dependencies.observer?.revokeSession(context.sessionId, new Set(resolved.map((item) => item.id)));
+    // Disabled usage analysis revokes every ticket and starts MCP servers without the observer channel.
+    const observer = this.dependencies.observer?.enabledForRun(context.runId) ? this.dependencies.observer : undefined;
+    this.dependencies.observer?.revokeSession(context.sessionId, observer ? new Set(resolved.map((item) => item.id)) : new Set());
     if (resolved.length === 0) return [];
     return Promise.all(resolved.map(async (item) => {
       const { allowedTools, ...upstream } = item.server;
       const result = await this.dependencies.checker.check(upstream, item.checkTimeoutMs);
       this.dependencies.manager.recordCheckResult(item.id, result);
       const startupTimeoutSeconds = Math.max(1, Math.ceil(item.checkTimeoutMs / 1000));
-      let observer;
-      try { observer = await this.dependencies.observer?.configuration(context.sessionId, item.id); }
+      let observerConfig;
+      try { observerConfig = await observer?.configuration(context.sessionId, item.id); }
       catch { console.error("usage_observer_unavailable"); }
       const tools = result.status === "passed" ? (result.tools ?? []).filter(tool => allowedTools === undefined || allowedTools.includes(tool.name)) : [];
       return {
-        server: allowedTools === undefined && observer === undefined
+        server: allowedTools === undefined && observerConfig === undefined
           ? { ...upstream, startupTimeoutSeconds }
-          : wrapMcpServerWithToolFilter(upstream, allowedTools ?? null, startupTimeoutSeconds, observer),
+          : wrapMcpServerWithToolFilter(upstream, allowedTools ?? null, startupTimeoutSeconds, observerConfig),
         result,
         usageIdentity: { serverId: String(item.id), tools: tools.map(tool => tool.name), definitions: tools }
       };

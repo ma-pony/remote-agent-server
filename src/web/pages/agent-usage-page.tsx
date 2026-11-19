@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Database, RefreshCw, SearchX, TriangleAlert } from "lucide-react";
-import { useSearchParams } from "react-router";
+import { BarChart3, Database, RefreshCw, SearchX, TriangleAlert } from "lucide-react";
+import { Link, useSearchParams } from "react-router";
 
 import { api, errorMessage, type ApiError, type Agent, type Page, type SessionListItem } from "@/api";
 import { EmptyState, PageContainer, PageHeader } from "@/components/page-header";
@@ -15,6 +15,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PagedResourceSelect } from "@/components/paged-resource-select";
 import { ListPagination } from "@/components/list-pagination";
+import { ResourceLoadError } from "@/components/resource-feedback";
+import { useUsageAnalysisSettings } from "@/components/usage-analysis-settings";
 import { useI18n } from "@/i18n";
 import type {
   AttributionDetail, AttributionInvocation, AttributionRankRow, Capability, CapabilityKind, RankingDimension, ContextEvidence, ContextEvidenceDetail, TokenEstimate, ToolContentEstimate
@@ -127,7 +129,24 @@ const queryString = (values: Record<string, string | undefined>): string => {
 const statusVariant = (status: string): "default" | "secondary" | "destructive" | "outline" =>
   status === "completed" || status === "ready" ? "default" : status === "failed" ? "destructive" : status === "collecting" ? "secondary" : "outline";
 
+/** A disabled switch shows no analysis and issues no analysis queries. */
 export const AgentUsagePage = () => {
+  const { text } = useI18n();
+  const { settings, error, reload } = useUsageAnalysisSettings();
+  if (settings?.enabled) return <UsageAnalysisContent />;
+  if (settings === null && error === "") return <PageContainer width="wide"><div role="status" aria-label={text("正在加载用量分析", "Loading usage analysis")}><Skeleton className="h-56" /></div></PageContainer>;
+  return <PageContainer width="wide">
+    <PageHeader title={text("用量分析", "Usage analysis")}
+      description={text("核对模型上报的 token，查看提示词、工具和上下文的用量估算。", "Reconcile model-reported tokens and inspect usage estimates for prompts, tools, and context.")} />
+    {error ? <ResourceLoadError title={text("用量分析设置加载失败", "Could not load usage analysis settings")} message={error} onRetry={reload} />
+      : <EmptyState icon={BarChart3} title={text("用量分析已关闭", "Usage analysis is disabled")}
+        description={text("当前不记录、不分析提示词、工具、MCP、上下文和执行器日志用量。模型上报的 token 仍可在用量看板查看。", "Prompt, tool, MCP, context, and provider-log usage is not being recorded or analyzed. Model-reported tokens remain available in the usage dashboard.")}
+        action={<div className="flex flex-wrap justify-center gap-2"><Button asChild><Link to="/system-settings/concurrency">{text("前往系统设置", "Open system settings")}</Link></Button>
+          <Button asChild variant="outline"><Link to="/dashboard">{text("查看用量看板", "View usage dashboard")}</Link></Button></div>} />}
+  </PageContainer>;
+};
+
+const UsageAnalysisContent = () => {
   const { text, formatDate } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const searchParamsRef = useRef(searchParams);

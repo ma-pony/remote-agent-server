@@ -96,8 +96,8 @@ export class HostUsageCapture {
     const route = await this.relay.register({ ...upstream, apiKey: this.keys.get(input.provider)! }, () => this.begin(subject),
       (intent, exchange, signal) => this.finish(intent, exchange, upstream.protocol, signal));
     this.subjects.set(input.sessionId, Object.assign(subject, { route }));
-    this.host.db.prepare("INSERT OR IGNORE INTO agent_usage_capture_sessions VALUES (?, ?, ?, ?, ?, 'waiting')")
-      .run(binding.namespace, binding.agentId, binding.sessionId, epoch, input.provider);
+    // The relay always forwards Provider traffic; capture health is recorded only while analysis is enabled.
+    if (this.host.analysisEnabled()) this.recordSession(subject);
     return route;
   }
 
@@ -111,12 +111,19 @@ export class HostUsageCapture {
     if (subject?.runId === runId) subject.runId = null;
   }
 
-  private begin(subject: Subject): Intent {
+  private recordSession(subject: Subject): void {
+    this.host.db.prepare("INSERT OR IGNORE INTO agent_usage_capture_sessions VALUES (?, ?, ?, ?, ?, 'waiting')")
+      .run(subject.binding.namespace, subject.binding.agentId, subject.binding.sessionId, subject.epoch, subject.provider);
+  }
+
+  private begin(subject: Subject): Intent | undefined {
+    if (!(subject.runId === null ? this.host.analysisEnabled() : this.host.runAnalysisEnabled(subject.runId))) return undefined;
     const intent: Intent = {
       id: randomUUID(), aliases: subject.aliases, subject, binding: { ...subject.binding },
       epoch: subject.epoch, runId: subject.runId, startedAt: new Date().toISOString()
     };
     this.assertIntent(intent);
+    this.recordSession(subject);
     this.host.db.prepare("INSERT INTO agent_usage_captures VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL)")
       .run(intent.id, intent.binding.namespace, intent.binding.agentId, intent.binding.sessionId, intent.epoch,
         intent.runId === null ? null : String(intent.runId), subject.provider, intent.startedAt);

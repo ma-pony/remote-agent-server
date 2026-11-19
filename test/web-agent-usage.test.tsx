@@ -27,6 +27,7 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/usage?range=all");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost");
+    if (url.pathname === "/api/system-settings/usage-analysis") return response({ enabled: true });
     if (url.pathname === "/api/agents") return response([{ id: 1, name: "Example Agent" }]);
     if (url.pathname === "/api/sessions") return response({ items: [{ id: 2, title: "Example Session", agentId: 1 }], total: 1, page: 1, pageSize: 20, totalPages: 1 });
     if (url.pathname === "/api/usage/summary") return response(summary);
@@ -595,6 +596,8 @@ it("keeps a slow ranking request alive while pending status revisions change", a
       return original(input, init);
     });
     mount();
+    // The analysis view mounts after the usage-analysis switch has loaded.
+    await vi.waitFor(() => expect(fetch.mock.calls.some(([input]) => String(input).includes("/usage/status"))).toBe(true));
     await act(async () => { await vi.advanceTimersByTimeAsync(65_000); });
     expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/summary")).length).toBeGreaterThan(1);
     expect(fetch.mock.calls.filter(([input]) => String(input).includes("/usage/capabilities"))).toHaveLength(1);

@@ -25,6 +25,8 @@ export const createTestDatabase = (databasePath = ":memory:"): {
 } => {
   const db = openDatabase(databasePath);
   migrate(db);
+  // Usage analysis is opt-in in production; most fixtures exercise the analysis pipeline, so enable it here.
+  db.prepare("UPDATE system_settings SET usage_analysis_enabled = 1 WHERE scope = 'global'").run();
   let sessionSequence = 0;
 
   const projectEnvironmentId = Number(db.prepare(

@@ -872,6 +872,9 @@ export const migrate = (
     db.prepare("UPDATE system_settings SET run_timeout_minutes = ? WHERE scope = 'global'")
       .run(concurrencyDefaults.runTimeoutMinutes ?? DEFAULT_CONCURRENCY.runTimeoutMinutes);
   }
+  if (!hasColumn("system_settings", "usage_analysis_enabled")) {
+    db.exec("ALTER TABLE system_settings ADD COLUMN usage_analysis_enabled INTEGER NOT NULL DEFAULT 0 CHECK (usage_analysis_enabled IN (0, 1))");
+  }
   if (!hasColumn("system_settings", "session_storage_retention_hours")) {
     db.exec("ALTER TABLE system_settings ADD COLUMN session_storage_retention_hours INTEGER NOT NULL DEFAULT 168 CHECK (session_storage_retention_hours BETWEEN 0 AND 8760)");
     db.prepare("UPDATE system_settings SET session_storage_retention_hours = ? WHERE scope = 'global'")
@@ -1052,6 +1055,8 @@ export const migrate = (
   if (!hasColumn("runs", "rtk_snapshot_json")) db.exec("ALTER TABLE runs ADD COLUMN rtk_snapshot_json TEXT");
   if (!hasColumn("runs", "events_pruned_at")) db.exec("ALTER TABLE runs ADD COLUMN events_pruned_at TEXT");
   if (!hasColumn("runs", "events_pruned_through_seq")) db.exec("ALTER TABLE runs ADD COLUMN events_pruned_through_seq INTEGER NOT NULL DEFAULT 0");
+  // Snapshot of the global usage-analysis switch when the Run starts; historical Runs were analyzed.
+  if (!hasColumn("runs", "usage_analysis_enabled")) db.exec("ALTER TABLE runs ADD COLUMN usage_analysis_enabled INTEGER NOT NULL DEFAULT 1 CHECK (usage_analysis_enabled IN (0, 1))");
   // Recovery and legacy accounting must not read historical prompt/result bodies.
   db.exec(`
     CREATE INDEX IF NOT EXISTS runs_status_queue ON runs(status, created_at, id, session_id);

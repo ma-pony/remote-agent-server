@@ -187,7 +187,8 @@ export class RuntimeContentBackfill {
 
   private scope(filter: UsageFilter = {}, includeExpired = false): { sql: string; params: string[] } {
     const params = [this.namespace, this.namespace, this.namespace];
-    const conditions = ["(r.status NOT IN ('queued', 'running') OR (r.status='running' AND j.run_id IS NOT NULL))", `NOT EXISTS (SELECT 1 FROM agent_usage_subjects u
+    // Runs started while usage analysis was disabled are never replayed after it is enabled again.
+    const conditions = ["(r.status NOT IN ('queued', 'running') OR (r.status='running' AND j.run_id IS NOT NULL))", "r.usage_analysis_enabled=1", `NOT EXISTS (SELECT 1 FROM agent_usage_subjects u
       WHERE u.namespace = ? AND u.state != 'active' AND ((u.kind = 'session' AND u.subject_id = CAST(s.id AS TEXT))
         OR (u.kind = 'agent' AND u.subject_id = CAST(a.id AS TEXT))))`,
     `NOT EXISTS (SELECT 1 FROM agent_usage_runtime_backfill_deleted_sessions d WHERE d.namespace = ? AND d.session_id = CAST(s.id AS TEXT))`];

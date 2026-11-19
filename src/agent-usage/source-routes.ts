@@ -20,6 +20,7 @@ const sourceQuerySchema = paginationQuerySchema.extend({ agentId: id.optional(),
 const collectionSchema = z.object({ rebuild: z.boolean().optional() }).strict();
 
 const errorStatuses: Partial<Record<UsageErrorCode, number>> = {
+  usage_analysis_disabled: 409,
   usage_source_conflict: 409, usage_mapping_conflict: 409, usage_mapping_revoked: 409,
   usage_subject_deleted: 409, usage_subject_mismatch: 409, usage_binding_stale: 409,
   usage_details_expired: 410,
@@ -48,6 +49,7 @@ export const registerUsageSourceRoutes = (app: FastifyInstance, manager: Managed
     const parsed = sourceSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage source" } });
     try {
+      if (!collector.analysisEnabled()) throw new UsageError("usage_analysis_disabled");
       const result = await manager.register(parsed.data);
       return reply.code(result.created ? 201 : 200).send(publicSource(result.source));
     } catch (error) { return errorReply(reply, error); }
@@ -56,6 +58,7 @@ export const registerUsageSourceRoutes = (app: FastifyInstance, manager: Managed
     const parsed = collectionSchema.safeParse(request.body ?? {});
     if (!parsed.success) return reply.code(400).send({ error: { code: "invalid_request", message: "Invalid usage collection request" } });
     try {
+      if (!collector.analysisEnabled()) throw new UsageError("usage_analysis_disabled");
       const source = collector.sources.listSources(collector.namespace, { id: request.params.id })[0];
       if (!source) throw new UsageError("usage_source_not_found");
       if (source.mappings.every((mapping) => mapping.state === "revoked")) throw new UsageError("usage_mapping_revoked");

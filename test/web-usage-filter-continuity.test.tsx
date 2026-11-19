@@ -15,6 +15,7 @@ beforeEach(() => {
   window.history.replaceState({}, "", "/usage");
   vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
     const url = new URL(String(input), "http://localhost"); requests.push(url);
+    if (url.pathname === "/api/system-settings/usage-analysis") return json({enabled: true});
     if (url.pathname === "/api/agents") return json(page([{id: 1, name: "Agent"}]));
     if (url.pathname === "/api/sessions") return json(page([{id: 25, agentId: 1, title: "Session 25"}]));
     if (url.pathname === "/api/usage/sources") return json(page([]));

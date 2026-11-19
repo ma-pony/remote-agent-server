@@ -339,6 +339,8 @@ MCP 包装器就地提取可见文本并估算参数／结果，通过私有 Uni
 
 自动模型请求采集使用独立于业务表的 loopback HTTP/SSE 转发层，由宿主适配器绑定 Session generation、epoch 和请求开始时的 Run。它与手动快照共用规范化和归因逻辑，识别 Responses、Chat Completions、Anthropic Messages。`USAGE_CAPTURE_UPSTREAMS` 显式选择 API-key 上游；子进程只拿本地凭据，服务端注入指定环境变量的上游 key。原始正文只在有界内存中解析，数据库保存采集意图／状态与无正文投影。实际请求中逐次命中已投影 Skill 路径的调用才增加 Skill／插件标签。
 
+用量分析开关保存在 `system_settings.usage_analysis_enabled`（默认 0，即关闭；迁移前的历史 Run 视为已分析），并在 Run 开始的同一事务中冻结到 `runs.usage_analysis_enabled`。关闭时宿主只保留 Provider 上报的账本写入、看板会计投影和保留期清理；执行器不写内容、工具、能力、转录档案，Run 收尾、维护前和关闭时不发现或采集原生日志，后台不入队来源、回补、排名和上下文汇总；MCP 不挂观察器并撤销旧票据；HTTP 转发层继续转发但不缓冲、不登记采集；手动来源登记和采集返回 `usage_analysis_disabled`。历史回补排除冻结为关闭的 Run，重新开启不会用保留事件补算。
+
 原生插件投影返回实际 Skill 名称、版本及路径别名，由 Runtime Session 保留，复用 Handle 时仍返回同一映射；Run 在启动 Turn 前将其与托管 Skill 一并登记。Claude 会话重建使用 `sourceToolUseID` 将单独注入的指令消息关联到 `Skill` 调用。关联保留到下一模型请求边界，支持 checkpoint 恢复，之后释放；正文只计量一次并按后续请求累计，输入对照按内容位置去重。
 
 托管启动适配当前支持 Codex Responses 和 Claude Messages；Hermes 和 DeepSeek Harness 自动接入配置明确拒绝，通用 Chat Completions 解析器不代表已接通 Hermes。OAuth／Bedrock／Vertex 路由继续使用原有日志和执行来源。实际模型请求的日期依据优先于同 epoch／指标的原生累计差额，不能将两者相加；累计父范围仍用于补全不限日期总量，未覆盖部分保留为未定位用量。

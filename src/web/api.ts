@@ -21,6 +21,10 @@ export type RuntimeSettings = {
   sessionStorageRetentionHours: number;
 };
 
+export type UsageAnalysisSettings = {
+  enabled: boolean;
+};
+
 export type AgentModelPolicy =
   | { mode: "provider_default" }
   | { mode: "fixed"; model: string }

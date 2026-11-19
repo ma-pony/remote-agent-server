@@ -116,6 +116,8 @@ export class RunExecutor {
    */
   async execute(runId: number): Promise<Run> {
     const run = this.runRepository.markRunning(runId);
+    // Frozen at start: a later switch change never alters what this Run records.
+    const analysis = this.usageCollector.runAnalysisEnabled(run.id);
     let liveTurn: RuntimeTurn | undefined;
     let liveIterator: AsyncIterator<RuntimeEvent> | undefined;
     let publicNoticeCode: "mcp_preflight_failed" | "run_timed_out" | undefined;
@@ -140,6 +142,7 @@ export class RunExecutor {
       clearMessageFlushTimer();
       const content = { stream: batch.stream, text: batch.text };
       const event = this.eventStore.append(run.id, "message", content);
+      if (!analysis) return;
       try { await this.usageCollector.conversationContent.recordMessage(run.id, content, { sequence: event.seq, occurredAt: event.createdAt }, usageController.signal); }
       catch (error) {
         if (usageController.signal.aborted) this.usageCollector.contentBackfill.schedule(run.id, null);
@@ -222,13 +225,13 @@ export class RunExecutor {
       const { memory, revision: skillsRevision, projectedSkills } = this.skillProjector.prepare(agent, { ...session, storageKey: executionContext.legacyStorageSessionId === null
         ? executionContextStorageKey(executionContext.id) : String(executionContext.legacyStorageSessionId) }, pluginSkills);
       this.runRepository.setSkillsRevision(run.id, skillsRevision);
-      try {
+      if (analysis) try {
         this.usageCollector.runtimeCapabilities.recordRun(run.id);
         this.usageCollector.transcriptProfiles.record(session.id, run.id, mcpServers);
       } catch {
         console.error(`runtime_capability_run_failed runId=${run.id}`);
       }
-      if (projectedSkills !== undefined) {
+      if (analysis && projectedSkills !== undefined) {
         try {
           this.usageCollector.runtimeCapabilities.recordProjection(run.id, projectedSkills);
         } catch {
@@ -241,7 +244,7 @@ export class RunExecutor {
         : "";
       const resolvedModel = resolveModelPolicy(agent.modelPolicy, new Date()) ?? agent.providerDefaultModel ?? undefined;
       this.runRepository.setResolvedModel(run.id, resolvedModel ?? null);
-      try { await this.usageCollector.conversationContent.recordRun(run.id, usageController.signal); }
+      if (analysis) try { await this.usageCollector.conversationContent.recordRun(run.id, usageController.signal); }
       catch (error) {
         if (usageController.signal.aborted) this.usageCollector.contentBackfill.schedule(run.id, null);
         else if (error instanceof UsageError && error.code === "usage_tokenizer_pending") this.usageCollector.contentBackfill.schedule(run.id);
@@ -281,7 +284,7 @@ export class RunExecutor {
       }
       this.sessionManager.saveExecutionContextProviderSessionId(executionContext.id, runtimeSession.providerSessionId);
       const handoff = this.sessionManager.pendingExecutionContextHandoff(executionContext.id);
-      if (runtimeSession.projectedSkills?.length) {
+      if (analysis && runtimeSession.projectedSkills?.length) {
         try {
           this.usageCollector.runtimeCapabilities.recordProjection(run.id, [...(projectedSkills ?? []), ...runtimeSession.projectedSkills]);
         } catch {
@@ -383,7 +386,7 @@ export class RunExecutor {
         }
         const event = persistedEvent(runtimeEvent);
         this.eventStore.append(run.id, event.type, event.content);
-        if (runtimeEvent.type === "tool") {
+        if (analysis && runtimeEvent.type === "tool") {
           try {
             await this.usageCollector.runtimeCapabilities.recordTool(run.id, runtimeEvent.content, undefined, usageController.signal);
           } catch (error) {
@@ -415,7 +418,7 @@ export class RunExecutor {
       this.cancellationIntents.delete(run.id);
       this.usageCancellations.delete(run.id);
       usageController.abort();
-      try { await this.usageCollector.collectSession(run.sessionId); }
+      if (analysis) try { await this.usageCollector.collectSession(run.sessionId); }
       catch { console.error(`usage_collection_failed sessionId=${run.sessionId}`); }
     }
   }

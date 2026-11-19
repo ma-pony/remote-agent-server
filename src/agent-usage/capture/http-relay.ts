@@ -66,6 +66,8 @@ export class UsageHttpRelay {
         let issue: string | null = null;
         try {
           binding = route.begin();
+          // An undefined binding forwards the request without buffering any body.
+          if (binding === undefined) issue = "not_observed";
         } catch {
           issue = "binding_unavailable";
         }

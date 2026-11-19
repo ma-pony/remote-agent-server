@@ -67,6 +67,10 @@ export class McpUsageObserver {
     return token;
   }
 
+  enabledForRun(runId: number): boolean {
+    return this.collector.runAnalysisEnabled(runId);
+  }
+
   async configuration(sessionId: number, serverId: number): Promise<McpObserverConfig> {
     const token = this.issueTicket(sessionId, serverId);
     this.ready ??= this.listen();

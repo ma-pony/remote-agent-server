@@ -1,4 +1,5 @@
 export type UsageErrorCode =
+  | "usage_analysis_disabled"
   | "usage_attribution_unavailable"
   | "usage_binding_stale"
   | "usage_capture_runtime_unsupported"

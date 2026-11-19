@@ -371,3 +371,17 @@ it("real aborted Claude transport persists retained usage and identity as interi
   expect(db.serialize().includes(Buffer.from("PRIVATE_ABORTED_REQUEST"))).toBe(false);
   expect(db.serialize().includes(Buffer.from("PRIVATE_ABORTED_SYSTEM"))).toBe(false);
 });
+it("forwards Provider traffic without recording captures for a Run started while usage analysis is disabled", async () => {
+  const { db, host, capture, route, session, run } = await setup();
+  db.prepare("UPDATE system_settings SET usage_analysis_enabled = 0").run();
+  db.prepare("UPDATE runs SET usage_analysis_enabled = 0 WHERE id = ?").run(run);
+  capture.startRun(session.id, run);
+  const response = await fetch(route.baseUrl + "/responses", { method: "POST", body: JSON.stringify({ model: "fixture-model", input: [],
+    tools: [{ type: "function", name: "mcp__docs__search", parameters: {} }] }) });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({ id: "r1" });
+  await capture.drain();
+  expect(db.prepare("SELECT COUNT(*) AS total FROM agent_usage_captures").get()).toEqual({ total: 0 });
+  expect(host.attribution.rankings({}, "mcp_tool")).toEqual([]);
+  expect(host.store.summary().usage.totalTokens).toBeNull();
+});
