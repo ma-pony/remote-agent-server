@@ -11,6 +11,7 @@ Choose a guide for your current task. For a first installation, complete one tas
 | Track tokens or analyze capability usage | [Usage and collection (Chinese)](agent-usage.md) | Reported usage versus estimates, collection sources, historical backfill, and retention. |
 | Understand the current architecture | [Product and architecture](design.en.md) | Object relationships, session reuse, queues, concurrency, workspace lifecycle, and security boundaries. |
 | Discuss future multi-Core routing | [Agent Core routing proposal](agent-core-routing.en.md) | A proposed design and staged plan that has not been implemented. |
+| Review deferred Workspace sandbox research | [Sandbox research and POC record (Chinese)](superpowers/specs/2026-11-09-workspace-sandbox-research.md) | Linux/Docker candidates, historical checks, and remaining gaps; implementation is deferred. |
 
 ## Find a feature
 
@@ -36,6 +37,6 @@ Choose a guide for your current task. For a first installation, complete one tas
 
 ## Current behavior and proposals
 
-The README, deployment guide, usage guide, and architecture document describe the current implementation. The Agent Core routing document is explicitly labeled as an unimplemented proposal.
+The README, deployment guide, usage guide, and architecture document describe the current implementation. The Agent Core routing document is explicitly labeled as an unimplemented proposal. Workspace sandbox research and its POC are deferred by user decision and do not establish current Docker sandbox support.
 
 `superpowers/specs/`, `superpowers/plans/`, and `superpowers/validation/` contain dated designs, implementation plans, and validation records. Check their date and version when reading them; historical validation does not establish production acceptance for the current version.

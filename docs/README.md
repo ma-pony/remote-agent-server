@@ -11,6 +11,7 @@
 | 查看 Token 走势或分析能力占用 | [用量看板、能力分析与采集](agent-usage.md) | 上报用量与估算的区别、采集来源、历史补算和保留策略。 |
 | 理解当前架构与约束 | [产品与架构](design.md) | 对象关系、会话复用、排队与并发、工作区生命周期和安全边界。 |
 | 讨论未来的多 Core 路由 | [Agent Core 与模型运行路由提案](agent-core-routing.md) | 尚未实现的目标设计与分阶段计划。 |
+| 查阅暂缓的 Workspace 沙箱研究 | [沙箱调研与 POC 记录](superpowers/specs/2026-11-09-workspace-sandbox-research.md) | Linux／Docker 候选、历史验证和未完成事项；功能已暂缓，尚未实现。 |
 
 ## 按功能查找
 
@@ -36,6 +37,6 @@
 
 ## 当前行为与设计提案
 
-README、部署指南、用量指南和架构文档说明当前实现。“Agent Core 与模型运行路由”明确标为尚未实现的提案。
+README、部署指南、用量指南和架构文档说明当前实现。“Agent Core 与模型运行路由”明确标为尚未实现的提案；“Workspace 沙箱调研与 POC”已按用户决定暂缓，不代表当前支持 Docker 沙箱。
 
 `superpowers/specs/`、`superpowers/plans/` 和 `superpowers/validation/` 保存按日期记录的设计、实施计划与验证结果。阅读时检查日期和对应版本；历史验证不代表当前版本已完成生产验收。
